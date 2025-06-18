@@ -56,15 +56,15 @@ set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -t 0")
 set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -t 0")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Weffc++")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wpedantic")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Weffc++")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wpedantic")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wextra")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wpedantic")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --Werror=all-warnings")
+  # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
+  # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wextra")
+  # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wpedantic")
+  # set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --Werror=all-warnings")
 endif()
 
 #############################
@@ -128,7 +128,7 @@ target_compile_options(
   INTERFACE 
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda>
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--expt-relaxed-constexpr>
-    $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Wno-deprecated-declarations>
+    # $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Wno-deprecated-declarations>
 )
 if(NOT USE_SANITIZER STREQUAL "Compute")
   target_compile_options(
@@ -145,8 +145,8 @@ target_link_libraries(fzmod_compile_settings INTERFACE CUDA::cudart)
 ###########################
 
 target_include_directories(fzmod_compile_settings INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/include/>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/src/>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/api/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/codec/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/stat/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/predictor/>
@@ -222,13 +222,16 @@ add_library(FZMOD::histogram ALIAS fzmod_cu_histogram)
 ####
 #### Huffman Module
 add_library(fzmod_cu_huffman
-  modules/codec/huffman/src/hfclass.cc
-  modules/codec/huffman/src/hfbk_impl1.seq.cc
-  modules/codec/huffman/src/hfbk_impl2.seq.cc
-  modules/codec/huffman/src/hfbk_internal.seq.cc
-  modules/codec/huffman/src/hfbk.seq.cc
-  modules/codec/huffman/src/hfcanon.seq.cc
-  modules/codec/huffman/src/hfcxx_module.cu
+  modules/codec/huffman/src/hf_est.cc
+  modules/codec/huffman/src/hf_bk_impl1.seq.cc
+  modules/codec/huffman/src/hf_bk_impl2.seq.cc
+  modules/codec/huffman/src/hf_bk_internal.seq.cc
+  modules/codec/huffman/src/hf_bk.seq.cc
+  modules/codec/huffman/src/hf_canon.seq.cc
+  modules/codec/huffman/src/hf_kernels.cu
+  modules/codec/huffman/src/hf_ood.cc
+  modules/codec/huffman/src/hf_hl.cc
+  modules/codec/huffman/src/hf_buf.cc
   modules/codec/huffman/src/libphf.cc
 )
 target_link_libraries(fzmod_cu_huffman

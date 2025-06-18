@@ -1,6 +1,8 @@
 #ifndef AE6DCA2E_F19B_41DB_80CB_11230E548F92
 #define AE6DCA2E_F19B_41DB_80CB_11230E548F92
 
+#include <cuda_runtime.h>
+
 #include <exception>
 #include <sstream>
 
@@ -25,7 +27,7 @@ struct exception_gpu_general : public std::exception {
 }  // namespace _portable::utils
 
 // proxy: not safe to put throw inside a macro expansion
-static void throw_exception_gpu_general(cudaError_t GPU_ERROR_CODE,
+inline void throw_exception_gpu_general(cudaError_t GPU_ERROR_CODE,
                                         const char* _file_, const int _line_) {
   if (cudaSuccess != GPU_ERROR_CODE) {
     throw _portable::utils::exception_gpu_general(GPU_ERROR_CODE, _file_,

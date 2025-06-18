@@ -13,10 +13,7 @@
 #include <stdexcept>
 #include <string>
 
-// #include "busyheader.hh"
-#include "hfbk_impl.hh"
-#include "hfword.hh"
-// #include "utils/dbg.hh"
+#include "hf_impl.hh"
 #include "timer.hh"
 
 // internal data structure

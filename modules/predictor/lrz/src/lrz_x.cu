@@ -9,7 +9,6 @@
  *
  */
 
-
 #include "lorenzo.hh"
 #include "err.hh"
 #include "timer.hh"

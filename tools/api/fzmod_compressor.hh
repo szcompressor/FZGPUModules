@@ -1,0 +1,315 @@
+#pragma once
+
+#include "codec.hh"
+#include "config.hh"
+#include "mem/buffer.hh"
+#include "predictor.hh"
+#include "stat.hh"
+#include "timer.hh"
+#include "metrics.hh"
+
+namespace fz {
+
+template <typename T>
+struct Compressor {
+
+  Config<T>* conf = nullptr;
+  CompressorBufferToggle* toggle = nullptr;
+  InternalBuffers<T>* ibuffer = nullptr;
+  fzmod_metrics* metrics = nullptr;
+
+  Compressor(Config<T>& config) : conf(&config) {
+    toggle = new CompressorBufferToggle();
+    if (conf->fromFile && conf->toFile) {
+      toggle->_internal = true;
+      if (conf->fname == "") {
+        throw std::runtime_error("File name must be provided for from file and to file operations in config");
+      }
+    }
+    module_optimizer();
+    ibuffer = new InternalBuffers<T>(conf, toggle, true);
+    metrics = new fzmod_metrics();
+    metrics->total_footprint_d = ibuffer->total_footprint_d;
+    metrics->total_footprint_h = ibuffer->total_footprint_h;
+  }
+
+  ~Compressor() {
+    if (ibuffer) delete ibuffer;
+    if (toggle) delete toggle;
+    if (metrics) delete metrics;
+    if (conf) delete conf;
+  }
+
+  //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
+
+  size_t compress(T* in_data, uint8_t** out_data, cudaStream_t stream) {
+    
+    CREATE_CPU_TIMER(total)
+    START_CPU_TIMER(total)
+
+    // PRE-COMPRESSION SETUP
+
+    if (toggle->_internal) {
+      in_data = ibuffer->internal_original;
+    }
+
+    if (conf->eb_type == EB_TYPE::REL) {
+      CREATE_CPU_TIMER(preproc)
+      START_CPU_TIMER(preproc)
+      double _max_val, _min_val, _range;
+      fz::analysis::GPU_probe_extrema<T>(in_data, conf->len, _max_val, _min_val, _range);
+      conf->eb *= _range;
+      conf->logging_max = _max_val;
+      conf->logging_min = _min_val;
+      
+      metrics->max = _max_val;
+      metrics->min = _min_val;
+      metrics->range = _range;
+      STOP_CPU_TIMER(preproc)
+      TIME_ELAPSED_CPU_TIMER(preproc, metrics->preprocessing_time)
+    }
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~ Predictor ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
+
+    CREATE_CPU_TIMER(predictor)
+    START_CPU_TIMER(predictor)
+    if (conf->algo == ALGO::LORENZO) {
+      lorenzo(in_data, stream);
+    } else if (conf->algo == ALGO::SPLINE) {
+      spline(in_data, stream);
+    } else {
+      throw std::runtime_error("Unsupported algorithm type");
+    }
+    STOP_CPU_TIMER(predictor)
+    TIME_ELAPSED_CPU_TIMER(predictor, metrics->prediction_time)
+
+    // get the number of outliers
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(ibuffer->h_num.get(), ibuffer->d_num.get(), sizeof(uint32_t),
+      cudaMemcpyDeviceToHost);
+    conf->num_outliers = *(ibuffer->h_num.get());
+
+    size_t max_num_outliers = conf->outlier_buffer_ratio * conf->len;
+    if (conf->num_outliers > max_num_outliers) {
+      printf("Number of outliers: %zu, Max allowed: %zu\n",
+        conf->num_outliers, max_num_outliers);
+      throw std::runtime_error("Number of outliers exceeds reserved buffer size try increasing outlier_buffer_ratio in the config (default 0.2x of input data len) or lower the error bound");
+    }
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
+
+    if (conf->codec == CODEC::HUFFMAN) {
+      CREATE_CPU_TIMER(hist)
+      START_CPU_TIMER(hist)  
+      histogram(stream);
+      STOP_CPU_TIMER(hist)
+      TIME_ELAPSED_CPU_TIMER(hist, metrics->hist_time)
+
+      CREATE_CPU_TIMER(encoder)
+      START_CPU_TIMER(encoder)
+      huffman(stream);
+      STOP_CPU_TIMER(encoder)
+      TIME_ELAPSED_CPU_TIMER(encoder, metrics->encoder_time)
+    } else if (conf->codec == CODEC::FZG) {
+      CREATE_CPU_TIMER(encoder)
+      START_CPU_TIMER(encoder)
+      fzg(stream);
+      STOP_CPU_TIMER(encoder)
+      TIME_ELAPSED_CPU_TIMER(encoder, metrics->encoder_time)
+    } else {
+      throw std::runtime_error("Unsupported codec type");
+    }
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
+
+    if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
+      // Implement GZIP compression here
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::LSTD) {
+      // Implement LSTD compression here
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
+      // No secondary codec
+    } else {
+      throw std::runtime_error("Unsupported secondary codec type");
+    }
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~ Finalize Compression ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
+
+    // construct offsets array for file
+    static const int HEADER = 0;
+    static const int ANCHOR = 1;
+    static const int ENCODED = 2;
+    static const int OUTLIER = 3;
+    static const int END = 4;
+
+    uint32_t nbyte[END] = {0, 0, 0, 0};
+    nbyte[HEADER] = sizeof(fzmod_header);
+    nbyte[ANCHOR] =
+        conf->algo == ALGO::SPLINE ? conf->anchor512_len * sizeof(float) : 0;
+    nbyte[ENCODED] = ibuffer->codec_comp_output_len * sizeof(uint8_t);
+    nbyte[OUTLIER] = conf->num_outliers * (sizeof(T) + sizeof(uint32_t));
+
+    uint32_t offsets[END + 1] = {0, 0, 0, 0, 0};
+    offsets[0] = 0;
+    for (auto i = 1; i < END + 1; i++) offsets[i] = nbyte[i - 1];
+    for (auto i = 1; i < END + 1; i++) offsets[i] += offsets[i - 1];
+
+    #define DST(FIELD, OFFSET) ((void*)(ibuffer->compressed() + offsets[FIELD] + OFFSET))
+    #define CONCAT_ON_DEVICE(dst, src, nbyte, stream) \
+      if (nbyte != 0) cudaMemcpyAsync(dst, src, nbyte, cudaMemcpyDeviceToDevice, stream);
+
+    // concatenate buffers on device
+    CONCAT_ON_DEVICE(DST(ANCHOR, 0), ibuffer->anchor_points(), nbyte[ANCHOR], stream);
+    CONCAT_ON_DEVICE(DST(ENCODED, 0), ibuffer->codec_comp_output, nbyte[ENCODED], stream);
+    CONCAT_ON_DEVICE(DST(OUTLIER, 0), ibuffer->outlier_values(), conf->num_outliers * sizeof(T), stream);
+    CONCAT_ON_DEVICE(DST(OUTLIER, conf->num_outliers * sizeof(T)), ibuffer->outlier_indices(), conf->num_outliers * sizeof(uint32_t), stream);
+
+    // set the output data pointer
+    *out_data = ibuffer->compressed();
+    conf->comp_size = offsets[END];
+
+    STOP_CPU_TIMER(total)
+    TIME_ELAPSED_CPU_TIMER(total, metrics->end_to_end_comp_time)
+
+    // ~~~~~~~~~~~~~~~~~~~ COMPRESSION FINISHED ~~~~~~~~~~~~~~~~~~~ //
+
+    conf->populate_header(offsets);
+    if (conf->dump) {
+      conf->print();
+    }
+
+    // output compressed data to disk
+    if (conf->toFile) {
+      CREATE_CPU_TIMER(file_io)
+      START_CPU_TIMER(file_io)
+      auto compressed_fname = conf->fname + ".fzmod";
+      auto file = MAKE_UNIQUE_HOST(uint8_t, conf->comp_size);
+
+      // copy header info to beginning of file
+      cudaMemcpy(file.get(), ibuffer->compressed(), conf->comp_size, cudaMemcpyDeviceToHost);
+      std::memcpy(file.get(), conf->header, sizeof(fzmod_header));
+      utils::tofile(compressed_fname.c_str(), file.get(), conf->comp_size);
+      STOP_CPU_TIMER(file_io)
+      TIME_ELAPSED_CPU_TIMER(file_io, metrics->file_io_time)
+    }
+
+    // report metrics about compression
+    if (conf->report) {
+      metrics->precision = conf->precision;
+      metrics->num_outliers = conf->num_outliers;
+      metrics->data_len = conf->len;
+      metrics->orig_bytes = conf->len * sizeof(T);
+      metrics->comp_bytes = conf->comp_size;
+      metrics->compression_ratio = static_cast<double>(metrics->orig_bytes) / metrics->comp_bytes;
+      metrics->final_eb = conf->eb;
+      metrics->print();
+    }
+
+    return 0;
+
+  } // end compress
+
+  // ~~~~~~~~~~~~~~~~~~~ PREPROCESSING ~~~~~~~~~~~~~~~~~~~ //
+
+  void module_optimizer() {    
+    if (conf->algo == ALGO::LORENZO) {
+      toggle->quant_codes = true;
+      toggle->top1 = true;
+    } else if (conf->algo == ALGO::SPLINE) {
+      toggle->quant_codes = true;
+      toggle->anchor_points = true;
+    }
+    if (conf->codec == CODEC::HUFFMAN) {
+      toggle->histogram = true;
+      toggle->top1 = true;
+    } else if (conf->codec == CODEC::FZG) {
+      
+    }
+
+    if (conf->codec == CODEC::HUFFMAN) {
+      if (!conf->use_histogram_sparse) {
+        fz::module::GPU_histogram_generic_optimizer_on_initialization<uint16_t>(
+          conf->len, conf->radius * 2, conf->h_gen_grid_d, 
+          conf->h_gen_block_d, conf->h_gen_shmem_use,
+          conf->h_gen_repeat);
+      }
+      capi_phf_coarse_tune(conf->len, &conf->sublen, &conf->pardeg);
+    } else if (conf->codec == CODEC::FZG) {
+      // FZG specific optimizations can be added here
+    } else {
+      throw std::runtime_error("Unsupported codec type for optimization");
+    }
+
+  } // end module_optimizer
+
+  // ################ PREDICTOR FUNCTIONS ################ //
+
+  void lorenzo(T* input_data, cudaStream_t stream) {
+    std::array<size_t, 3> len3 = std::array<size_t, 3>{conf->x, conf->y, conf->z};
+    double eb = conf->eb;
+    double ebx2 = eb * 2;
+    double ebx2_r = 1 / ebx2;
+
+    if (conf->use_lorenzo_zigzag) {
+      fz::module::GPU_c_lorenzo_nd_with_outlier<T, true, uint16_t>(
+          input_data, len3, ibuffer->codes(), ibuffer->outlier_values(), 
+          ibuffer->outlier_indices(), ibuffer->num_outliers_d(), ibuffer->top1(),
+          ebx2, ebx2_r, conf->radius, stream);
+    } else {
+      fz::module::GPU_c_lorenzo_nd_with_outlier<T, false, uint16_t>(
+          input_data, len3, ibuffer->codes(), ibuffer->outlier_values(),
+          ibuffer->outlier_indices(), ibuffer->num_outliers_d(),
+          ibuffer->top1(), ebx2, ebx2_r, conf->radius, stream);
+    }
+  } // end lorenzo
+
+  void spline(T* input_data, cudaStream_t stream) {
+    std::array<size_t, 3> len3 = std::array<size_t, 3>{conf->x, conf->y, conf->z};
+    double eb = conf->eb;
+    double eb_r = 1 / eb;
+    double ebx2 = eb * 2;
+    fz::module::GPU_predict_spline(
+        input_data, len3, ibuffer->codes(), len3, ibuffer->anchor_points(),
+        conf->anchor_len3(), ibuffer->outlier_values(), ibuffer->outlier_indices(),
+        ibuffer->num_outliers_d(), ebx2, eb_r, conf->radius, stream);
+  } // end spline
+
+  // ################ STAT FUNCTIONS ################ //
+
+  void histogram(cudaStream_t stream) {
+    if (conf->use_histogram_sparse) {
+      fz::module::GPU_histogram_Cauchy<uint16_t>(
+          ibuffer->codes(), conf->len, ibuffer->histogram(),
+          conf->radius * 2, stream);
+    } else {
+      fz::module::GPU_histogram_generic<uint16_t>(
+          ibuffer->codes(), conf->len, ibuffer->histogram(),
+          static_cast<uint16_t>(conf->radius * 2),
+          conf->h_gen_grid_d, conf->h_gen_block_d,
+          conf->h_gen_shmem_use, conf->h_gen_repeat, stream);
+    }
+  } // end histogram
+
+  // ################ CODEC 1 FUNCTIONS ################ //
+
+  void huffman(cudaStream_t stream) {
+    cudaMemcpy(ibuffer->h_hist.get(), ibuffer->d_hist.get(),
+               conf->radius * 2 * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    phf::high_level<uint16_t>::build_book(ibuffer->buf_hf, 
+      ibuffer->h_hist.get(), conf->radius * 2, stream);
+    phf_header dummy_header;
+    phf::high_level<uint16_t>::encode(ibuffer->buf_hf, ibuffer->codes(),
+      conf->len, &ibuffer->codec_comp_output, &ibuffer->codec_comp_output_len,
+      dummy_header, stream);
+  } // end huffman
+
+  void fzg(cudaStream_t stream) {
+    ibuffer->codec_fzg->encode(
+      ibuffer->codes(), conf->len, &ibuffer->codec_comp_output,
+      &ibuffer->codec_comp_output_len, stream);
+  } // end fzg
+
+  // ################ CODEC 2 FUNCTIONS ################ //
+
+}; // end Compressor
+
+} // namespace fz

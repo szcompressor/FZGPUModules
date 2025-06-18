@@ -12,14 +12,14 @@ using hires = std::chrono::high_resolution_clock;
 using duration_t = std::chrono::duration<double>;
 using hires_clock_t = std::chrono::time_point<hires>;
 
-#define CREATE_CPU_TIMER                                    \
-  std::chrono::time_point<std::chrono::steady_clock> a_ct1; \
-  std::chrono::time_point<std::chrono::steady_clock> b_ct1;
-#define START_CPU_TIMER a_ct1 = std::chrono::steady_clock::now();
-#define STOP_CPU_TIMER b_ct1 = std::chrono::steady_clock::now();
-#define TIME_ELAPSED_CPU_TIMER(PTR_MILLISEC) \
-  ms = std::chrono::duration<float, std::milli>(b_ct1 - a_ct1).count();
-
+#define CREATE_CPU_TIMER(NAME) \
+  std::chrono::time_point<std::chrono::steady_clock> NAME##_start; \
+  std::chrono::time_point<std::chrono::steady_clock> NAME##_end;
+#define START_CPU_TIMER(NAME) NAME##_start = std::chrono::steady_clock::now();
+#define STOP_CPU_TIMER(NAME) NAME##_end = std::chrono::steady_clock::now();
+#define TIME_ELAPSED_CPU_TIMER(NAME, PTR_MILLISEC) \
+  PTR_MILLISEC = std::chrono::duration<float, std::milli>( \
+    NAME##_end - NAME##_start).count();
 
 #define CREATE_GPUEVENT_PAIR \
   cudaEvent_t a, b;          \

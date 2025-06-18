@@ -1,32 +1,26 @@
-#ifndef FZMOD_DRIVER
-#define FZMOD_DRIVER
-
 #include <cuda_runtime.h>
 #include <iostream>
 #include <fstream>
 #include <vector>
 
-#include "fzmod_api.hh"
+#include "fzmod_compressor.hh"
+#include "fzmod_decompressor.hh"
 namespace utils = _portable::utils;
 
 uint8_t* compressed_data_host;
 float* decompressed_data_host;
-fz::Config* conf;
+fz::Config<float>* conf;
 
 void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t stream) {
     
     // Setup config with compression options
-    conf = new fz::Config(x, y, z);
+    conf = new fz::Config<float>(x, y, z);
     conf->eb = 2e-4;
-    conf->eb_type = fz::EB_TYPE::EB_ABS;
-    conf->algo = fz::ALGO::ALGO_LORENZO;
-    conf->precision = fz::PRECISION::PRECISION_FLOAT;
-    conf->codec = fz::CODEC::CODEC_HUFFMAN;
+    conf->eb_type = fz::EB_TYPE::ABS;
+    conf->algo = fz::ALGO::LORENZO;
+    conf->precision = fz::PRECISION::FLOAT;
+    conf->codec = fz::CODEC::HUFFMAN;
     conf->fname = fname;
-    // conf->use_lorenzo_zigzag = true;
-    // conf->use_lorenzo_regular = false;
-    conf->use_histogram_generic = true;
-    conf->use_histogram_sparse = false;
 
     // create memory for the data
     float* input_data_device, * input_data_host;
@@ -45,9 +39,6 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t
     // create compressor object
     fz::Compressor<float> compressor(*conf);
 
-    // std::cout << "Compressing...\n" << std::endl;
-
-    // compress the data -- send in gpu data and get back 
     compressor.compress(input_data_device, &internal_compressed, stream);
 
     //! internal_compressed is a pointer to the compressed data on the gpu
@@ -55,13 +46,6 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t
     // copy out compressed data (if not dumped to file, can set in config)
     cudaMallocHost(&compressed_data_host, conf->comp_size);
     cudaMemcpy(compressed_data_host, internal_compressed, conf->comp_size, cudaMemcpyDeviceToHost);
-
-    // print statistics
-    // std::cout << "compressed!\n" << std::endl;
-    // std::cout << "original size: " << conf->orig_size << std::endl;
-    // std::cout << "compressed size: " << conf->comp_size << std::endl;
-    // std::cout << "compression ratio: " << (float)conf->orig_size / (float)conf->comp_size << std::endl;
-    // std::cout << "\n\n" << std::endl;
 
     // free memory
     cudaFreeHost(input_data_host);
@@ -76,11 +60,13 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t
 
 void decompress_demo_file(std::string fname, cudaStream_t stream) {
 
-    std::string compressed_fname = fname + ".stf_compressed";
-    // std::string compressed_fname = fname + ".fzmod";
+    // std::string compressed_fname = fname + ".stf_compressed";
+    std::string compressed_fname = fname + ".fzmod";
     
     // create decompressor object
-    fz::Compressor<float> decompressor(compressed_fname);
+    fz::Decompressor<float> decompressor(compressed_fname);
+
+    decompressor.conf->toFile = true;
 
     // decompress the data
     float* decompressed;
@@ -92,7 +78,7 @@ void decompress_demo_file(std::string fname, cudaStream_t stream) {
     cudaMallocHost(&original_data_host, original_size);
     utils::fromfile(fname, original_data_host, original_size);
 
-    decompressor.decompress(compressed_fname, decompressed, stream, original_data_host);
+    decompressor.decompress(compressed_data_host, decompressed, stream, original_data_host);
 
     // Free memory
     cudaFree(decompressed);
@@ -126,5 +112,3 @@ int main(int argc, char **argv) {
     cudaFreeHost(compressed_data_host);
     return 0;
 }
-
-#endif /* FZMOD_DRIVER */

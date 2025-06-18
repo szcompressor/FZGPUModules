@@ -26,7 +26,7 @@ namespace cg = cooperative_groups;
 #include <type_traits>
 
 #include "lorenzo.hh"
-#include "mem/cxx_sp_gpu.h"
+#include "mem/cxx_smart_ptr.h"
 #include "err.hh"
 #include "timer.hh"
 #include "detail/zigzag.hh"
@@ -109,7 +109,7 @@ __global__ void KERNEL_CUHIP_c_lorenzo_1d1l(
     }
     else {
       candidate = delta + radius;
-      s_eq_uint[threadIdx.x * Seq + ix] = quantizable * (EqUInt)candidate;
+      s_eq_uint[threadIdx.x * Seq + ix] = quantizable * static_cast<EqUInt>(candidate);
     }
 
     if (not quantizable) {
@@ -228,7 +228,7 @@ __global__ void KERNEL_CUHIP_c_lorenzo_2d1l__32x32(
     CompactNum* const out_cn, 
     uint16_t const radius, 
     Fp const ebx2_r, 
-    uint32_t* top_count = nullptr) //! DIFFERENT FROM CUSZ (FZMOD = 263168) (CUSZ = 203405)
+    uint32_t* top_count = nullptr)
 {
   constexpr auto TileDim = 32;
   constexpr auto Yseq = 8;
@@ -455,18 +455,19 @@ int GPU_c_lorenzo_nd_with_outlier(
     T* const in_data, 
     stdlen3 const _data_len3, 
     Eq* const out_eq, 
-    void* out_outlier, 
+    T* outlier_vals,
+    uint32_t* outlier_idxs,
+    uint32_t* num_outliers, 
     uint32_t* out_top1,
     double const ebx2, 
     double const ebx2_r, 
     uint16_t const radius, 
     void* stream)
 {
-  using Compact = _portable::compact_gpu<T>;
+  // using Compact = _portable::compact_gpu<T>;
   using namespace fz::kernelconfig;
 
   auto data_len3 = TO_DIM3(_data_len3);
-  auto ot = (Compact*)out_outlier;
   auto d = lorenzo_utils::ndim(data_len3); 
 
   // error bound
@@ -476,21 +477,22 @@ int GPU_c_lorenzo_nd_with_outlier(
     fz::KERNEL_CUHIP_c_lorenzo_1d1l<
         T, c_lorenzo<1>::tile.x, c_lorenzo<1>::sequentiality.x, UseZigZag, Eq>
         <<<c_lorenzo<1>::thread_grid(data_len3), c_lorenzo<1>::thread_block, 0, (cudaStream_t)stream>>>(
-            in_data, data_len3, leap3, out_eq, ot->val(), ot->idx(), ot->num(), radius, (T)ebx2_r, out_top1);
+            in_data, data_len3, leap3, out_eq, outlier_vals, outlier_idxs, num_outliers, radius, (T)ebx2_r, out_top1);
   else if (d == 2) {
     fz::KERNEL_CUHIP_c_lorenzo_2d1l__32x32<T, UseZigZag, Eq>
       <<<c_lorenzo<2, 32, 32>::thread_grid(data_len3), 
       c_lorenzo<2, 32, 32>::thread_block, 0, (cudaStream_t)stream>>>(in_data, data_len3, leap3,
-        out_eq, ot->val(), ot->idx(), ot->num(), radius,(T)ebx2_r, out_top1);
+        out_eq, outlier_vals, outlier_idxs, num_outliers, radius,(T)ebx2_r, out_top1);
   }
   else if (d == 3)
     fz::KERNEL_CUHIP_c_lorenzo_3d1l<T, UseZigZag, Eq>
         <<<c_lorenzo<3>::thread_grid(data_len3), c_lorenzo<3>::thread_block, 0,
            (cudaStream_t)stream>>>(
-            in_data, data_len3, leap3, out_eq, ot->val(), ot->idx(), ot->num(), radius, (T)ebx2_r,
+            in_data, data_len3, leap3, out_eq, outlier_vals, outlier_idxs, num_outliers, radius, (T)ebx2_r,
             out_top1);
   else
-    return -1;
+    throw std::runtime_error(
+        "GPU_c_lorenzo_nd_with_outlier: only 1D, 2D, and 3D data are supported");
 
   return 0;
 }
@@ -512,10 +514,12 @@ int GPU_lorenzo_prequant(
 }  // namespace fz::module
 
 // -----------------------------------------------------------------------------
-#define INSTANCIATE_GPU_L23R_3params(T, USE_ZIGZAG, Eq)                                         \
-  template int fz::module::GPU_c_lorenzo_nd_with_outlier<T, USE_ZIGZAG, Eq>(                   \
-      T* const in_data, stdlen3 const data_len3, Eq* const out_eq, void* out_outlier, uint32_t* top1, \
-      double const ebx2, double const ebx2_r, uint16_t const radius, void* stream);
+#define INSTANCIATE_GPU_L23R_3params(T, USE_ZIGZAG, Eq)                      \
+  template int fz::module::GPU_c_lorenzo_nd_with_outlier<T, USE_ZIGZAG, Eq>( \
+    T* const in_data, stdlen3 const _data_len3, Eq* const out_eq,   \
+    T* outlier_vals, uint32_t* outlier_idxs, uint32_t* num_outliers,\
+    uint32_t* out_top1, double const ebx2, double const ebx2_r,     \
+    uint16_t const radius, void* stream);
 
 #define INSTANCIATE_GPU_L23R_2params(T, Eq)   \
   INSTANCIATE_GPU_L23R_3params(T, false, Eq); \

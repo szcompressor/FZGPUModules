@@ -1,10 +1,8 @@
 #pragma once
 #include <memory>
 
-#include "huffman/include/hfcanon.hh"
-#include "huffman/include/hfword.hh"
-#include "huffman/include/hfbk_impl.hh"
-#include "huffman/src/hfbk_impl1.seq.cc"
+#include "huffman/include/hf_impl.hh"
+#include "huffman/src/hf_bk_impl1.seq.cc"
 
 #include "huffman_kernels.cu"
 

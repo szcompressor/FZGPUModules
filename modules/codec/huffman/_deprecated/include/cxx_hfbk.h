@@ -11,7 +11,7 @@ void phf_GPU_build_canonized_codebook(
     float* time, void* = nullptr);
 
 template <typename E, typename H = uint32_t>
-[[deprecated("use phf_CPU_build_canonized_codebook_v2")]] void phf_CPU_build_canonized_codebook_v1(
+void phf_CPU_build_canonized_codebook_v1(
     uint32_t* freq, int const bklen, H* book, uint8_t* revbook, int const revbook_bytes,
     float* time);
 

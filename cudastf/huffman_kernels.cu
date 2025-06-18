@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <stdexcept>
 
-#include "hfword.hh"
+#include "hf_impl.hh"
 
 using namespace cuda::experimental::stf;
 

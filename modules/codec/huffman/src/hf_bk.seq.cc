@@ -4,11 +4,8 @@
 
 // #include "busyheader.hh"
 // #include "type.h"
-#include "cxx_hfbk.h"
 #include "hf.h"
-#include "hfbk_impl.hh"
-#include "hfcanon.hh"
-#include "hfword.hh"
+#include "hf_impl.hh"
 #include "timer.hh"
 
 template <typename E, typename H>
@@ -159,6 +156,7 @@ void phf_CPU_build_canonized_codebook_v2(
   memcpy(revbook + offset, space->keys(), sizeof(E) * bklen);
 
   delete space;
+  delete[] bk8;
 }
 
 #define INSTANTIATE_PHF_CPU_BUILD_CANONICAL(E, H)                  \

@@ -11,8 +11,7 @@
 
 #include <queue>
 
-#include "hfbk_impl.hh"
-#include "hfword.hh"
+#include "hf_impl.hh"
 #include "timer.hh"
 
 // impl2
