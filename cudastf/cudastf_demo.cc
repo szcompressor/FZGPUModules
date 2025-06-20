@@ -6,7 +6,8 @@
 #include <iostream>
 #include <vector>
 
-#include "fzmod_api.hh"
+#include "fzmod_compressor.hh"
+#include "fzmod_decompressor.hh"
 #include "ibuffer.hh"
 #include "hist_generic_stf.cu"
 #include "hist_sparse_stf.cu"
@@ -97,9 +98,13 @@ void compress(std::string fname, size_t len1, size_t len2, size_t len3) {
     codec_hf.revbk4_bytes,
     codec_hf.max_bklen * sizeof(uint32_t), pardeg);
 
-  Timer total_timer;
-  FZModPerformance perf;
-  total_timer.start();
+  float ms_total = 0;
+  cudaEvent_t start, stop;
+
+  cuda_safe_call(cudaEventCreate(&start));
+  cuda_safe_call(cudaEventCreate(&stop));
+
+  cuda_safe_call(cudaEventRecord(start, ctx.task_fence()));
   
   //! Initialize the buffers
   ctx.task(
@@ -275,6 +280,8 @@ void compress(std::string fname, size_t len1, size_t len2, size_t len3) {
         cudaMemcpyDeviceToDevice, s));
   };
 
+  cuda_safe_call(cudaEventRecord(stop, ctx.task_fence()));
+
   cuda_safe_call(cudaStreamSynchronize(ctx.task_fence()));
 
   // create memory to store compressed data for file output
@@ -368,9 +375,8 @@ void compress(std::string fname, size_t len1, size_t len2, size_t len3) {
   // finish the tasks
   ctx.finalize();
 
-  // print total time
-  perf.total_time = total_timer.elapsed();
-  printf("Total Time: %.6f ms\n", perf.total_time * 1000);
+  cuda_safe_call(cudaEventElapsedTime(&ms_total, start, stop));
+  printf("Total Time: %.6f ms\n", ms_total);
 
   // cleanup 
   cudaFreeHost(input_data_host);
