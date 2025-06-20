@@ -290,8 +290,13 @@ add_library(FZMOD::all ALIAS fzmod)
 ### EXECUTABLES ###
 ###################
 
-add_executable(fzmod-bin examples/demo.cc)
+add_executable(fzmod-bin-example examples/demo.cc)
 set_source_files_properties(examples/demo.cc PROPERTIES LANGUAGE CUDA)
+target_link_libraries(fzmod-bin-example PRIVATE fzmod)
+set_target_properties(fzmod-bin-example PROPERTIES OUTPUT_NAME fzmod_demo)
+
+add_executable(fzmod-bin tools/cli/cli.cc)
+set_source_files_properties(tools/cli/cli.cc PROPERTIES LANGUAGE CUDA)
 target_link_libraries(fzmod-bin PRIVATE fzmod)
 set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 
@@ -326,8 +331,26 @@ if(BUILD_CUDASTF)
     CCCL::cudax
   )
 
+  # testing example
+  add_executable(testing_run cudastf/testing.cc)
+  set_source_files_properties(cudastf/testing.cc PROPERTIES LANGUAGE CUDA)
+  target_link_libraries(testing_run
+    PRIVATE 
+    fzmod_compile_settings
+    fz_utils
+    fzmod_cu_huffman
+    CUDA::cudart
+    CUDA::cuda_driver
+    CCCL::CCCL 
+    CCCL::cudax 
+  )
+
   # install executable
   install(TARGETS cudastf_demo
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+
+  install(TARGETS testing_run
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
 endif()

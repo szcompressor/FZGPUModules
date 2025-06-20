@@ -11,7 +11,8 @@ uint8_t* compressed_data_host;
 float* decompressed_data_host;
 fz::Config<float>* conf;
 
-void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t stream) {
+void compress_demo(std::string fname, size_t x, 
+    size_t y, size_t z, cudaStream_t stream) {
     
     // Setup config with compression options
     conf = new fz::Config<float>(x, y, z);
@@ -34,7 +35,8 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t
     utils::fromfile(fname, input_data_host, conf->orig_size);
 
     // copy data to device
-    cudaMemcpy(input_data_device, input_data_host, conf->orig_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(input_data_device, 
+        input_data_host, conf->orig_size, cudaMemcpyHostToDevice);
 
     // create compressor object
     fz::Compressor<float> compressor(*conf);
@@ -45,7 +47,8 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t
 
     // copy out compressed data (if not dumped to file, can set in config)
     cudaMallocHost(&compressed_data_host, conf->comp_size);
-    cudaMemcpy(compressed_data_host, internal_compressed, conf->comp_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(compressed_data_host, 
+        internal_compressed, conf->comp_size, cudaMemcpyDeviceToHost);
 
     // free memory
     cudaFreeHost(input_data_host);
@@ -60,7 +63,6 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z, cudaStream_t
 
 void decompress_demo_file(std::string fname, cudaStream_t stream) {
 
-    // std::string compressed_fname = fname + ".stf_compressed";
     std::string compressed_fname = fname + ".fzmod";
     
     // create decompressor object
@@ -78,7 +80,8 @@ void decompress_demo_file(std::string fname, cudaStream_t stream) {
     cudaMallocHost(&original_data_host, original_size);
     utils::fromfile(fname, original_data_host, original_size);
 
-    decompressor.decompress(compressed_data_host, decompressed, stream, original_data_host);
+    decompressor.decompress(compressed_data_host, 
+        decompressed, stream, original_data_host);
 
     // Free memory
     cudaFree(decompressed);
@@ -91,7 +94,8 @@ void decompress_demo_file(std::string fname, cudaStream_t stream) {
 int main(int argc, char **argv) {
 
     if (argc != 5) {
-        std::cerr << "Usage: " << argv[0] << " <filename> <len1> <len2> <len3> <eb>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << 
+            " <filename> <len1> <len2> <len3> <eb>" << std::endl;
         return 1;
     }
     auto fname = std::string(argv[1]);

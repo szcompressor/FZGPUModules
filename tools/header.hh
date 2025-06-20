@@ -7,7 +7,7 @@
 
 #define HEADER_SIZE 128
 #define MAGIC 0x465A4D4F // "FZMO" in ASCII
-#define VERSION 1
+#define VERSION 100 // version 1.0.0
 
 #define HEADER_OFFSET 0
 #define HEADER_ANCHOR 1

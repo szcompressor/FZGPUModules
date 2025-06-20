@@ -31,8 +31,12 @@ struct Decompressor {
   Decompressor(Config<T>& config) : conf(&config) {
     // check if config is from previous compression
     if (conf->hedear->offsets[4] == 0) {
-
-    }    
+      throw std::runtime_error("Invalid configuration: The header offsets are not set correctly. \
+        likely this is not from a previous compression.");
+    }
+    toggle = new CompressorBufferToggle();
+    metrics = new fzmod_metrics();
+    ibuffer = new InternalBuffers<T>(conf, toggle, false);
   }
 
   ~Decompressor() {

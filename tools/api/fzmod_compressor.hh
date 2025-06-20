@@ -297,9 +297,17 @@ struct Compressor {
     phf::high_level<uint16_t>::build_book(ibuffer->buf_hf, 
       ibuffer->h_hist.get(), conf->radius * 2, stream);
     phf_header dummy_header;
-    phf::high_level<uint16_t>::encode(ibuffer->buf_hf, ibuffer->codes(),
-      conf->len, &ibuffer->codec_comp_output, &ibuffer->codec_comp_output_len,
-      dummy_header, stream);
+    if (conf->use_huffman_reVISIT) {
+      phf::high_level<uint16_t>::encode_ReVISIT_lite(
+        ibuffer->buf_hf, ibuffer->codes(), conf->len,
+        &ibuffer->codec_comp_output, &ibuffer->codec_comp_output_len,
+        dummy_header, stream);
+    } else {
+      phf::high_level<uint16_t>::encode(ibuffer->buf_hf, ibuffer->codes(),
+        conf->len, &ibuffer->codec_comp_output, &ibuffer->codec_comp_output_len,
+        dummy_header, stream);
+    }
+    
   } // end huffman
 
   void fzg(cudaStream_t stream) {
