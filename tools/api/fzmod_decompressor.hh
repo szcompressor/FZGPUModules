@@ -83,7 +83,7 @@ struct Decompressor {
 
     if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
       // Implement GZIP compression here
-    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::LSTD) {
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
       // Implement LSTD compression here
     } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
       // No secondary codec
@@ -124,7 +124,7 @@ struct Decompressor {
 
     // ~~~~~~~~~~~~~~~~~~~~~~~ END DECOMPRESSION ~~~~~~~~~~~~~~~~~~~~~~~ //
 
-    if (conf->dump) {
+    if (conf->verbose) {
       conf->print();
     }
 
@@ -142,9 +142,6 @@ struct Decompressor {
     }
 
     if (conf->report) {
-      CREATE_CPU_TIMER(compare)
-      START_CPU_TIMER(compare)
-
       metrics->precision = conf->precision;
       metrics->num_outliers = conf->num_outliers;
       metrics->data_len = conf->len;
@@ -152,15 +149,10 @@ struct Decompressor {
       metrics->comp_bytes = conf->header->offsets[END];
       metrics->compression_ratio = static_cast<double>(metrics->orig_bytes) / metrics->comp_bytes;
       metrics->final_eb = conf->eb;
-
-      if (orig_data != nullptr) {
-        metrics->compare<float>(orig_data, out_data, conf->len, stream);
+      if (conf->compare) {
+        metrics->compare<T>(orig_data, out_data, conf->len, stream);
       }
-
-      metrics->print(false, true);
-
-      STOP_CPU_TIMER(compare)
-      TIME_ELAPSED_CPU_TIMER(compare, metrics->comparison_time);
+      metrics->print(false, conf->compare);
     }
 
   } // end decompress

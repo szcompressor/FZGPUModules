@@ -192,3 +192,4 @@ void GPU_extrema(T *in, size_t len, T res[4])
   template void fz::module::GPU_extrema<T>(T * in, size_t len, T res[4]);
 
 __INSTANTIATE_CUHIP_EXTREMA(float)
+__INSTANTIATE_CUHIP_EXTREMA(double)

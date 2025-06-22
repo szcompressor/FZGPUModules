@@ -24,7 +24,6 @@ struct fzmod_metrics {
   double decoding_time = 0;
   double prediction_reversing_time = 0;
   double decomp_file_io_time = 0;
-  double comparison_time = 0;
 
   // data metrics
   double min = 0;
@@ -128,9 +127,6 @@ struct fzmod_metrics {
     if (compare && !comp) {
       printf("~~COMPARISON~~\n");
 
-      printf("Comparison Stage:\t\t %f ms %f GiB/s\n", comparison_time,
-             throughput(orig_bytes, comparison_time));
-
       printf("Data Original Min:\t\t %f\n", min);
       printf("Data Original Max:\t\t %f\n", max);
       printf("Data Original Range:\t\t %f\n", range);
@@ -158,7 +154,7 @@ struct fzmod_metrics {
   } // print
 
   template <typename T>
-  void compare(float* orig_data, float* decomp_data, size_t len, cudaStream_t stream) {
+  void compare(T* orig_data, T* decomp_data, size_t len, cudaStream_t stream) {
     constexpr auto MINVAL = 0;
     constexpr auto MAXVAL = 1;
     constexpr auto AVGVAL = 2;

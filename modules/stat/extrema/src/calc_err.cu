@@ -109,3 +109,4 @@ void fz::module::GPU_calculate_errors(
       T * d_odata, T odata_avg, T * d_xdata, T xdata_avg, size_t len, T h_err[4]);
 
 __INSTANTIATE_CUHIP_CALCERRORS(float)
+__INSTANTIATE_CUHIP_CALCERRORS(double)

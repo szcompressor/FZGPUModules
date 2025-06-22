@@ -37,7 +37,7 @@ struct Compressor {
     if (ibuffer) delete ibuffer;
     if (toggle) delete toggle;
     if (metrics) delete metrics;
-    if (conf) delete conf;
+    // if (conf) delete conf;
   }
 
   //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
@@ -96,6 +96,31 @@ struct Compressor {
       throw std::runtime_error("Number of outliers exceeds reserved buffer size try increasing outlier_buffer_ratio in the config (default 0.2x of input data len) or lower the error bound");
     }
 
+    if (conf->dump) {
+      // dump the outliers and quant codes to file
+      std::string pred_dump_fname = conf->fname + ".pred_dump";
+      size_t pred_dump_size = (conf->num_outliers * sizeof(T) * 2) + sizeof(uint32_t) + (conf->len * sizeof(uint16_t));
+      auto pred_dump_file = MAKE_UNIQUE_HOST(uint8_t, pred_dump_size);
+      size_t offset = 0;
+      // copy number of outliers
+      std::memcpy(pred_dump_file.get() + offset, &conf->num_outliers, sizeof(uint32_t));
+      offset += sizeof(uint32_t);
+      // copy outlier values
+      cudaMemcpy(pred_dump_file.get() + offset, ibuffer->h_val.get(), conf->num_outliers * sizeof(T), cudaMemcpyDeviceToHost);
+      offset += conf->num_outliers * sizeof(T);
+      // copy outlier indices
+      cudaMemcpy(pred_dump_file.get() + offset, ibuffer->h_idx.get(), conf->num_outliers * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+      offset += conf->num_outliers * sizeof(uint32_t);
+      // copy quant codes
+      if (toggle->quant_codes) {
+        cudaMemcpy(pred_dump_file.get() + offset, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
+      } else {
+        std::memset(pred_dump_file.get() + offset, 0, conf->len * sizeof(uint16_t));
+      }
+      utils::tofile(pred_dump_fname.c_str(), pred_dump_file.get(), pred_dump_size);
+      printf("Dumped prediction data to %s\n", pred_dump_fname.c_str());
+    }
+
     //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 
     if (conf->codec == CODEC::HUFFMAN) {
@@ -104,6 +129,16 @@ struct Compressor {
       histogram(stream);
       STOP_CPU_TIMER(hist)
       TIME_ELAPSED_CPU_TIMER(hist, metrics->hist_time)
+
+      if (conf->dump) {
+        // dump the histogram to file
+        std::string hist_dump_fname = conf->fname + ".hist_dump";
+        size_t hist_dump_size = conf->radius * 2 * sizeof(uint32_t);
+        auto hist_dump_file = MAKE_UNIQUE_HOST(uint8_t, hist_dump_size);
+        cudaMemcpy(hist_dump_file.get(), ibuffer->h_hist.get(), hist_dump_size, cudaMemcpyDeviceToHost);
+        utils::tofile(hist_dump_fname.c_str(), hist_dump_file.get(), hist_dump_size);
+        printf("Dumped histogram data to %s\n", hist_dump_fname.c_str());
+      }
 
       CREATE_CPU_TIMER(encoder)
       START_CPU_TIMER(encoder)
@@ -124,7 +159,7 @@ struct Compressor {
 
     if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
       // Implement GZIP compression here
-    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::LSTD) {
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
       // Implement LSTD compression here
     } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
       // No secondary codec
@@ -173,7 +208,7 @@ struct Compressor {
     // ~~~~~~~~~~~~~~~~~~~ COMPRESSION FINISHED ~~~~~~~~~~~~~~~~~~~ //
 
     conf->populate_header(offsets);
-    if (conf->dump) {
+    if (conf->verbose) {
       conf->print();
     }
 
@@ -307,7 +342,6 @@ struct Compressor {
         conf->len, &ibuffer->codec_comp_output, &ibuffer->codec_comp_output_len,
         dummy_header, stream);
     }
-    
   } // end huffman
 
   void fzg(cudaStream_t stream) {

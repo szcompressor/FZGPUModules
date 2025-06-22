@@ -40,7 +40,7 @@ class InternalBuffers {
   T* internal_original{nullptr};
 
   GPU_unique_dptr<uint16_t[]> d_codes = nullptr;
-  GPU_unique_dptr<float[]> d_anchors = nullptr;
+  GPU_unique_dptr<T[]> d_anchors = nullptr;
 
   GPU_unique_dptr<uint32_t[]> d_hist = nullptr;
   GPU_unique_hptr<uint32_t[]> h_hist = nullptr;
@@ -95,8 +95,8 @@ class InternalBuffers {
         total_footprint_d += ALIGN_4ki(conf->len) * sizeof(uint16_t);
       }
       if (toggle->anchor_points) {
-        d_anchors = MAKE_UNIQUE_DEVICE(float, conf->anchor512_len);
-        total_footprint_d += conf->anchor512_len * sizeof(float);
+        d_anchors = MAKE_UNIQUE_DEVICE(T, conf->anchor512_len);
+        total_footprint_d += conf->anchor512_len * sizeof(T);
       }
       if (toggle->histogram) {
         d_hist = MAKE_UNIQUE_DEVICE(uint32_t, conf->radius * 2);

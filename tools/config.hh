@@ -21,6 +21,7 @@ namespace fz {
       bool report = true;
       bool compare = false;
       bool dump = false;
+      bool verbose = false;
       bool dryrun = false;
 
       // #### PIPELINE #### //
@@ -37,7 +38,7 @@ namespace fz {
       uint32_t y;
       uint32_t z;
       size_t len;
-      size_t num_outliers;
+      size_t num_outliers = 0; // -1 means not set
       float outlier_buffer_ratio = 0.2f;
 
       size_t orig_size;

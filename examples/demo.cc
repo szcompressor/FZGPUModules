@@ -9,46 +9,48 @@ namespace utils = _portable::utils;
 
 uint8_t* compressed_data_host;
 float* decompressed_data_host;
-fz::Config<float>* conf;
+// fz::Config<float> conf;
 
 void compress_demo(std::string fname, size_t x, 
     size_t y, size_t z, cudaStream_t stream) {
     
     // Setup config with compression options
-    conf = new fz::Config<float>(x, y, z);
-    conf->eb = 2e-4;
-    conf->eb_type = fz::EB_TYPE::ABS;
-    conf->algo = fz::ALGO::LORENZO;
-    conf->precision = fz::PRECISION::FLOAT;
-    conf->codec = fz::CODEC::HUFFMAN;
-    conf->fname = fname;
+    fz::Config<float> conf(x, y, z);
+    conf.eb = 2e-4;
+    conf.eb_type = fz::EB_TYPE::ABS;
+    conf.algo = fz::ALGO::LORENZO;
+    conf.precision = fz::PRECISION::FLOAT;
+    conf.codec = fz::CODEC::HUFFMAN;
+    conf.fname = fname;
+
+    // conf->use_huffman_reVISIT = true;
 
     // create memory for the data
     float* input_data_device, * input_data_host;
     uint8_t* internal_compressed;
 
     // allocate memory for the data
-    cudaMallocHost(&input_data_host, conf->orig_size);
-    cudaMalloc(&input_data_device, conf->orig_size);
+    cudaMallocHost(&input_data_host, conf.orig_size);
+    cudaMalloc(&input_data_device, conf.orig_size);
 
     // read data from file
-    utils::fromfile(fname, input_data_host, conf->orig_size);
+    utils::fromfile(fname, input_data_host, conf.orig_size);
 
     // copy data to device
     cudaMemcpy(input_data_device, 
-        input_data_host, conf->orig_size, cudaMemcpyHostToDevice);
+        input_data_host, conf.orig_size, cudaMemcpyHostToDevice);
 
     // create compressor object
-    fz::Compressor<float> compressor(*conf);
+    fz::Compressor<float> compressor(conf);
 
     compressor.compress(input_data_device, &internal_compressed, stream);
 
     //! internal_compressed is a pointer to the compressed data on the gpu
 
     // copy out compressed data (if not dumped to file, can set in config)
-    cudaMallocHost(&compressed_data_host, conf->comp_size);
+    cudaMallocHost(&compressed_data_host, conf.comp_size);
     cudaMemcpy(compressed_data_host, 
-        internal_compressed, conf->comp_size, cudaMemcpyDeviceToHost);
+        internal_compressed, conf.comp_size, cudaMemcpyDeviceToHost);
 
     // free memory
     cudaFreeHost(input_data_host);

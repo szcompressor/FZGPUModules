@@ -17,7 +17,8 @@ struct CLIOptions {
   bool verbose = false;
   bool skip = false;
   // bool auto = false;
-  std::string origin;
+  bool stf = false; // use cudastf api
+  std::string origin = "";
 
   std::vector<std::string> pipeline;
   uint32_t x = 0;
@@ -25,40 +26,75 @@ struct CLIOptions {
   uint32_t z = 0;
   size_t len = 0;
   int n_dims = 0;
+  float outlier_buff_ratio = 0.2f;
+  uint16_t radius = 512;
 
   bool comp = true;
   double eb = 0;
   bool float_precision = true;
 };
 
-void print_help() {
-  std::cout
-      << "Usage: fzmod_cli [options] <input_file>\n\n"
-      << "General Options:\n"
-      << "  -h, --help                Show this help message and exit\n"
-      << "  -v, --version             Show version information and exit\n\n"
-      << "Analysis Options:\n"
-      << "  -D, --dump                Dump the contents of the file\n"
-      << "  -R, --report <time,cr>    Generate a report (time, compression "
-         "ratio)\n"
-      << "  -V, --verbose             Enable verbose output\n"
-      << "  -S, --skip <huffman,write2disk>   Skip processing specified step\n"
-      << "      --compare, --origin   Compare with original\n\n"
-      << "Compression Parameters:\n"
-      << "  -m, --mode <rel,abs>      Error bound mode (relative, absolute)\n"
-      << "  -e, --eb, --error-bound <value>  Set error bound value\n"
-      << "  -p, --pred, --predictor <lorenzo,lorenzo_zz,spline>  Set "
-         "predictor\n"
-      << "      --hist, --histogram <generic,sparse>  Histogram type\n"
-      << "  -c1, --codec, --codec1 <huffman,huff_revisit,fzg>  Primary codec\n"
-      << "  -c2, --codec2 <none,zstd,gzip>  Secondary codec\n"
-      << "  -t, --type, --dtype <f32,f64>  Data type (float32, float64)\n\n"
-      << "Input/Output Options:\n"
-      << "  -i, --input <filename>    Input file\n"
-      << "  -l, --len, --xyz <val>x<val>x<val>  Dimensions (e.g., "
-         "100x200x300)\n"
-      << "  -z, --zip, --compress     Compress mode\n"
-      << "  -x, --unzip, --decompress Decompress mode\n";
+static int constexpr PRECISION = 0;        // index into pipeline
+static int constexpr EB_TYPE = 1;          // index into pipeline
+static int constexpr PREDICTOR = 2;        // index into pipeline
+static int constexpr HISTOGRAM = 3;        // index into pipeline
+static int constexpr CODEC = 4;            // index into pipeline
+static int constexpr SECONDARY_CODEC = 5;  // index into pipeline
+
+void print_help(){
+    std::cout
+    << "Name: FZModules GPU Compression Library\n\n"
+    << "Synopsis: (Basic usage) \n"
+    << "  fzmod -t f32 -m rel -e 1e-3 -i {data} -l 300x100x200 -z --report\n"
+    << "        ------ ------ ------- --------- -------------- -- --------\n"
+    << "         Type   Mode   Error   Input     Dim-fast-slow  zip  Report\n"
+    << "  fzmod -i {compressed} -x --compare {original} --report\n"
+    << "        --------------- -- -------------------- -------------\n"
+    << "         Input file   Unzip   Compare original     Report    \n\n"
+    << "General Options:\n"
+    << "  -h, --help                Show this help message and exit\n"
+    << "  -v, --version             Show version information and exit\n\n"
+    << "Analysis Options:\n"
+    << "  -D, --dump                Dump the prediction/histogram output to file\n"
+    << "  -R, --report              Generate a report\n"
+    << "  -V, --verbose             Enable verbose output\n"
+    << "  -S, --skip <write2disk>   Skip processing specified step\n"
+    << "  --compare, --origin   Compare with original\n\n"
+    << "Compression Parameters:\n"
+    << "  -m, --mode <rel,abs>      Error bound mode (relative, absolute)\n"
+    << "  -e, --eb, --error-bound <value>  Set error bound value\n"
+    << "  -p, --pred, --predictor <lorenzo,lorenzo_zz,spline>  Set "
+       "predictor\n"
+    << "      --hist, --histogram <generic,sparse>  Histogram type\n"
+    << "  -c1, --codec, --codec1 <huffman,huff_revisit,fzg>  Primary codec\n"
+    << "  -c2, --codec2 <none,zstd,gzip>  Secondary codec\n"
+    << "  -t, --type, --dtype <f32,f64>  Data type (float32, float64)\n"
+    << "  -r, --radius <value>  Set histogram radius (default: 512)\n"
+    << "  -b, --outlier-buffer-ratio <value>  Set outlier buffer ratio "
+       "(default: 0.2)\n\n"
+    << "Input/Output Options:\n"
+    << "  -i, --input <filename>    Input file\n"
+    << "  -l, --len, --xyz <val>x<val>x<val>  Dimensions (e.g., "
+       "100x200x300)\n"
+    << "  -z, --zip, --compress     Compress mode\n"
+    << "  -x, --unzip, --decompress Decompress mode\n\n"
+    << "Examples:\n"
+    << "  Compression Pipelines:\n"
+    << "    1. (default) Lorenzo -> Histogram -> Huffman -> None\n"
+    << "    fzmod -t f32 -m rel -e 1e-4 -i data.f32 -l 500x500x500 -z \\ \n"
+    << "        --pred lrz --hist sparse --codec huffman\n"
+    << "    2. (quality) Spline 3D -> Histogram -> Huffman -> None\n"
+    << "    fzmod -t f32 -m abs -e 1e-3 -i data.f32 -l 500x500x500 -z \\ \n"
+    << "        --pred spline --hist generic --codec huffman\n"
+    << "    3. (speed) Lorenzo -> FZG -> None\n"
+    << "    fzmod -t f32 -m rel -e 1e-4 -i data.f32 -l 500x500x500 -z \\ \n"
+    << "        --pred lrz --codec fzg\n"
+    << "  Testing Data:\n"
+    << "    Get testing data from Scientific Data Reduction Benchmarks (SDRB)\n"
+    << "    at https://sdrbench.github.io\n\n"
+    << "    2D CESM example (compression and decompression):\n"
+    << "    fzmod -t f32 -m rel -e 1e-4 -i ${CESM} -l 3600-1800 -z --report\n"
+    << "    fzmod -i ${CESM}.fzmod -x --report --compare ${CESM}\n";
 }
 
 void print_version() {
@@ -71,13 +107,6 @@ void print_version() {
 void parse_args(int const argc, char** const argv, CLIOptions& options) {
 
   int i = 1;
-
-  int constexpr PRECISION = 0; // index into pipeline
-  int constexpr EB_TYPE = 1; // index into pipeline
-  int constexpr PREDICTOR = 2; // index into pipeline
-  int constexpr HISTOGRAM = 3; // index into pipeline
-  int constexpr CODEC = 4; // index into pipeline
-  int constexpr SECONDARY_CODEC = 5; // index into pipeline
 
   options.pipeline.push_back("f32");
   options.pipeline.push_back("rel");
@@ -108,10 +137,12 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
       } else if (optmatch({"-v", "--version"})) {
         options.version = true;
         print_version();
+      } else if (optmatch({"--stf"})) {
+        options.stf = true;
+        throw std::runtime_error("STF API is not implemented yet.");
       } else if (optmatch({"-D", "--dump"})) {
         options.dump = true;
       } else if (optmatch({"-R", "--report"})) {
-        check_next();
         options.report = true;
       } else if (optmatch({"-V", "--verbose"})) {
         options.verbose = true;
@@ -121,6 +152,7 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
         auto _ = std::string(argv[++i]);
         if (_ == "huffman") {
           options.skip_huffman = true;
+          throw std::runtime_error("Skipping huffman is not supported yet.");
         } else if (_ == "write2disk") {
           options.skip_to_file = true;
         } else {
@@ -146,7 +178,7 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
       } else if (optmatch({"-e", "--eb", "--error-bound"})) {
         check_next();
         char* end;
-        options.eb - std::strtod(argv[++i], &end);
+        options.eb = std::strtod(argv[++i], &end);
       } else if (optmatch({"-p", "--pred", "--predictor"})) {
         check_next();
         auto _ = std::string(argv[++i]);
@@ -205,6 +237,26 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
         } else {
           throw std::runtime_error("Unknown data type: " + _);
         }
+      } else if (optmatch({"-r", "--radius"})) {
+        check_next();
+        char* end;
+        options.radius = std::strtol(argv[++i], &end, 10);
+        if (*end) {
+          throw std::runtime_error("Invalid radius value: " + std::string(argv[i]));
+        }
+        if (options.radius == 0) {
+          throw std::runtime_error("Radius cannot be zero.");
+        }
+      } else if (optmatch({"-b", "--outlier-buffer-ratio"})) {
+        check_next();
+        char* end;
+        options.outlier_buff_ratio = std::strtof(argv[++i], &end);
+        if (*end) {
+          throw std::runtime_error("Invalid outlier buffer ratio value: " + std::string(argv[i]));
+        }
+        if (options.outlier_buff_ratio <= 0) {
+          throw std::runtime_error("Outlier buffer ratio must be greater than zero.");
+        }
       } else if (optmatch({"-i", "--input"})) {
         check_next();
         options.input_file = std::string(argv[++i]);
@@ -229,6 +281,9 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
               }
               checked = true;
             }
+          }
+          if (!checked) {
+            dims.push_back(str);
           }
         };
         // lambda to convert string to int returning uint32_t
@@ -277,10 +332,101 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
   } // while
 } // parse_args
 
+void validate_cli(const CLIOptions& options) {
+  if (options.comp) {
+    if (options.input_file.empty()) {
+      throw std::runtime_error("Input file is required for compression.");
+    }
+    if (options.eb <= 0) {
+      throw std::runtime_error("Error bound must be greater than zero.");
+    }
+    if (options.x == 0 || options.y == 0 || options.z == 0) {
+      throw std::runtime_error("Invalid dimensions: " + std::to_string(options.x) + "x" + 
+                               std::to_string(options.y) + "x" + std::to_string(options.z));
+    }
+  } else {
+    if (options.input_file.empty()) {
+      throw std::runtime_error("Input file is required for decompression.");
+    }
+  }
+} // validate_cli
+
+template <typename T>
+void apply_cli_options(const CLIOptions& options, fz::Config<T>& config) {
+  config.toFile = !options.skip_to_file;
+  config.fromFile = true;  // always read from file
+  config.fname = options.input_file;
+
+  config.report = options.report;
+  config.dump = options.dump;
+  config.verbose = options.verbose;
+
+  if (options.comp) {
+    config.comp = options.comp;
+    config.eb = options.eb;
+    config.eb_type = (options.pipeline[EB_TYPE] == "rel") ? fz::EB_TYPE::REL
+                                                          : fz::EB_TYPE::ABS;
+    config.algo = (options.pipeline[PREDICTOR] == "lorenzo" ||
+                   options.pipeline[PREDICTOR] == "lorenzo_zz")
+                      ? fz::ALGO::LORENZO
+                      : fz::ALGO::SPLINE;
+    config.codec = (options.pipeline[CODEC] == "huffman" ||
+                    options.pipeline[CODEC] == "huff_revisit")
+                       ? fz::CODEC::HUFFMAN
+                       : fz::CODEC::FZG;
+    config.lossless_codec_2 = (options.pipeline[SECONDARY_CODEC] == "none")
+                                  ? fz::SECONDARY_CODEC::NONE
+                              : (options.pipeline[SECONDARY_CODEC] == "zstd")
+                                  ? fz::SECONDARY_CODEC::ZSTD
+                                  : fz::SECONDARY_CODEC::GZIP;
+    config.outlier_buffer_ratio = options.outlier_buff_ratio;
+    config.radius = options.radius;
+    config.use_histogram_sparse = (options.pipeline[HISTOGRAM] == "sparse");
+    config.use_huffman_reVISIT = options.pipeline[CODEC] == "huff_revisit";
+    config.use_lorenzo_zigzag = (options.pipeline[PREDICTOR] == "lorenzo_zz");
+  } else {
+    config.compare = !options.origin.empty();
+  }
+} // apply_cli_options
+
 template<typename T>
 void run_compression(const CLIOptions& options, cudaStream_t stream) {
+  fz::Config<T> config(options.x, options.y, options.z);
+  apply_cli_options<T>(options, config);
+  fz::Compressor<T> compressor(config);
+  uint8_t* out_data;
+  compressor.compress(nullptr, &out_data, stream);
+  cudaFree(out_data);
+} // run_compression
 
-}
+template<typename T>
+void run_decompression(const CLIOptions& options, cudaStream_t stream) {
+  fz::Decompressor<T> decompressor(options.input_file);
+  apply_cli_options<T>(options, *decompressor.conf);
+
+  T* out_data;
+  size_t out_size = decompressor.conf->orig_size;
+  cudaMalloc(&out_data, out_size);
+
+  uint8_t* compressed_data;
+  cudaMallocHost(&compressed_data, decompressor.conf->comp_size);
+  utils::fromfile(options.input_file.c_str(), compressed_data, decompressor.conf->comp_size);
+
+  T* orig_data;
+  if (options.origin.empty()) {
+    decompressor.decompress(compressed_data, out_data, stream);
+  } else {
+    cudaMallocHost(&orig_data, decompressor.conf->orig_size);
+    utils::fromfile(options.origin.c_str(), orig_data, decompressor.conf->orig_size);
+    decompressor.decompress(compressed_data, out_data, stream, orig_data);
+  }
+
+  cudaFree(out_data);
+  cudaFree(compressed_data);
+  if (!options.origin.empty()) {
+    cudaFree(orig_data);
+  }
+} // run_decompression
 
 void run_CLI(int argc, char** argv) {
   cudaStream_t stream;
@@ -288,11 +434,15 @@ void run_CLI(int argc, char** argv) {
 
   CLIOptions options;
 
-  parse_args(argc, argv, options);
-
-  if (options.help || options.version) {
+  if (argc < 2) {
+    print_help();
     return;
   }
+
+  parse_args(argc, argv, options);
+  validate_cli(options);
+
+  if (options.help || options.version) return;
 
   if (options.comp) {
     if (options.pipeline[0] == "f32") {
@@ -303,13 +453,18 @@ void run_CLI(int argc, char** argv) {
       throw std::runtime_error("Unsupported data type: " + options.pipeline[0]);
     }
   } else {
-    // Decompression logic here
-    // For now, just a placeholder
-    std::cout << "Decompression not implemented yet." << std::endl;
+    if (options.pipeline[0] == "f32") {
+      run_decompression<float>(options, stream);
+    } else if (options.pipeline[0] == "f64") {
+      run_decompression<double>(options, stream);
+    } else {
+      throw std::runtime_error("Unsupported data type: " + options.pipeline[0]);
+    }
   }
-}
+  cudaStreamDestroy(stream);
+} // run_CLI
 
 int main(int argc, char** argv) {
   run_CLI(argc, argv);
   return 0;
-}
+} // main
