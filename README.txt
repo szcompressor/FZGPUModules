@@ -18,4 +18,4 @@ make -j
 make install
 
 
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CUDA_ARCHITECTURES="86"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DFZMOD_BUILD_EXAMPLES=ON -DCMAKE_CUDA_ARCHITECTURES="86"

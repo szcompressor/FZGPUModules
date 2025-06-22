@@ -269,7 +269,7 @@ add_library(FZMOD::spline ALIAS fzmod_cu_spline)
 ####
 #### Combine Modules
 add_library(fzmod
-  examples/demo.cc
+  tools/cli/cli.cc
 )
 target_link_libraries(fzmod
   PUBLIC
@@ -290,10 +290,12 @@ add_library(FZMOD::all ALIAS fzmod)
 ### EXECUTABLES ###
 ###################
 
-add_executable(fzmod-bin-example examples/demo.cc)
-set_source_files_properties(examples/demo.cc PROPERTIES LANGUAGE CUDA)
-target_link_libraries(fzmod-bin-example PRIVATE fzmod)
-set_target_properties(fzmod-bin-example PROPERTIES OUTPUT_NAME fzmod_demo)
+# Examples are now handled in the examples/ subdirectory
+option(FZMOD_BUILD_EXAMPLES "Build example applications" ON)
+if(FZMOD_BUILD_EXAMPLES)
+  message(STATUS "Building examples")
+  add_subdirectory(examples)
+endif()
 
 add_executable(fzmod-bin tools/cli/cli.cc)
 set_source_files_properties(tools/cli/cli.cc PROPERTIES LANGUAGE CUDA)

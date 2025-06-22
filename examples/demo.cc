@@ -9,7 +9,6 @@ namespace utils = _portable::utils;
 
 uint8_t* compressed_data_host;
 float* decompressed_data_host;
-// fz::Config<float> conf;
 
 void compress_demo(std::string fname, size_t x, 
     size_t y, size_t z, cudaStream_t stream) {
@@ -22,8 +21,6 @@ void compress_demo(std::string fname, size_t x,
     conf.precision = fz::PRECISION::FLOAT;
     conf.codec = fz::CODEC::HUFFMAN;
     conf.fname = fname;
-
-    // conf->use_huffman_reVISIT = true;
 
     // create memory for the data
     float* input_data_device, * input_data_host;
@@ -57,8 +54,6 @@ void compress_demo(std::string fname, size_t x,
     cudaFree(input_data_device);
     cudaFree(internal_compressed);
     cudaStreamSynchronize(stream);
-
-    // output is dumped to fname.fzmod and used in decompression
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

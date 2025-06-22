@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <iostream>
+#include <cmath>
 
 #include "header.hh"
 #include "compare.hh"

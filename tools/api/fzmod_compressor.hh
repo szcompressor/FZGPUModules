@@ -37,7 +37,6 @@ struct Compressor {
     if (ibuffer) delete ibuffer;
     if (toggle) delete toggle;
     if (metrics) delete metrics;
-    // if (conf) delete conf;
   }
 
   //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
@@ -158,9 +157,9 @@ struct Compressor {
     //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 
     if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
-      // Implement GZIP compression here
+      throw std::runtime_error("GZIP compression is not implemented yet");
     } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
-      // Implement LSTD compression here
+      throw std::runtime_error("ZSTD compression is not implemented yet");
     } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
       // No secondary codec
     } else {

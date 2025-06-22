@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include "header.hh"
 #include "io.hh"
 
@@ -38,7 +39,7 @@ namespace fz {
       uint32_t y;
       uint32_t z;
       size_t len;
-      size_t num_outliers = 0; // -1 means not set
+      size_t num_outliers = 0;
       float outlier_buffer_ratio = 0.2f;
 
       size_t orig_size;

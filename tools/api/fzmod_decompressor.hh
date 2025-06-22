@@ -82,9 +82,9 @@ struct Decompressor {
     // ~~~~~~~~~~~~~~~~~~~~~~~ CODEC 1 ~~~~~~~~~~~~~~~~~~~~~~~ //
 
     if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
-      // Implement GZIP compression here
+      throw std::runtime_error("GZIP decompression is not implemented yet");
     } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
-      // Implement LSTD compression here
+      throw std::runtime_error("ZSTD decompression is not implemented yet");
     } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
       // No secondary codec
     } else {

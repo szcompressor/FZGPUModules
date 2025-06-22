@@ -16,7 +16,6 @@ struct CLIOptions {
   bool help = false;
   bool verbose = false;
   bool skip = false;
-  // bool auto = false;
   bool stf = false; // use cudastf api
   std::string origin = "";
 
@@ -34,12 +33,12 @@ struct CLIOptions {
   bool float_precision = true;
 };
 
-static int constexpr PRECISION = 0;        // index into pipeline
-static int constexpr EB_TYPE = 1;          // index into pipeline
-static int constexpr PREDICTOR = 2;        // index into pipeline
-static int constexpr HISTOGRAM = 3;        // index into pipeline
-static int constexpr CODEC = 4;            // index into pipeline
-static int constexpr SECONDARY_CODEC = 5;  // index into pipeline
+static int constexpr PRECISION = 0; // index into pipeline
+static int constexpr EB_TYPE = 1;          
+static int constexpr PREDICTOR = 2;        
+static int constexpr HISTOGRAM = 3;        
+static int constexpr CODEC = 4;            
+static int constexpr SECONDARY_CODEC = 5;  
 
 void print_help(){
     std::cout
@@ -63,9 +62,8 @@ void print_help(){
     << "Compression Parameters:\n"
     << "  -m, --mode <rel,abs>      Error bound mode (relative, absolute)\n"
     << "  -e, --eb, --error-bound <value>  Set error bound value\n"
-    << "  -p, --pred, --predictor <lorenzo,lorenzo_zz,spline>  Set "
-       "predictor\n"
-    << "      --hist, --histogram <generic,sparse>  Histogram type\n"
+    << "  -p, --pred, --predictor <lorenzo,lorenzo_zz,spline>  Set predictor\n"
+    << "  --hist, --histogram <generic,sparse>  Histogram type\n"
     << "  -c1, --codec, --codec1 <huffman,huff_revisit,fzg>  Primary codec\n"
     << "  -c2, --codec2 <none,zstd,gzip>  Secondary codec\n"
     << "  -t, --type, --dtype <f32,f64>  Data type (float32, float64)\n"
@@ -95,6 +93,7 @@ void print_help(){
     << "    2D CESM example (compression and decompression):\n"
     << "    fzmod -t f32 -m rel -e 1e-4 -i ${CESM} -l 3600-1800 -z --report\n"
     << "    fzmod -i ${CESM}.fzmod -x --report --compare ${CESM}\n";
+    exit(0);
 }
 
 void print_version() {
@@ -102,6 +101,7 @@ void print_version() {
   printf("FZModules Version %d.%d.%d\n", (VERSION / 100) % 100,
          (VERSION / 10) % 10, VERSION % 10);
   printf("Github: https://github.com/skyler-ruiter/FZModules\n");
+  exit(0);
 }
 
 void parse_args(int const argc, char** const argv, CLIOptions& options) {
