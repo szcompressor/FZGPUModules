@@ -105,6 +105,8 @@ struct fzmod_metrics {
           total_footprint_d / (1024 * 1024);
       size_t total_footprint_h_mib =
           total_footprint_h / (1024 * 1024);
+      printf("Original File Size:\t\t %zu MiB\n",
+             orig_bytes / (1024 * 1024));
       printf("Total Footprint (Device):\t %zu MiB\n", total_footprint_d_mib);
       printf("Total Footprint (Host):\t\t %zu MiB\n", total_footprint_h_mib);
     } else {
