@@ -17,6 +17,9 @@ FZMod is a modular refactor of [cuSZ/pSZ](https://github.com/szcompressor/cuSZ),
 
 <p align="center", style="font-size: 2em">
 <a href="https://github.com/skyler-ruiter/FZModules/wiki/Build-and-Install"><b>Build and Install Wiki Page</b></a>
+</p>
+
+<p align="center", style="font-size: 2em">
 <a href="https://github.com/skyler-ruiter/FZModules/wiki/Command-Line-Interface-(CLI)-Usage"><b>Command Line Interface (CLI) Wiki Page</b></a>
 </p>
 
