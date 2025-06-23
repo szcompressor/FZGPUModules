@@ -1,8 +1,7 @@
 #include <iostream>
 #include <string>
 
-#include "fzmod_compressor.hh"
-#include "fzmod_decompressor.hh"
+#include "fzmod.hh"
 
 namespace utils = _portable::utils;
 
