@@ -59,6 +59,19 @@ struct Decompressor {
     // DECOMPRESSION SETUP
     cudaMemsetAsync(out_data, 0, conf->orig_size, stream);
 
+    // ~~~~~~~~~~~~~~~~~~~~~~~ CODEC 2 ~~~~~~~~~~~~~~~~~~~~~~~ //
+
+    if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
+      throw std::runtime_error("GZIP decompression is not implemented yet");
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
+      zstd(compressed_data);
+      compressed_data = ibuffer->d_internal_temp.get();
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
+      // No secondary codec
+    } else {
+      throw std::runtime_error("Unsupported secondary codec type");
+    }
+
     // static const int HEADER = 0;
     static const int ANCHOR = 1;
     static const int ENCODED = 2;
@@ -80,18 +93,6 @@ struct Decompressor {
     }
 
     // ~~~~~~~~~~~~~~~~~~~~~~~ CODEC 1 ~~~~~~~~~~~~~~~~~~~~~~~ //
-
-    if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
-      throw std::runtime_error("GZIP decompression is not implemented yet");
-    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
-      throw std::runtime_error("ZSTD decompression is not implemented yet");
-    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
-      // No secondary codec
-    } else {
-      throw std::runtime_error("Unsupported secondary codec type");
-    }
-
-    // ~~~~~~~~~~~~~~~~~~~~~~~ CODEC 2 ~~~~~~~~~~~~~~~~~~~~~~~ //
 
     CREATE_CPU_TIMER(decoding)
     START_CPU_TIMER(decoding)
@@ -158,6 +159,24 @@ struct Decompressor {
   } // end decompress
 
   // ~~~~~~~~~~~~~~~~~~~~~~~ CODEC FUNCTIONS ~~~~~~~~~~~~~~~~~~~~~~~ //
+
+  void zstd(uint8_t* src) {
+    size_t src_len;
+    src_len = conf->comp_size - sizeof(fzmod_header) - sizeof(size_t);
+    
+    // get original size from header and move past it
+    size_t dst_len;
+    cudaMemcpy(&dst_len, src, sizeof(size_t), cudaMemcpyDeviceToHost);
+    src += sizeof(size_t); // move past src_len
+
+    // allocate space for decompression
+    ibuffer->d_internal_temp = MAKE_UNIQUE_DEVICE(uint8_t, dst_len);
+    uint8_t* dst = ibuffer->d_internal_temp.get();
+
+    // decompress using zstd
+    ZSTD_decompress(dst, dst_len, src, src_len);
+    
+  } // end zstd
 
   void huffman(uint8_t* encoded, cudaStream_t stream) {
     phf_header h;

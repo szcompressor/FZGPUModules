@@ -154,18 +154,6 @@ struct Compressor {
       throw std::runtime_error("Unsupported codec type");
     }
 
-    //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
-
-    if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
-      throw std::runtime_error("GZIP compression is not implemented yet");
-    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
-      throw std::runtime_error("ZSTD compression is not implemented yet");
-    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
-      // No secondary codec
-    } else {
-      throw std::runtime_error("Unsupported secondary codec type");
-    }
-
     //~~~~~~~~~~~~~~~~~~~~~~~~~ Finalize Compression ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 
     // construct offsets array for file
@@ -200,6 +188,18 @@ struct Compressor {
     // set the output data pointer
     *out_data = ibuffer->compressed();
     conf->comp_size = offsets[END];
+
+    //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 2 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
+
+    if (conf->lossless_codec_2 == SECONDARY_CODEC::GZIP) {
+      throw std::runtime_error("GZIP compression is not implemented yet");
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::ZSTD) {
+      zstd();
+    } else if (conf->lossless_codec_2 == SECONDARY_CODEC::NONE) {
+      // No secondary codec
+    } else {
+      throw std::runtime_error("Unsupported secondary codec type");
+    }
 
     STOP_CPU_TIMER(total)
     TIME_ELAPSED_CPU_TIMER(total, metrics->end_to_end_comp_time)
@@ -350,6 +350,38 @@ struct Compressor {
   } // end fzg
 
   // ################ CODEC 2 FUNCTIONS ################ //
+
+  void zstd() {
+    int compression_level = 3; // Default compression level
+    GPU_unique_hptr<uint8_t[]> src = MAKE_UNIQUE_HOST(uint8_t, conf->comp_size);
+    cudaMemcpy(src.get(), ibuffer->compressed(), conf->comp_size, cudaMemcpyDeviceToHost);
+
+    // Allocate memory for the compressed output
+    size_t max_compressed_size = ZSTD_compressBound(conf->comp_size);
+    ibuffer->h_compressed = MAKE_UNIQUE_HOST(uint8_t, max_compressed_size + sizeof(size_t));
+    uint8_t* dst = ibuffer->h_compressed.get();
+
+    memcpy(dst, &conf->comp_size, sizeof(size_t));
+    size_t dst_len = ZSTD_compress(dst + sizeof(size_t), max_compressed_size - sizeof(size_t),
+                                  src.get(), conf->comp_size, compression_level);
+    
+    if (ZSTD_isError(dst_len)) {
+      throw std::runtime_error("ZSTD compression failed: " + std::string(ZSTD_getErrorName(dst_len)));
+    }
+
+    if (dst_len >= conf->comp_size * 0.9) {
+      size_t temp_comp_len = dst_len + sizeof(size_t) + 128;
+      printf("ZSTD compression did not reduce size sufficiently, "
+             "original size: %zu, compressed size: %zu, consider disabling it\n",
+             conf->comp_size, temp_comp_len);
+      throw std::runtime_error("ZSTD compression did not reduce size sufficiently");
+    }
+
+    ibuffer->d_compressed = MAKE_UNIQUE_DEVICE(uint8_t, dst_len + sizeof(size_t));
+    cudaMemcpy(ibuffer->d_compressed.get(), dst, dst_len + sizeof(size_t), cudaMemcpyHostToDevice);
+
+    conf->comp_size = dst_len + sizeof(size_t) + 128; // include header size
+  } // end zstd
 
 }; // end Compressor
 

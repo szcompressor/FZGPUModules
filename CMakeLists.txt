@@ -180,6 +180,9 @@ target_include_directories(fzmod_compile_settings INTERFACE
 ### LIBRARIES ###
 #################
 
+#### ZSTD 
+add_subdirectory(modules/codec/zstd)
+
 #### FZ utils
 add_library(fz_utils
   modules/stat/extrema/src/extrema.cu
@@ -280,6 +283,7 @@ target_link_libraries(fzmod
   fzmod_cu_huffman
   fzmod_cu_lrz
   fzmod_cu_spline
+  zstd
   CUDA::cudart
 )
 add_library(FZMOD::CUDA ALIAS fzmod)
