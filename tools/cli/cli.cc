@@ -107,7 +107,7 @@ void print_version() {
   // print using definition in header (100 for version 1.0.0)
   printf("FZModules Version %d.%d.%d\n", (VERSION / 100) % 100,
          (VERSION / 10) % 10, VERSION % 10);
-  printf("Github: https://github.com/skyler-ruiter/FZModules\n");
+  printf("Github: https://github.com/szcompressor/FZModules\n");
   exit(0);
 }
 

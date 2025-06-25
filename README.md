@@ -8,7 +8,7 @@ FZ GPU Module Library (FZMod): A GPU-accelerated Module Library for Prediction-b
 
 FZMod is a modular refactor of [cuSZ/pSZ](https://github.com/szcompressor/cuSZ), a GPU implementation of the [SZ algorithm](https://github.com/szcompressor/SZ). It aims to create a flexible and extensible framework for lossy GPU accelerated data-reduction modules. 
 
-(C) 2025 by Argonne National Laboratory, and Indiana University. See [COPYRIGHT](https://github.com/skyler-ruiter/FZModules/blob/main/LICENSE) in top-level directory.
+(C) 2025 by Argonne National Laboratory, and Indiana University. See [COPYRIGHT](https://github.com/szcompressor/FZModules/blob/main/LICENSE) in top-level directory.
 
 - Developers: (primary) Skyler Ruiter, Pushkal Mudhapaka, Jiannan Tian.
 - Special thanks to Fengguang Song for advising this project.
@@ -16,12 +16,15 @@ FZMod is a modular refactor of [cuSZ/pSZ](https://github.com/szcompressor/cuSZ),
 <br>
 
 <p align="center", style="font-size: 2em">
-<a href="https://github.com/skyler-ruiter/FZModules/wiki/Build-and-Install"><b>Build and Install Wiki Page</b></a>
+<a href="https://github.com/szcompressor/FZModules/wiki/Build-and-Install"><b>Build and Install Wiki Page</b></a>
 </p>
 
 <p align="center", style="font-size: 2em">
-<a href="https://github.com/skyler-ruiter/FZModules/wiki/Command-Line-Interface-(CLI)-Usage"><b>Command Line Interface (CLI) Wiki Page</b></a>
+<a href="https://github.com/szcompressor/FZModules/wiki/Command-Line-Interface-(CLI)-Usage"><b>Command Line Interface (CLI) Wiki Page</b></a>
 </p>
+
+<p align="center", style="font-size: 2em">
+<a href="https://github.com/szcompressor/FZModules/wiki/Modules-Explained"><b>Modules Explained Wiki Page</b></a>
 
 
 # FAQ 
