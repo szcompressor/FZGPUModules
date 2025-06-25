@@ -20,6 +20,9 @@ class FzgCodec {
   FzgCodec(size_t const data_len);
   ~FzgCodec();
 
+  size_t total_footprint_d();
+  size_t total_footprint_h();
+
   FzgCodec* encode(
       E* in_data, size_t const data_len, uint8_t** out_comp, size_t* comp_len, void* stream);
 

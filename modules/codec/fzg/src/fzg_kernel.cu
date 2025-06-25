@@ -49,6 +49,11 @@ void fzgpu::Buf::init(size_t data_len, bool _alloc_test_buf)
 
     CHECK_GPU(cudaMemset(d_in_data, 0, sizeof(uint16_t) * len));
     CHECK_GPU(cudaMemset(d_out_data, 0, sizeof(uint16_t) * len));
+
+    this->total_footprint_d += sizeof(uint16_t) * pad_len;  // d_in_data
+    this->total_footprint_h += sizeof(uint16_t) * len;    // h_in_data
+    this->total_footprint_d += sizeof(uint16_t) * pad_len;  // d_out_data
+    this->total_footprint_h += sizeof(uint16_t) * len;    // h_out_data
   }
 
   // arrange archive output
@@ -57,6 +62,8 @@ void fzgpu::Buf::init(size_t data_len, bool _alloc_test_buf)
                       + sizeof(uint32_t) * config.at("grid_x")      // field 3: start pos
                       + sizeof(InputT) * len;                       // field 4: max comp
   CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
+
+  this->total_footprint_d += max_archive_bytes;  // d_archive
 
   // The following overlap teh archive.
   // CHECK_GPU(cudaMalloc(&d_bitflag_array, sizeof(uint32_t) * chunk_size));
@@ -82,6 +89,9 @@ void fzgpu::Buf::init(size_t data_len, bool _alloc_test_buf)
 
   CHECK_GPU(cudaMemset(d_offset_counter, 0, sizeof(uint32_t)));
   CHECK_GPU(cudaMemset(d_comp_len, 0, sizeof(uint32_t) * grid_x));
+
+  this->total_footprint_d += sizeof(uint32_t);
+  this->total_footprint_d += sizeof(uint32_t) * grid_x;  // d_comp_len
 }
 
 fzgpu::Buf::Buf(size_t const data_len, bool alloc_test_buf) { init(data_len, alloc_test_buf); }

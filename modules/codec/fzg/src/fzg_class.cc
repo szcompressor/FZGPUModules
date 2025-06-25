@@ -108,3 +108,6 @@ fz::FzgCodec* fz::FzgCodec::decode(
 size_t fz::FzgCodec::expose_padded_input_len() const { return pimpl->config.at("pad_len"); }
 
 void fz::FzgCodec::clear_buffer() { pimpl->buf->clear_buffer(); }
+
+size_t fz::FzgCodec::total_footprint_d() { return pimpl->buf->total_footprint_d; }
+size_t fz::FzgCodec::total_footprint_h() { return pimpl->buf->total_footprint_h; }

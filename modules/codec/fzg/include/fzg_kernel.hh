@@ -50,6 +50,9 @@ class Buf {
 
   size_t max_archive_bytes;
 
+  size_t total_footprint_d = 0;
+  size_t total_footprint_h = 0;
+
   Buf(size_t const data_len, bool alloc_test_buf);
   ~Buf();
 

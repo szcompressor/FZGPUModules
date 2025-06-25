@@ -13,7 +13,7 @@ int GPU_predict_spline(
     T* in_data, stdlen3 const data_len3,       //
     E* out_ectrl, stdlen3 const ectrl_len3,    //
     T* out_anchor, stdlen3 const anchor_len3,  //
-    void* out_outlier,                         //
+    T* out_vals, uint32_t* out_idxs, uint32_t* out_num,                      //
     double const ebx2, double const eb_r, uint32_t radius, void* stream);
 
 template <typename T, typename E, typename FP = T>

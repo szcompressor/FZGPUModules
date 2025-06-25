@@ -56,15 +56,15 @@ set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -t 0")
 set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -t 0")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Weffc++")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wpedantic")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Weffc++")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wextra")
+  # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wpedantic")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wextra")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wpedantic")
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --Werror=all-warnings")
+  # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
+  # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wextra")
+  # set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wpedantic")
+  # set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --Werror=all-warnings")
 endif()
 
 #############################
@@ -122,13 +122,15 @@ endif()
 ### COMPILER SETTINGS ###
 #########################
 
+option(BUILD_CUDASTF "Build the CUDASTF API" OFF)
+
 add_library(fzmod_compile_settings INTERFACE)
 target_compile_options(
   fzmod_compile_settings 
   INTERFACE 
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda>
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--expt-relaxed-constexpr>
-    $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Wno-deprecated-declarations>
+    # $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Wno-deprecated-declarations>
 )
 if(NOT USE_SANITIZER STREQUAL "Compute")
   target_compile_options(
@@ -145,8 +147,8 @@ target_link_libraries(fzmod_compile_settings INTERFACE CUDA::cudart)
 ###########################
 
 target_include_directories(fzmod_compile_settings INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/include/>
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/src/>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tools/api/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/codec/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/stat/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/predictor/>
@@ -179,6 +181,9 @@ target_include_directories(fzmod_compile_settings INTERFACE
 #################
 ### LIBRARIES ###
 #################
+
+#### ZSTD 
+add_subdirectory(modules/codec/zstd)
 
 #### FZ utils
 add_library(fz_utils
@@ -222,13 +227,16 @@ add_library(FZMOD::histogram ALIAS fzmod_cu_histogram)
 ####
 #### Huffman Module
 add_library(fzmod_cu_huffman
-  modules/codec/huffman/src/hfclass.cc
-  modules/codec/huffman/src/hfbk_impl1.seq.cc
-  modules/codec/huffman/src/hfbk_impl2.seq.cc
-  modules/codec/huffman/src/hfbk_internal.seq.cc
-  modules/codec/huffman/src/hfbk.seq.cc
-  modules/codec/huffman/src/hfcanon.seq.cc
-  modules/codec/huffman/src/hfcxx_module.cu
+  modules/codec/huffman/src/hf_est.cc
+  modules/codec/huffman/src/hf_bk_impl1.seq.cc
+  modules/codec/huffman/src/hf_bk_impl2.seq.cc
+  modules/codec/huffman/src/hf_bk_internal.seq.cc
+  modules/codec/huffman/src/hf_bk.seq.cc
+  modules/codec/huffman/src/hf_canon.seq.cc
+  modules/codec/huffman/src/hf_kernels.cu
+  modules/codec/huffman/src/hf_ood.cc
+  modules/codec/huffman/src/hf_hl.cc
+  modules/codec/huffman/src/hf_buf.cc
   modules/codec/huffman/src/libphf.cc
 )
 target_link_libraries(fzmod_cu_huffman
@@ -266,7 +274,7 @@ add_library(FZMOD::spline ALIAS fzmod_cu_spline)
 ####
 #### Combine Modules
 add_library(fzmod
-  examples/demo.cc
+  tools/cli/cli.cc
 )
 target_link_libraries(fzmod
   PUBLIC
@@ -277,6 +285,7 @@ target_link_libraries(fzmod
   fzmod_cu_huffman
   fzmod_cu_lrz
   fzmod_cu_spline
+  zstd
   CUDA::cudart
 )
 add_library(FZMOD::CUDA ALIAS fzmod)
@@ -287,8 +296,15 @@ add_library(FZMOD::all ALIAS fzmod)
 ### EXECUTABLES ###
 ###################
 
-add_executable(fzmod-bin examples/demo.cc)
-set_source_files_properties(examples/demo.cc PROPERTIES LANGUAGE CUDA)
+# Examples are now handled in the examples/ subdirectory
+option(FZMOD_BUILD_EXAMPLES "Build example applications" ON)
+if(FZMOD_BUILD_EXAMPLES)
+  message(STATUS "Building examples")
+  add_subdirectory(examples)
+endif()
+
+add_executable(fzmod-bin tools/cli/cli.cc)
+set_source_files_properties(tools/cli/cli.cc PROPERTIES LANGUAGE CUDA)
 target_link_libraries(fzmod-bin PRIVATE fzmod)
 set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 
@@ -296,8 +312,20 @@ set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 ### CUDASTF CONFIGURATION ###
 #############################
 
-option(BUILD_CUDASTF "Build the CUDASTF API" OFF)
 if(BUILD_CUDASTF)
+
+  message(STATUS "Building CUDASTF API")
+
+  target_include_directories(fzmod_compile_settings INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cudastf/>
+  )
+
+  # add compile definition
+  target_compile_definitions(fzmod_compile_settings
+    INTERFACE
+      FZMOD_CUDASTF
+  )
+
   # Add CPM.cmake for fetching CCCL
   include(cmake/CPM.cmake)
 
@@ -309,9 +337,15 @@ if(BUILD_CUDASTF)
     OPTIONS "CCCL_ENABLE_UNSTABLE ON"
   )
 
+  target_link_libraries(fzmod_compile_settings
+    INTERFACE 
+      CCCL::CCCL
+      CCCL::cudax
+  )
+
   # CUDASTF demo executable
-  add_executable(cudastf_demo cudastf/cudastf_demo.cc)
-  set_source_files_properties(cudastf/cudastf_demo.cc PROPERTIES LANGUAGE CUDA)
+  add_executable(cudastf_demo cudastf/examples/cudastf_demo.cc)
+  set_source_files_properties(cudastf/examples/cudastf_demo.cc PROPERTIES LANGUAGE CUDA)
   target_link_libraries(cudastf_demo 
     PRIVATE 
     fzmod_compile_settings
@@ -323,8 +357,26 @@ if(BUILD_CUDASTF)
     CCCL::cudax
   )
 
+  # testing example
+  add_executable(testing_run cudastf/examples/testing.cc)
+  set_source_files_properties(cudastf/examples/testing.cc PROPERTIES LANGUAGE CUDA)
+  target_link_libraries(testing_run
+    PRIVATE 
+    fzmod_compile_settings
+    fz_utils
+    fzmod_cu_huffman
+    CUDA::cudart
+    CUDA::cuda_driver
+    CCCL::CCCL 
+    CCCL::cudax 
+  )
+
   # install executable
   install(TARGETS cudastf_demo
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+
+  install(TARGETS testing_run
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
 endif()

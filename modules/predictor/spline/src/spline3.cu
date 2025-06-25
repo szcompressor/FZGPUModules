@@ -14,7 +14,7 @@
 // #include "type.h"
 #include "spline3.inl"
 #include "spline.hh"
-#include "mem/cxx_sp_gpu.h"
+#include "mem/cxx_smart_ptr.h"
 
 #define STDLEN3_TO_DIM3(LEN3) dim3(LEN3[0], LEN3[1], LEN3[2])
 #define STDLEN3_TO_STRIDE3(LEN3) dim3(1, LEN3[0], LEN3[0] * LEN3[1])
@@ -41,22 +41,23 @@ int fz::module::GPU_predict_spline(
     T* in_data, stdlen3 const data_len3,       //
     E* out_ectrl, stdlen3 const ectrl_len3,    //
     T* out_anchor, stdlen3 const anchor_len3,  //
-    void* _outlier, double const ebx2, double const eb_r, uint32_t radius, void* stream)
+    T* out_vals, uint32_t* out_idxs, uint32_t* out_num, 
+    double const ebx2, double const eb_r, uint32_t radius, void* stream)
 {
 #define l3 data_len3
 
   auto div = [](auto _l, auto _subl) { return (_l - 1) / _subl + 1; };
   auto grid_dim = dim3(div(l3[0], BLK * 4), div(l3[1], BLK), div(l3[2], BLK));
 
-  using Compact = _portable::compact_gpu<T>;
-  auto ot = (Compact*)_outlier;
+  // using Compact = _portable::compact_gpu<T>;
+  // auto ot = (Compact*)_outlier;
 
   fz::c_spline3d_infprecis_32x8x8data<T*, E*, float, DEFAULT_BLOCK_SIZE>  //
       <<<grid_dim, dim3(DEFAULT_BLOCK_SIZE, 1, 1), 0, (cudaStream_t)stream>>>(
           in_data, STDLEN3_TO_DIM3(data_len3), STDLEN3_TO_STRIDE3(data_len3),      //
           out_ectrl, STDLEN3_TO_DIM3(ectrl_len3), STDLEN3_TO_STRIDE3(ectrl_len3),  //
           out_anchor, STDLEN3_TO_STRIDE3(anchor_len3),                             //
-          ot->val(), ot->idx(), ot->num(), eb_r, ebx2, radius);
+          out_vals, out_idxs, out_num, eb_r, ebx2, radius);
 
   return 0;
 
@@ -91,7 +92,9 @@ int fz::module::GPU_reverse_predict_spline(
 #define INSTANTIATE_PSZCXX_MODULE_SPLINE__2params(T, E)                                       \
   template int fz::module::GPU_predict_spline<T, E>(                                         \
       T * in_data, stdlen3 const data_len3, E* out_ectrl, stdlen3 const ectrl_len3,           \
-      T* out_anchor, stdlen3 const anchor_len3, void* _outlier, double const ebx2, double const eb_r, \
+      T* out_anchor, stdlen3 const anchor_len3, \
+      T* out_vals, uint32_t* out_idxs, uint32_t* out_num, \
+      double const ebx2, double const eb_r, \
       uint32_t radius, void* stream);                                                         \
   template int fz::module::GPU_reverse_predict_spline<T, E>(                                 \
       E * in_ectrl, stdlen3 const ectrl_len3, T* in_anchor, stdlen3 const anchor_len3,        \
