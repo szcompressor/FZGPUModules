@@ -122,6 +122,8 @@ endif()
 ### COMPILER SETTINGS ###
 #########################
 
+option(BUILD_CUDASTF "Build the CUDASTF API" OFF)
+
 add_library(fzmod_compile_settings INTERFACE)
 target_compile_options(
   fzmod_compile_settings 
@@ -310,8 +312,20 @@ set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 ### CUDASTF CONFIGURATION ###
 #############################
 
-option(BUILD_CUDASTF "Build the CUDASTF API" OFF)
 if(BUILD_CUDASTF)
+
+  message(STATUS "Building CUDASTF API")
+
+  target_include_directories(fzmod_compile_settings INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cudastf/>
+  )
+
+  # add compile definition
+  target_compile_definitions(fzmod_compile_settings
+    INTERFACE
+      FZMOD_CUDASTF
+  )
+
   # Add CPM.cmake for fetching CCCL
   include(cmake/CPM.cmake)
 
@@ -323,9 +337,15 @@ if(BUILD_CUDASTF)
     OPTIONS "CCCL_ENABLE_UNSTABLE ON"
   )
 
+  target_link_libraries(fzmod_compile_settings
+    INTERFACE 
+      CCCL::CCCL
+      CCCL::cudax
+  )
+
   # CUDASTF demo executable
-  add_executable(cudastf_demo cudastf/cudastf_demo.cc)
-  set_source_files_properties(cudastf/cudastf_demo.cc PROPERTIES LANGUAGE CUDA)
+  add_executable(cudastf_demo cudastf/examples/cudastf_demo.cc)
+  set_source_files_properties(cudastf/examples/cudastf_demo.cc PROPERTIES LANGUAGE CUDA)
   target_link_libraries(cudastf_demo 
     PRIVATE 
     fzmod_compile_settings
@@ -338,8 +358,8 @@ if(BUILD_CUDASTF)
   )
 
   # testing example
-  add_executable(testing_run cudastf/testing.cc)
-  set_source_files_properties(cudastf/testing.cc PROPERTIES LANGUAGE CUDA)
+  add_executable(testing_run cudastf/examples/testing.cc)
+  set_source_files_properties(cudastf/examples/testing.cc PROPERTIES LANGUAGE CUDA)
   target_link_libraries(testing_run
     PRIVATE 
     fzmod_compile_settings

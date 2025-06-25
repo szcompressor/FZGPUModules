@@ -36,12 +36,12 @@ struct x_lorenzo<1> {
   static dim3 thread_grid(dim3 len3) { return div3(len3, tile); };
 };
 
-template <int TileDim, int Seq, bool UseLocalStat = true, int UseGlobalStat = true>
+template <typename T, int TileDim, int Seq, bool UseLocalStat = true, int UseGlobalStat = true>
 __global__ void kernel_lorenzo_1d(
-    slice<float> input,
+    slice<T> input,
     size_t input_size,
     slice<uint16_t> quant_codes,
-    slice<float> outlier_vals,
+    slice<T> outlier_vals,
     slice<uint32_t> outlier_idxs,
     slice<uint32_t> outlier_num,
     slice<uint32_t> out_top1,
@@ -54,12 +54,12 @@ __global__ void kernel_lorenzo_1d(
   __shared__ uint32_t s_top1_counts[1];
   if (threadIdx.x == 0) s_top1_counts[0] = 0;
 
-  __shared__ float s_data[TileDim];
+  __shared__ T s_data[TileDim];
   __shared__ uint16_t s_eq_uint[TileDim];
 
-  float _thp_data[Seq + 1] = {0};
-  auto prev = [&]() -> float& { return _thp_data[0]; };
-  auto thp_data = [&](auto i) -> float& { return _thp_data[i + 1]; };
+  T _thp_data[Seq + 1] = {0};
+  auto prev = [&]() -> T& { return _thp_data[0]; };
+  auto thp_data = [&](auto i) -> T& { return _thp_data[i + 1]; };
 
   auto const id_base = blockIdx.x * TileDim;
 
@@ -80,7 +80,7 @@ __global__ void kernel_lorenzo_1d(
 
   #pragma unroll
   for (auto ix = 0; ix < Seq; ix++) {
-    float delta = thp_data(ix) - thp_data(ix - 1);
+    T delta = thp_data(ix) - thp_data(ix - 1);
     bool quantizable = fabs(delta) < radius;
 
     if constexpr(UseLocalStat) {
@@ -88,7 +88,7 @@ __global__ void kernel_lorenzo_1d(
       COUNT_LOCAL_STAT(delta, is_valid_range);
     }
 
-    float candidate;
+    T candidate;
     candidate = delta + radius;
     s_eq_uint[threadIdx.x * Seq + ix] = quantizable * (uint16_t)candidate;
 
@@ -119,10 +119,10 @@ __global__ void kernel_lorenzo_1d(
   }
 }
 
-template <int TileDim, int Seq>
+template <typename T, int TileDim, int Seq>
 __global__ void kernel_decomp_lorenzo_1d(
   slice<uint16_t> in_eq,
-  slice<float> out_data,
+  slice<T> out_data,
   size_t input_size,
   double ebx2,
   double ebx2_r,
@@ -130,12 +130,11 @@ __global__ void kernel_decomp_lorenzo_1d(
 ) {
   constexpr auto NTHREAD = TileDim / Seq;
 
-  __shared__ float scratch[TileDim];
-  // __shared__ uint16_t s_eq[TileDim];
-  __shared__ float exch_in[NTHREAD / 32];
-  __shared__ float exch_out[NTHREAD / 32];
+  __shared__ T scratch[TileDim];
+  __shared__ T exch_in[NTHREAD / 32];
+  __shared__ T exch_out[NTHREAD / 32];
 
-  float thp_data[Seq];
+  T thp_data[Seq];
 
   auto id_base = blockIdx.x * TileDim;
 
@@ -145,7 +144,7 @@ __global__ void kernel_decomp_lorenzo_1d(
       auto local_id = threadIdx.x + i * NTHREAD;
       auto id = id_base + local_id;
       if (id < input_size) {
-        scratch[local_id] = out_data(id) + static_cast<float>(in_eq(id)) - radius;
+        scratch[local_id] = out_data(id) + static_cast<T>(in_eq(id)) - radius;
       }
     }
     __syncthreads();
@@ -156,8 +155,8 @@ __global__ void kernel_decomp_lorenzo_1d(
   };
 
   auto block_scan_1d = [&]() {
-    fz::SUBR_CUHIP_WAVE32_intrawarp_inclscan_1d<float, Seq>(thp_data);
-    fz::SUBR_CUHIP_WAVE32_intrablock_exclscan_1d<float, Seq, NTHREAD>(thp_data, exch_in, exch_out);
+    fz::SUBR_CUHIP_WAVE32_intrawarp_inclscan_1d<T, Seq>(thp_data);
+    fz::SUBR_CUHIP_WAVE32_intrablock_exclscan_1d<T, Seq, NTHREAD>(thp_data, exch_in, exch_out);
 
     #pragma unroll
     for (auto i = 0; i < Seq; i++) scratch[threadIdx.x * Seq + i] = thp_data[i] * ebx2;
@@ -178,12 +177,12 @@ __global__ void kernel_decomp_lorenzo_1d(
   write_1d();
 }
 
-
+template <typename T>
 void lorenzo_1d(
-    slice<float> input,
+    slice<T> input,
     size_t input_size,
     slice<uint16_t> quant_codes,
-    slice<float> outlier_vals,
+    slice<T> outlier_vals,
     slice<uint32_t> outlier_idxs,
     slice<uint32_t> outlier_num,
     slice<uint32_t> out_top1,
@@ -192,20 +191,21 @@ void lorenzo_1d(
     size_t radius,
     cudaStream_t stream) 
 {
-  kernel_lorenzo_1d<c_lorenzo<1>::tile.x, c_lorenzo<1>::sequentiality.x>
-      <<<c_lorenzo<1>::thread_grid(input_size), c_lorenzo<1>::thread_block, 0, stream>>>(input, input_size, quant_codes, outlier_vals, outlier_idxs, outlier_num, out_top1, ebx2, (float)ebx2_r, radius);
+  kernel_lorenzo_1d<T, c_lorenzo<1>::tile.x, c_lorenzo<1>::sequentiality.x>
+      <<<c_lorenzo<1>::thread_grid(input_size), c_lorenzo<1>::thread_block, 0, stream>>>(input, input_size, quant_codes, outlier_vals, outlier_idxs, outlier_num, out_top1, ebx2, (T)ebx2_r, radius);
 }
 
+template <typename T>
 void lorenzo_decomp_1d(
   slice<uint16_t> in_eq,
-  slice<float> out_data,
+  slice<T> out_data,
   size_t input_size,
   double ebx2,
   double ebx2_r,
   uint16_t radius,
   cudaStream_t stream
 ) {
-  kernel_decomp_lorenzo_1d<x_lorenzo<1>::tile.x, x_lorenzo<1>::sequentiality.x>
+  kernel_decomp_lorenzo_1d<T, x_lorenzo<1>::tile.x, x_lorenzo<1>::sequentiality.x>
     <<<x_lorenzo<1>::thread_grid(input_size), x_lorenzo<1>::thread_block, 0, stream>>>(
       in_eq, out_data, input_size, ebx2, ebx2_r, radius
     );

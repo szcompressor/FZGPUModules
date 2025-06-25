@@ -4,8 +4,9 @@
 
 using namespace cuda::experimental::stf;
 
+template <typename T>
 __global__ void spvn_scatter(
-    slice<const float> val, slice<const uint32_t> idx, int const nnz, slice<float> out) {
+    slice<const T> val, slice<const uint32_t> idx, int const nnz, slice<T> out) {
   auto tid = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (tid < nnz) {

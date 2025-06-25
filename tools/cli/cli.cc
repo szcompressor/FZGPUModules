@@ -3,6 +3,10 @@
 
 #include "fzmod.hh"
 
+#ifdef FZMOD_CUDASTF
+#include "cudastf_api.hh"
+#endif
+
 namespace utils = _portable::utils;
 
 struct CLIOptions {
@@ -142,7 +146,6 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
         print_version();
       } else if (optmatch({"--stf"})) {
         options.stf = true;
-        throw std::runtime_error("STF API is not implemented yet.");
       } else if (optmatch({"-D", "--dump"})) {
         options.dump = true;
       } else if (optmatch({"-R", "--report"})) {
@@ -394,40 +397,87 @@ void apply_cli_options(const CLIOptions& options, fz::Config<T>& config) {
 
 template<typename T>
 void run_compression(const CLIOptions& options, cudaStream_t stream) {
-  fz::Config<T> config(options.x, options.y, options.z);
-  apply_cli_options<T>(options, config);
-  fz::Compressor<T> compressor(config);
-  uint8_t* out_data;
-  compressor.compress(nullptr, &out_data, stream);
-  cudaFree(out_data);
+  if (!options.stf) {
+    fz::Config<T> config(options.x, options.y, options.z);
+    apply_cli_options<T>(options, config);
+    fz::Compressor<T> compressor(config);
+    uint8_t* out_data;
+    compressor.compress(nullptr, &out_data, stream);
+    cudaFree(out_data);
+  } else {
+    #ifdef FZMOD_CUDASTF
+    fz::Config<T> config(options.x, options.y, options.z);
+    apply_cli_options<T>(options, config);
+    context ctx;
+    T* input_data_host;
+    cudaMallocHost(&input_data_host, config.orig_size);
+    utils::fromfile(options.input_file.c_str(), input_data_host,
+                    config.orig_size);
+    fz::STF_Compressor<T> compressor(config, ctx, input_data_host);
+    compressor.compress(stream);
+    #else
+    throw std::runtime_error("STF compression is not built/enabled.");
+    #endif  // FZMOD_CUDASTF
+  }
 } // run_compression
 
 template<typename T>
 void run_decompression(const CLIOptions& options, cudaStream_t stream) {
-  fz::Decompressor<T> decompressor(options.input_file);
-  apply_cli_options<T>(options, *decompressor.conf);
+  if (!options.stf) {
+    fz::Decompressor<T> decompressor(options.input_file);
+    apply_cli_options<T>(options, *decompressor.conf);
 
-  T* out_data;
-  size_t out_size = decompressor.conf->orig_size;
-  cudaMalloc(&out_data, out_size);
+    T* out_data;
+    size_t out_size = decompressor.conf->orig_size;
+    cudaMalloc(&out_data, out_size);
 
-  uint8_t* compressed_data;
-  cudaMallocHost(&compressed_data, decompressor.conf->comp_size);
-  utils::fromfile(options.input_file.c_str(), compressed_data, decompressor.conf->comp_size);
+    uint8_t* compressed_data;
+    cudaMallocHost(&compressed_data, decompressor.conf->comp_size);
+    utils::fromfile(options.input_file.c_str(), compressed_data, decompressor.conf->comp_size);
 
-  T* orig_data;
-  if (options.origin.empty()) {
-    decompressor.decompress(compressed_data, out_data, stream);
+    T* orig_data;
+    if (options.origin.empty()) {
+      decompressor.decompress(compressed_data, out_data, stream);
+    } else {
+      cudaMallocHost(&orig_data, decompressor.conf->orig_size);
+      utils::fromfile(options.origin.c_str(), orig_data, decompressor.conf->orig_size);
+      decompressor.decompress(compressed_data, out_data, stream, orig_data);
+    }
+
+    cudaFree(out_data);
+    cudaFree(compressed_data);
+    if (!options.origin.empty()) {
+      cudaFree(orig_data);
+    }
   } else {
-    cudaMallocHost(&orig_data, decompressor.conf->orig_size);
-    utils::fromfile(options.origin.c_str(), orig_data, decompressor.conf->orig_size);
-    decompressor.decompress(compressed_data, out_data, stream, orig_data);
-  }
+    #ifdef FZMOD_CUDASTF
+    context ctx;
+    fz::STF_Decompressor<T> decompressor(options.input_file, ctx);
+    apply_cli_options<T>(options, *decompressor.conf);
+    // T* out_data;
+    // size_t out_size = decompressor.conf->orig_size;
+    // cudaMalloc(&out_data, out_size);
 
-  cudaFree(out_data);
-  cudaFree(compressed_data);
-  if (!options.origin.empty()) {
-    cudaFree(orig_data);
+    uint8_t* compressed_data;
+    cudaMallocHost(&compressed_data, decompressor.conf->comp_size);
+    utils::fromfile(options.input_file.c_str(), compressed_data, decompressor.conf->comp_size);
+
+    T* orig_data;
+    if (options.origin.empty()) {
+      decompressor.decompress(compressed_data, stream);
+    } else {
+      cudaMallocHost(&orig_data, decompressor.conf->orig_size);
+      utils::fromfile(options.origin.c_str(), orig_data, decompressor.conf->orig_size);
+      decompressor.decompress(compressed_data, stream, orig_data);
+    }
+    // cudaFree(out_data);
+    cudaFree(compressed_data);
+    if (!options.origin.empty()) {
+      cudaFree(orig_data);
+    }
+    #else
+    throw std::runtime_error("STF decompression is not built/enabled.");
+    #endif // FZMOD_CUDASTF
   }
 } // run_decompression
 

@@ -238,7 +238,7 @@ struct Compressor {
       metrics->print();
     }
 
-    return 0;
+    return conf->comp_size;
 
   } // end compress
 

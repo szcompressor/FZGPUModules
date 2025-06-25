@@ -76,6 +76,7 @@ void capi_phf_coarse_tune(size_t len, int* sublen, int* pardeg) {
 // ~~~~~~~~~~~~~~~ STF HUFFMAN CLASS ~~~~~~~~~~~~~~~ //
 
 //! Huffman Codec (STF Version)
+template <typename T>
 class HuffmanCodecSTF {
   public:
   int num_SMs;
@@ -97,7 +98,7 @@ class HuffmanCodecSTF {
 
   // ~~~~~~~~~~~~~~~~~~~~~~~~~ Huffman Buildbook ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
   void buildbook(uint16_t const _rt_bklen, 
-                 stf_internal_buffers& ibuffer, 
+                 stf_internal_buffers<T>& ibuffer, 
                  context& ctx, 
                  cudaStream_t stream) {
 
@@ -190,7 +191,7 @@ class HuffmanCodecSTF {
 
   // ~~~~~~~~~~~~~~~~~~~~~~~~~~ Encode ~~~~~~~~~~~~~~~~~~~~~~~~ //
   void encode(int pardeg, 
-              stf_internal_buffers& ibuffer, 
+              stf_internal_buffers<T>& ibuffer, 
               context& ctx, 
               cudaStream_t stream) {
 
