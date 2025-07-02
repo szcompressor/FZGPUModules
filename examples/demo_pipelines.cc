@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
 
   compress_demo(fname, len1, len2, len3, stream);
 
-  decompress_demo(fname, stream);
+  decompress_demo_file(fname, stream);
 
   cudaStreamDestroy(stream);
   cudaFreeHost(compressed_data_host);

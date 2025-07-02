@@ -74,4 +74,9 @@ function(add_fzmod_example example_name source_file)
 endfunction()
 
 # Example usage of the helper function (uncomment when adding new examples):
-# add_fzmod_example(my_new_example my_new_example.cc)
+add_fzmod_example(fzmod_simple_demo demo_simple.cc)
+add_fzmod_example(fzmod_pipeline_demo demo_pipelines.cc)
+
+if(BUILD_CUDASTF)
+    add_fzmod_example(fzmod_cudastf_demo demo_stf.cc)
+endif()
