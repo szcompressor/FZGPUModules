@@ -30,7 +30,6 @@ void compress_demo(std::string fname, size_t x, size_t y, size_t z,
   cudaMemcpy(compressed_data_host, comp_data_d, conf.comp_size,
              cudaMemcpyDeviceToHost);
 
-  cudaFree(comp_data_d);
   cudaStreamSynchronize(stream);
 }
 

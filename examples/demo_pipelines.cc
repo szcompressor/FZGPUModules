@@ -3,58 +3,37 @@
  * author: Skyler Ruiter
  * date: 06/23/2025
  *
- * 
+ * A demo file that helps show how to compare pipelines
+ * using the module framework of fzmod.
  */
 
 #include "fzmod.hh"
 namespace utils = _portable::utils;  // for file I/O utilities
 
-uint8_t* compressed_data_host;
-float* decompressed_data_host;
-
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-// Compression Demo
-void compress_demo(std::string fname, size_t x, size_t y, size_t z,
-                   cudaStream_t stream) {
-  
-  fz::Config<float> conf(x, y, z);
-  conf.eb = 2e-4;                                     // set error bound
-  conf.eb_type = fz::EB_TYPE::ABS;                    // set error bound type
-  conf.algo = fz::ALGO::LORENZO;                      // set algorithm type
-  conf.codec = fz::CODEC::HUFFMAN;                    // set codec type
-  conf.lossless_codec_2 = fz::SECONDARY_CODEC::NONE;  // no secondary codec
-  conf.fromFile = false;  // not reading directly from file
-  conf.fname = fname;     // filename for output
+float* input_data_host; // host pointer for input data
 
-  float *input_data_device, *input_data_host;
-  cudaMallocHost(&input_data_host, conf.orig_size);
-  cudaMalloc(&input_data_device, conf.orig_size);
-  utils::fromfile(fname, input_data_host, conf.orig_size);
-  cudaMemcpy(input_data_device, input_data_host, conf.orig_size,
-             cudaMemcpyHostToDevice);
+void run_pipeline(fz::Config<float>& conf, float* input_data_device, 
+  uint8_t* compressed_data_device, cudaStream_t stream) {
 
   fz::Compressor<float> compressor(conf);
 
-  uint8_t* comp_data_d;
+  compressor.compress(input_data_device, &compressed_data_device, stream);
 
-  compressor.compress(input_data_device, &comp_data_d, stream);
+  fz::Decompressor<float> decompressor(conf);
 
+  float* decompressed;
+  cudaMalloc(&decompressed, conf.orig_size);
+
+  uint8_t* compressed_data_host;
   cudaMallocHost(&compressed_data_host, conf.comp_size);
-  cudaMemcpy(compressed_data_host, comp_data_d, conf.comp_size,
-             cudaMemcpyDeviceToHost);
+  cudaMemcpy(compressed_data_host, compressed_data_device, conf.comp_size, cudaMemcpyDeviceToHost);
 
-  cudaFreeHost(input_data_host);
-  cudaFree(input_data_device);
-  cudaFree(comp_data_d);
-  cudaStreamSynchronize(stream);
-}
+  decompressor.decompress(compressed_data_device, decompressed, stream, input_data_device);
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-// Decompression Demo
-void decompress_demo_file(std::string fname, cudaStream_t stream) {
-  
+  cudaFree(decompressed);
+  cudaFreeHost(compressed_data_host);
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -68,18 +47,63 @@ int main(int argc, char** argv) {
     return 1;
   }
   auto fname = std::string(argv[1]);
-  size_t len1 = std::stoi(argv[2]);
-  size_t len2 = std::stoi(argv[3]);
-  size_t len3 = std::stoi(argv[4]);
+  size_t x = std::stoi(argv[2]);
+  size_t y = std::stoi(argv[3]);
+  size_t z = std::stoi(argv[4]);
 
+  double eb = 2e-4;
+  fz::EB_TYPE eb_type = fz::EB_TYPE::REL;
+  
   cudaStream_t stream;
   cudaStreamCreate(&stream);
 
-  compress_demo(fname, len1, len2, len3, stream);
+  fz::Config<float> default_conf(x, y, z);
+  fz::Config<float> quality_conf(x, y, z);
+  fz::Config<float> speed_conf(x, y, z);
 
-  decompress_demo_file(fname, stream);
+  // Set the configurations for the pipelines
+  default_conf.eb = eb;
+  default_conf.eb_type = eb_type;
+  default_conf.toFile = false;
+  
+  quality_conf.eb = eb;
+  quality_conf.eb_type = eb_type;
+  quality_conf.toFile = false;
+  quality_conf.algo = fz::ALGO::SPLINE;
+  quality_conf.codec = fz::CODEC::HUFFMAN;
+  quality_conf.lossless_codec_2 = fz::SECONDARY_CODEC::NONE;
+  
+  speed_conf.eb = eb;
+  speed_conf.eb_type = eb_type;
+  speed_conf.toFile = false;
+  speed_conf.algo = fz::ALGO::LORENZO;
+  speed_conf.codec = fz::CODEC::FZG;
+  speed_conf.lossless_codec_2 = fz::SECONDARY_CODEC::NONE;
 
+  // setup the input data
+  float* input_data_device;
+  cudaMallocHost(&input_data_host, default_conf.orig_size);
+  utils::fromfile(fname, input_data_host, default_conf.orig_size);
+  cudaMalloc(&input_data_device, default_conf.orig_size);
+  cudaMemcpyAsync(input_data_device, input_data_host, default_conf.orig_size,
+                  cudaMemcpyHostToDevice, stream);
+
+  uint8_t* comp_d_default = nullptr;
+  uint8_t* comp_d_quality = nullptr;
+  uint8_t* comp_d_speed = nullptr;
+
+  // run the pipelines
+  printf("Running default pipeline...\n");
+  run_pipeline(default_conf, input_data_device, comp_d_default, stream);
+  cudaStreamSynchronize(stream);
+  printf("Running quality pipeline...\n");
+  run_pipeline(quality_conf, input_data_device, comp_d_quality, stream);
+  cudaStreamSynchronize(stream);
+  printf("Running speed pipeline...\n");
+  run_pipeline(speed_conf, input_data_device, comp_d_speed, stream);
+  
+  cudaFree(input_data_device);
+  cudaFreeHost(input_data_host);
   cudaStreamDestroy(stream);
-  cudaFreeHost(compressed_data_host);
   return 0;
 }

@@ -25,7 +25,7 @@ class InternalBuffers {
 
   using CodecFZG = fz::FzgCodec;
   using hf_mem_t = phf::Buf<uint16_t>;
-  hf_mem_t* buf_hf;
+  hf_mem_t* buf_hf = nullptr;
 
   bool is_comp;
 

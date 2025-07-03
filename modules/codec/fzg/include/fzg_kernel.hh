@@ -30,25 +30,25 @@ class Buf {
 
   uint32_t h_offset_sum;
 
-  uint32_t* d_bitflag_array;
-  uint32_t* d_offset_counter;
-  uint32_t* d_start_pos;
+  uint32_t* d_bitflag_array = nullptr;
+  uint32_t* d_offset_counter = nullptr;
+  uint32_t* d_start_pos = nullptr;
 
-  uint8_t* d_comp_out;
-  uint32_t* d_comp_len;
+  uint8_t* d_comp_out = nullptr;
+  uint32_t* d_comp_len = nullptr;
 
   // overlap with d_comp_out to save space
-  uint8_t* d_archive;
+  uint8_t* d_archive = nullptr;
 
-  bool* d_signum;
+  bool* d_signum = nullptr;
 
-  uint16_t* h_in_data;
-  uint16_t* d_in_data;
+  uint16_t* h_in_data = nullptr;
+  uint16_t* d_in_data = nullptr;
 
-  uint16_t* h_out_data;
-  uint16_t* d_out_data;
+  uint16_t* h_out_data = nullptr;
+  uint16_t* d_out_data = nullptr;
 
-  size_t max_archive_bytes;
+  size_t max_archive_bytes = 0;
 
   size_t total_footprint_d = 0;
   size_t total_footprint_h = 0;

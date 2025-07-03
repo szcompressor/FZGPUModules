@@ -62,7 +62,7 @@ namespace fz {
       bool use_lorenzo_zigzag = false;
 
       // #### SPLINE #### //
-      size_t const anchor512_len;
+      size_t anchor512_len;
       constexpr static size_t BLK = 8;
 
       // helper function to calculate the number of anchors
@@ -112,6 +112,7 @@ namespace fz {
         num_outliers = header->num_outliers;
         logging_max = header->logging_max;
         logging_min = header->logging_min;
+        anchor512_len = _div(x, BLK) * _div(y, BLK) * _div(z, BLK);
       }
 
       // anchor len for spline predictor anchor points

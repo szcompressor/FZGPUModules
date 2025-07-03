@@ -17,6 +17,7 @@ struct Decompressor {
   CompressorBufferToggle* toggle = nullptr;
   InternalBuffers<T>* ibuffer = nullptr;
   fzmod_metrics* metrics = nullptr;
+  bool external_config = false;
 
   Decompressor(std::string fname, bool toFile = true) {
     conf = new Config<T>(fname);
@@ -26,24 +27,27 @@ struct Decompressor {
     toggle = new CompressorBufferToggle();
     metrics = new fzmod_metrics();
     ibuffer = new InternalBuffers<T>(conf, toggle, false);
+    conf->comp = false;
   }
 
   Decompressor(Config<T>& config) : conf(&config) {
     // check if config is from previous compression
-    if (conf->hedear->offsets[4] == 0) {
+    if (conf->header->offsets[4] == 0) {
       throw std::runtime_error("Invalid configuration: The header offsets are not set correctly. \
         likely this is not from a previous compression.");
     }
     toggle = new CompressorBufferToggle();
     metrics = new fzmod_metrics();
     ibuffer = new InternalBuffers<T>(conf, toggle, false);
+    external_config = true;
+    conf->comp = false;
   }
 
   ~Decompressor() {
     if (ibuffer) delete ibuffer;
     if (toggle) delete toggle;
     if (metrics) delete metrics;
-    if (conf) delete conf;
+    if (conf && !external_config) delete conf;
   }
 
   //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
@@ -57,7 +61,7 @@ struct Decompressor {
     START_CPU_TIMER(total)
 
     // DECOMPRESSION SETUP
-    cudaMemsetAsync(out_data, 0, conf->orig_size, stream);
+    CHECK_GPU(cudaMemsetAsync(out_data, 0, conf->orig_size, stream));
 
     // ~~~~~~~~~~~~~~~~~~~~~~~ CODEC 2 ~~~~~~~~~~~~~~~~~~~~~~~ //
 
@@ -71,6 +75,7 @@ struct Decompressor {
     } else {
       throw std::runtime_error("Unsupported secondary codec type");
     }
+
 
     // static const int HEADER = 0;
     static const int ANCHOR = 1;
@@ -113,7 +118,7 @@ struct Decompressor {
     if (conf->algo == ALGO::LORENZO) {
       lorenzo(out_data, stream);
     } else if (conf->algo == ALGO::SPLINE) {
-      spline(out_data, stream);
+      spline(out_data, d_anchor, stream);
     } else {
       throw std::runtime_error("Unsupported algorithm type");
     }
@@ -205,15 +210,15 @@ struct Decompressor {
     }
   } // end lorenzo
 
-  void spline(T* out_data, cudaStream_t stream) {
+  void spline(T* out_data, T* d_anchor, cudaStream_t stream) {
     std::array<size_t, 3> len3 = {conf->x, conf->y, conf->z};
     double eb = conf->eb;
     double eb_r = 1 / eb;
     double ebx2 = eb * 2;
 
-    fz::module::GPU_reverse_predict_spline(
-      ibuffer->codes(), len3, ibuffer->anchor_points(),
-      conf->anchor_len3(), out_data, len3, ebx2, eb_r, conf->radius, stream);
+    fz::module::GPU_reverse_predict_spline( 
+      ibuffer->codes(), len3, d_anchor,conf->anchor_len3(), 
+      out_data, len3, ebx2, eb_r, conf->radius, stream);
   } // end spline
 
 }; // end Decompressor

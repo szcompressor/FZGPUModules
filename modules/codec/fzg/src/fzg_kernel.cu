@@ -47,8 +47,8 @@ void fzgpu::Buf::init(size_t data_len, bool _alloc_test_buf)
     CHECK_GPU(cudaMallocHost(&h_out_data, sizeof(uint16_t) * len));
     CHECK_GPU(cudaMalloc(&d_out_data, sizeof(uint16_t) * pad_len));
 
-    CHECK_GPU(cudaMemset(d_in_data, 0, sizeof(uint16_t) * len));
-    CHECK_GPU(cudaMemset(d_out_data, 0, sizeof(uint16_t) * len));
+    CHECK_GPU(cudaMemset(d_in_data, 0, sizeof(uint16_t) * pad_len));
+    CHECK_GPU(cudaMemset(d_out_data, 0, sizeof(uint16_t) * pad_len));
 
     this->total_footprint_d += sizeof(uint16_t) * pad_len;  // d_in_data
     this->total_footprint_h += sizeof(uint16_t) * len;    // h_in_data
@@ -99,17 +99,14 @@ fzgpu::Buf::Buf(size_t const data_len, bool alloc_test_buf) { init(data_len, all
 fzgpu::Buf::~Buf()
 {
   if (alloc_test_buf) {
-    CHECK_GPU(cudaFreeHost(h_in_data));
-    CHECK_GPU(cudaFree(d_in_data));
-
-    CHECK_GPU(cudaFree(d_out_data));
-    CHECK_GPU(cudaFreeHost(h_out_data));
+    if (h_in_data) { CHECK_GPU(cudaFreeHost(h_in_data)); h_in_data = nullptr; }
+    if (d_in_data) { CHECK_GPU(cudaFree(d_in_data)); d_in_data = nullptr; }
+    if (d_out_data) { CHECK_GPU(cudaFree(d_out_data)); d_out_data = nullptr; }
+    if (h_out_data) { CHECK_GPU(cudaFreeHost(h_out_data)); h_out_data = nullptr; }
   }
-
-  CHECK_GPU(cudaFree(d_archive));
-
-  CHECK_GPU(cudaFree(d_offset_counter));
-  CHECK_GPU(cudaFree(d_comp_len));
+  if (d_archive) { CHECK_GPU(cudaFree(d_archive)); d_archive = nullptr; }
+  if (d_offset_counter) { CHECK_GPU(cudaFree(d_offset_counter)); d_offset_counter = nullptr; }
+  if (d_comp_len) { CHECK_GPU(cudaFree(d_comp_len)); d_comp_len = nullptr; }
 }
 
 void fzgpu::Buf::clear_buffer()

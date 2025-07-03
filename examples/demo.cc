@@ -26,13 +26,14 @@ void compress_demo(std::string fname, size_t x,
     //! STEP 2: Setup config with compression options
     //! these are settings that adjust the runtime/compression behavior
     fz::Config<float> conf(x, y, z);
-    conf.eb = 2e-4; // set error bound
-    conf.eb_type = fz::EB_TYPE::ABS; // set error bound type
+    conf.eb = 5e-5; // set error bound
+    conf.eb_type = fz::EB_TYPE::REL; // set error bound type
     conf.algo = fz::ALGO::LORENZO; // set algorithm type
-    conf.codec = fz::CODEC::HUFFMAN; // set codec type
+    conf.codec = fz::CODEC::FZG; // set codec type
     conf.lossless_codec_2 = fz::SECONDARY_CODEC::NONE; // no secondary codec
     conf.fromFile = false; // not reading directly from file
     conf.fname = fname; // filename for output
+    conf.verbose = true;
 
     //! STEP 3: get the input data on the device (file->host->device)
     float* input_data_device, * input_data_host;
@@ -61,8 +62,6 @@ void compress_demo(std::string fname, size_t x,
     //! STEP 8: free memory
     cudaFreeHost(input_data_host);
     cudaFree(input_data_device);
-    cudaFree(comp_data_d);
-    cudaStreamSynchronize(stream);
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -77,6 +76,7 @@ void decompress_demo_file(std::string fname, cudaStream_t stream) {
 
     //! STEP 11: Make any adjustments to the decompressor config
     decompressor.conf->toFile = true;
+    decompressor.conf->verbose = true;
 
     //! STEP 12: allocate memory for the decompressed data
     //! this will be the location of the decompressed data on the GPU
@@ -122,6 +122,8 @@ int main(int argc, char **argv) {
 
     //! COMPRESSION (STEPS 2-9)
     compress_demo(fname, len1, len2, len3, stream);
+
+    printf("\n### COMPRESSION COMPLETE ###\n\n");
 
     //! DECOMPRESSION (STEPS 10-14)
     decompress_demo_file(fname, stream);
