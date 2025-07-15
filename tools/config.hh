@@ -49,7 +49,7 @@ namespace fz {
 
       // #### HISTOGRAM #### //
       uint16_t radius = 512;
-      bool use_histogram_sparse = true;
+      bool use_histogram_sparse = false;
       int h_gen_grid_d, h_gen_block_d, h_gen_shmem_use, h_gen_repeat;
 
       // #### HUFFMAN #### //
@@ -161,7 +161,7 @@ namespace fz {
         printf("Length: %zu\n", len);
         printf("Original Size: %zu bytes\n", orig_size);
         printf("Compression Enabled: %s\n", comp ? "Yes" : "No");
-        printf("Error Bound: %f (%s)\n", eb, eb_type == EB_TYPE::REL ? "Relative" : "Absolute");
+        printf("Error Bound: %.3e (%s)\n", eb, eb_type == EB_TYPE::REL ? "Relative" : "Absolute");
         printf("Algorithm: %s\n", algo == ALGO::LORENZO ? "Lorenzo" : "Spline");
         if (use_lorenzo_zigzag) {
           printf("Lorenzo Zigzag: Enabled\n");

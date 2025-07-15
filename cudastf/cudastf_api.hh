@@ -9,7 +9,7 @@
 #include "modules/hist_generic_stf.cu"
 #include "modules/hist_sparse_stf.cu"
 #include "modules/huffman_class.hh"
-#include "modules/lorenzo_1d.cu"
+#include "modules/lorenzo.cu"
 #include "modules/spvn_stf.cu"
 
 namespace utils = _portable::utils;
@@ -27,26 +27,13 @@ struct STF_Compressor {
   HuffmanCodecSTF<T>* codec_hf = nullptr;
   stf_internal_buffers<T>* ibuffer = nullptr;
 
-  STF_Compressor(Config<T>& config, context& ctx, T* input_data_host) : conf(&config), ctx(&ctx) {
+  STF_Compressor(Config<T>& config, context& ctx) : conf(&config), ctx(&ctx) {
     toggle = new CompressorBufferToggle();
     module_optimizer();
     metrics = new fzmod_metrics();
     codec_hf = new HuffmanCodecSTF<T>(conf->len, conf->pardeg, ctx);
-    ibuffer = new stf_internal_buffers<T>(ctx, conf->len, input_data_host,
+    ibuffer = new stf_internal_buffers<T>(ctx, conf->len,
       codec_hf->revbk4_bytes, codec_hf->max_bklen * sizeof(uint32_t), conf->pardeg);
-    if (conf->eb_type == EB_TYPE::REL) {
-      double _max_val, _min_val, _range;
-      GPU_unique_dptr<T[]> input_data_device = MAKE_UNIQUE_DEVICE(T, conf->len);
-      cuda_safe_call(cudaMemcpy(input_data_device.get(), input_data_host, conf->len * sizeof(T), cudaMemcpyHostToDevice));
-      // Probe extrema on the device
-      fz::analysis::GPU_probe_extrema<T>(input_data_device.get(), conf->len, _max_val, _min_val, _range);
-      conf->eb *= _range;
-      conf->logging_max = _max_val;
-      conf->logging_min = _min_val;
-      metrics->max = _max_val;
-      metrics->min = _min_val;
-      metrics->range = _range;
-    }
   } // end Compressor constructor
 
   ~STF_Compressor() {
@@ -56,14 +43,34 @@ struct STF_Compressor {
     if (codec_hf) delete codec_hf;
   }  // end Compressor destructor
 
-  size_t compress(cudaStream_t stream) {
+  size_t compress(T* input_data_host, uint8_t** out_data, cudaStream_t stream) {
+    
+    // preprocessing
+    ibuffer->l_uncomp = ctx->logical_data(input_data_host, {conf->len}).set_symbol("l_uncomp");
+
+    if (conf->eb_type == EB_TYPE::REL) {
+      double _max_val, _min_val, _range;
+      GPU_unique_dptr<T[]> input_data_device = MAKE_UNIQUE_DEVICE(T, conf->len);
+      cuda_safe_call(cudaMemcpy(input_data_device.get(), input_data_host,
+                                conf->len * sizeof(T), cudaMemcpyHostToDevice));
+      // Probe extrema on the device
+      fz::analysis::GPU_probe_extrema<T>(input_data_device.get(), conf->len,
+                                         _max_val, _min_val, _range);
+      conf->eb *= _range;
+      conf->logging_max = _max_val;
+      conf->logging_min = _min_val;
+      metrics->max = _max_val;
+      metrics->min = _min_val;
+      metrics->range = _range;
+    }
+
     float ms_total = 0;
     cudaEvent_t start, stop;
 
     cuda_safe_call(cudaEventCreate(&start));
     cuda_safe_call(cudaEventCreate(&stop));
 
-    cuda_safe_call(cudaEventRecord(start, ctx->task_fence()));
+    cuda_safe_call(cudaEventRecord(start, ctx->fence()));
 
     //! Initialize the buffers
     ctx->task(
@@ -93,19 +100,19 @@ struct STF_Compressor {
       cuda_safe_call(
         cudaMemsetAsync(l_t1.data_handle(), 0, sizeof(uint32_t), s));
       cuda_safe_call(
-        cudaMemsetAsync(l_h.data_handle(), 0, 1024 * sizeof(uint32_t), s));
+        cudaMemsetAsync(l_h.data_handle(), 0, conf->radius * 2 * sizeof(uint32_t), s));
       cuda_safe_call(cudaMemsetAsync(o_v.data_handle(), 0,
-                                     (conf->len / 5) * sizeof(float), s));
+                                     (conf->len * conf->outlier_buffer_ratio) * sizeof(float), s));
       cuda_safe_call(cudaMemsetAsync(o_i.data_handle(), 0,
-                                     (conf->len / 5) * sizeof(uint32_t), s));
+                                     (conf->len * conf->outlier_buffer_ratio) * sizeof(uint32_t), s));
       cuda_safe_call(
         cudaMemsetAsync(o_n.data_handle(), 0, sizeof(uint32_t), s));
       cuda_safe_call(cudaMemsetAsync(rev_bk4.data_handle(), 0xff, 
           codec_hf->revbk4_bytes, s));
       cuda_safe_call(cudaMemsetAsync(bk4.data_handle(), 0xff, 
           codec_hf->max_bklen * sizeof(uint32_t), s));
-      cuda_safe_call(cudaMemsetAsync(codeword_hist.data_handle(), 0, 
-          1024 * sizeof(uint32_t), s));
+      cuda_safe_call(cudaMemsetAsync(codeword_hist.data_handle(), 0,
+                                     conf->radius * 2 * sizeof(uint32_t), s));
       cuda_safe_call(cudaMemsetAsync(l_scratch.data_handle(), 0,
                                      conf->len * sizeof(uint32_t), s));
       cuda_safe_call(cudaMemsetAsync(l_par_nbit.data_handle(), 0,
@@ -154,8 +161,8 @@ struct STF_Compressor {
       conf->num_outliers = out_num(0);
       uint32_t nbyte[END] = {0, 0, 0, 0};
       nbyte[HEADER] = sizeof(fzmod_header);
-      nbyte[ENCODED] = ibuffer->codec_comp_output_len * sizeof(uint8_t);
       nbyte[ANCHOR] = 0;
+      nbyte[ENCODED] = ibuffer->codec_comp_output_len * sizeof(uint8_t);
       nbyte[SPFMT] = conf->num_outliers * (sizeof(T) + sizeof(uint32_t));
 
       uint32_t offsets[END + 1] = {0, 0, 0, 0, 0};
@@ -171,7 +178,7 @@ struct STF_Compressor {
       }
     };
 
-    cuda_safe_call(cudaStreamSynchronize(ctx->task_fence()));
+    cuda_safe_call(cudaStreamSynchronize(ctx->fence()));
 
     //! concat data on device
     ctx->task(ibuffer->l_compressed.rw(), 
@@ -193,15 +200,15 @@ struct STF_Compressor {
           cudaMemcpyDeviceToDevice, s));
     };
 
-    cuda_safe_call(cudaEventRecord(stop, ctx->task_fence()));
+    cuda_safe_call(cudaEventRecord(stop, ctx->fence()));
 
-    cuda_safe_call(cudaStreamSynchronize(ctx->task_fence()));
+    cuda_safe_call(cudaStreamSynchronize(ctx->fence()));
 
     if (conf->toFile) {
 
       auto file = MAKE_UNIQUE_HOST(uint8_t, conf->comp_size);
 
-      cuda_safe_call(cudaStreamSynchronize(ctx->task_fence()));
+      cuda_safe_call(cudaStreamSynchronize(ctx->fence()));
     
       //! copy header to compressed buffer
       ctx->task(ibuffer->l_compressed.read())
@@ -213,7 +220,7 @@ struct STF_Compressor {
             cudaMemcpyDeviceToHost));
       };
     
-      cuda_safe_call(cudaStreamSynchronize(ctx->task_fence()));
+      cuda_safe_call(cudaStreamSynchronize(ctx->fence()));
 
       //! Output Data To File
       ctx->host_launch().set_symbol("file_header_and_output")->*[&]() {
@@ -224,6 +231,16 @@ struct STF_Compressor {
         utils::tofile(compressed_fname.c_str(), file.get(), conf->comp_size);
       };
     }
+
+    // host task to set out_data to the compressed data pointer
+    ctx->task(ibuffer->l_compressed.read()).set_symbol("set_out_data")->*[&]
+      (cudaStream_t s, auto compressed) 
+    {
+      ibuffer->d_compressed = MAKE_UNIQUE_DEVICE(uint8_t, conf->comp_size);
+      cuda_safe_call(cudaMemcpyAsync(ibuffer->d_compressed.get(),
+          compressed.data_handle(), conf->comp_size, cudaMemcpyDeviceToDevice, s));
+      *out_data = ibuffer->d_compressed.get();
+    };
 
     ctx->finalize();
 
@@ -248,9 +265,6 @@ struct STF_Compressor {
   // ###################################################### //
 
   void lorenzo() {
-    if (conf->y != 1 || conf->z != 1) {
-      throw std::runtime_error("Lorenzo compression only supports 1D data in STF.");
-    }
     ctx->task(
       ibuffer->l_uncomp.rw(), ibuffer->l_q_codes.write(),
       ibuffer->l_out_vals.write(), ibuffer->l_out_idxs.write(), 
@@ -260,8 +274,39 @@ struct STF_Compressor {
        auto l_u, auto q_c, auto o_v,
        auto o_i, auto o_n, auto l_t1) 
     {
-      lorenzo_1d<T>(l_u, conf->len, q_c, o_v, o_i, o_n, l_t1, conf->eb * 2,
-                  1 / (conf->eb * 2), 512, s);
+      if (conf->y == 1 and conf->z == 1) {
+        if (conf->use_lorenzo_zigzag) {
+          // 1D Lorenzo compression
+          lorenzo_1d<T, true>(l_u, conf->x, q_c, o_v, o_i, o_n, l_t1, 
+                      conf->eb * 2, 1 / (conf->eb * 2), conf->radius, s);
+        } else {
+          lorenzo_1d<T, false>(l_u, conf->x, q_c, o_v, o_i, o_n, l_t1,
+                      conf->eb * 2, 1 / (conf->eb * 2), conf->radius, s);
+        }        
+      } else if (conf->z == 1) {
+        if (conf->use_lorenzo_zigzag) {
+          // 2D Lorenzo compression with zigzag
+          lorenzo_2d<T, true>(l_u, conf->x, conf->y, q_c, o_v, o_i, o_n, l_t1,
+                      conf->eb * 2, 1 / (conf->eb * 2), conf->radius, s);
+        } else {
+          // 2D Lorenzo compression without zigzag
+          lorenzo_2d<T, false>(l_u, conf->x, conf->y, q_c, o_v, o_i, o_n, l_t1,
+                      conf->eb * 2, 1 / (conf->eb * 2), conf->radius, s);
+        }
+      } else {
+        if (conf->use_lorenzo_zigzag) {
+          // 3D Lorenzo compression with zigzag
+          lorenzo_3d<T, true>(l_u, conf->x, conf->y, conf->z, q_c, o_v, o_i,
+                      o_n, l_t1, conf->eb * 2,
+                      1 / (conf->eb * 2), conf->radius, s);
+        } else {
+          // 3D Lorenzo compression
+          lorenzo_3d<T, false>(l_u, conf->x, conf->y, conf->z, q_c, o_v, o_i,
+                        o_n, l_t1, conf->eb * 2,
+                        1 / (conf->eb * 2), conf->radius, s);    
+        }
+          
+      }
     };
   } // end lorenzo
 
@@ -311,6 +356,7 @@ struct STF_Compressor {
       toggle->histogram = true;
       toggle->top1 = true;
     } else if (conf->codec == CODEC::FZG) {
+
     }
 
     if (conf->codec == CODEC::HUFFMAN) {
@@ -345,7 +391,7 @@ struct STF_Decompressor {
     std::string basename = fname.substr(0, fname.rfind("."));
     conf->fname = basename;
     metrics = new fzmod_metrics();
-    ibuffer = new stf_internal_buffers<T>(ctx, conf->len, nullptr, 0, 0, 0, false);
+    ibuffer = new stf_internal_buffers<T>(ctx, conf->len, 0, 0, 0, false);
     codec_hf = new HuffmanCodecSTF<T>(conf->len, conf->pardeg, ctx);
   } // end Decompressor constructor
 
@@ -357,7 +403,7 @@ struct STF_Decompressor {
     if (conf) delete conf;
   } // end Decompressor destructor
 
-  void decompress(uint8_t* compressed_data_host, cudaStream_t stream, T* original_data_host = nullptr) {
+  void decompress(uint8_t* compressed_data_host, T* out_data, cudaStream_t stream, T* original_data = nullptr) {
     static const int ENCODED = 2;
     static const int SPFMT = 3;
 
@@ -369,252 +415,223 @@ struct STF_Decompressor {
     cuda_safe_call(cudaEventCreate(&start));
     cuda_safe_call(cudaEventCreate(&stop));
 
-    cuda_safe_call(cudaEventRecord(start, ctx->task_fence()));
+    // ### Allocate and register memory buffers with CUDASTF context ### //
 
-    throw std::runtime_error("STF decompression is not implemented yet in CUDASTF.");
+    size_t encoded_size = conf->header->offsets[SPFMT] - 
+                          conf->header->offsets[ENCODED];
+    auto l_encoded = ctx->logical_data(shape_of<slice<uint8_t>>(encoded_size));
+    auto l_spval = ctx->logical_data(shape_of<slice<T>>(conf->num_outliers));
+    auto l_spidx = ctx->logical_data(shape_of<slice<uint32_t>>(conf->num_outliers));
 
-    // size_t encoded_size = conf->header->offsets[SPFMT] - 
-    //                       conf->header->offsets[ENCODED];
-    // auto l_encoded = ctx->logical_data(shape_of<slice<uint8_t>>(encoded_size));
-    // auto l_spval = ctx->logical_data(shape_of<slice<T>>(conf->num_outliers));
-    // auto l_spidx = ctx->logical_data(shape_of<slice<uint32_t>>(conf->num_outliers));
+    uint8_t* encoded_data_h;
+    cudaMallocHost(&encoded_data_h, encoded_size);
+    std::memcpy(encoded_data_h, 
+                compressed_data_host + conf->header->offsets[ENCODED], 
+                encoded_size);
+    T* outlier_vals_h = nullptr;
+    uint32_t* outlier_idx_h = nullptr;
 
-    // uint8_t* encoded_data_h;
-    // cudaMallocHost(&encoded_data_h, encoded_size);
-    // std::memcpy(encoded_data_h, 
-    //             compressed_data_host + conf->header->offsets[ENCODED], 
-    //             encoded_size);
-    // T* outlier_vals_h = nullptr;
-    // uint32_t* outlier_idx_h = nullptr;
+    if (conf->num_outliers > 0) {
+      outlier_vals_h = (T*)malloc(conf->num_outliers * sizeof(T));
+      outlier_idx_h = (uint32_t*)malloc(conf->num_outliers * sizeof(uint32_t));
+      std::memcpy(outlier_vals_h, 
+                  compressed_data_host + conf->header->offsets[SPFMT],
+                  conf->num_outliers * sizeof(T));
+      std::memcpy(outlier_idx_h, 
+                  compressed_data_host + conf->header->offsets[SPFMT] + 
+                  (conf->num_outliers * sizeof(T)),
+                  conf->num_outliers * sizeof(uint32_t));
+    }
 
-    // if (conf->num_outliers > 0) {
-    //   outlier_vals_h = (T*)malloc(conf->num_outliers * sizeof(T));
-    //   outlier_idx_h = (uint32_t*)malloc(conf->num_outliers * sizeof(uint32_t));
-    //   std::memcpy(outlier_vals_h, 
-    //               compressed_data_host + conf->header->offsets[SPFMT],
-    //               conf->num_outliers * sizeof(T));
-    //   std::memcpy(outlier_idx_h, 
-    //               compressed_data_host + conf->header->offsets[SPFMT] + 
-    //               (conf->num_outliers * sizeof(T)),
-    //               conf->num_outliers * sizeof(uint32_t));
-    // }
+    // Start decompression
     
-    // //! Populate internal buffers with zero
-    // ctx->task(ibuffer->l_uncompressed.write(), 
-    //   l_encoded.write(), l_spval.write(), 
-    //   l_spidx.write()).set_symbol("populate_outliers")->*[&]
-    //   (cudaStream_t s, auto uncompressed, auto encoded, 
-    //   auto spval, auto spidx) 
-    // {
-    //   cuda_safe_call(
-    //     cudaMemsetAsync(uncompressed.data_handle(), 0, 
-    //     conf->len * sizeof(T), s));
-    //   cuda_safe_call(
-    //     cudaMemcpyAsync(encoded.data_handle(), encoded_data_h, 
-    //     encoded_size, cudaMemcpyHostToDevice, s));
-    //   if (conf->num_outliers > 0) {
-    //     cuda_safe_call(
-    //       cudaMemcpyAsync(spval.data_handle(), outlier_vals_h, 
-    //       conf->num_outliers * sizeof(T), cudaMemcpyHostToDevice, s));
-    //     cuda_safe_call(
-    //       cudaMemcpyAsync(spidx.data_handle(), outlier_idx_h, 
-    //       conf->num_outliers * sizeof(uint32_t), cudaMemcpyHostToDevice, s));
-    //   }
-    // };
+    //! Populate internal buffers with zero
+    ctx->task(ibuffer->l_uncompressed.write(), 
+      l_encoded.write(), l_spval.write(), 
+      l_spidx.write()).set_symbol("populate_outliers")->*[&]
+      (cudaStream_t s, auto uncompressed, auto encoded, 
+      auto spval, auto spidx) 
+    {
+      cuda_safe_call(
+        cudaMemsetAsync(uncompressed.data_handle(), 0, 
+        conf->len * sizeof(T), s));
+      cuda_safe_call(
+        cudaMemcpyAsync(encoded.data_handle(), encoded_data_h, 
+        encoded_size, cudaMemcpyHostToDevice, s));
+      if (conf->num_outliers > 0) {
+        cuda_safe_call(
+          cudaMemcpyAsync(spval.data_handle(), outlier_vals_h, 
+          conf->num_outliers * sizeof(T), cudaMemcpyHostToDevice, s));
+        cuda_safe_call(
+          cudaMemcpyAsync(spidx.data_handle(), outlier_idx_h, 
+          conf->num_outliers * sizeof(uint32_t), cudaMemcpyHostToDevice, s));
+      }
+    };
 
-    // //! Populate the header with the entries
-    // ctx->task(
-    //   l_encoded.read())
-    //   .set_symbol("hf_header_populate")
-    //   ->*[&](cudaStream_t s, auto encoded) {
-    //   cuda_safe_call(cudaMemcpyAsync(
-    //     &header_hf, encoded.data_handle(), 
-    //     sizeof(hf_header), cudaMemcpyDeviceToHost, s));
-    // };
+    //! Populate the header with the entries
+    ctx->task(l_encoded.read()).set_symbol("hf_header_populate")
+      ->*[&](cudaStream_t s, auto encoded) 
+    {
+      cuda_safe_call(cudaMemcpyAsync(
+          &header_hf, encoded.data_handle(), sizeof(hf_header),
+          cudaMemcpyDeviceToHost, s));
+    };
 
-    // cuda_safe_call(cudaStreamSynchronize(ctx->task_fence()));
+    cuda_safe_call(cudaStreamSynchronize(ctx->fence()));
+    cuda_safe_call(cudaEventRecord(start, ctx->fence()));
 
-    // //! scatter outliers to uncompressed buffer
-    // ctx->task(
-    //   l_spval.read(), 
-    //   l_spidx.read(), 
-    //   ibuffer->l_uncompressed.rw())
-    //   .set_symbol("spv_scatter")->*[&]
-    //   (cudaStream_t s, 
-    //   auto val,
-    //   auto idx, 
-    //   auto uncompressed) 
-    // {
-    //   if (conf->num_outliers > 0) {
-    //     spvn_scatter<T><<<(conf->num_outliers - 1) / 128 + 1, 128, 0, s>>>(
-    //         val, idx, conf->num_outliers, uncompressed);
-    //   }
-    // };
+    //! scatter outliers to uncompressed buffer
+    ctx->task(
+      l_spval.read(), 
+      l_spidx.read(), 
+      ibuffer->l_uncompressed.rw())
+      .set_symbol("spv_scatter")->*[&]
+      (cudaStream_t s, 
+      auto val,
+      auto idx, 
+      auto uncompressed) 
+    {
+      if (conf->num_outliers > 0) {
+        spvn_scatter<T><<<(conf->num_outliers - 1) / 128 + 1, 128, 0, s>>>(
+            val, idx, conf->num_outliers, uncompressed);
+      }
+    };
 
-    // //! decode the huffman encoded data
-    // ctx->task(
-    //   l_encoded.rw(), 
-    //   ibuffer->l_q_codes.write())
-    //   .set_symbol("hf_decode")->*[&]
-    //   (cudaStream_t s, 
-    //   auto encoded, 
-    //   auto q_codes) 
-    // {
-    //   auto div = [](auto l, auto subl) { return (l - 1) / subl + 1; };
-    //   auto const block_dim = 256;
-    //   auto const grid_dim = div(conf->pardeg, block_dim);
+    if (conf->codec == CODEC::HUFFMAN) {
+      huffman(header_hf, l_encoded);
+    } else if (conf->codec == CODEC::FZG) {
+      throw std::runtime_error("FZG codec is not implemented yet in CUDASTF.");
+    } else {
+      throw std::runtime_error("Unsupported codec type");
+    }
 
-    //   #define ACCESSOR(SYM, TYPE) reinterpret_cast<TYPE*>( \
-    //     encoded.data_handle() + header_hf.entry[HF_HEADER_##SYM])
+    if (conf->algo == ALGO::SPLINE) {
+      spline();
+    } else if (conf->algo == ALGO::LORENZO) {
+      lorenzo();
+    } else {
+      throw std::runtime_error("Unsupported decompression algorithm");
+    }
 
-    //   hf_kernel_decode<<<grid_dim, block_dim, codec_hf->revbk4_bytes, s>>>(
-    //     ACCESSOR(BITSTREAM, uint32_t), ACCESSOR(REVBK, uint8_t), 
-    //     ACCESSOR(PAR_NBIT, uint32_t), ACCESSOR(PAR_ENTRY, uint32_t), 
-    //     codec_hf->revbk4_bytes, conf->sublen, conf->pardeg, q_codes);
-    // };
+    cuda_safe_call(cudaEventRecord(stop, ctx->fence()));
 
-    // //! decompress the lorenzo quant codes
-    // ctx->task(
-    //   ibuffer->l_q_codes.rw(), 
-    //   ibuffer->l_uncompressed.rw())
-    //   .set_symbol("lorenzo_decomp")->*[&]
-    //   (cudaStream_t s, 
-    //   auto q_codes, 
-    //   auto uncompressed) 
-    // {
-    //   lorenzo_decomp_1d<T>(q_codes, uncompressed, conf->len, 
-    //     conf->eb*2, 1/(conf->eb*2), conf->radius, s);
-    // };
+    // move data to out_data
+    ctx->task(
+      ibuffer->l_uncompressed.read())
+      .set_symbol("copy_to_out_data")->*[&]
+      (cudaStream_t s, auto uncompressed) 
+    {
+      cuda_safe_call(cudaMemcpyAsync(out_data, uncompressed.data_handle(),
+        conf->len * sizeof(T), cudaMemcpyDeviceToHost, s));
+    };
 
-    cuda_safe_call(cudaEventRecord(stop, ctx->task_fence()));
-
-    // ctx->host_launch(
-    //   ibuffer->l_uncompressed.read())
-    //   .set_symbol("decomp_to_file")->*[&]
-    //   (auto uncompressed) 
-    // {
-    //   auto decompressed_fname = conf->fname + ".stf_decompressed";
-    //   utils::tofile(decompressed_fname.c_str(), uncompressed.data_handle(), conf->len);
-    // };
+    ctx->host_launch(
+      ibuffer->l_uncompressed.read())
+      .set_symbol("decomp_to_file")->*[&]
+      (auto uncompressed) 
+    {
+      auto decompressed_fname = conf->fname + ".stf_decompressed";
+      utils::tofile(decompressed_fname.c_str(), uncompressed.data_handle(), conf->len);
+    };
   
-    // if (conf->num_outliers > 0) {
-    //   free(outlier_vals_h);
-    //   free(outlier_idx_h);
-    // }
-    // cudaFreeHost(encoded_data_h);
+    if (conf->num_outliers > 0) {
+      free(outlier_vals_h);
+      free(outlier_idx_h);
+    }
+    cudaFreeHost(encoded_data_h);
 
     ctx->finalize();
 
     cuda_safe_call(cudaEventElapsedTime(&ms_total, start, stop));
     metrics->end_to_end_decomp_time = ms_total;
 
-    // if (conf->verbose) {
-    //   conf->print();
-    // }
 
-    // if (conf->report) {
-    //   metrics->precision = conf->precision;
-    //   metrics->num_outliers = conf->num_outliers;
-    //   metrics->data_len = conf->len;
-    //   metrics->orig_bytes = conf->len * sizeof(T);
-    //   metrics->comp_bytes = conf->header->offsets[SPFMT];
-    //   metrics->compression_ratio =
-    //       static_cast<double>(metrics->orig_bytes) / metrics->comp_bytes;
-    //   metrics->final_eb = conf->eb;
-    //   //TODO: compare logic here
-    //   metrics->print(false);
-    // }
+    if (conf->verbose) {
+      conf->print();
+    }
+
+    if (conf->report) {
+      metrics->precision = conf->precision;
+      metrics->num_outliers = conf->num_outliers;
+      metrics->data_len = conf->len;
+      metrics->orig_bytes = conf->len * sizeof(T);
+      metrics->comp_bytes = conf->header->offsets[SPFMT];
+      metrics->compression_ratio =
+          static_cast<double>(metrics->orig_bytes) / metrics->comp_bytes;
+      metrics->final_eb = conf->eb;
+      if (conf->compare) {
+        metrics->compare<T>(original_data, out_data, conf->len, stream);
+      }
+      metrics->print(false, conf->compare);
+    }
   } // end decompress
 
-  // ~~~~~~~~~~~~~~~~~~~~~~~~ Compare ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ //
+  void huffman(hf_header& header_hf, logical_data<slice<uint8_t>>& l_encoded) {
+    //! decode the huffman encoded data
+    ctx->task(
+      l_encoded.rw(), 
+      ibuffer->l_q_codes.write())
+      .set_symbol("hf_decode")->*[&]
+      (cudaStream_t s, 
+      auto encoded, 
+      auto q_codes) 
+    {
+      auto div = [](auto l, auto subl) { return (l - 1) / subl + 1; };
+      auto const block_dim = 256;
+      auto const grid_dim = div(conf->pardeg, block_dim);
 
-  // void compare(std::string fname, size_t len1, size_t len2, size_t len3) {
+      #define ACCESSOR(SYM, TYPE) reinterpret_cast<TYPE*>( \
+        encoded.data_handle() + header_hf.entry[HF_HEADER_##SYM])
 
-  //   float* original_data_device;
-  //   float* decompressed_data_device;
-  //   cudaMalloc(&original_data_device, len1 * len2 * len3 * sizeof(float));
-  //   cudaMalloc(&decompressed_data_device, len1 * len2 * len3 *
-  //   sizeof(float));
+      hf_kernel_decode<<<grid_dim, block_dim, codec_hf->revbk4_bytes, s>>>(
+        ACCESSOR(BITSTREAM, uint32_t), ACCESSOR(REVBK, uint8_t), 
+        ACCESSOR(PAR_NBIT, uint32_t), ACCESSOR(PAR_ENTRY, uint32_t), 
+        codec_hf->revbk4_bytes, conf->sublen, conf->pardeg, q_codes);
+    };
+  } // end huffman
 
-  //   float* original_data_host;
-  //   float* decompressed_data_host;
-  //   cudaMallocHost(&original_data_host, len1 * len2 * len3 * sizeof(float));
-  //   cudaMallocHost(&decompressed_data_host, len1 * len2 * len3 *
-  //   sizeof(float)); utils::fromfile(fname, original_data_host, len1 * len2 *
-  //   len3); utils::fromfile(fname + ".stf_decompressed",
-  //   decompressed_data_host, len1 * len2 * len3);
+  void spline() {
+    throw std::runtime_error("Spline decompression is not implemented yet in CUDASTF.");
+  } // end spline
 
-  //   cudaMemcpy(original_data_device, original_data_host,
-  //     len1 * len2 * len3 * sizeof(float), cudaMemcpyHostToDevice);
-  //   cudaMemcpy(decompressed_data_device, decompressed_data_host,
-  //     len1 * len2 * len3 * sizeof(float), cudaMemcpyHostToDevice);
-
-  //   // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ //
-
-  //   constexpr auto MINVAL = 0;
-  //   constexpr auto MAXVAL = 1;
-  //   constexpr auto AVGVAL = 2;
-
-  //   constexpr auto SUM_CORR = 0;
-  //   constexpr auto SUM_ERR_SQ = 1;
-  //   constexpr auto SUM_VAR_ODATA = 2;
-  //   constexpr auto SUM_VAR_XDATA = 3;
-
-  //   float orig_data_res[4], decomp_data_res[4];
-
-  //   fz::module::GPU_extrema(original_data_device,
-  //     len1 * len2 * len3, orig_data_res);
-  //   fz::module::GPU_extrema(decompressed_data_device,
-  //     len1 * len2 * len3, decomp_data_res);
-
-  //   float h_err[4];
-
-  //   fz::module::GPU_calculate_errors<float>(
-  //       original_data_device, orig_data_res[AVGVAL],
-  //       decompressed_data_device, decomp_data_res[AVGVAL], len1 * len2 *
-  //       len3, h_err);
-
-  //   double std_orig_data = sqrt(h_err[SUM_VAR_ODATA] / (len1 * len2 * len3));
-  //   double std_decomp_data = sqrt(h_err[SUM_VAR_XDATA] / (len1 * len2 *
-  //   len3)); double ee = h_err[SUM_CORR] / (len1 * len2 * len3);
-
-  //   float max_abserr{0};
-  //   size_t max_abserr_index{0};
-  //   fz::module::GPU_find_max_error<float>(
-  //       decompressed_data_device, original_data_device,
-  //       len1 * len2 * len3, max_abserr, max_abserr_index);
-
-  //   printf("Original Data Min: %f\n", orig_data_res[MINVAL]);
-  //   printf("Original Data Max: %f\n", orig_data_res[MAXVAL]);
-  //   printf("Original Data Range: %f\n", orig_data_res[MAXVAL] -
-  //   orig_data_res[MINVAL]); printf("Original Data Mean: %f\n",
-  //   orig_data_res[AVGVAL]); printf("Original Data Stddev: %f\n",
-  //   std_orig_data); printf("Decompressed Data Min: %f\n",
-  //   decomp_data_res[MINVAL]); printf("Decompressed Data Max: %f\n",
-  //   decomp_data_res[MAXVAL]); printf("Decompressed Data Range: %f\n",
-  //   decomp_data_res[MAXVAL] - decomp_data_res[MINVAL]); printf("Decompressed
-  //   Data Mean: %f\n", decomp_data_res[AVGVAL]); printf("Decompressed Data
-  //   Stddev: %f\n", std_decomp_data);
-
-  //   printf("Max Absolute Error: %f\n", max_abserr);
-  //   printf("Max Absolute Error Index: %zu\n", max_abserr_index);
-
-  //   printf("Correlation Coefficient: %f\n", ee);
-  //   double mse = h_err[SUM_ERR_SQ] / (len1 * len2 * len3);
-  //   printf("Mean Squared Error: %f\n", mse);
-  //   printf("Normalized Root Mean Squared Error: %f\n", sqrt(mse) /
-  //     (orig_data_res[MAXVAL] - orig_data_res[MINVAL]));
-  //   printf("Peak Signal-to-Noise Ratio: %f\n", 20 *
-  //     log10(orig_data_res[MAXVAL] - orig_data_res[MINVAL]) - 10 *
-  //     log10(mse));
-
-  //   // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ //
-
-  //   cudaFree(original_data_device);
-  //   cudaFree(decompressed_data_device);
-  //   cudaFreeHost(original_data_host);
-  //   cudaFreeHost(decompressed_data_host);
-  // }
+  void lorenzo() {
+    //! decompress the lorenzo quant codes
+    ctx->task(
+      ibuffer->l_q_codes.rw(), 
+      ibuffer->l_uncompressed.rw())
+      .set_symbol("lorenzo_decomp")->*[&]
+      (cudaStream_t s, 
+      auto q_codes, 
+      auto uncompressed) 
+    {
+      if (conf->y == 1 && conf->z == 1) {
+        if (conf->use_lorenzo_zigzag) {
+          lorenzo_decomp_1d<T, true>(q_codes, uncompressed, conf->len, 
+            conf->eb*2, 1/(conf->eb*2), conf->radius, s);
+        } else {
+          lorenzo_decomp_1d<T, false>(q_codes, uncompressed, conf->len, 
+            conf->eb*2, 1/(conf->eb*2), conf->radius, s);
+        }
+      } else if (conf->z == 1) {
+        if (conf->use_lorenzo_zigzag) {
+          lorenzo_decomp_2d<T, true>(q_codes, uncompressed, conf->x, conf->y,
+            conf->eb*2, 1/(conf->eb*2), conf->radius, s);
+        } else {
+          lorenzo_decomp_2d<T, false>(q_codes, uncompressed, conf->x, conf->y,
+            conf->eb*2, 1/(conf->eb*2), conf->radius, s);
+        }
+      } else {
+        printf("3D Lorenzo decompression\n");
+        if (conf->use_lorenzo_zigzag) {
+          lorenzo_decomp_3d<T, true>(q_codes, uncompressed, conf->x, conf->y,
+            conf->z, conf->eb*2, 1/(conf->eb*2), conf->radius, s);
+        } else {
+          lorenzo_decomp_3d<T, false>(q_codes, uncompressed, conf->x, conf->y,
+            conf->z, conf->eb*2, 1/(conf->eb*2), conf->radius, s);
+        }
+      }
+    };
+  } // end lorenzo
 
 }; // end Decompressor
 

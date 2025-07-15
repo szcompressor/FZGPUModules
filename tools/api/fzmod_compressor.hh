@@ -287,12 +287,14 @@ struct Compressor {
       fz::module::GPU_c_lorenzo_nd_with_outlier<T, true, uint16_t>(
           input_data, len3, ibuffer->codes(), ibuffer->outlier_values(), 
           ibuffer->outlier_indices(), ibuffer->num_outliers_d(), ibuffer->top1(),
-          ebx2, ebx2_r, conf->radius, stream);
+          ebx2, ebx2_r, conf->radius, ibuffer->outlier_reserve_size,
+          stream);
     } else {
       fz::module::GPU_c_lorenzo_nd_with_outlier<T, false, uint16_t>(
           input_data, len3, ibuffer->codes(), ibuffer->outlier_values(),
           ibuffer->outlier_indices(), ibuffer->num_outliers_d(),
-          ibuffer->top1(), ebx2, ebx2_r, conf->radius, stream);
+          ibuffer->top1(), ebx2, ebx2_r, conf->radius, ibuffer->outlier_reserve_size,
+          stream);
     }
   } // end lorenzo
 

@@ -9,6 +9,7 @@ float* decompressed_final;
 
 void compress(std::string fname, size_t len1, size_t len2, size_t len3, cudaStream_t stream) {
   fz::Config<float> conf(len1, len2, len3);
+  conf.eb = 2e-4;
   conf.fname = fname;
   conf.use_histogram_sparse = false;
 
@@ -17,10 +18,15 @@ void compress(std::string fname, size_t len1, size_t len2, size_t len3, cudaStre
   utils::fromfile(fname, input_data_host, conf.orig_size);
 
   context ctx;
-  fz::STF_Compressor<float> compressor(conf, ctx, input_data_host);
-  compressor.compress(stream);
+  uint8_t* compressed_data_device;
+  fz::STF_Compressor<float> compressor(conf, ctx);
+  compressor.compress(input_data_host, &compressed_data_device, stream);
+
+  // get out compressed data if needed
 
   conf.print();
+
+  cudaFreeHost(input_data_host);
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~ Decompressor ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ //
@@ -37,12 +43,16 @@ void decompress_file_demo(std::string fname, cudaStream_t stream) {
   decompressor.conf->use_histogram_sparse = false;
   decompressor.conf->print();
 
+  float* out_data_device;
+  cudaMalloc(&out_data_device, original_size);
+
   float* original_data_host;
   cudaMallocHost(&original_data_host, original_size);
   utils::fromfile(fname, original_data_host, original_size);
-  decompressor.decompress(compressed_data_host, stream, original_data_host);
+  decompressor.decompress(compressed_data_host, out_data_device, stream, original_data_host);
 
   cudaFree(compressed_data_host);
+  cudaFree(out_data_device);
   cudaFreeHost(original_data_host);
 }
 

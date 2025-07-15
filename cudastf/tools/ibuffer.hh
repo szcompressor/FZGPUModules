@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda/experimental/stf.cuh>
+#include "mem/cxx_smart_ptr.h"
 
 using namespace cuda::experimental::stf;
 
@@ -11,9 +12,9 @@ using namespace cuda::experimental::stf;
 
 template <typename T>
 struct stf_internal_buffers {
-  stf_internal_buffers(context& ctx, size_t len, T* input_data, size_t revbk4_bytes, size_t bk_bytes, int pardeg, bool comp = true) {
+  stf_internal_buffers(context& ctx, size_t len, size_t revbk4_bytes, size_t bk_bytes, int pardeg, bool comp = true) {
     if (comp) {
-      l_uncomp = ctx.logical_data(input_data, {len}).set_symbol("l_uncomp"); 
+      // l_uncomp = ctx.logical_data(input_data, {len}).set_symbol("l_uncomp"); 
       l_compressed = ctx.logical_data(shape_of<slice<uint8_t>>(len * 4 / 2)).set_symbol("l_compressed");
       l_q_codes =   ctx.logical_data(shape_of<slice<uint16_t>>(len)).set_symbol("l_q_codes");
       l_top1 =      ctx.logical_data(shape_of<slice<uint32_t>>(1)).set_symbol("l_top1");
@@ -61,6 +62,8 @@ struct stf_internal_buffers {
   uint32_t codec_comp_output_len{0}; // codec compressed output length
 
   mutable logical_data<slice<uint32_t>> out_entries; // logical outlier entries data
+
+  GPU_unique_dptr<uint8_t[]> d_compressed; // device pointer to compressed data
 
   // ~~~ Decompression Buffers ~~~ //
 

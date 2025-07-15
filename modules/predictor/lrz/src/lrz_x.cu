@@ -12,8 +12,6 @@
 #include "lorenzo.hh"
 #include "err.hh"
 #include "timer.hh"
-// #include "subr.cu_hip.inl"
-// #include "mem/cxx_backends.h"
 #include "detail/wave32.cu"
 #include "detail/zigzag.hh"
 
@@ -192,13 +190,13 @@ __global__ [[deprecated]] void KERNEL_CUHIP_x_lorenzo_2d1l(  //
   decomp_write_2d();
 }
 
-template <typename T, bool UseZigZag, typename Eq = uint16_t, typename Fp = T>
+template <typename T, bool UseZigZag, class Perf, typename Eq = uint16_t, typename Fp = T>
 __global__ void KERNEL_CUHIP_x_lorenzo_2d1l__32x32(  //
     Eq* const in_eq, T* const in_outlier, T* const out_data, dim3 const data_len3,
     dim3 const data_leap3, uint16_t const radius, Fp const ebx2)
 {
   SETUP_ZIGZAG;
-  constexpr auto TileDim = 32;
+  constexpr auto TileDim = Perf::TileDim;
   constexpr auto NumWarps = 4;
   constexpr auto YSEQ = TileDim / NumWarps;
 
@@ -293,7 +291,6 @@ __global__ void KERNEL_CUHIP_x_lorenzo_3d1l(  //
   SETUP_ZIGZAG
   constexpr auto TileDim = 8;
   constexpr auto YSEQ = TileDim;
-  static_assert(TileDim == 8, "In one case, we need TileDim for 3D == 8");
 
   __shared__ T scratch[TileDim][4][8];
   T thread_private[YSEQ] = {0};
@@ -383,34 +380,32 @@ int GPU_x_lorenzo_nd(
     Eq* const in_eq, T* const in_outlier, T* const out_data, stdlen3 const _data_len3,
     double const ebx2, double const ebx2_r, uint16_t const radius, void* stream)
 {
-  using namespace fz::kernelconfig;
 
-  // error bound
   auto data_len3 = TO_DIM3(_data_len3);
-  auto data_leap3 = dim3(1, data_len3.x, data_len3.x * data_len3.y);
-  auto d = lorenzo_utils::ndim(data_len3);
+  auto d = fz::kernelconfig::lorenzo_utils::ndim(data_len3); 
+  auto leap3 = dim3(1, data_len3.x, data_len3.x * data_len3.y);
 
-  if (d == 1)
-    fz::KERNEL_CUHIP_x_lorenzo_1d1l<T, x_lorenzo<1>::tile.x, x_lorenzo<1>::sequentiality.x, UseZigZag, Eq>
-        <<<x_lorenzo<1>::thread_grid(data_len3), x_lorenzo<1>::thread_block, 0, (cudaStream_t)stream>>>(
-            in_eq, in_outlier, out_data, data_len3, data_leap3, radius, (T)ebx2);
-  else if (d == 2) {
-    // psz::KERNEL_CUHIP_x_lorenzo_2d1l<T, UseZigZag, Eq>
-    //     <<<x_lorenzo<2>::thread_grid(data_len3), x_lorenzo<2>::thread_block, 0,
-    //        (cudaStream_t)stream>>>(
-    //         in_eq, in_outlier, out_data, data_len3, data_leap3, radius, (T)ebx2);
-    fz::KERNEL_CUHIP_x_lorenzo_2d1l__32x32<T, UseZigZag, Eq>
-        <<<x_lorenzo<2, 32>::thread_grid(data_len3), x_lorenzo<2, 32>::thread_block, 0,
+  if (d == 1) {
+    using lrx1 = fz::kernelconfig::x_lorenzo<1>;
+    fz::KERNEL_CUHIP_x_lorenzo_1d1l<T, lrx1::tile.x, lrx1::sequentiality.x, UseZigZag, Eq>
+        <<<lrx1::thread_grid(data_len3), lrx1::thread_block, 0, (cudaStream_t)stream>>>(
+            in_eq, in_outlier, out_data, data_len3, leap3, radius, (T)ebx2);
+  } else if (d == 2) {
+    using lrx2 = fz::kernelconfig::x_lorenzo<2, 32>;
+    fz::KERNEL_CUHIP_x_lorenzo_2d1l__32x32<T, UseZigZag, lrx2::Perf, Eq>
+        <<<lrx2::thread_grid(data_len3), lrx2::thread_block, 0,
            (cudaStream_t)stream>>>(
-            in_eq, in_outlier, out_data, data_len3, data_leap3, radius, (T)ebx2);
+            in_eq, in_outlier, out_data, data_len3, leap3, radius, (T)ebx2);
   }
-  else if (d == 3)
+  else if (d == 3) {
+    using lrx3 = fz::kernelconfig::x_lorenzo<3>;
     fz::KERNEL_CUHIP_x_lorenzo_3d1l<T, UseZigZag, Eq>
-        <<<x_lorenzo<3>::thread_grid(data_len3), x_lorenzo<3>::thread_block, 0,
+        <<<lrx3::thread_grid(data_len3), lrx3::thread_block, 0,
            (cudaStream_t)stream>>>(
-            in_eq, in_outlier, out_data, data_len3, data_leap3, radius, (T)ebx2);
-  else
-    return -1;
+            in_eq, in_outlier, out_data, data_len3, leap3, radius, (T)ebx2);
+  } else
+    throw std::runtime_error(
+        "GPU_x_lorenzo_nd: only 1D, 2D, and 3D data are supported");
 
   return 0;
 }

@@ -14,7 +14,7 @@
 namespace utils = _portable::utils; // for file I/O utilities
 
 // pointers for host versions of compressed and decompressed data
-uint8_t* compressed_data_host;
+uint8_t* compressed_data_device;
 float* decompressed_data_host;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -55,9 +55,9 @@ void compress_demo(std::string fname, size_t x,
 
     //! STEP 7: copy out compressed data (if not dumped to file, can set in config)
     //! or leave it on the device for further processing
-    cudaMallocHost(&compressed_data_host, conf.comp_size);
-    cudaMemcpy(compressed_data_host, 
-        comp_data_d, conf.comp_size, cudaMemcpyDeviceToHost);
+    cudaMalloc(&compressed_data_device, conf.comp_size);
+    cudaMemcpy(compressed_data_device, 
+        comp_data_d, conf.comp_size, cudaMemcpyDeviceToDevice);
 
     //! STEP 8: free memory
     cudaFreeHost(input_data_host);
@@ -89,20 +89,27 @@ void decompress_demo_file(std::string fname, cudaStream_t stream) {
     float* original_data_host;
     cudaMallocHost(&original_data_host, original_size);
     utils::fromfile(fname, original_data_host, original_size);
+    float* original_data_device;
+    cudaMalloc(&original_data_device, original_size);
+    cudaMemcpy(original_data_device, original_data_host,
+        original_size, cudaMemcpyHostToDevice);
 
     //! STEP 13: Decompress the data on the GPU
-    decompressor.decompress(compressed_data_host, 
-        decompressed, stream, original_data_host);
+    decompressor.decompress(compressed_data_device, 
+        decompressed, stream, original_data_device);
 
     //! STEP 14: Free the memory
     cudaFree(decompressed);
     cudaFreeHost(original_data_host);
+    cudaFree(original_data_device);
     cudaStreamSynchronize(stream);
 }
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 int main(int argc, char **argv) {
+
+    //! WARNING: This demo assumes the input is float data
 
     // USAGE: ./fzmod_demo <filename> <len1> <len2> <len3>
 
@@ -130,6 +137,6 @@ int main(int argc, char **argv) {
 
     //! STEP 15: Cleanup
     cudaStreamDestroy(stream);
-    cudaFreeHost(compressed_data_host);
+    cudaFree(compressed_data_device);
     return 0;
 }

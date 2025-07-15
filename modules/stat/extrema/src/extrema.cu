@@ -141,8 +141,8 @@ void GPU_extrema(T *in, size_t len, T res[4])
   static const int RNG = 3;
 
   // TODO use external stream
-  cudaStream_t stream;
-  cudaStreamCreate(&stream);
+  cudaStream_t _stream;
+  cudaStreamCreate(&_stream);
 
   auto div = [](auto _l, auto _subl) { return (_l - 1) / _subl + 1; };
 
@@ -164,10 +164,10 @@ void GPU_extrema(T *in, size_t len, T res[4])
   CHECK_GPU(cudaMemcpy(d_maxel, in, sizeof(T), cudaMemcpyDeviceToDevice));  // init max el
 
   // launch
-  fz::KERNEL_CUHIP_extrema<T><<<div(len, chunk), nworker, sizeof(T) * 2, stream>>>(
+  fz::KERNEL_CUHIP_extrema<T><<<div(len, chunk), nworker, sizeof(T) * 2, _stream>>>(
       in, len, d_minel, d_maxel, d_sum, failsafe, R);
 
-  cudaStreamSynchronize(stream);
+  cudaStreamSynchronize(_stream);
 
   // collect results
   CHECK_GPU(cudaMemcpy(&h_min, d_minel, sizeof(T), cudaMemcpyDeviceToHost));
@@ -183,7 +183,7 @@ void GPU_extrema(T *in, size_t len, T res[4])
   CHECK_GPU(cudaFree(d_maxel));
   CHECK_GPU(cudaFree(d_sum));
 
-  cudaStreamDestroy(stream);
+  cudaStreamDestroy(_stream);
 }
 
 }  // namespace fz::module

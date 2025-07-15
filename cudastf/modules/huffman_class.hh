@@ -255,7 +255,7 @@ class HuffmanCodecSTF {
         (pardeg - 1) * sizeof(uint32_t), cudaMemcpyDeviceToDevice, s));
     };
 
-    cuda_safe_call(cudaStreamSynchronize(ctx.task_fence()));
+    cuda_safe_call(cudaStreamSynchronize(ctx.fence()));
 
     //! GPU_coarse_encode_phase3_sync
     ctx.host_launch(
@@ -325,7 +325,7 @@ class HuffmanCodecSTF {
       ibuffer.codec_comp_output_len = header.entry[HF_HEADER_END];
     };
 
-    cuda_safe_call(cudaStreamSynchronize(ctx.task_fence()));
+    cuda_safe_call(cudaStreamSynchronize(ctx.fence()));
 
     //! Copy the header to the compressed buffer
     ctx.task(

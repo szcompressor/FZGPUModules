@@ -1,0 +1,22 @@
+compute-sanitizer --tool memcheck --leak-check full --padding 32 ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z
+compute-sanitizer --tool memcheck --leak-check full --padding 32 ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z --stf
+compute-sanitizer --tool memcheck --leak-check full --padding 32 ./fzmod -i ../data/CLDHGH.f32.fzmod -x --compare ../data/CLDHGH.f32
+compute-sanitizer --tool memcheck --leak-check full --padding 32 ./fzmod -i ../data/CLDHGH.f32.stf_compressed -x --compare ../data/CLDHGH.f32 --stf
+
+
+compute-sanitizer --tool racecheck --racecheck-report all ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z
+compute-sanitizer --tool racecheck --racecheck-report all ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z --stf
+compute-sanitizer --tool racecheck --racecheck-report all ./fzmod -i ../data/CLDHGH.f32.fzmod -x --compare ../data/CLDHGH.f32
+compute-sanitizer --tool racecheck --racecheck-report all ./fzmod -i ../data/CLDHGH.f32.stf_compressed -x --compare ../data/CLDHGH.f32 --stf
+
+
+compute-sanitizer --tool initcheck ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z
+compute-sanitizer --tool initcheck ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z --stf
+compute-sanitizer --tool initcheck ./fzmod -i ../data/CLDHGH.f32.fzmod -x --compare ../data/CLDHGH.f32
+compute-sanitizer --tool initcheck ./fzmod -i ../data/CLDHGH.f32.stf_compressed -x --compare ../data/CLDHGH.f32 --stf
+
+
+compute-sanitizer --tool synccheck ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z
+compute-sanitizer --tool synccheck ./fzmod -t f32 -m rel -e 2e-4 -i ../data/CLDHGH.f32 -l 6480000 -z --stf
+compute-sanitizer --tool synccheck ./fzmod -i ../data/CLDHGH.f32.fzmod -x --compare ../data/CLDHGH.f32
+compute-sanitizer --tool synccheck ./fzmod -i ../data/CLDHGH.f32.stf_compressed -x --compare ../data/CLDHGH.f32 --stf

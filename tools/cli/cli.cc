@@ -367,8 +367,9 @@ void apply_cli_options(const CLIOptions& options, fz::Config<T>& config) {
   config.dump = options.dump;
   config.verbose = options.verbose;
 
+  
+
   if (options.comp) {
-    config.comp = options.comp;
     config.eb = options.eb;
     config.eb_type = (options.pipeline[EB_TYPE] == "rel") ? fz::EB_TYPE::REL
                                                           : fz::EB_TYPE::ABS;
@@ -387,11 +388,12 @@ void apply_cli_options(const CLIOptions& options, fz::Config<T>& config) {
                                   : fz::SECONDARY_CODEC::GZIP;
     config.outlier_buffer_ratio = options.outlier_buff_ratio;
     config.radius = options.radius;
-    config.use_histogram_sparse = (options.pipeline[HISTOGRAM] == "sparse");
+    if (options.pipeline[HISTOGRAM] == "generic") config.use_histogram_sparse = false;
     config.use_huffman_reVISIT = options.pipeline[CODEC] == "huff_revisit";
     config.use_lorenzo_zigzag = (options.pipeline[PREDICTOR] == "lorenzo_zz");
   } else {
     config.compare = !options.origin.empty();
+    config.comp = false;
   }
 } // apply_cli_options
 
@@ -403,7 +405,6 @@ void run_compression(const CLIOptions& options, cudaStream_t stream) {
     fz::Compressor<T> compressor(config);
     uint8_t* out_data;
     compressor.compress(nullptr, &out_data, stream);
-    cudaFree(out_data);
   } else {
     #ifdef FZMOD_CUDASTF
     fz::Config<T> config(options.x, options.y, options.z);
@@ -413,8 +414,11 @@ void run_compression(const CLIOptions& options, cudaStream_t stream) {
     cudaMallocHost(&input_data_host, config.orig_size);
     utils::fromfile(options.input_file.c_str(), input_data_host,
                     config.orig_size);
-    fz::STF_Compressor<T> compressor(config, ctx, input_data_host);
-    compressor.compress(stream);
+    fz::STF_Compressor<T> compressor(config, ctx);
+    uint8_t* out_data;
+    compressor.compress(input_data_host, &out_data, stream);
+
+    cudaFreeHost(input_data_host);
     #else
     throw std::runtime_error("STF compression is not built/enabled.");
     #endif  // FZMOD_CUDASTF
@@ -435,28 +439,38 @@ void run_decompression(const CLIOptions& options, cudaStream_t stream) {
     cudaMallocHost(&compressed_data, decompressor.conf->comp_size);
     utils::fromfile(options.input_file.c_str(), compressed_data, decompressor.conf->comp_size);
 
+    uint8_t * compressed_data_device;
+    cudaMalloc(&compressed_data_device, decompressor.conf->comp_size);
+    cudaMemcpy(compressed_data_device, compressed_data, decompressor.conf->comp_size, cudaMemcpyHostToDevice);
+    cudaFreeHost(compressed_data);
+
     T* orig_data;
     if (options.origin.empty()) {
-      decompressor.decompress(compressed_data, out_data, stream);
+      decompressor.decompress(compressed_data_device, out_data, stream);
     } else {
       cudaMallocHost(&orig_data, decompressor.conf->orig_size);
       utils::fromfile(options.origin.c_str(), orig_data, decompressor.conf->orig_size);
-      decompressor.decompress(compressed_data, out_data, stream, orig_data);
+      T* orig_data_device;
+      cudaMalloc(&orig_data_device, decompressor.conf->orig_size);
+      cudaMemcpy(orig_data_device, orig_data, decompressor.conf->orig_size, cudaMemcpyHostToDevice);
+      // Decompress with original data for comparison
+      decompressor.decompress(compressed_data_device, out_data, stream, orig_data_device);
+      cudaFree(orig_data_device);
     }
 
     cudaFree(out_data);
-    cudaFree(compressed_data);
+    cudaFree(compressed_data_device);
     if (!options.origin.empty()) {
-      cudaFree(orig_data);
+      cudaFreeHost(orig_data);
     }
   } else {
     #ifdef FZMOD_CUDASTF
     context ctx;
     fz::STF_Decompressor<T> decompressor(options.input_file, ctx);
     apply_cli_options<T>(options, *decompressor.conf);
-    // T* out_data;
-    // size_t out_size = decompressor.conf->orig_size;
-    // cudaMalloc(&out_data, out_size);
+    T* out_data;
+    size_t out_size = decompressor.conf->orig_size;
+    cudaMalloc(&out_data, out_size);
 
     uint8_t* compressed_data;
     cudaMallocHost(&compressed_data, decompressor.conf->comp_size);
@@ -464,16 +478,20 @@ void run_decompression(const CLIOptions& options, cudaStream_t stream) {
 
     T* orig_data;
     if (options.origin.empty()) {
-      decompressor.decompress(compressed_data, stream);
+      decompressor.decompress(compressed_data, out_data, stream);
     } else {
       cudaMallocHost(&orig_data, decompressor.conf->orig_size);
       utils::fromfile(options.origin.c_str(), orig_data, decompressor.conf->orig_size);
-      decompressor.decompress(compressed_data, stream, orig_data);
+      T* orig_data_device;
+      cudaMalloc(&orig_data_device, decompressor.conf->orig_size);
+      cudaMemcpy(orig_data_device, orig_data, decompressor.conf->orig_size, cudaMemcpyHostToDevice);
+      decompressor.decompress(compressed_data, out_data, stream, orig_data_device);
+      cudaFree(orig_data_device);
     }
-    // cudaFree(out_data);
-    cudaFree(compressed_data);
+    cudaFree(out_data);
+    cudaFreeHost(compressed_data);
     if (!options.origin.empty()) {
-      cudaFree(orig_data);
+      cudaFreeHost(orig_data);
     }
     #else
     throw std::runtime_error("STF decompression is not built/enabled.");

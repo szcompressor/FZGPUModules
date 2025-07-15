@@ -18,7 +18,7 @@ double Y0(int i) {
 
 int main(int argc, char** argv) {
   
-  context ctx;
+  context ctx = stream_ctx();
 
   const size_t N = 16;
   double X[N], Y[N];
@@ -40,14 +40,15 @@ int main(int argc, char** argv) {
   cuda_safe_call(cudaEventCreate(&start));
   cuda_safe_call(cudaEventCreate(&stop));
 
-  cuda_safe_call(cudaEventRecord(start, ctx.task_fence()));
+  cuda_safe_call(cudaEventRecord(start, ctx.fence()));
 
   /* Compute Y = Y + alpha X */
   ctx.parallel_for(lY.shape(), lX.read(), lY.rw())->*[alpha] __device__(size_t i, auto dX, auto dY) {
     dY(i) += alpha * dX(i);
   };
 
-  cuda_safe_call(cudaEventRecord(stop, ctx.task_fence()));
+  cuda_safe_call(cudaEventRecord(stop, ctx.fence()));
+
 
   ctx.finalize();
 

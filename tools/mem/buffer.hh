@@ -53,7 +53,7 @@ class InternalBuffers {
   GPU_unique_dptr<uint8_t[]> d_internal_temp = nullptr;
 
   // OUTLIERS
-  int outlier_reserve_size = 0;
+  size_t outlier_reserve_size = 0;
   GPU_unique_dptr<T[]> d_val = nullptr;
   GPU_unique_hptr<T[]> h_val = nullptr;
   GPU_unique_dptr<uint32_t[]> d_idx = nullptr;

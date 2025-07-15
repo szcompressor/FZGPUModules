@@ -29,7 +29,8 @@ int GPU_c_lorenzo_nd_with_outlier(T* const in_data, stdlen3 const _data_len3,
                                   uint32_t* outlier_idxs,
                                   uint32_t* num_outliers, uint32_t* out_top1,
                                   double const ebx2, double const ebx2_r,
-                                  uint16_t const radius, void* stream);
+                                  uint16_t const radius, size_t const outlier_reserve_size,
+                                  void* stream);
 
 template <typename T, bool UseZigZag, typename Eq>
 int GPU_x_lorenzo_nd(

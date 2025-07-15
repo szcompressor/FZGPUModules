@@ -90,16 +90,17 @@ if(NOT USE_SANITIZER)
 endif()
 set_property(CACHE USE_SANITIZER PROPERTY STRINGS "" "Address" "Thread" "Undefined" "Leak" "Compute")
 if (USE_SANITIZER STREQUAL "Address")
-    message(STATUS "Compiling with Address Sanitizer")
+    message(STATUS "Compiling with Address Sanitizer (NOT WELL CUDA SUPPORTED)")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
 elseif (USE_SANITIZER STREQUAL "Thread")
-    message(STATUS "Compiling with Thread Sanitizer")
+    message(STATUS "Compiling with Thread Sanitizer (NOT WELL CUDA SUPPORTED)")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread")
     # check if ASAN_OPTIONS=protect_shadow_gap=0
+    # https://stackoverflow.com/questions/55750700/opencl-usable-when-compiling-host-application-with-address-sanitizer
     if(DEFINED ENV{ASAN_OPTIONS})
         set(ASAN_OPTIONS "$ENV{ASAN_OPTIONS}:protect_shadow_gap=0")
     else()
@@ -130,7 +131,7 @@ target_compile_options(
   INTERFACE 
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda>
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--expt-relaxed-constexpr>
-    # $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Wno-deprecated-declarations>
+    $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Wno-deprecated-declarations>
 )
 if(NOT USE_SANITIZER STREQUAL "Compute")
   target_compile_options(
@@ -431,7 +432,6 @@ install(FILES
 )
 
 install(DIRECTORY
-  tools/include/
   modules/codec/fzg/include/
   modules/stat/histogram/include/
   modules/codec/huffman/include/
