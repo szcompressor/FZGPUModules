@@ -17,6 +17,7 @@ set(FZMOD_BACKEND "CUDA" CACHE STRING "Select the backend for the FZ Compression
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
 set(CMAKE_CUDA_ARCHITECTURES native)
+set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86")
 
 #####################
 ### WSL DETECTION ###
