@@ -103,6 +103,11 @@ namespace fz {
         eb = header->eb;
         eb_type = header->eb_type;
         algo = header->algo;
+        printf("Algorithm enum value: %u\n", static_cast<uint32_t>(algo));
+        if (algo == ALGO::LORENZO_ZZ) {
+          use_lorenzo_zigzag = true;
+          algo = ALGO::LORENZO;
+        }
         precision = header->precision;
         codec = header->codec;
         lossless_codec_2 = header->lossless_codec_2;

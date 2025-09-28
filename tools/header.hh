@@ -18,7 +18,7 @@
 namespace fz {
 
 enum class EB_TYPE : uint32_t { REL, ABS };
-enum class ALGO : uint32_t { LORENZO, SPLINE };
+enum class ALGO : uint32_t { LORENZO, LORENZO_ZZ, SPLINE };
 enum class PRECISION : uint32_t { FLOAT, DOUBLE };
 enum class CODEC : uint32_t { HUFFMAN, FZG };
 enum class SECONDARY_CODEC : uint32_t { NONE, GZIP, ZSTD };

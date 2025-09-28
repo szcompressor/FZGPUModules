@@ -72,7 +72,7 @@ struct Compressor {
 
     CREATE_CPU_TIMER(predictor)
     START_CPU_TIMER(predictor)
-    if (conf->algo == ALGO::LORENZO) {
+    if (conf->algo == ALGO::LORENZO || conf->algo == ALGO::LORENZO_ZZ) {
       lorenzo(in_data, stream);
     } else if (conf->algo == ALGO::SPLINE) {
       spline(in_data, stream);
@@ -119,6 +119,18 @@ struct Compressor {
       utils::tofile(pred_dump_fname.c_str(), pred_dump_file.get(), pred_dump_size);
       printf("Dumped prediction data to %s\n", pred_dump_fname.c_str());
     }
+
+
+    // print first 100 quant codes for debugging
+    auto h_codes_owner = MAKE_UNIQUE_HOST(uint16_t, conf->len);
+    uint16_t* h_codes = h_codes_owner.get();
+    cudaMemcpy(h_codes, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
+    printf("First 100 quant codes: ");
+    for (size_t i = 0; i < std::min<size_t>(1000, conf->len); i++) {
+      if (i % 50 == 0) printf("\n");
+      printf("%hu ", h_codes[i]);
+    }
+    printf("\n");
 
     //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 

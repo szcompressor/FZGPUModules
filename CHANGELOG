@@ -2,8 +2,11 @@ CHANGELOG FOR FZMOD LIBRARY
 Skyler Ruiter
 Indiana University
 
-Options: [feature, optimze, bugfix, document, refactor, test, milestone, deploy]
+Options: [feature, optimize, bugfix, document, refactor, test, milestone, deploy]
 
 
 July 1 2025
   feature   Added cmake code for rest of example codes
+
+September 27 2025
+  bugfix    Fixed bug in GPU lorenzo zigzag predictor where zigzag flag was not being set for decompression properly

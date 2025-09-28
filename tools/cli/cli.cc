@@ -391,6 +391,9 @@ void apply_cli_options(const CLIOptions& options, fz::Config<T>& config) {
     if (options.pipeline[HISTOGRAM] == "generic") config.use_histogram_sparse = false;
     config.use_huffman_reVISIT = options.pipeline[CODEC] == "huff_revisit";
     config.use_lorenzo_zigzag = (options.pipeline[PREDICTOR] == "lorenzo_zz");
+    if (options.pipeline[PREDICTOR] == "lorenzo_zz") {
+      config.algo = fz::ALGO::LORENZO_ZZ;
+    }
   } else {
     config.compare = !options.origin.empty();
     config.comp = false;
