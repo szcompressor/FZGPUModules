@@ -103,7 +103,6 @@ namespace fz {
         eb = header->eb;
         eb_type = header->eb_type;
         algo = header->algo;
-        printf("Algorithm enum value: %u\n", static_cast<uint32_t>(algo));
         if (algo == ALGO::LORENZO_ZZ) {
           use_lorenzo_zigzag = true;
           algo = ALGO::LORENZO;
@@ -167,7 +166,7 @@ namespace fz {
         printf("Original Size: %zu bytes\n", orig_size);
         printf("Compression Enabled: %s\n", comp ? "Yes" : "No");
         printf("Error Bound: %.3e (%s)\n", eb, eb_type == EB_TYPE::REL ? "Relative" : "Absolute");
-        printf("Algorithm: %s\n", algo == ALGO::LORENZO ? "Lorenzo" : "Spline");
+        printf("Algorithm: %s\n", algo == ALGO::LORENZO || algo == ALGO::LORENZO_ZZ ? "Lorenzo" : "Spline");
         if (use_lorenzo_zigzag) {
           printf("Lorenzo Zigzag: Enabled\n");
         } else {
@@ -175,7 +174,9 @@ namespace fz {
         }
         printf("Use Histogram Sparse: %s\n", use_histogram_sparse ? "Yes" : "No");
         printf("Precision: %s\n", precision == PRECISION::FLOAT ? "Float" : "Double");
-        printf("Codec: %s\n", codec == CODEC::HUFFMAN ? "Huffman" : "FZG");
+        std::string codec_str = (codec == CODEC::HUFFMAN) ? "Huffman" :
+                                (codec == CODEC::FZG) ? "FZG" : "PFPL";
+        printf("Codec: %s\n", codec_str.c_str());
         printf("Secondary Codec: %s\n", lossless_codec_2 == SECONDARY_CODEC::NONE ? "None" : 
                (lossless_codec_2 == SECONDARY_CODEC::GZIP ? "Gzip" : "LSTD"));
         printf("Radius: %u\n", radius);

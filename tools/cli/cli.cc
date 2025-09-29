@@ -216,6 +216,8 @@ void parse_args(int const argc, char** const argv, CLIOptions& options) {
           options.pipeline[CODEC] = "huff_revisit";
         } else if (_ == "fzg") {
           options.pipeline[CODEC] = "fzg";
+        } else if (_ == "pfpl") {
+          options.pipeline[CODEC] = "pfpl";
         } else {
           throw std::runtime_error("Unknown primary codec: " + _);
         }
@@ -381,6 +383,9 @@ void apply_cli_options(const CLIOptions& options, fz::Config<T>& config) {
                     options.pipeline[CODEC] == "huff_revisit")
                        ? fz::CODEC::HUFFMAN
                        : fz::CODEC::FZG;
+    if (options.pipeline[CODEC] == "pfpl") {
+      config.codec = fz::CODEC::PFPL;
+    }
     config.lossless_codec_2 = (options.pipeline[SECONDARY_CODEC] == "none")
                                   ? fz::SECONDARY_CODEC::NONE
                               : (options.pipeline[SECONDARY_CODEC] == "zstd")

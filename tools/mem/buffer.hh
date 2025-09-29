@@ -2,6 +2,7 @@
 
 #include "config.hh"
 #include "hf_hl.hh"
+#include "pfpl.hh"
 #include "mem/cxx_smart_ptr.h"
 
 #define ALIGN_4ki(len) (((len) + 4095) & ~4095)
@@ -24,6 +25,7 @@ class InternalBuffers {
   public:
 
   using CodecFZG = fz::FzgCodec;
+  using CodecPFPL = fz::PFPL_Codec<uint16_t>;
   using hf_mem_t = phf::Buf<uint16_t>;
   hf_mem_t* buf_hf = nullptr;
 
@@ -62,6 +64,7 @@ class InternalBuffers {
   GPU_unique_hptr<uint32_t[]> h_num = nullptr;
 
   CodecFZG* codec_fzg = nullptr;
+  CodecPFPL* codec_pfpl = nullptr;
 
   InternalBuffers(Config<T>* config, CompressorBufferToggle* toggle, bool is_comp = true) 
     : conf(config), is_comp(is_comp)
@@ -74,6 +77,10 @@ class InternalBuffers {
       codec_fzg = new CodecFZG(conf->len);
       total_footprint_d += codec_fzg->total_footprint_d();
       total_footprint_h += codec_fzg->total_footprint_h();
+    } else if (conf->codec == CODEC::PFPL) {
+      codec_pfpl = new CodecPFPL(conf->len);
+      total_footprint_d += codec_pfpl->total_footprint_d();
+      total_footprint_h += codec_pfpl->total_footprint_h();
     } else {
       throw std::runtime_error("Unsupported codec type");
     }
@@ -133,6 +140,7 @@ class InternalBuffers {
 
   ~InternalBuffers() {
     if (codec_fzg) delete codec_fzg;
+    if (codec_pfpl) delete codec_pfpl;
     if (buf_hf) delete buf_hf;
     if (internal_original) cudaFree(internal_original);
   }

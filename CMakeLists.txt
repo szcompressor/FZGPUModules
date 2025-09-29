@@ -17,7 +17,7 @@ set(FZMOD_BACKEND "CUDA" CACHE STRING "Select the backend for the FZ Compression
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
 set(CMAKE_CUDA_ARCHITECTURES native)
-set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86")
+set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86")
 
 #####################
 ### WSL DETECTION ###
@@ -175,6 +175,9 @@ target_include_directories(fzmod_compile_settings INTERFACE
   # spvn module
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/stat/spvn/include/>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/stat/spvn/src/>
+  # pfpl codec
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/codec/pfpl/include/>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/codec/pfpl/src/>
   # misc
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include/>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
@@ -273,6 +276,23 @@ target_link_libraries(fzmod_cu_spline
 )
 add_library(FZMOD::CUDA::spline ALIAS fzmod_cu_spline)
 add_library(FZMOD::spline ALIAS fzmod_cu_spline)
+
+####
+#### PFPL Codec Module
+add_library(fzmod_cu_pfpl
+  modules/codec/pfpl/src/pfpl_class.cc
+  modules/codec/pfpl/src/pfpl_buffer.cu
+  modules/codec/pfpl/src/pfpl_c.cu
+  modules/codec/pfpl/src/pfpl_x.cu
+)
+target_link_libraries(fzmod_cu_pfpl
+  PUBLIC
+  fzmod_compile_settings
+  CUDA::cudart  
+)
+add_library(FZMOD::CUDA::pfpl ALIAS fzmod_cu_pfpl)
+add_library(FZMOD::pfpl ALIAS fzmod_cu_pfpl)
+
 ####
 #### Combine Modules
 add_library(fzmod
@@ -287,6 +307,7 @@ target_link_libraries(fzmod
   fzmod_cu_huffman
   fzmod_cu_lrz
   fzmod_cu_spline
+  fzmod_cu_pfpl
   zstd
   CUDA::cudart
 )
@@ -395,6 +416,7 @@ install(TARGETS
   fzmod_cu_huffman 
   fzmod_cu_lrz 
   fzmod_cu_spline 
+  fzmod_cu_pfpl
   fzmod 
   EXPORT FZModulesTargets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -438,6 +460,7 @@ install(DIRECTORY
   modules/codec/huffman/include/
   modules/predictor/lrz/include/
   modules/predictor/spline/include/
+  modules/codec/pfpl/include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
 )
 

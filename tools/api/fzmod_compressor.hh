@@ -120,17 +120,16 @@ struct Compressor {
       printf("Dumped prediction data to %s\n", pred_dump_fname.c_str());
     }
 
-
-    // print first 100 quant codes for debugging
-    auto h_codes_owner = MAKE_UNIQUE_HOST(uint16_t, conf->len);
-    uint16_t* h_codes = h_codes_owner.get();
-    cudaMemcpy(h_codes, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
-    printf("First 100 quant codes: ");
-    for (size_t i = 0; i < std::min<size_t>(1000, conf->len); i++) {
-      if (i % 50 == 0) printf("\n");
-      printf("%hu ", h_codes[i]);
-    }
-    printf("\n");
+    // // print first 100 quant codes for debugging
+    // auto h_codes_owner = MAKE_UNIQUE_HOST(uint16_t, conf->len);
+    // uint16_t* h_codes = h_codes_owner.get();
+    // cudaMemcpy(h_codes, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
+    // printf("First 100 quant codes: ");
+    // for (size_t i = 0; i < std::min<size_t>(1000, conf->len); i++) {
+    //   if (i % 50 == 0) printf("\n");
+    //   printf("%hu ", h_codes[i]);
+    // }
+    // printf("\n");
 
     //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 
@@ -160,6 +159,12 @@ struct Compressor {
       CREATE_CPU_TIMER(encoder)
       START_CPU_TIMER(encoder)
       fzg(stream);
+      STOP_CPU_TIMER(encoder)
+      TIME_ELAPSED_CPU_TIMER(encoder, metrics->encoder_time)
+    } else if (conf->codec == CODEC::PFPL) {
+      CREATE_CPU_TIMER(encoder)
+      START_CPU_TIMER(encoder)
+      pfpl(stream);
       STOP_CPU_TIMER(encoder)
       TIME_ELAPSED_CPU_TIMER(encoder, metrics->encoder_time)
     } else {
@@ -269,6 +274,8 @@ struct Compressor {
       toggle->top1 = true;
     } else if (conf->codec == CODEC::FZG) {
       
+    } else if (conf->codec == CODEC::PFPL) {
+
     }
 
     if (conf->codec == CODEC::HUFFMAN) {
@@ -281,6 +288,8 @@ struct Compressor {
       capi_phf_coarse_tune(conf->len, &conf->sublen, &conf->pardeg);
     } else if (conf->codec == CODEC::FZG) {
       // FZG specific optimizations can be added here
+    } else if (conf->codec == CODEC::PFPL) {
+      // PFPL specific optimizations can be added here
     } else {
       throw std::runtime_error("Unsupported codec type for optimization");
     }
@@ -362,6 +371,20 @@ struct Compressor {
       ibuffer->codes(), conf->len, &ibuffer->codec_comp_output,
       &ibuffer->codec_comp_output_len, stream);
   } // end fzg
+
+  void pfpl(cudaStream_t stream) {
+
+    const int num_codes = conf->len - conf->num_outliers;
+
+    // set PFPL kernel launch parameters
+    ibuffer->codec_pfpl->set_kernel_params(num_codes);
+
+    ibuffer->codec_pfpl->encode(
+      ibuffer->codes(), num_codes, &ibuffer->codec_comp_output,
+      &ibuffer->codec_comp_output_len, stream);
+
+    printf("PFPL finished... Compressed size: %zu bytes\n", ibuffer->codec_comp_output_len);
+  }
 
   // ################ CODEC 2 FUNCTIONS ################ //
 
