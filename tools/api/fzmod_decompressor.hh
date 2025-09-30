@@ -201,7 +201,13 @@ struct Decompressor {
       printf("PFPL decode kernel error (before): %s\n", cudaGetErrorString(err));
     }
 
-    ibuffer->codec_pfpl->decode(encoded, ibuffer->codes(), conf->len, stream);
+    size_t encoded_size = conf->header->offsets[3] - conf->header->offsets[2];
+
+    size_t num_codes;
+    cudaMemcpy(&num_codes, encoded, sizeof(size_t), cudaMemcpyDeviceToHost);
+    printf("PFPL number of codes from header: %zu\n", num_codes);
+
+    ibuffer->codec_pfpl->decode(encoded, ibuffer->codes(), encoded_size, num_codes, stream);
 
     err = cudaGetLastError();
     if (err != cudaSuccess) {

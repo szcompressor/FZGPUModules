@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "err.hh"
+#include "mem/cxx_smart_ptr.h"
 #include "pfpl.hh"
 
 namespace pfpl {
@@ -10,7 +11,7 @@ template <typename T>
 void GPU_PFPL_encode(const T*, size_t, uint8_t*, size_t*, int*, int,
                      cudaStream_t);
 template <typename T>
-void GPU_PFPL_decode(const uint8_t*, size_t, T*, size_t*, int, cudaStream_t);
+void GPU_PFPL_decode(const uint8_t*, size_t, T*, int*, int, cudaStream_t);
 }
 
 namespace fz {
@@ -19,7 +20,7 @@ template <typename T>
 struct PFPL_Codec<T>::impl {
   pfpl::PFPL_Buf<T>* buf;
 
-  explicit impl(size_t data_len) : buf(new pfpl::PFPL_Buf<T>(data_len)) {}
+  explicit impl(size_t data_len, bool comp = true) : buf(new pfpl::PFPL_Buf<T>(data_len, comp)) {}
   ~impl() { delete buf; }
 
   impl(const impl&) = delete;
@@ -56,17 +57,18 @@ struct PFPL_Codec<T>::impl {
     printf("PFPL encoded data length: %zu bytes\n", *out_len);
   }
 
-  void decode(uint8_t* in_data, T* out_data, size_t data_len, cudaStream_t stream) {
-    pfpl::GPU_PFPL_decode<T>(in_data, data_len, out_data,
-                             (size_t*)buf->d_comp_len, buf->blocks, stream);
-    
-    printf("PFPL decoding completed for %zu codes.\n", data_len);
+  void decode(uint8_t* in_data, T* out_data, size_t encoded_size, size_t const num_codes, cudaStream_t stream) {
+
+    pfpl::GPU_PFPL_decode<T>(in_data, encoded_size, out_data,
+                             buf->d_uncomp_len, buf->blocks, stream);
+
+    printf("PFPL decoding completed for %zu bytes.\n", encoded_size);
   }
 };
 
 template <typename T>
-PFPL_Codec<T>::PFPL_Codec(size_t data_len)
-    : pimpl(std::unique_ptr<impl>(new impl(data_len))) {}
+PFPL_Codec<T>::PFPL_Codec(size_t data_len, bool is_comp)
+    : pimpl(std::unique_ptr<impl>(new impl(data_len, is_comp))) {}
 
 template <typename T>
 PFPL_Codec<T>::~PFPL_Codec() = default;
@@ -81,8 +83,8 @@ PFPL_Codec<T>* PFPL_Codec<T>::encode(T* in_data, size_t data_len,
 
 template <typename T>
 PFPL_Codec<T>* PFPL_Codec<T>::decode(uint8_t* in_comp, T* out_data,
-                                     size_t data_len, cudaStream_t stream) {
-  pimpl->decode(in_comp, out_data, data_len, stream);
+                                     size_t const encoded_size, size_t const num_codes, cudaStream_t stream) {
+  pimpl->decode(in_comp, out_data, encoded_size, num_codes, stream);
   return this;
 }
 

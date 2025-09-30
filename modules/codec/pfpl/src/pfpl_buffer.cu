@@ -26,6 +26,7 @@ void PFPL_Buf<T>::init(size_t data_len, bool comp) {
     CHECK_GPU(cudaMalloc((void**)&d_fullcarry, sizeof(int) * temp_chunks));
   } else {
     CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
+    CHECK_GPU(cudaMalloc(&d_uncomp_len, sizeof(int)));
   }
 }
 

@@ -92,7 +92,7 @@ static __device__ inline bool bitshuffle_2byte(int& csize, uint8_t in [1024*16],
   unsigned short* const out_s = (unsigned short*)out;
   const int tid = threadIdx.x;
   const int sublane = tid % SWS;
-  const int extra = csize % (32 * 16 / 8);
+  const int extra = csize % (32 * 32 / 8);
   const int size = (csize - extra) / 2;
   assert(WS % SWS == 0);
 
@@ -437,6 +437,9 @@ void GPU_PFPL_encode(const T* d_input, size_t num_codes,
   cudaStreamSynchronize(stream);
 
   // DEBUG PRINTS
+  printf("PFPL num blocks: %d\n", blocks);
+  
+
   size_t compressed_size;
   cudaMemcpyAsync(&compressed_size, d_archive_len, sizeof(size_t), cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);

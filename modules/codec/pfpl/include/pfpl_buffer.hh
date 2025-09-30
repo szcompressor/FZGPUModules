@@ -31,6 +31,7 @@ struct PFPL_Buf {
 
   uint8_t* d_comp_out = nullptr;
   size_t* d_comp_len = nullptr;
+  int* d_uncomp_len = nullptr;
 
   size_t total_footprint_d = 0;
   size_t total_footprint_h = 0;

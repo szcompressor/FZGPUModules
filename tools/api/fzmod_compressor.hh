@@ -202,6 +202,29 @@ struct Compressor {
     CONCAT_ON_DEVICE(DST(OUTLIER, 0), ibuffer->outlier_values(), conf->num_outliers * sizeof(T), stream);
     CONCAT_ON_DEVICE(DST(OUTLIER, conf->num_outliers * sizeof(T)), ibuffer->outlier_indices(), conf->num_outliers * sizeof(uint32_t), stream);
 
+    // // print debugging output for PFPL encoded data
+    // if (conf->codec == CODEC::PFPL) {
+    //   auto h_test_data = MAKE_UNIQUE_HOST(uint8_t, ibuffer->codec_comp_output_len);
+    //   cudaMemcpyAsync(h_test_data.get(), ibuffer->codec_comp_output, 
+    //     ibuffer->codec_comp_output_len * sizeof(uint8_t), cudaMemcpyDeviceToHost, stream);
+    //   cudaStreamSynchronize(stream);
+
+    //   printf("PFPL Encoded Data Analysis:\n");
+    //   printf("Total encoded bytes: %zu\n", ibuffer->codec_comp_output_len);
+      
+    //   long long* const header = (long long*)(h_test_data.get());
+    //   printf("Header - Element count: %lld\n", header[0]);
+    //   printf("Header - Second value: %016llx\n", header[1]);
+
+    //   int chunks = (header[0] + 16384 - 1) / 16384;  // CHUNK_SIZE = 1024*16 = 16384
+    //   unsigned short* const chunk_sizes = (unsigned short*)&header[2];
+    //   printf("First %d chunk sizes: ", std::min(chunks, 10));
+    //   for (int i = 0; i < std::min(chunks, 10); i++) {
+    //     printf("%u ", chunk_sizes[i]);
+    //   }
+    //   printf("\n");
+    // }
+
     // set the output data pointer
     *out_data = ibuffer->compressed();
     conf->comp_size = offsets[END];

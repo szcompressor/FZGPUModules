@@ -42,7 +42,7 @@ Sponsor: This code is based upon work supported by the U.S. Department of Energy
 #include <cassert>
 #include <cuda_runtime.h>
 
-
+#include "mem/cxx_smart_ptr.h"
 #include "sum_reductions.h"
 #include "prefix_sum.h"
 #include "zero_elimination.h"
@@ -148,7 +148,7 @@ static __device__ inline void bitshuffle_x(int& csize, uint8_t in [1024*16], uin
   const int tid = threadIdx.x;
   const int sublane = tid % SWS;
   const int extra = csize % (32 * 32 / 8);
-  const int size = (csize - extra) / 4;
+  const int size = (csize - extra) / 2;
   assert(32 % SWS == 0);
 
   for (int i = tid; i < size; i += 512) {
@@ -341,7 +341,7 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
 
     // decode
     const int osize = min(chunk_size, outsize - base);
-    if (csize < osize) {
+    // if (csize < osize) {
       tmp = in; in = out; out = tmp;
       detail::zero_elimination_x<T>(csize, in, out, temp);
       __syncthreads();
@@ -351,7 +351,7 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
       tmp = in; in = out; out = tmp;
       detail::difference_coding_x<T>(csize, in, out, temp);
       __syncthreads();
-    }
+    // }
 
     long long* const output_l = (long long*)&d_output[base];
     long long* const out_l = (long long*)out;
@@ -371,17 +371,42 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
 
 template <typename T>
 void GPU_PFPL_decode(const uint8_t* d_input, size_t data_len,
-                     T* d_output, size_t* d_archive_len, int blocks, cudaStream_t stream)
+                     T* d_output, int* d_archive_len, int blocks, cudaStream_t stream)
 {
+
+  // DEBUG PRINT
+  printf("GPU_PFPL_decode<%zu> launched with %d blocks on stream %p\n", sizeof(T), blocks, (void*)stream);
+  printf("Input data length: %zu\n", data_len);
+  printf("Output data pointer: %p\n", (void*)d_output);
+  printf("Archive length pointer: %p\n", (void*)d_archive_len);
+
+  auto h_test_data = MAKE_UNIQUE_HOST(uint8_t, data_len);
+  cudaMemcpyAsync(h_test_data.get(), d_input, data_len, cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
+  long long* const header = (long long*)h_test_data.get();
+  printf("Header - Element count: %lld\n", header[0]);
+  printf("Header - Second value: %016llx\n", header[1]);
+  
+  // Print chunk sizes
+  int chunks = (header[0] + 16384 - 1) / 16384;  // CHUNK_SIZE = 1024*16 = 16384
+  unsigned short* const chunk_sizes = (unsigned short*)&header[2];
+  printf("First %d chunk sizes: ", std::min(chunks, 10));
+  for (int i = 0; i < std::min(chunks, 10); i++) {
+      printf("%u ", chunk_sizes[i]);
+  }
+  printf("\n");
+
+  size_t shared_mem_size = 3 * (1024 * 16);
+
   detail::d_reset<<<1, 1, 0, stream>>>();
-  pfpl_decode_kernel<T><<<blocks, 512, 3 * (1024 * 16), stream>>>(d_input, d_output, (int*)d_archive_len);
+  pfpl_decode_kernel<T><<<blocks, 512, shared_mem_size, stream>>>(d_input, d_output, d_archive_len);
 }
 
 template void GPU_PFPL_decode<uint8_t>(const uint8_t* d_input, size_t data_len,
-                                      uint8_t* d_output, size_t* d_archive_len, int blocks, cudaStream_t stream);
+                                      uint8_t* d_output, int* d_archive_len, int blocks, cudaStream_t stream);
 template void GPU_PFPL_decode<uint16_t>(const uint8_t* d_input, size_t data_len,
-                                       uint16_t* d_output, size_t* d_archive_len, int blocks, cudaStream_t stream);
+                                       uint16_t* d_output, int* d_archive_len, int blocks, cudaStream_t stream);
 template void GPU_PFPL_decode<uint32_t>(const uint8_t* d_input, size_t data_len,
-                                       uint32_t* d_output, size_t* d_archive_len, int blocks, cudaStream_t stream);
+                                       uint32_t* d_output, int* d_archive_len, int blocks, cudaStream_t stream);
 
 } // namespace pfpl

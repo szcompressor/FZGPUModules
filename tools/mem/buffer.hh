@@ -78,7 +78,7 @@ class InternalBuffers {
       total_footprint_d += codec_fzg->total_footprint_d();
       total_footprint_h += codec_fzg->total_footprint_h();
     } else if (conf->codec == CODEC::PFPL) {
-      codec_pfpl = new CodecPFPL(conf->len);
+      codec_pfpl = new CodecPFPL(conf->len, is_comp);
       total_footprint_d += codec_pfpl->total_footprint_d();
       total_footprint_h += codec_pfpl->total_footprint_h();
     } else {
