@@ -46,6 +46,7 @@ Sponsor: This code is based upon work supported by the U.S. Department of Energy
 #include "prefix_sum.h"
 #include "zero_elimination.h"
 #include "repetition_elimination.h"
+#include "mem/cxx_smart_ptr.h"
 
 namespace pfpl {
 
@@ -434,6 +435,33 @@ void GPU_PFPL_encode(const T* d_input, size_t num_codes,
       d_input, num_codes, d_archive, d_archive_len, d_fullcarry);
 
   cudaStreamSynchronize(stream);
+
+  // DEBUG PRINTS
+  size_t compressed_size;
+  cudaMemcpyAsync(&compressed_size, d_archive_len, sizeof(size_t), cudaMemcpyDeviceToHost, stream);
+  cudaStreamSynchronize(stream);
+
+  printf("PFPL Encoding completed: %zu input elements, %zu bytes compressed.\n", num_codes, compressed_size);
+  if (compressed_size > 0) {
+      auto h_test_data = MAKE_UNIQUE_HOST(uint8_t, compressed_size);
+      cudaMemcpyAsync(h_test_data.get(), d_archive, compressed_size, cudaMemcpyDeviceToHost, stream);
+      cudaStreamSynchronize(stream);
+      
+      // Print header information
+      long long* const header = (long long*)h_test_data.get();
+      printf("Header - Element count: %lld\n", header[0]);
+      printf("Header - Second value: %016llx\n", header[1]);
+      
+      // Print chunk sizes
+      int chunks = (header[0] + 16384 - 1) / 16384;  // CHUNK_SIZE = 1024*16 = 16384
+      unsigned short* const chunk_sizes = (unsigned short*)&header[2];
+      printf("First %d chunk sizes: ", std::min(chunks, 10));
+      for (int i = 0; i < std::min(chunks, 10); i++) {
+          printf("%u ", chunk_sizes[i]);
+      }
+      printf("\n");
+  }
+
 }
 
 template void GPU_PFPL_encode<uint8_t>(const uint8_t*, size_t, uint8_t*, size_t*, int*, int, cudaStream_t);

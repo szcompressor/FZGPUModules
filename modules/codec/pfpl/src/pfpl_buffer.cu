@@ -5,7 +5,7 @@
 namespace pfpl {
 
 template <typename T>
-void PFPL_Buf<T>::init(size_t data_len) {
+void PFPL_Buf<T>::init(size_t data_len, bool comp) {
   
   int device;
   cudaGetDevice(&device);
@@ -20,15 +20,18 @@ void PFPL_Buf<T>::init(size_t data_len) {
 
   max_archive_bytes = sizeof(T) * data_len * 2;  // Temporary estimate
 
-  CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
-  CHECK_GPU(cudaMalloc(&d_comp_len, sizeof(size_t)));
-
-  CHECK_GPU(cudaMalloc((void**)&d_fullcarry, sizeof(int) * temp_chunks));
+  if (comp) {
+    CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
+    CHECK_GPU(cudaMalloc(&d_comp_len, sizeof(size_t)));
+    CHECK_GPU(cudaMalloc((void**)&d_fullcarry, sizeof(int) * temp_chunks));
+  } else {
+    CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
+  }
 }
 
 template <typename T>
-PFPL_Buf<T>::PFPL_Buf(size_t data_len) {
-  init(data_len);
+PFPL_Buf<T>::PFPL_Buf(size_t data_len, bool comp) {
+  init(data_len, comp);
 }
 
 template <typename T>

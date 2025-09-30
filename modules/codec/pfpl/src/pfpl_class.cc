@@ -9,6 +9,8 @@ namespace pfpl {
 template <typename T>
 void GPU_PFPL_encode(const T*, size_t, uint8_t*, size_t*, int*, int,
                      cudaStream_t);
+template <typename T>
+void GPU_PFPL_decode(const uint8_t*, size_t, T*, size_t*, int, cudaStream_t);
 }
 
 namespace fz {
@@ -38,13 +40,27 @@ struct PFPL_Codec<T>::impl {
     size_t pfpl_comp_len;
     CHECK_GPU(cudaMemcpy(&pfpl_comp_len, buf->d_comp_len, sizeof(size_t), cudaMemcpyDeviceToHost));
     printf("PFPL compressed length retrieved: %zu bytes\n", pfpl_comp_len);
+
+    // align pfpl_comp_len to 8 byte alignment
+    size_t aligned_size = (pfpl_comp_len + 7) & ~7;
+
+    if (aligned_size > pfpl_comp_len) {
+      size_t padding = aligned_size - pfpl_comp_len;
+      cudaMemsetAsync((uint8_t*)(*out_data) + pfpl_comp_len, 0, padding, stream);
+      pfpl_comp_len = aligned_size;
+      printf("PFPL compressed length aligned to %zu bytes with %zu bytes padding\n", aligned_size, padding);
+    }
+
     *out_len = pfpl_comp_len;
 
     printf("PFPL encoded data length: %zu bytes\n", *out_len);
   }
 
   void decode(uint8_t* in_data, T* out_data, size_t data_len, cudaStream_t stream) {
-    throw std::runtime_error("PFPL codec is not implemented yet");
+    pfpl::GPU_PFPL_decode<T>(in_data, data_len, out_data,
+                             (size_t*)buf->d_comp_len, buf->blocks, stream);
+    
+    printf("PFPL decoding completed for %zu codes.\n", data_len);
   }
 };
 

@@ -76,7 +76,6 @@ struct Decompressor {
       throw std::runtime_error("Unsupported secondary codec type");
     }
 
-
     // static const int HEADER = 0;
     static const int ANCHOR = 1;
     static const int ENCODED = 2;
@@ -93,7 +92,8 @@ struct Decompressor {
 
     if (conf->num_outliers != 0) {
       float ms = 0;
-      fz::spv_scatter_naive<T, uint32_t>(d_out_vals, d_out_idx, conf->num_outliers, out_data, &ms, stream);
+      fz::spv_scatter_naive<T, uint32_t>(d_out_vals, d_out_idx, 
+        conf->num_outliers, out_data, &ms, stream);
       metrics->scatter_time = ms;
     }
 
@@ -105,6 +105,8 @@ struct Decompressor {
       huffman((uint8_t*)access(ENCODED), stream);
     } else if (conf->codec == CODEC::FZG) {
       fzg((uint8_t*)access(ENCODED), stream);
+    } else if (conf->codec == CODEC::PFPL) {
+      pfpl((uint8_t*)access(ENCODED), stream);
     } else {
       throw std::runtime_error("Unsupported codec type");
     }
@@ -192,6 +194,31 @@ struct Decompressor {
   void fzg(uint8_t* encoded, cudaStream_t stream) {
     ibuffer->codec_fzg->decode(encoded, ibuffer->codes(), conf->len, stream);
   } // end fzg
+
+  void pfpl(uint8_t* encoded, cudaStream_t stream) {
+    auto err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      printf("PFPL decode kernel error (before): %s\n", cudaGetErrorString(err));
+    }
+
+    ibuffer->codec_pfpl->decode(encoded, ibuffer->codes(), conf->len, stream);
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      printf("PFPL decode kernel error (after): %s\n", cudaGetErrorString(err));
+    }
+
+    // print out first 100 codes for debugging
+    auto h_codes = GPU_make_unique(malloc_host<uint16_t>(conf->len), GPU_deleter_host());
+    cudaMemcpyAsync(h_codes.get(), ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    printf("First 1000 PFPL codes:\n");
+    for (size_t i = 0; i < std::min(size_t(1000), conf->len); i++) {
+      if (i % 50 == 0) printf("\n");
+      printf("%u ", h_codes.get()[i]);
+    }
+    printf("\n");
+  } // end pfpl
 
   // ~~~~~~~~~~~~~~~~~~~~~~~ PREDICTOR FUNCTIONS ~~~~~~~~~~~~~~~~~~~~~~~ //
 

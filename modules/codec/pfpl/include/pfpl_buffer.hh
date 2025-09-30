@@ -6,10 +6,10 @@ namespace pfpl {
 
 template <typename T>
 struct PFPL_Buf {
-  PFPL_Buf(size_t data_len);
+  PFPL_Buf(size_t data_len, bool comp = true);
   ~PFPL_Buf();
 
-  void init(size_t data_len);
+  void init(size_t data_len, bool comp = true);
   void clear_buffer();
 
   const int chunk_size = 1024 * 16;

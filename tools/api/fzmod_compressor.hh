@@ -374,6 +374,17 @@ struct Compressor {
 
   void pfpl(cudaStream_t stream) {
 
+    // print first 100 quant codes for debugging
+    auto h_codes_owner = MAKE_UNIQUE_HOST(uint16_t, conf->len);
+    uint16_t* h_codes = h_codes_owner.get();
+    cudaMemcpy(h_codes, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
+    printf("First 1000 quant codes before PFPL: ");
+    for (size_t i = 0; i < std::min<size_t>(1000, conf->len); i++) {
+      if (i % 50 == 0) printf("\n");
+      printf("%hu ", h_codes[i]);
+    }
+    printf("\n");
+
     const int num_codes = conf->len - conf->num_outliers;
 
     // set PFPL kernel launch parameters
@@ -384,6 +395,11 @@ struct Compressor {
       &ibuffer->codec_comp_output_len, stream);
 
     printf("PFPL finished... Compressed size: %zu bytes\n", ibuffer->codec_comp_output_len);
+
+    auto err = cudaGetLastError();
+    if (err != cudaSuccess) {
+      printf("PFPL decode kernel error: %s\n", cudaGetErrorString(err));
+    }
   }
 
   // ################ CODEC 2 FUNCTIONS ################ //
