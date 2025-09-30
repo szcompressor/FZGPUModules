@@ -83,68 +83,43 @@ static __device__ inline bool diff_coding_nb(int& csize, uint8_t in [1024*16], u
   return true;
 }  
 
+#define swp(x, y, s, m) t = ((x) ^ ((y) >> (s))) & (m);  (x) ^= t;  (y) ^= t << (s);
+
 static __device__ inline bool bitshuffle_2byte(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16])
 {
-  // const int WS = 32;
-  // const int TPB = 512;
-  const int SWS = 32;  // sub-warp size
-  unsigned short* const in_s = (unsigned short*)in;
-  unsigned short* const out_s = (unsigned short*)out;
-  const int tid = threadIdx.x;
-  const int sublane = tid % SWS;
-  const int extra = csize % (32 * 32 / 8);
+  const int extra = csize % (16 * 16 / 8);
   const int size = (csize - extra) / 2;
-  assert(WS % SWS == 0);
+  const int tid = threadIdx.x;
+  unsigned long long* const in_l = (unsigned long long*)in;
+  unsigned short* const out_s = (unsigned short*)out;
 
-  for (int i = tid; i < size; i += TPB) {
-    unsigned short a = in_s[i];
-    
-    // Exchange with thread 16 lanes away
-    unsigned short q = __shfl_xor_sync(0xFFFFFFFF, a, 16);
-    unsigned short mask = 0x00FF;
-    if ((sublane & 16) == 0) {
-      a = (a & ~mask) | ((q >> 8) & mask);
-    } else {
-      a = (a & mask) | ((q << 8) & ~mask);
+  for (int pos = 16 * tid; pos < size; pos += 16 * 512) {
+    unsigned long long t, *a = &in_l[pos / 4];  // process 4 shorts in 1 long long
+
+    for (int i = 0; i < 2; i++) {
+      swp(a[i], a[i + 2], 8, 0x00FF00FF00FF00FFULL);
     }
 
-    // Exchange with thread 8 lanes away
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 8);
-    mask = 0x0F0F;
-    if ((sublane & 8) == 0) {
-      a = (a & ~mask) | ((q >> 4) & mask);
-    } else {
-      a = (a & mask) | ((q << 4) & ~mask);
+    for (int j = 0; j < 4; j += 2) {
+      swp(a[j], a[j + 1], 4, 0x0F0F0F0F0F0F0F0FULL);
     }
 
-    // Exchange with thread 4 lanes away
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 4);
-    mask = 0x3333;
-    if ((sublane & 4) == 0) {
-      a = (a & ~mask) | ((q >> 2) & mask);
-    } else {
-      a = (a & mask) | ((q << 2) & ~mask);
+    for (int j = 0; j < 4; j++) {
+      const unsigned long long m = 0x33333333CCCCCCCCULL;
+      const unsigned long long vnm = a[j] & ~m;
+      a[j] = (a[j] & m) | (vnm >> 34) | (vnm << 34);
     }
 
-    // Exchange with thread 2 lanes away
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 2);
-    mask = 0x5555;
-    if ((sublane & 2) == 0) {
-      a = (a & ~mask) | ((q >> 1) & mask);
-    } else {
-      a = (a & mask) | ((q << 1) & ~mask);
+    for (int j = 0; j < 4; j++) {
+      const unsigned long long m = 0x5555AAAA5555AAAAULL;
+      const unsigned long long m1 = 0xFFFF0000FFFF0000ULL;
+      const unsigned long long vnm = a[j] & ~m;
+      const unsigned long long res = (a[j] & m) | ((vnm & m1) >> 17) | ((vnm & ~m1) << 17);
+      out_s[pos / 16 + (j * 4) * (size / 16)] = res;
+      out_s[pos / 16 + (j * 4 + 1) * (size / 16)] = res >> 16;
+      out_s[pos / 16 + (j * 4 + 2) * (size / 16)] = res >> 32;
+      out_s[pos / 16 + (j * 4 + 3) * (size / 16)] = res >> 48;
     }
-
-    // Exchange with thread 1 lane away
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 1);
-    mask = 0xAAAA;
-    if ((sublane & 1) == 0) {
-      a = (a & ~mask) | ((q >> 1) & mask);
-    } else {
-      a = (a & mask) | ((q << 1) & ~mask);
-    }
-
-    out_s[i / 32 + sublane * (size / 32)] = a;
   }
 
   // copy leftover bytes

@@ -142,49 +142,39 @@ static __device__ inline void zero_elimination_x(int& csize, uint8_t in [1024*16
 
 static __device__ inline void bitshuffle_x(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16])
 {
-  const int SWS = 32;  // sub-warp size
-  int* const in_w = (int*)in;
-  int* const out_w = (int*)out;
-  const int tid = threadIdx.x;
-  const int sublane = tid % SWS;
-  const int extra = csize % (32 * 32 / 8);
+  const int extra = csize % (16 * 16 / 8);
   const int size = (csize - extra) / 2;
-  assert(32 % SWS == 0);
+  const int tid = threadIdx.x;
+  unsigned short* const in_s = (unsigned short*)in;
+  unsigned long long* const out_l = (unsigned long long*)out;
 
-  for (int i = tid; i < size; i += 512) {
-    unsigned int a = in_w[i / 32 + sublane * (size / 32)];
+  for (int pos = 16 * tid; pos < size; pos += 16 * 512) {
+    unsigned long long t, *a = &out_l[pos / 4];  // process 4 shorts in 1 long long
 
-    unsigned int q = __shfl_xor_sync(0xFFFFFFFF, a, 16);
-    a = ((sublane & 16) == 0) ? __byte_perm(a, q, (3 << 12) | (2 << 8) | (7 << 4) | 6) : __byte_perm(a, q, (5 << 12) | (4 << 8) | (1 << 4) | 0);
-
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 8);
-    a = ((sublane & 8) == 0) ? __byte_perm(a, q, (3 << 12) | (7 << 8) | (1 << 4) | 5) : __byte_perm(a, q, (6 << 12) | (2 << 8) | (4 << 4) | 0);
-
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 4);
-    unsigned int mask = 0x0F0F0F0F;
-    if ((sublane & 4) == 0) {
-      a = (a & ~mask) | ((q >> 4) & mask);
-    } else {
-      a = (a & mask) | ((q << 4) & ~mask);
+    for (int i = 0; i < 4; i++) {
+      a[i] = in_s[pos / 16 + (i * 4) * (size / 16)] | ((unsigned long long)in_s[pos / 16 + (i * 4 + 1) * (size / 16)] << 16) | ((unsigned long long)in_s[pos / 16 + (i * 4 + 2) * (size / 16)] << 32) | ((unsigned long long)in_s[pos / 16 + (i * 4 + 3) * (size / 16)] << 48);
     }
 
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 2);
-    mask = 0x33333333;
-    if ((sublane & 2) == 0) {
-      a = (a & ~mask) | ((q >> 2) & mask);
-    } else {
-      a = (a & mask) | ((q << 2) & ~mask);
+    for (int i = 0; i < 2; i++) {
+      swp(a[i], a[i + 2], 8, 0x00FF00FF00FF00FFULL);
     }
 
-    q = __shfl_xor_sync(0xFFFFFFFF, a, 1);
-    mask = 0x55555555;
-    if ((sublane & 1) == 0) {
-      a = (a & ~mask) | ((q >> 1) & mask);
-    } else {
-      a = (a & mask) | ((q << 1) & ~mask);
+    for (int j = 0; j < 4; j += 2) {
+      swp(a[j], a[j + 1], 4, 0x0F0F0F0F0F0F0F0FULL);
     }
 
-    out_w[i] = a;
+    for (int j = 0; j < 4; j++) {
+      const unsigned long long m = 0x33333333CCCCCCCCULL;
+      const unsigned long long vnm = a[j] & ~m;
+      a[j] = (a[j] & m) | (vnm >> 34) | (vnm << 34);
+    }
+
+    for (int j = 0; j < 4; j++) {
+      const unsigned long long m = 0x5555AAAA5555AAAAULL;
+      const unsigned long long m1 = 0xFFFF0000FFFF0000ULL;
+      const unsigned long long vnm = a[j] & ~m;
+      a[j] = (a[j] & m) | ((vnm & m1) >> 17) | ((vnm & ~m1) << 17);
+    }
   }
 
   // copy leftover bytes
