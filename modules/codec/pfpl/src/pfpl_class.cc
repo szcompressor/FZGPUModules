@@ -105,9 +105,12 @@ size_t PFPL_Codec<T>::total_footprint_h() {
 
 template <typename T>
 void PFPL_Codec<T>::set_kernel_params(int len) {
-  pimpl->buf->chunks = (len + pimpl->buf->chunk_size - 1) / pimpl->buf->chunk_size;
+  pimpl->buf->chunks = ((len * sizeof(T)) + pimpl->buf->chunk_size - 1) / pimpl->buf->chunk_size;
   pimpl->buf->max_size = 3 * sizeof(int) + pimpl->buf->chunks * sizeof(short) + pimpl->buf->chunks * pimpl->buf->chunk_size;
   pimpl->buf->num_codes = len;
+
+  printf("PFPL set kernel params: num_codes=%d, chunks=%d, max_size=%zu bytes\n",
+         pimpl->buf->num_codes, pimpl->buf->chunks, pimpl->buf->max_size);
 }
 
 template class PFPL_Codec<uint8_t>;

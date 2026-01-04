@@ -48,9 +48,13 @@ Sponsor: This code is based upon work supported by the U.S. Department of Energy
 #include "zero_elimination.h"
 #include "repetition_elimination.h"
 
+#define swp(x, y, s, m) t = ((x) ^ ((y) >> (s))) & (m);  (x) ^= t;  (y) ^= t << (s);
+
 namespace pfpl {
 
 namespace detail {
+
+__device__ unsigned short g_bs_tail_decoded[32]; //! DEBUG
 
 static __device__ int g_chunk_counter;
 
@@ -60,7 +64,7 @@ static __global__ void d_reset()
 }
 
 template <typename T>
-static __device__ inline void zero_elimination_x(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16])
+static __device__ inline void zero_elimination_x(int& csize, uint8_t in [CS], uint8_t out [CS], uint8_t temp [CS])
 {
   const int tid = threadIdx.x;
   int rpos = csize;
@@ -140,7 +144,7 @@ static __device__ inline void zero_elimination_x(int& csize, uint8_t in [1024*16
   }
 }
 
-static __device__ inline void bitshuffle_x(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16])
+static __device__ inline void bitshuffle_x(int& csize, uint8_t in [CS], uint8_t out [CS], uint8_t temp [CS])
 {
   const int extra = csize % (16 * 16 / 8);
   const int size = (csize - extra) / 2;
@@ -178,7 +182,29 @@ static __device__ inline void bitshuffle_x(int& csize, uint8_t in [1024*16], uin
   }
 
   // copy leftover bytes
-  if (tid < extra) out[csize - extra + tid] = in[csize - extra + tid];
+  // if (tid < extra) out[csize - extra + tid] = in[csize - extra + tid];
+  if (extra > 0) {
+    const int tail_offset = csize - extra;
+    const int extra_words = extra / static_cast<int>(sizeof(unsigned short));
+    unsigned short* const tail_in =
+        reinterpret_cast<unsigned short*>(&in[tail_offset]);
+    unsigned short* const tail_out =
+        reinterpret_cast<unsigned short*>(&out[tail_offset]);
+    if (tid < extra_words) {
+      tail_out[tid] = tail_in[tid];
+    }
+    if ((extra & 1) && tid == 0) {
+      out[csize - 1] = in[csize - 1];
+    }
+  }
+
+  if (threadIdx.x == 0) { //! DEBUG
+    const unsigned short* const out_tail = reinterpret_cast<const unsigned short*>(out);
+    const int tail = min(size, 32);
+    for (int i = 0; i < tail; ++i) {
+      g_bs_tail_decoded[i] = out_tail[size - tail + i];
+    }
+  }
 }
 
 template <typename T>
@@ -287,10 +313,11 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
 
   // input header
   long long* const head_in = (long long*)d_input;
-  const int outsize = (int)head_in[0];
+  const size_t element_count = static_cast<size_t>(head_in[0]);
+  const size_t total_bytes = element_count * sizeof(T);
   
   // init
-  const int chunks = (outsize + chunk_size - 1) / chunk_size;
+  const int chunks = (total_bytes + chunk_size - 1) / chunk_size;
   unsigned short* const size_in = (unsigned short*)&head_in[2];
   uint8_t* const data_in = (uint8_t*)&size_in[chunks];
 
@@ -306,8 +333,8 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
 
     // terminate if done
     const int chunkID = (int)chunk[last];
-    const int base = chunkID * chunk_size;
-    if (base >= outsize) break;
+    const size_t base = static_cast<size_t>(chunkID) * chunk_size;
+    if (base >= total_bytes) break;
 
     // compute sum of all prior csizes (start where left off in previous iteration)
     int sum = 0;
@@ -330,10 +357,12 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
     __syncthreads();
 
     // decode
-    const int osize = min(chunk_size, outsize - base);
+    const int osize = min(chunk_size, static_cast<int>(total_bytes - base));
     // if (csize < osize) {
       tmp = in; in = out; out = tmp;
+      // int original_csize = csize;
       detail::zero_elimination_x<T>(csize, in, out, temp);
+      // if (tid == 0) printf("Chunk %d: Header size=%d, Internal size=%d\n", chunkID, original_csize, csize);
       __syncthreads();
       tmp = in; in = out; out = tmp;
       detail::bitshuffle_x(csize, in, out, temp);
@@ -343,17 +372,18 @@ __global__ void pfpl_decode_kernel(const uint8_t* const __restrict__ d_input,
       __syncthreads();
     // }
 
-    long long* const output_l = (long long*)&d_output[base];
+    uint8_t* const output_bytes = reinterpret_cast<uint8_t*>(d_output) + base;
+    long long* const output_l = reinterpret_cast<long long*>(output_bytes);
     long long* const out_l = (long long*)out;
     for (int i = tid; i < osize / 8; i += 512) {
       output_l[i] = out_l[i];
     }
     const int extra = osize % 8;
-    if (tid < extra) d_output[base + osize - extra + tid] = out[osize - extra + tid];
+    if (tid < extra) output_bytes[osize - extra + tid] = out[osize - extra + tid];
   } while (true);
 
   if (blockIdx.x == 0 && tid == 0) {
-    *d_archive_len = outsize;
+    *d_archive_len = element_count;
   }
 }
 
@@ -374,22 +404,40 @@ void GPU_PFPL_decode(const uint8_t* d_input, size_t data_len,
   cudaMemcpyAsync(h_test_data.get(), d_input, data_len, cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
   long long* const header = (long long*)h_test_data.get();
+  const long long num_codes = header[0];
   printf("Header - Element count: %lld\n", header[0]);
   printf("Header - Second value: %016llx\n", header[1]);
   
   // Print chunk sizes
-  int chunks = (header[0] + 16384 - 1) / 16384;  // CHUNK_SIZE = 1024*16 = 16384
+  const size_t chunk_elems = (1024 * 16) / sizeof(T);
+  int chunks = (header[0] + chunk_elems - 1) / chunk_elems;  // CHUNK_SIZE = 1024*16 = 16384
+  printf("Total chunks: %d\n", chunks);
   unsigned short* const chunk_sizes = (unsigned short*)&header[2];
-  printf("First %d chunk sizes: ", std::min(chunks, 10));
-  for (int i = 0; i < std::min(chunks, 10); i++) {
+  printf("First %d chunk sizes: ", chunks);
+  for (int i = 0; i < chunks; i++) {
       printf("%u ", chunk_sizes[i]);
   }
   printf("\n");
 
-  size_t shared_mem_size = 3 * (1024 * 16);
-
   detail::d_reset<<<1, 1, 0, stream>>>();
-  pfpl_decode_kernel<T><<<blocks, 512, shared_mem_size, stream>>>(d_input, d_output, d_archive_len);
+  pfpl_decode_kernel<T><<<blocks, 512, 0, stream>>>(d_input, d_output, d_archive_len);
+
+  cudaStreamSynchronize(stream);
+
+  // Add after the PFPL decode call
+  auto h_chunks_processed = GPU_make_unique(malloc_host<int>(1), GPU_deleter_host());
+  cudaMemcpyFromSymbol(h_chunks_processed.get(), pfpl::detail::g_chunk_counter, sizeof(int), 0, cudaMemcpyDeviceToHost);
+  printf("PFPL chunks processed: %d\n", *h_chunks_processed.get());
+
+  // Also check the total chunks expected
+  int expected_chunks = ((num_codes) + chunk_elems - 1) / chunk_elems;  // Ceiling division
+  printf("Expected chunks based on num_codes (%zu): %d\n", num_codes, expected_chunks);
+
+  unsigned short h_bs_dec[32];
+  cudaMemcpyFromSymbol(h_bs_dec, detail::g_bs_tail_decoded,sizeof(h_bs_dec));
+  printf("\nDecode tail:\n");
+  for (int i = 0; i < 32; ++i) printf("%u ", h_bs_dec[i]);
+  printf("\n");
 }
 
 template void GPU_PFPL_decode<uint8_t>(const uint8_t* d_input, size_t data_len,

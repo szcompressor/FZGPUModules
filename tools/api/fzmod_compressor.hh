@@ -120,16 +120,58 @@ struct Compressor {
       printf("Dumped prediction data to %s\n", pred_dump_fname.c_str());
     }
 
-    // // print first 100 quant codes for debugging
-    // auto h_codes_owner = MAKE_UNIQUE_HOST(uint16_t, conf->len);
-    // uint16_t* h_codes = h_codes_owner.get();
-    // cudaMemcpy(h_codes, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
-    // printf("First 100 quant codes: ");
-    // for (size_t i = 0; i < std::min<size_t>(1000, conf->len); i++) {
-    //   if (i % 50 == 0) printf("\n");
-    //   printf("%hu ", h_codes[i]);
+    auto h_codes =
+        GPU_make_unique(malloc_host<uint16_t>(conf->len), GPU_deleter_host());
+    cudaMemcpyAsync(h_codes.get(), ibuffer->codes(),
+                    conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost,
+                    stream);
+    cudaStreamSynchronize(stream);
+
+    // printf("Nonzero PFPL quantization codes:\n");
+    // size_t printed = 0;
+    // for (size_t i = 0; i < conf->len && printed < 20000; i++) {
+    //   if (printed % 24 == 0 && printed != 0) printf("\n");
+    //   if (printed % (16384/2) == 0 && printed != 0) printf("\n--- next 16KB chunk ---\n");
+    //   printf("%u ", h_codes.get()[i]);
+    //   printed++;
     // }
     // printf("\n");
+
+    // print first and last 100 values of each 16KB chunk of quant codes
+    if (conf->verbose) {
+      size_t chunk_size = 16384 / sizeof(uint16_t); // 16KB
+      size_t num_chunks = (conf->len + chunk_size - 1) / chunk_size;
+      for (size_t c = 740; c < num_chunks; c++) {
+        size_t start_idx = c * chunk_size;
+        size_t end_idx = std::min(start_idx + chunk_size, conf->len);
+        printf("Chunk %zu:\n", c);
+        printf("  First 100 codes: ");
+        for (size_t i = start_idx; i < std::min(start_idx + 100, end_idx); i++) {
+          if (i % 25 == 0 && i != start_idx) printf("\n");
+          printf("%u ", h_codes.get()[i]);
+        }
+        printf("\n");
+        printf("  Last 100 codes: ");
+        for (size_t i = (end_idx > 100 ? end_idx - 100 : start_idx); i < end_idx; i++) {
+          if (i % 25 == 0 && i != end_idx) printf("\n");
+          printf("%u ", h_codes.get()[i]);
+        }
+        printf("\n");
+      }
+    }
+
+    // print first 100 values of raw input data (fp32)
+    // if (conf->verbose) {
+    //   auto h_input = GPU_make_unique(malloc_host<T>(conf->len), GPU_deleter_host());
+    //   cudaMemcpyAsync(h_input.get(), in_data, conf->len * sizeof(T),
+    //                   cudaMemcpyDeviceToHost, stream);
+    //   cudaStreamSynchronize(stream);
+    //   printf("First 100 values of input data:\n");
+    //   for (size_t i = 0; i < conf->len && i < 100; i++) {
+    //     printf("%f ", static_cast<double>(h_input.get()[i]));
+    //   }
+    //   printf("\n");
+    // }
 
     //~~~~~~~~~~~~~~~~~~~~~~~~~ Lossless Encoder 1 ~~~~~~~~~~~~~~~~~~~~~~~~~~ //
 
@@ -201,29 +243,6 @@ struct Compressor {
     CONCAT_ON_DEVICE(DST(ENCODED, 0), ibuffer->codec_comp_output, nbyte[ENCODED], stream);
     CONCAT_ON_DEVICE(DST(OUTLIER, 0), ibuffer->outlier_values(), conf->num_outliers * sizeof(T), stream);
     CONCAT_ON_DEVICE(DST(OUTLIER, conf->num_outliers * sizeof(T)), ibuffer->outlier_indices(), conf->num_outliers * sizeof(uint32_t), stream);
-
-    // // print debugging output for PFPL encoded data
-    // if (conf->codec == CODEC::PFPL) {
-    //   auto h_test_data = MAKE_UNIQUE_HOST(uint8_t, ibuffer->codec_comp_output_len);
-    //   cudaMemcpyAsync(h_test_data.get(), ibuffer->codec_comp_output, 
-    //     ibuffer->codec_comp_output_len * sizeof(uint8_t), cudaMemcpyDeviceToHost, stream);
-    //   cudaStreamSynchronize(stream);
-
-    //   printf("PFPL Encoded Data Analysis:\n");
-    //   printf("Total encoded bytes: %zu\n", ibuffer->codec_comp_output_len);
-      
-    //   long long* const header = (long long*)(h_test_data.get());
-    //   printf("Header - Element count: %lld\n", header[0]);
-    //   printf("Header - Second value: %016llx\n", header[1]);
-
-    //   int chunks = (header[0] + 16384 - 1) / 16384;  // CHUNK_SIZE = 1024*16 = 16384
-    //   unsigned short* const chunk_sizes = (unsigned short*)&header[2];
-    //   printf("First %d chunk sizes: ", std::min(chunks, 10));
-    //   for (int i = 0; i < std::min(chunks, 10); i++) {
-    //     printf("%u ", chunk_sizes[i]);
-    //   }
-    //   printf("\n");
-    // }
 
     // set the output data pointer
     *out_data = ibuffer->compressed();
@@ -396,17 +415,6 @@ struct Compressor {
   } // end fzg
 
   void pfpl(cudaStream_t stream) {
-
-    // print first 100 quant codes for debugging
-    auto h_codes_owner = MAKE_UNIQUE_HOST(uint16_t, conf->len);
-    uint16_t* h_codes = h_codes_owner.get();
-    cudaMemcpy(h_codes, ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost);
-    printf("First 1000 quant codes before PFPL: ");
-    for (size_t i = 0; i < std::min<size_t>(1000, conf->len); i++) {
-      if (i % 50 == 0) printf("\n");
-      printf("%hu ", h_codes[i]);
-    }
-    printf("\n");
 
     const int num_codes = conf->len - conf->num_outliers;
 

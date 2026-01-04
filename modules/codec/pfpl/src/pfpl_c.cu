@@ -48,9 +48,14 @@ Sponsor: This code is based upon work supported by the U.S. Department of Energy
 #include "repetition_elimination.h"
 #include "mem/cxx_smart_ptr.h"
 
+#define swp(x, y, s, m) t = ((x) ^ ((y) >> (s))) & (m);  (x) ^= t;  (y) ^= t << (s);
+
 namespace pfpl {
 
 namespace detail {
+
+__device__ unsigned short g_bs_tail_in[32]; //! DEBUG
+__device__ unsigned short g_bs_tail_out[32]; //! DEBUG
 
 static __device__ int g_chunk_counter;
 
@@ -60,7 +65,7 @@ static __global__ void d_reset()
 }
 
 template <typename T>
-static __device__ inline bool diff_coding_nb(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16]) 
+static __device__ inline bool diff_coding_nb(int& csize, uint8_t in [CS], uint8_t out [CS], uint8_t temp [CS]) 
 {
   const T s = (T)0xAAAAAAAAAAAAAAAAULL;
   T* const in_t = (T*)in;
@@ -83,9 +88,7 @@ static __device__ inline bool diff_coding_nb(int& csize, uint8_t in [1024*16], u
   return true;
 }  
 
-#define swp(x, y, s, m) t = ((x) ^ ((y) >> (s))) & (m);  (x) ^= t;  (y) ^= t << (s);
-
-static __device__ inline bool bitshuffle_2byte(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16])
+static __device__ inline bool bitshuffle_2byte(int& csize, uint8_t in [CS], uint8_t out [CS], uint8_t temp [CS])
 {
   const int extra = csize % (16 * 16 / 8);
   const int size = (csize - extra) / 2;
@@ -123,12 +126,35 @@ static __device__ inline bool bitshuffle_2byte(int& csize, uint8_t in [1024*16],
   }
 
   // copy leftover bytes
-  if (tid < extra) out[csize - extra + tid] = in[csize - extra + tid];
+  // if (tid < extra) out[csize - extra + tid] = in[csize - extra + tid];
+  if (extra > 0) {
+    const int tail_offset = csize - extra;
+    const int extra_words = extra / static_cast<int>(sizeof(unsigned short));
+    const unsigned short* const tail_in =
+        reinterpret_cast<const unsigned short*>(&in[tail_offset]);
+    unsigned short* const tail_out =
+        reinterpret_cast<unsigned short*>(&out[tail_offset]);
+    if (tid < extra_words) {
+      tail_out[tid] = tail_in[tid];
+    }
+    if ((extra & 1) && tid == 0) {
+      out[csize - 1] = in[csize - 1];
+    }
+  }
+  if (threadIdx.x == 0) { //! DEBUG
+    const unsigned short* const in_tail = reinterpret_cast<const unsigned short*>(in);
+    const unsigned short* const out_tail = reinterpret_cast<const unsigned short*>(out);
+    const int tail = min(size, 32);
+    for (int i = 0; i < tail; ++i) {
+      g_bs_tail_in[i]  = in_tail[size - tail + i];
+      g_bs_tail_out[i] = out_tail[size - tail + i];
+    }
+  }
   return true;
 }
 
 template <typename T>
-static __device__ inline bool zero_removal(int& csize, uint8_t in [1024*16], uint8_t out [1024*16], uint8_t temp [1024*16])
+static __device__ inline bool zero_removal(int& csize, uint8_t in [CS], uint8_t out [CS], uint8_t temp [CS])
 {
   const int tid = threadIdx.x;
   const int size = csize / sizeof(T);
@@ -140,7 +166,7 @@ static __device__ inline bool zero_removal(int& csize, uint8_t in [1024*16], uin
   int* const temp_w = (int*)temp;
   uint8_t* const bitmap = (uint8_t*)&temp_w[32 + 1];
   if (csize < (1024 * 16)) {
-    for (int i = csize / bits + tid; i < (1024*16) / bits; i += 512) {
+    for (int i = csize / bits + tid; i < (CS) / bits; i += 512) {
       bitmap[i] = 0;
     }
     __syncthreads();
@@ -293,12 +319,13 @@ static inline __device__ void s2g(void* const __restrict__ destination,
 template <typename T>
 __global__ void pfpl_encode_kernel(
     const T* __restrict__ d_input, 
-    size_t num_codes,
+    size_t const num_codes,
     uint8_t* __restrict__ d_archive,
     size_t* const __restrict__ d_archive_len,
     int* const __restrict__ fullcarry)
 {
   const int CHUNK_SIZE = 1024 * 16;
+  const size_t total_bytes = static_cast<size_t>(num_codes) * sizeof(T);
   
   // shared mem buffer
   __shared__ long long chunk [3 * (CHUNK_SIZE / sizeof(long long))];
@@ -311,7 +338,7 @@ __global__ void pfpl_encode_kernel(
   // init
   const int tid = threadIdx.x;
   const int last = 3 * (CHUNK_SIZE / sizeof(long long)) - 2 - 32;
-  const int chunks = (num_codes + CHUNK_SIZE - 1) / CHUNK_SIZE;
+  const int chunks = (total_bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
   long long* const head_out = (long long*)d_archive;
   unsigned short* const size_out = (unsigned short*)&head_out[2];
   uint8_t* const data_out = (uint8_t*)&size_out[chunks];
@@ -324,18 +351,19 @@ __global__ void pfpl_encode_kernel(
 
     // check if done
     const int chunkID = chunk[last];
-    const int base = chunkID * CHUNK_SIZE;
-    if (base >= num_codes) break;
+    const size_t base = static_cast<size_t>(chunkID) * CHUNK_SIZE;
+    if (base >= total_bytes) break;
 
     // load input chunk
-    const int osize = min(CHUNK_SIZE, static_cast<int>(num_codes - base));
-    long long* const input_l = (long long*)&d_input[base];
+    const int osize = min(CHUNK_SIZE, static_cast<int>(total_bytes - base));
+    const uint8_t* const chunk_src = reinterpret_cast<const uint8_t*>(d_input) + base;
+    const long long* const input_l = reinterpret_cast<const long long*>(chunk_src);
     long long* const out_l = (long long*)out;
     for (int i = tid; i < osize / 8; i += 512) {
       out_l[i] = input_l[i];
     }
     const int extra = osize % 8;
-    if (tid < extra) out[osize - extra + tid] = ((uint8_t*)d_input)[base + osize - extra + tid];
+    if (tid < extra) out[osize - extra + tid] = chunk_src[osize - extra + tid];
     __syncthreads();
 
     // encode chunk
@@ -371,7 +399,8 @@ __global__ void pfpl_encode_kernel(
         out_l[i] = input_l[i];
       }
       const int extra = osize % 8;
-      if (tid < extra) out[osize - extra + tid] = ((uint8_t*)d_input)[base + osize - extra + tid];
+      // chunk_src = reinterpret_cast<const uint8_t*>(d_input);
+      if (tid < extra) out[osize - extra + tid] = chunk_src[osize - extra + tid];
     }
     __syncthreads();
 
@@ -380,7 +409,7 @@ __global__ void pfpl_encode_kernel(
     detail::s2g(&data_out[offs], out, csize);
 
     // finalize if last chunk
-    if ((tid == 0) && (base + (CHUNK_SIZE) >= num_codes)) {
+    if ((tid == 0) && (base + static_cast<size_t>(CHUNK_SIZE) >= total_bytes)) {
       head_out[0] = (long long)num_codes;
       *d_archive_len = &data_out[fullcarry[chunkID]] - d_archive;
     }
@@ -411,10 +440,27 @@ void GPU_PFPL_encode(const T* d_input, size_t num_codes,
 
   cudaStreamSynchronize(stream);
 
+  unsigned short h_bs_in[32], h_bs_out[32];
+  cudaMemcpyFromSymbol(h_bs_in,  detail::g_bs_tail_in,     sizeof(h_bs_in));
+  cudaMemcpyFromSymbol(h_bs_out, detail::g_bs_tail_out,    sizeof(h_bs_out));
+  printf("Encode tail in/out:\n");
+  for (int i = 0; i < 32; ++i) printf("%u/%u ", h_bs_in[i], h_bs_out[i]);
+  printf("\n");
+
+  // Add after the PFPL decode call
+  auto h_chunks_processed = GPU_make_unique(malloc_host<int>(1), GPU_deleter_host());
+  cudaMemcpyFromSymbol(h_chunks_processed.get(), pfpl::detail::g_chunk_counter, sizeof(int), 0, cudaMemcpyDeviceToHost);
+  printf("PFPL chunks processed: %d\n", *h_chunks_processed.get());
+
+  // Also check the total chunks expected
+  constexpr size_t chunk_bytes = 1024 * 16;
+  const size_t chunk_elems = chunk_bytes / sizeof(T);
+  int expected_chunks = static_cast<int>((num_codes + chunk_elems - 1) / chunk_elems);
+  printf("Expected chunks based on num_codes (%zu): %d\n", num_codes, expected_chunks);
+
   // DEBUG PRINTS
   printf("PFPL num blocks: %d\n", blocks);
   
-
   size_t compressed_size;
   cudaMemcpyAsync(&compressed_size, d_archive_len, sizeof(size_t), cudaMemcpyDeviceToHost, stream);
   cudaStreamSynchronize(stream);
@@ -426,15 +472,18 @@ void GPU_PFPL_encode(const T* d_input, size_t num_codes,
       cudaStreamSynchronize(stream);
       
       // Print header information
-      long long* const header = (long long*)h_test_data.get();
+      const long long* const header = reinterpret_cast<long long*>(h_test_data.get());
+      const size_t elem_count = static_cast<size_t>(header[0]);
+      const size_t total_bytes = elem_count * sizeof(T);
       printf("Header - Element count: %lld\n", header[0]);
       printf("Header - Second value: %016llx\n", header[1]);
       
       // Print chunk sizes
-      int chunks = (header[0] + 16384 - 1) / 16384;  // CHUNK_SIZE = 1024*16 = 16384
-      unsigned short* const chunk_sizes = (unsigned short*)&header[2];
-      printf("First %d chunk sizes: ", std::min(chunks, 10));
-      for (int i = 0; i < std::min(chunks, 10); i++) {
+      const int chunks = static_cast<int>((total_bytes + chunk_bytes - 1) / chunk_bytes);
+      const unsigned short* const chunk_sizes = reinterpret_cast<const unsigned short*>(&header[2]);
+      printf("Decompressed chunk size = %zu bytes (%zu elements)\n", chunk_bytes, chunk_elems);
+      printf("First %d chunk sizes: ", chunks);
+      for (int i = 0; i < chunks; i++) {
           printf("%u ", chunk_sizes[i]);
       }
       printf("\n");

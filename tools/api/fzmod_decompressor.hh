@@ -113,6 +113,54 @@ struct Decompressor {
     STOP_CPU_TIMER(decoding)
     TIME_ELAPSED_CPU_TIMER(decoding, metrics->decoding_time)
 
+    auto h_codes = GPU_make_unique(malloc_host<uint16_t>(conf->len), GPU_deleter_host());
+    cudaMemcpyAsync(h_codes.get(), ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    // printf("Nonzero PFPL quantization codes:\n");
+    // size_t printed = 0;
+    // for (size_t i = 0; i < conf->len; i++) {
+    //   // if (h_codes.get()[i] != 0) {
+    //   if (printed > 20000) {
+    //     if (h_codes.get()[i] != 0) {
+    //       printf("nonzero found at index %zu: %u\n", i, h_codes.get()[i]);
+    //     }
+    //     if (printed > 20100) {
+    //       printf("... (truncated)\n");
+    //       break;
+    //     }
+    //   } else {
+    //     if (printed % 24 == 0 && printed != 0) printf("\n");
+    //     if (printed % (16384 / 2) == 0 && printed != 0)
+    //       printf("\n--- next 16KB chunk ---\n");
+    //     printf("%u ", h_codes.get()[i]);
+    //   }
+    //   printed++;
+    //   // }
+    // }
+    // printf("\n");
+
+    if (conf->verbose) {
+      size_t chunk_size = 16384 / sizeof(uint16_t); // 16KB
+      size_t num_chunks = (conf->len + chunk_size - 1) / chunk_size;
+      for (size_t c = 740; c < num_chunks; c++) {
+        size_t start_idx = c * chunk_size;
+        size_t end_idx = std::min(start_idx + chunk_size, conf->len);
+        printf("Chunk %zu:\n", c);
+        printf("  First 100 codes: ");
+        for (size_t i = start_idx; i < std::min(start_idx + 100, end_idx); i++) {
+          if (i % 25 == 0 && i != start_idx) printf("\n");
+          printf("%u ", h_codes.get()[i]);
+        }
+        printf("\n");
+        printf("  Last 100 codes: ");
+        for (size_t i = (end_idx > 100 ? end_idx - 100 : start_idx); i < end_idx; i++) {
+          if (i % 25 == 0 && i != end_idx) printf("\n");
+          printf("%u ", h_codes.get()[i]);
+        }
+        printf("\n");
+      }
+    }
+
     // ~~~~~~~~~~~~~~~~~~~~~~~ PREDICTION ~~~~~~~~~~~~~~~~~~~~~~~ //
 
     CREATE_CPU_TIMER(prediction)
@@ -129,6 +177,19 @@ struct Decompressor {
 
     STOP_CPU_TIMER(total)
     TIME_ELAPSED_CPU_TIMER(total, metrics->end_to_end_decomp_time)
+
+    // print first 100 decompressed floats
+    if (conf->verbose) {
+      auto h_out = GPU_make_unique(malloc_host<T>(conf->len), GPU_deleter_host());
+      cudaMemcpyAsync(h_out.get(), out_data, conf->orig_size, cudaMemcpyDeviceToHost, stream);
+      cudaStreamSynchronize(stream);
+      printf("First 100 decompressed values: ");
+      for (size_t i = 0; i < std::min<size_t>(100, conf->len); i++) {
+        if (i % 50 == 0) printf("\n");
+        printf("%f ", static_cast<double>(h_out.get()[i]));
+      }
+      printf("\n");
+    }
 
     // ~~~~~~~~~~~~~~~~~~~~~~~ END DECOMPRESSION ~~~~~~~~~~~~~~~~~~~~~~~ //
 
@@ -215,15 +276,15 @@ struct Decompressor {
     }
 
     // print out first 100 codes for debugging
-    auto h_codes = GPU_make_unique(malloc_host<uint16_t>(conf->len), GPU_deleter_host());
-    cudaMemcpyAsync(h_codes.get(), ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    printf("First 1000 PFPL codes:\n");
-    for (size_t i = 0; i < std::min(size_t(1000), conf->len); i++) {
-      if (i % 50 == 0) printf("\n");
-      printf("%u ", h_codes.get()[i]);
-    }
-    printf("\n");
+    // auto h_codes = GPU_make_unique(malloc_host<uint16_t>(conf->len), GPU_deleter_host());
+    // cudaMemcpyAsync(h_codes.get(), ibuffer->codes(), conf->len * sizeof(uint16_t), cudaMemcpyDeviceToHost, stream);
+    // cudaStreamSynchronize(stream);
+    // printf("First 1000 PFPL codes:\n");
+    // for (size_t i = 0; i < std::min(size_t(1000), conf->len); i++) {
+    //   if (i % 50 == 0) printf("\n");
+    //   printf("%u ", h_codes.get()[i]);
+    // }
+    // printf("\n");
   } // end pfpl
 
   // ~~~~~~~~~~~~~~~~~~~~~~~ PREDICTOR FUNCTIONS ~~~~~~~~~~~~~~~~~~~~~~~ //

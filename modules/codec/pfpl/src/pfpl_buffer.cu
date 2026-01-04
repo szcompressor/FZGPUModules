@@ -21,13 +21,16 @@ void PFPL_Buf<T>::init(size_t data_len, bool comp) {
   max_archive_bytes = sizeof(T) * data_len * 2;  // Temporary estimate
 
   if (comp) {
-    CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
+    CHECK_GPU(cudaMalloc(&d_archive, max_size));
     CHECK_GPU(cudaMalloc(&d_comp_len, sizeof(size_t)));
     CHECK_GPU(cudaMalloc((void**)&d_fullcarry, sizeof(int) * temp_chunks));
   } else {
-    CHECK_GPU(cudaMalloc(&d_archive, max_archive_bytes));
+    CHECK_GPU(cudaMalloc(&d_archive, max_size));
     CHECK_GPU(cudaMalloc(&d_uncomp_len, sizeof(int)));
   }
+
+  printf("PFPL Buffer: SMs=%d, mTpSM=%d, blocks=%d\n", SMs, mTpSM, blocks);
+  printf("PFPL Buffer: max_size=%u, max_archive_bytes=%zu\n", max_size, max_archive_bytes);
 }
 
 template <typename T>
@@ -45,6 +48,10 @@ PFPL_Buf<T>::~PFPL_Buf() {
     CHECK_GPU(cudaFree(d_comp_len));
     d_comp_len = nullptr;
   }
+  if (d_uncomp_len) {
+    CHECK_GPU(cudaFree(d_uncomp_len));
+    d_uncomp_len = nullptr;
+  }
   if (d_fullcarry) {
     CHECK_GPU(cudaFree(d_fullcarry));
     d_fullcarry = nullptr;
@@ -58,6 +65,9 @@ void PFPL_Buf<T>::clear_buffer() {
   }
   if (d_comp_len) {
     CHECK_GPU(cudaMemset(d_comp_len, 0, sizeof(size_t)));
+  }
+  if (d_uncomp_len) {
+    CHECK_GPU(cudaMemset(d_uncomp_len, 0, sizeof(int)));
   }
   if (d_fullcarry) {
     CHECK_GPU(cudaMemset(d_fullcarry, 0, sizeof(int) * ((max_size + chunk_size - 1) / chunk_size)));
