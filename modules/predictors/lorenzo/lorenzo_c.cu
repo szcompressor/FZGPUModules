@@ -291,8 +291,8 @@ cudaGraphNode_t LorenzoStage<TInput, TCode>::addToGraph(cudaGraph_t graph,
     memset_params.dst = d_outlier_count;
     memset_params.value = 0;
     memset_params.pitch = 0;
-    memset_params.elementSize = sizeof(uint32_t);
-    memset_params.width = 1;
+    memset_params.elementSize = 1;  // Byte-level granularity
+    memset_params.width = sizeof(uint32_t);  // 4 bytes for uint32_t
     memset_params.height = 1;
     
     cudaError_t err = cudaGraphAddMemsetNode(&memset_node, graph, dependencies, num_deps, &memset_params);
