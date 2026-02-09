@@ -9,6 +9,15 @@ namespace fz {
 // ========== CUDA Kernel Implementation ==========
 
 /**
+ * Simple kernel to zero a uint32_t counter (graph-compatible)
+ */
+__global__ void zero_uint32_kernel(uint32_t* ptr) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *ptr = 0;
+    }
+}
+
+/**
  * Optimized Lorenzo 1D prediction + quantization kernel
  * 
  * Performance optimizations:
@@ -285,19 +294,21 @@ cudaGraphNode_t LorenzoStage<TInput, TCode>::addToGraph(cudaGraph_t graph,
     uint32_t* d_outlier_indices = static_cast<uint32_t*>(aux_buffers[1]);
     uint32_t* d_outlier_count = static_cast<uint32_t*>(aux_buffers[2]);
     
-    // Add memset node to zero the outlier count
-    cudaGraphNode_t memset_node;
-    cudaMemsetParams memset_params = {};
-    memset_params.dst = d_outlier_count;
-    memset_params.value = 0;
-    memset_params.pitch = 0;
-    memset_params.elementSize = 1;  // Byte-level granularity
-    memset_params.width = sizeof(uint32_t);  // 4 bytes for uint32_t
-    memset_params.height = 1;
+    // Add zero-init kernel node (more compatible with graph memory than memset)
+    cudaGraphNode_t zero_node;
+    void* zero_args[] = {(void*)&d_outlier_count};
     
-    cudaError_t err = cudaGraphAddMemsetNode(&memset_node, graph, dependencies, num_deps, &memset_params);
+    cudaKernelNodeParams zero_params = {};
+    zero_params.func = (void*)zero_uint32_kernel;
+    zero_params.gridDim = dim3(1, 1, 1);
+    zero_params.blockDim = dim3(1, 1, 1);
+    zero_params.sharedMemBytes = 0;
+    zero_params.kernelParams = zero_args;
+    zero_params.extra = nullptr;
+    
+    cudaError_t err = cudaGraphAddKernelNode(&zero_node, graph, dependencies, num_deps, &zero_params);
     if (err != cudaSuccess) {
-        fprintf(stderr, "Failed to add memset node: %s\n", cudaGetErrorString(err));
+        fprintf(stderr, "Failed to add zero-init kernel: %s\n", cudaGetErrorString(err));
         return nullptr;
     }
     
@@ -327,9 +338,9 @@ cudaGraphNode_t LorenzoStage<TInput, TCode>::addToGraph(cudaGraph_t graph,
     kernel_params.kernelParams = kernel_args;
     kernel_params.extra = nullptr;
     
-    // Add kernel node to graph - depends on memset node
+    // Add kernel node to graph - depends on zero-init node
     cudaGraphNode_t kernel_node;
-    err = cudaGraphAddKernelNode(&kernel_node, graph, &memset_node, 1, &kernel_params);
+    err = cudaGraphAddKernelNode(&kernel_node, graph, &zero_node, 1, &kernel_params);
     
     if (err != cudaSuccess) {
         fprintf(stderr, "Failed to add Lorenzo kernel node: %s\n", cudaGetErrorString(err));

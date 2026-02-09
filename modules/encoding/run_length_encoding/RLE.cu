@@ -87,6 +87,15 @@ __global__ void test_kernel(uint32_t* counter) {
 }
 
 /**
+ * Simple kernel to zero a uint32_t counter (graph-compatible)
+ */
+__global__ void zero_uint32_rle_kernel(uint32_t* ptr) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *ptr = 0;
+    }
+}
+
+/**
  * Sequential RLE kernel - single thread for correctness
  * Not optimal for performance, but guarantees correct encoding
  */
@@ -286,19 +295,21 @@ cudaGraphNode_t RLEStage<TInput>::addToGraph(
     graph_num_elements_ = input_size / sizeof(TInput);
     graph_d_run_counter_ = static_cast<uint32_t*>(aux_buffers[0]);
     
-    // Node 1: Memset run counter to zero
-    cudaGraphNode_t memset_node;
-    cudaMemsetParams memset_params = {};
-    memset_params.dst = graph_d_run_counter_;
-    memset_params.value = 0;
-    memset_params.pitch = 0;
-    memset_params.elementSize = 1;  // Byte-level granularity
-    memset_params.width = sizeof(uint32_t);  // 4 bytes for uint32_t
-    memset_params.height = 1;
+    // Node 1: Zero-init run counter (kernel is more graph-compatible than memset)
+    cudaGraphNode_t zero_node;
+    void* zero_args[] = {(void*)&graph_d_run_counter_};
     
-    cudaError_t err = cudaGraphAddMemsetNode(&memset_node, graph, dependencies, num_deps, &memset_params);
+    cudaKernelNodeParams zero_params = {};
+    zero_params.func = (void*)zero_uint32_rle_kernel;
+    zero_params.gridDim = dim3(1, 1, 1);
+    zero_params.blockDim = dim3(1, 1, 1);
+    zero_params.sharedMemBytes = 0;
+    zero_params.kernelParams = zero_args;
+    zero_params.extra = nullptr;
+    
+    cudaError_t err = cudaGraphAddKernelNode(&zero_node, graph, dependencies, num_deps, &zero_params);
     if (err != cudaSuccess) {
-        fprintf(stderr, "Failed to add memset node for RLE: %s\n", cudaGetErrorString(err));
+        fprintf(stderr, "Failed to add zero-init kernel for RLE: %s\n", cudaGetErrorString(err));
         return nullptr;
     }
     
@@ -320,7 +331,7 @@ cudaGraphNode_t RLEStage<TInput>::addToGraph(
     encode_params.extra = nullptr;
     
     cudaGraphNode_t encode_node;
-    err = cudaGraphAddKernelNode(&encode_node, graph, &memset_node, 1, &encode_params);
+    err = cudaGraphAddKernelNode(&encode_node, graph, &zero_node, 1, &encode_params);
     if (err != cudaSuccess) {
         fprintf(stderr, "Failed to add RLE encode kernel node: %s\n", cudaGetErrorString(err));
         return nullptr;
