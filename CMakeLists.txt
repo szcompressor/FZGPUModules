@@ -1,44 +1,260 @@
-cmake_minimum_required(VERSION 3.18)
-project(FZModules CUDA CXX)
+cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
+project(FZModules LANGUAGES CUDA CXX C VERSION 1.0)
 
+########################
+### GENERAL SETTINGS ###
+########################
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+option(BUILD_SHARED_LIBS "prefer shared libraries" ON)
+include(GNUInstallDirs)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
+set(CMAKE_CUDA_ARCHITECTURES native)
 
-# Set C++ standard
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CUDA_STANDARD 14)
+#####################
+### WSL DETECTION ###
+#####################
 
-# Include directories
-include_directories(${CMAKE_SOURCE_DIR}/src)
-include_directories(${CMAKE_SOURCE_DIR}/modules)
-include_directories(${CMAKE_SOURCE_DIR}/include)
-include_directories(${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-
-# CUDA files
-add_library(stages STATIC
-  modules/predictors/lorenzo/lorenzo_c.cu
-  modules/encoding/run_length_encoding/RLE.cu
-  modules/encoding/bitpacking/bitpacking.cu
-  modules/encoding/concatenation/concat.cu
-  modules/encoding/difference/diff_encode.cu
+execute_process(
+  COMMAND systemd-detect-virt
+  OUTPUT_VARIABLE VIRT_ENV
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+  RESULT_VARIABLE DETECT_RESULT
 )
-# TODO: Add these back after updating to new Stage interface:
-#  modules/encoding/outlier/outlier.cu
 
-# C++ files  
-add_library(pipeline STATIC
-  src/pipeline/dag.cpp
+if(DETECT_RESULT EQUAL 0 AND VIRT_ENV STREQUAL "wsl")
+  message(STATUS "Running on WSL")
+  set(IS_WSL TRUE)
+  link_directories(/usr/lib/wsl/lib)
+else()
+  set(IS_WSL FALSE)
+endif()
+
+############################
+### BUILD CONFIGURATIONS ###
+############################
+
+set(default_build_type "Release")
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  message(STATUS "Setting build type to '${default_build_type}'")
+  set(CMAKE_BUILD_TYPE ${default_build_type} CACHE
+      STRING "Choose the type to build." FORCE)
+endif()
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release")
+
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0")
+set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -t 0")
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -t 0")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
+endif()
+
+################################
+### SANITIZERS CONFIGURATION ###
+################################
+
+if(NOT USE_SANITIZER)
+  set(USE_SANITIZER "" CACHE STRING "use a build sanitizer" FORCE)
+endif()
+set_property(CACHE USE_SANITIZER PROPERTY STRINGS "" "Address" "Thread" "Undefined" "Leak" "Compute")
+
+if (USE_SANITIZER STREQUAL "Address")
+    message(STATUS "Compiling with Address Sanitizer")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
+elseif (USE_SANITIZER STREQUAL "Thread")
+    message(STATUS "Compiling with Thread Sanitizer")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread")
+elseif (USE_SANITIZER STREQUAL "Undefined")
+    message(STATUS "Compiling with Undefined Behavior Sanitizer")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=undefined")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined")
+elseif (USE_SANITIZER STREQUAL "Leak")
+    message(STATUS "Compiling with Leak Sanitizer")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=leak")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=leak")
+elseif (USE_SANITIZER STREQUAL "Compute")
+    message(STATUS "Compiling with Compute Sanitizer")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -Xcompiler -rdynamic")
+endif()
+
+#########################
+### COMPILER SETTINGS ###
+#########################
+
+add_library(fzmod_compile_settings INTERFACE)
+target_compile_options(
+  fzmod_compile_settings 
+  INTERFACE 
+    $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda>
+    $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--expt-relaxed-constexpr>
+)
+
+if(NOT USE_SANITIZER STREQUAL "Compute")
+  target_compile_options(
+    fzmod_compile_settings
+    INTERFACE
+      $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-lineinfo>
+  )
+endif()
+
+target_compile_features(fzmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
+target_link_libraries(fzmod_compile_settings INTERFACE CUDA::cudart)
+
+###########################
+### INCLUDE DIRECTORIES ###
+###########################
+
+target_include_directories(fzmod_compile_settings INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+#################
+### LIBRARIES ###
+#################
+
+#### Memory Management
+add_library(fzmod_mem
+  src/mem/mempool.cpp
+)
+target_link_libraries(fzmod_mem
+  PUBLIC
+  fzmod_compile_settings
+)
+
+#### Encoders Module
+add_library(fzmod_encoders
+  modules/encoders/bitpacking/bitpacking.cu
+  modules/encoders/diff/diff.cu
+  modules/encoders/RLE/rle.cu
+)
+target_link_libraries(fzmod_encoders
+  PUBLIC
+  fzmod_compile_settings
+  CUDA::cudart
+)
+add_library(FZMOD::encoders ALIAS fzmod_encoders)
+
+#### Predictors Module
+add_library(fzmod_predictors
+  modules/predictors/lorenzo/lorenzo.cu
+)
+target_link_libraries(fzmod_predictors
+  PUBLIC
+  fzmod_compile_settings
+  CUDA::cudart
+)
+add_library(FZMOD::predictors ALIAS fzmod_predictors)
+
+add_library(fzmod_pipeline
   src/pipeline/compressor.cpp
-  src/stage/stage.cpp
-  src/mem/memory_pool.cpp
+  src/pipeline/dag.cpp
+  src/pipeline/stat.cpp
+  src/stage/mock_stages.cu
 )
-target_include_directories(pipeline PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_link_libraries(fzmod_pipeline
+  PUBLIC
+  fzmod_compile_settings
+  fzmod_mem
+  fzmod_encoders
+  fzmod_predictors
+  CUDA::cudart
+)
+add_library(FZMOD::pipeline ALIAS fzmod_pipeline)
 
-# Executables
-add_executable(compress_test utils/main.cpp)
-target_link_libraries(compress_test pipeline stages cudart)
+#### Combined Library
+add_library(fzmod
+  utils/cli/cli.cpp
+)
+target_link_libraries(fzmod
+  PUBLIC
+  fzmod_compile_settings
+  fzmod_mem
+  fzmod_encoders
+  fzmod_predictors
+  fzmod_pipeline
+  CUDA::cudart
+)
+add_library(FZMOD::fzmod ALIAS fzmod)
 
-add_executable(pipeline_example utils/pipeline_example.cpp)
-target_link_libraries(pipeline_example pipeline stages cudart)
+###################
+### EXECUTABLES ###
+###################
 
-add_executable(outlier_test utils/outlier_test.cpp)
-target_link_libraries(outlier_test pipeline stages cudart)
+add_executable(fzmod-bin utils/main.cpp)
+target_link_libraries(fzmod-bin PRIVATE fzmod)
+set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
+
+####################
+### INSTALLATION ###
+####################
+
+install(TARGETS fzmod_compile_settings EXPORT FZModulesTargets)
+install(TARGETS 
+  fzmod_mem
+  fzmod_encoders
+  fzmod_predictors
+  fzmod_pipeline
+  fzmod 
+  EXPORT FZModulesTargets
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(TARGETS fzmod-bin
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(
+  EXPORT FZModulesTargets
+  NAMESPACE FZMOD::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
+)
+
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FZModulesConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
+)
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfigVersion.cmake"
+  VERSION "${PROJECT_VERSION}"
+  COMPATIBILITY AnyNewerVersion
+)
+
+install(FILES 
+  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
+)
+
+install(DIRECTORY
+  include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
+  FILES_MATCHING PATTERN "*.h"
+)
+
+message(STATUS "FZModules configuration complete")
+message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")

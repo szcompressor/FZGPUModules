@@ -1,11 +1,12 @@
 #pragma once
 
 #include <cuda_runtime.h>
+
 #include <cstddef>
-#include <vector>
-#include <unordered_map>
-#include <string>
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace fz {
 
@@ -53,7 +54,7 @@ struct MemoryPoolConfig {
 
 /**
  * CUDA-graph compatible memory pool using stream-ordered allocation
- * 
+ *
  * Features:
  * - Stream-ordered cudaMallocAsync/cudaFreeAsync
  * - CUDA mempool for efficient reuse
@@ -85,9 +86,11 @@ public:
      * @param size Size in bytes
      * @param stream CUDA stream for allocation
      * @param tag Debug tag for tracking
+     * @param persistent If true, allocation persists for graph replay (graph mode)
+     *                   If false, can be freed/reused immediately (stream mode)
      * @return Device pointer (nullptr on failure)
      */
-    void* allocate(size_t size, cudaStream_t stream, const std::string& tag = "");
+    void* allocate(size_t size, cudaStream_t stream, const std::string& tag = "", bool persistent = false);
     
     /**
      * Free memory back to pool (stream-ordered)
@@ -96,22 +99,6 @@ public:
      * @param stream CUDA stream for deallocation
      */
     void free(void* ptr, cudaStream_t stream);
-    
-    /**
-     * Allocate memory that persists for graph capture/execution
-     * These allocations won't be freed until explicitly released
-     * 
-     * @param size Size in bytes
-     * @param stream CUDA stream
-     * @param tag Debug tag
-     * @return Device pointer
-     */
-    void* allocateGraphMemory(size_t size, cudaStream_t stream, const std::string& tag = "");
-    
-    /**
-     * Free graph-persistent memory
-     */
-    void freeGraphMemory(void* ptr, cudaStream_t stream);
     
     // ========== Memory Management ==========
     
@@ -134,19 +121,27 @@ public:
     // ========== Statistics & Debugging ==========
     
     /**
-     * Get current pool usage in bytes
+     * Get current pool usage in bytes (queries CUDA memory pool)
      */
-    size_t getCurrentUsage() const { return current_usage_; }
+    size_t getCurrentUsage() const {
+        uint64_t used_mem = 0;
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent, &used_mem);
+        return static_cast<size_t>(used_mem);
+    }
     
     /**
-     * Get peak pool usage in bytes
+     * Get peak pool usage in bytes (queries CUDA memory pool)
      */
-    size_t getPeakUsage() const { return peak_usage_; }
+    size_t getPeakUsage() const {
+        uint64_t used_mem_high = 0;
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &used_mem_high);
+        return static_cast<size_t>(used_mem_high);
+    }
     
     /**
-     * Get number of active allocations
+     * Get number of active allocations (stream + graph)
      */
-    size_t getAllocationCount() const { return allocations_.size(); }
+    size_t getAllocationCount() const { return allocations_.size() + graph_allocations_.size(); }
     
     /**
      * Print allocation statistics
@@ -172,8 +167,6 @@ private:
     std::unordered_map<void*, AllocationInfo> graph_allocations_;  // Persistent for graphs
     
     // Statistics
-    size_t current_usage_;
-    size_t peak_usage_;
     size_t total_allocations_;
     size_t total_frees_;
     
@@ -181,10 +174,7 @@ private:
     
     // Helper: Create and configure CUDA mempool
     void initializeMemPool();
-    
-    // Helper: Update usage statistics
-    void updateUsageStats(size_t size, bool allocating);
-};
+
+}; // memory pool class
 
 } // namespace fz
-

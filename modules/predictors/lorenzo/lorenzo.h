@@ -1,190 +1,202 @@
 #pragma once
 
 #include "stage/stage.h"
+#include "fzm_format.h"
 #include <cuda_runtime.h>
-#include <cstddef>
-#include <limits>
-#include <type_traits>
+#include <cstdint>
+#include <cmath>
+#include <cstring>
 
 namespace fz {
 
-/**
- * Configuration for Lorenzo predictor with quantization
- * @tparam TInput Input data type (float, double)
- * @tparam TCode Quantization code type (uint8_t, uint16_t, uint32_t)
- */
-template<typename TInput, typename TCode>
-struct LorenzoConfig {
-    static_assert(std::is_floating_point<TInput>::value, "TInput must be floating point");
-    static_assert(std::is_unsigned<TCode>::value, "TCode must be unsigned integer");
-    
-    TInput error_bound;          // Absolute error bound for quantization
-    TCode quant_radius;          // Quantization radius
-    float outlier_capacity;      // Max outliers as fraction of input (0.0-1.0)
-    
-    LorenzoConfig(TInput eb = static_cast<TInput>(1e-3), 
-                  TCode radius = 512,
-                  float outlier_frac = 0.2f)
-        : error_bound(eb), 
-          quant_radius(radius),
-          outlier_capacity(outlier_frac) {}
-};
+// ===== Lorenzo Stage-Specific Config =====
+// Serialized into FZMBufferEntry.stage_config[128]
 
 /**
- * 1D Lorenzo predictor fused with quantization
+ * Lorenzo predictor configuration for decompression
  * 
- * @tparam TInput Input data type (float, double)
- * @tparam TCode Quantization code type (uint8_t, uint16_t, uint32_t)
+ * This structure is serialized by LorenzoStage::serializeHeader()
+ * and fits into the generic 128-byte stage_config buffer in FZMBufferEntry.
+ */
+struct LorenzoConfig {
+    float error_bound;        // Error bound used in compression (4B)
+    uint32_t quant_radius;    // Quantization radius (4B)
+    uint32_t num_elements;    // Number of elements (4B)
+    uint32_t outlier_count;   // Actual number of outliers (4B)
+    DataType input_type;      // Original input type (1B)
+    DataType code_type;       // Quantization code type (1B)
+    uint8_t reserved[6];      // Padding (6B)
+    
+    // Total: 24 bytes (fits easily in 128B stage_config)
+    
+    LorenzoConfig() 
+        : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
+          input_type(DataType::FLOAT32), code_type(DataType::UINT16) {
+        memset(reserved, 0, sizeof(reserved));
+    }
+};
+static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig must fit in FZM_STAGE_CONFIG_SIZE");
+
+/**
+ * Lorenzo 1D predictor with quantization
  * 
- * Pipeline: TInput[] -> Lorenzo prediction -> Quantization -> TCode codes + outliers
+ * Applies Lorenzo prediction (1D differences) with error-bounded quantization.
+ * Produces quantization codes for predictable values and stores outliers separately.
  * 
  * Outputs:
- *   - Primary: Quantization codes (TCode array, same size as input)
- *   - Aux 0: Outlier prediction errors (TInput array, up to 20% of input size)
- *   - Aux 1: Outlier indices (uint32_t array, up to 20% of input size)  
- *   - Aux 2: Outlier count (single uint32_t)
+ *   [0] codes: Quantization codes for all elements (TCode type)
+ *   [1] outlier_errors: Prediction errors for outliers (TInput type)
+ *   [2] outlier_indices: Indices of outlier elements (uint32_t)
+ *   [3] outlier_count: Number of outliers (uint32_t)
+ * 
+ * Template parameters:
+ *   TInput: Input data type (float, double)
+ *   TCode: Quantization code type (uint8_t, uint16_t, uint32_t)
  */
 template<typename TInput = float, typename TCode = uint16_t>
-class LorenzoStage : public MultiOutputStage {
+class LorenzoStage : public Stage {
 public:
-    explicit LorenzoStage(const LorenzoConfig<TInput, TCode>& config = LorenzoConfig<TInput, TCode>());
-    virtual ~LorenzoStage() = default;
-    
-    // ========== Stage Interface Implementation ==========
-    
     /**
-     * Execute Lorenzo prediction + quantization
-     * @param input TInput* to input data (device pointer)
-     * @param input_size Size in bytes (num_elements * sizeof(TInput))
-     * @param output TCode* for quantization codes (device pointer)
-     * @param stream CUDA stream for execution
-     * @return Size of output in bytes (num_elements * sizeof(TCode))
+     * Configuration for Lorenzo predictor
      */
-    int execute(void* input, size_t input_size, 
-               void* output, cudaStream_t stream) override;
+    struct Config {
+        float error_bound = 1e-3;           // Error bound for quantization
+        int quant_radius = 32768;          // Quantization radius (2^15 for uint16_t)
+        float outlier_capacity = 0.2f;       // Fraction of input size to allocate for outliers (0-1)
+        
+        Config() = default;
+        Config(TInput eb, TCode radius = 32768, float outlier_cap = 0.2f)
+            : error_bound(eb), quant_radius(radius), outlier_capacity(outlier_cap) {}
+    };
     
-    /**
-     * Execute with outlier outputs
-     * @param aux_outputs [0] = outlier_errors (TInput*, prediction errors not original values)
-     *                    [1] = outlier_indices (uint32_t*)
-     *                    [2] = outlier_count (uint32_t*)
-     * @param aux_sizes Actual sizes written to auxiliary outputs
-     */
-    int executeMulti(void* input, size_t input_size,
-                    void* primary_output,
-                    std::vector<void*>& aux_outputs,
-                    std::vector<size_t>& aux_sizes,
-                    cudaStream_t stream) override;
+    explicit LorenzoStage(const Config& config = Config());
     
-    /**
-     * Add to CUDA graph
-     */
-    cudaGraphNode_t addToGraph(cudaGraph_t graph,
-                              cudaGraphNode_t* dependencies,
-                              size_t num_deps,
-                              void* input, size_t input_size,
-                              void* output,
-                              const std::vector<void*>& aux_buffers,
-                              cudaStream_t stream) override;
+    void execute(
+        cudaStream_t stream,
+        const std::vector<void*>& inputs,
+        const std::vector<void*>& outputs,
+        const std::vector<size_t>& sizes
+    ) override;
     
-    // ========== Memory Management ==========
+    std::string getName() const override { return "Lorenzo1D"; }
+    size_t getNumInputs() const override { return is_inverse_ ? 4 : 1; }
+    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 4; }
     
-    /**
-     * Calculate memory requirements
-     * - output_size: quantization codes (num_elements * sizeof(TCode))
-     * - temp_size: working memory for kernel (minimal)
-     * - aux_output_size: outlier data (values + indices + count)
-     */
-    StageMemoryRequirements getMemoryRequirements(size_t input_size) const override;
-    
-    /**
-     * Maximum output is same as input (1:1 mapping)
-     */
-    size_t getMaxOutputSize(size_t input_size) const override {
-        size_t num_elements = input_size / sizeof(TInput);
-        return num_elements * sizeof(TCode);
+    std::vector<std::string> getOutputNames() const override {
+        return {"codes", "outlier_errors", "outlier_indices", "outlier_count"};
     }
     
-    /**
-     * Average output size (for buffer allocation)
-     * Lorenzo + quantization typically produces codes of same size
-     */
-    size_t getAverageOutputSize(size_t input_size) const override {
-        return getMaxOutputSize(input_size);
+    std::vector<size_t> estimateOutputSizes(
+        const std::vector<size_t>& input_sizes
+    ) const override;
+    
+    std::unordered_map<std::string, size_t> getActualOutputSizesByName() const override {
+        auto names = getOutputNames();
+        std::unordered_map<std::string, size_t> result;
+        for (size_t i = 0; i < names.size() && i < actual_output_sizes_.size(); i++) {
+            result[names[i]] = actual_output_sizes_[i];
+        }
+        return result;
     }
     
-    size_t getNumAuxiliaryOutputs() const override { return 3; }
-    
-    // ========== Configuration ==========
-    
-    /**
-     * Update error bound (useful for adaptive compression)
-     */
-    void setErrorBound(TInput error_bound);
+    // Configuration accessors
+    void setErrorBound(TInput error_bound) { config_.error_bound = error_bound; }
+    void setQuantRadius(TCode radius) { config_.quant_radius = radius; }
+    void setOutlierCapacity(float capacity) { config_.outlier_capacity = capacity; }
     
     TInput getErrorBound() const { return config_.error_bound; }
+    TCode getQuantRadius() const { return config_.quant_radius; }
+    float getOutlierCapacity() const { return config_.outlier_capacity; }
     
-    const LorenzoConfig<TInput, TCode>& getConfig() const { return config_; }
+    // Inverse mode: toggle between compression (false) and decompression (true)
+    void setInverse(bool inverse) { is_inverse_ = inverse; }
+    bool isInverse() const { return is_inverse_; }
     
-    // ========== Metadata ==========
+    // ===== Decompression Support =====
     
-    StageMetadata getMetadata() const override;
+    uint16_t getStageTypeId() const override {
+        return static_cast<uint16_t>(StageType::LORENZO_1D);
+    }
     
-    void getOptimalLaunchConfig(size_t input_size,
-                               dim3& block_size,
-                               dim3& grid_size) const override;
+    uint8_t getOutputDataType(size_t output_index) const override {
+        switch (output_index) {
+            case 0: return static_cast<uint8_t>(getCodeDataType());      // codes
+            case 1: return static_cast<uint8_t>(getInputDataType());     // outlier_errors
+            case 2: return static_cast<uint8_t>(DataType::UINT32);       // outlier_indices
+            case 3: return static_cast<uint8_t>(DataType::UINT32);       // outlier_count
+            default: return static_cast<uint8_t>(DataType::UINT8);
+        }
+    }
+    
+    size_t serializeHeader(size_t output_index, uint8_t* header_buffer, size_t max_size) const override {
+        (void)output_index;  // Lorenzo uses same header for all outputs
+        
+        if (max_size < sizeof(LorenzoConfig)) {
+            throw std::runtime_error("Insufficient buffer for Lorenzo config");
+        }
+        
+        LorenzoConfig config;
+        config.error_bound = config_.error_bound;
+        config.quant_radius = static_cast<uint32_t>(config_.quant_radius);
+        config.num_elements = static_cast<uint32_t>(num_elements_);
+        config.outlier_count = actual_outlier_count_;
+        config.input_type = getInputDataType();
+        config.code_type = getCodeDataType();
+        
+        std::memcpy(header_buffer, &config, sizeof(LorenzoConfig));
+        return sizeof(LorenzoConfig);
+    }
+    
+    size_t getMaxHeaderSize(size_t output_index) const override {
+        (void)output_index;
+        return sizeof(LorenzoConfig);
+    }
+    
+    void deserializeHeader(const uint8_t* header_buffer, size_t size) override {
+        if (size < sizeof(LorenzoConfig)) {
+            throw std::runtime_error("Invalid Lorenzo config size");
+        }
+        
+        LorenzoConfig config;
+        std::memcpy(&config, header_buffer, sizeof(LorenzoConfig));
+        
+        config_.error_bound = config.error_bound;
+        config_.quant_radius = static_cast<TCode>(config.quant_radius);
+        num_elements_ = config.num_elements;
+        actual_outlier_count_ = config.outlier_count;
+    }
     
 private:
-    LorenzoConfig<TInput, TCode> config_;
+    Config config_;
+    std::vector<size_t> actual_output_sizes_;
+    size_t num_elements_ = 0;           // Track for header
+    uint32_t actual_outlier_count_ = 0; // Track for header
+    bool is_inverse_ = false;           // false = compress, true = decompress
     
-    // Helper to calculate outlier buffer sizes
+    // Helper to get data type enums
+    DataType getInputDataType() const {
+        if (std::is_same<TInput, float>::value) return DataType::FLOAT32;
+        if (std::is_same<TInput, double>::value) return DataType::FLOAT64;
+        return DataType::FLOAT32;
+    }
+    
+    DataType getCodeDataType() const {
+        if (std::is_same<TCode, uint8_t>::value) return DataType::UINT8;
+        if (std::is_same<TCode, uint16_t>::value) return DataType::UINT16;
+        if (std::is_same<TCode, uint32_t>::value) return DataType::UINT32;
+        return DataType::UINT16;
+    }
+    
+    // Helper to get max outlier count based on capacity
     size_t getMaxOutlierCount(size_t num_elements) const {
-        return static_cast<size_t>(num_elements * config_.outlier_capacity);
+        return static_cast<size_t>(std::ceil(num_elements * config_.outlier_capacity));
     }
 };
 
-// ========== CUDA Kernel Declarations ==========
-
-/**
- * Fused Lorenzo prediction + quantization kernel (optimized with shared memory)
- * 
- * Uses shared memory staging and sequential processing for better performance.
- * Each thread processes SEQ elements using pre-quantization for efficiency.
- * 
- * Outlier positions are marked with code value 0. Use outlier_indices for reconstruction.
- * 
- * @tparam TInput Input data type
- * @tparam TCode Quantization code type
- * @tparam TileDim Total elements per block (e.g., 1024)
- * @tparam Seq Sequential elements per thread (e.g., 4)
- * @param input Input data
- * @param n Number of elements
- * @param ebx2_r Reciprocal of (2 * error_bound) for pre-quantization
- * @param quant_radius Quantization radius
- * @param quant_codes Output quantization codes (0 = outlier position)
- * @param outlier_errors Output outlier prediction errors (not original values)
- * @param outlier_indices Output outlier indices  
- * @param outlier_count Output outlier count (atomic counter)
- * @param max_outliers Maximum outliers allowed
- */
-template<typename TInput, typename TCode, int TileDim = 1024, int Seq = 4>
-__global__ void lorenzo_quantize_1d_kernel(
-    const TInput* __restrict__ input,
-    const size_t n,
-    const TInput ebx2_r,
-    const TCode quant_radius,
-    TCode* __restrict__ quant_codes,
-    TInput* __restrict__ outlier_errors,
-    uint32_t* __restrict__ outlier_indices,
-    uint32_t* __restrict__ outlier_count,
-    const size_t max_outliers
-);
-
-// Common instantiations
-using LorenzoStageF32U16 = LorenzoStage<float, uint16_t>;
-using LorenzoStageF32U8 = LorenzoStage<float, uint8_t>;
-using LorenzoStageF64U16 = LorenzoStage<double, uint16_t>;
-using LorenzoStageF64U32 = LorenzoStage<double, uint32_t>;
+// Explicit instantiations for common type combinations
+extern template class LorenzoStage<float, uint16_t>;
+extern template class LorenzoStage<float, uint8_t>;
+extern template class LorenzoStage<double, uint16_t>;
+extern template class LorenzoStage<double, uint32_t>;
 
 } // namespace fz
-

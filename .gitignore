@@ -4,3 +4,8 @@
 data/
 settings.json
 temp/
+*.log
+*.fzm
+*.tmp
+*.fzmodules
+docs/
