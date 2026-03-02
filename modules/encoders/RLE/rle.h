@@ -41,6 +41,7 @@ public:
     
     void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes

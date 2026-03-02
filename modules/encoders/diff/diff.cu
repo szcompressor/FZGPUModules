@@ -1,5 +1,7 @@
 #include "encoders/diff/diff.h"
 #include <cuda_runtime.h>
+#include <cub/cub.cuh>
+#include "mem/mempool.h"
 
 namespace fz {
 
@@ -17,21 +19,6 @@ __global__ void differenceKernel(const T* input, T* output, size_t n) {
     }
 }
 
-// Inverse: Cumulative sum (decompression) - Sequential version
-template<typename T>
-__global__ void undoDifferenceKernel(const T* input, T* output, size_t n) {
-    // This must be executed by a SINGLE thread since it's sequential
-    // Thread 0 processes the entire array
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        if (n > 0) {
-            output[0] = input[0];
-            for (size_t i = 1; i < n; i++) {
-                output[i] = input[i] + output[i - 1];
-            }
-        }
-    }
-}
-
 // Explicit kernel launcher wrappers (these force kernel instantiation)
 template<typename T>
 void launchDifferenceKernel(const T* input, T* output, size_t n, int grid_size, int block_size, cudaStream_t stream) {
@@ -39,16 +26,34 @@ void launchDifferenceKernel(const T* input, T* output, size_t n, int grid_size, 
 }
 
 template<typename T>
-void launchUndoDifferenceKernel(const T* input, T* output, size_t n, cudaStream_t stream) {
-    // Cumulative sum is inherently sequential
-    // Launch with single thread to process entire array
-    // TODO: Implement efficient parallel prefix sum (scan) for better performance
-    undoDifferenceKernel<T><<<1, 1, 0, stream>>>(input, output, n);
+void launchUndoDifferenceKernel(const T* input, T* output, size_t n, cudaStream_t stream, MemoryPool* pool) {
+    // Parallel inclusive prefix sum via CUB DeviceScan.
+    // All allocations and launches are stream-ordered — no host sync required.
+    int n_int = static_cast<int>(n);
+
+    // Step 1: query required temp storage (d_temp = nullptr signals a size query)
+    size_t temp_bytes = 0;
+    cub::DeviceScan::InclusiveSum(nullptr, temp_bytes, input, output, n_int, stream);
+
+    // Step 2: allocate temp storage (freed before function returns, same stream)
+    void* d_temp = nullptr;
+    if (pool) {
+        d_temp = pool->allocate(temp_bytes, stream, "diff_cub_temp");
+    } else {
+        cudaMallocAsync(&d_temp, temp_bytes, stream);
+    }
+
+    // Step 3: run the scan
+    cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, input, output, n_int, stream);
+
+    // Step 4: free temp storage (stream-ordered — safe to issue immediately)
+    if (pool) { pool->free(d_temp, stream); } else { cudaFreeAsync(d_temp, stream); }
 }
 
 template<typename T>
 void DifferenceStage<T>::execute(
     cudaStream_t stream,
+    MemoryPool* pool,
     const std::vector<void*>& inputs,
     const std::vector<void*>& outputs,
     const std::vector<size_t>& sizes
@@ -71,7 +76,8 @@ void DifferenceStage<T>::execute(
             static_cast<const T*>(inputs[0]),
             static_cast<T*>(outputs[0]),
             n,
-            stream
+            stream,
+            pool
         );
     } else {
         // Compression: difference coding
@@ -117,12 +123,12 @@ template void launchDifferenceKernel<int64_t>(const int64_t*, int64_t*, size_t, 
 template void launchDifferenceKernel<uint16_t>(const uint16_t*, uint16_t*, size_t, int, int, cudaStream_t);
 template void launchDifferenceKernel<uint8_t>(const uint8_t*, uint8_t*, size_t, int, int, cudaStream_t);
 
-template void launchUndoDifferenceKernel<float>(const float*, float*, size_t, cudaStream_t);
-template void launchUndoDifferenceKernel<double>(const double*, double*, size_t, cudaStream_t);
-template void launchUndoDifferenceKernel<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t);
-template void launchUndoDifferenceKernel<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t);
-template void launchUndoDifferenceKernel<uint16_t>(const uint16_t*, uint16_t*, size_t, cudaStream_t);
-template void launchUndoDifferenceKernel<uint8_t>(const uint8_t*, uint8_t*, size_t, cudaStream_t);
-template void launchUndoDifferenceKernel<uint32_t>(const uint32_t*, uint32_t*, size_t, cudaStream_t);
+template void launchUndoDifferenceKernel<float>(const float*, float*, size_t, cudaStream_t, MemoryPool*);
+template void launchUndoDifferenceKernel<double>(const double*, double*, size_t, cudaStream_t, MemoryPool*);
+template void launchUndoDifferenceKernel<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t, MemoryPool*);
+template void launchUndoDifferenceKernel<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t, MemoryPool*);
+template void launchUndoDifferenceKernel<uint16_t>(const uint16_t*, uint16_t*, size_t, cudaStream_t, MemoryPool*);
+template void launchUndoDifferenceKernel<uint8_t>(const uint8_t*, uint8_t*, size_t, cudaStream_t, MemoryPool*);
+template void launchUndoDifferenceKernel<uint32_t>(const uint32_t*, uint32_t*, size_t, cudaStream_t, MemoryPool*);
 
 } // namespace fz

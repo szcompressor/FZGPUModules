@@ -41,7 +41,8 @@ CompressionDAG::CompressionDAG(MemoryPool* mem_pool, MemoryStrategy strategy)
       owns_streams_(false),
       max_level_(0),
       current_memory_usage_(0),
-      peak_memory_usage_(0) {
+      peak_memory_usage_(0),
+      profiling_enabled_(false) {
     
     if (!mem_pool_) {
         throw std::invalid_argument("MemoryPool cannot be null");
@@ -53,6 +54,9 @@ CompressionDAG::~CompressionDAG() {
     for (auto* node : nodes_) {
         if (node->completion_event) {
             cudaEventDestroy(node->completion_event);
+        }
+        if (node->start_event) {
+            cudaEventDestroy(node->start_event);
         }
         delete node;
     }
@@ -89,6 +93,18 @@ DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
         throw std::runtime_error(
             std::string("Failed to create CUDA event for stage '") + node->name + 
             "': " + cudaGetErrorString(err));
+    }
+
+    // Create start event for profiling if already enabled
+    if (profiling_enabled_) {
+        err = cudaEventCreate(&node->start_event);
+        if (err != cudaSuccess) {
+            cudaEventDestroy(node->completion_event);
+            delete node;
+            throw std::runtime_error(
+                std::string("Failed to create profiling start event for stage '") +
+                node->name + "': " + cudaGetErrorString(err));
+        }
     }
     
     nodes_.push_back(node);
@@ -401,12 +417,17 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 outputs.push_back(buffers_[buf_id].d_ptr);
             }
             
+            // Record stage start for profiling (before kernel launch)
+            if (profiling_enabled_ && node->start_event) {
+                cudaEventRecord(node->start_event, exec_stream);
+            }
+
             // Call stage execute
             if (node->stage) {
-                node->stage->execute(exec_stream, inputs, outputs, sizes);
+                node->stage->execute(exec_stream, mem_pool_, inputs, outputs, sizes);
             }
             
-            // Record completion for dependent stages
+            // Record completion for dependent stages (and profiling end)
             cudaEventRecord(node->completion_event, exec_stream);
             node->is_executed = true;
             
@@ -627,6 +648,81 @@ void CompressionDAG::assignStreams() {
         node->stream = streams_[stream_idx];
         level_stream_counter[node->level]++;
     }
+}
+
+// ========== Profiling ==========
+
+void CompressionDAG::enableProfiling(bool enable) {
+    profiling_enabled_ = enable;
+
+    if (enable) {
+        // Create start_event for all nodes that were added before this call
+        for (auto* node : nodes_) {
+            if (!node->start_event) {
+                cudaError_t err = cudaEventCreate(&node->start_event);
+                if (err != cudaSuccess) {
+                    // Non-fatal: log and leave start_event null (timing skipped for this node)
+                    std::cerr << "[DAG] WARNING: Could not create profiling event for '"
+                              << node->name << "': " << cudaGetErrorString(err) << "\n";
+                }
+            }
+        }
+    } else {
+        // Destroy and null out all start events to reclaim resources
+        for (auto* node : nodes_) {
+            if (node->start_event) {
+                cudaEventDestroy(node->start_event);
+                node->start_event = nullptr;
+            }
+        }
+    }
+}
+
+std::vector<StageTimingResult> CompressionDAG::collectTimings() {
+    if (!profiling_enabled_) return {};
+
+    // Sync all owned streams so that CUDA event queries are valid.
+    // (node streams may differ from the fallback stream passed to execute())
+    for (auto s : streams_) {
+        if (s) cudaStreamSynchronize(s);
+    }
+
+    std::vector<StageTimingResult> results;
+    results.reserve(nodes_.size());
+
+    for (auto* node : nodes_) {
+        if (!node->start_event || !node->completion_event) continue;
+
+        StageTimingResult r;
+        r.name       = node->name;
+        r.level      = node->level;
+        r.elapsed_ms = 0.0f;
+
+        cudaError_t err = cudaEventElapsedTime(&r.elapsed_ms,
+                                               node->start_event,
+                                               node->completion_event);
+        if (err != cudaSuccess) {
+            std::cerr << "[DAG] WARNING: cudaEventElapsedTime failed for '"
+                      << node->name << "': " << cudaGetErrorString(err) << "\n";
+            r.elapsed_ms = -1.0f;
+        }
+
+        // Sum up buffer sizes for input/output byte counts
+        r.input_bytes = 0;
+        for (int buf_id : node->input_buffer_ids) {
+            auto it = buffers_.find(buf_id);
+            if (it != buffers_.end()) r.input_bytes += it->second.size;
+        }
+        r.output_bytes = 0;
+        for (int buf_id : node->output_buffer_ids) {
+            auto it = buffers_.find(buf_id);
+            if (it != buffers_.end()) r.output_bytes += it->second.size;
+        }
+
+        results.push_back(r);
+    }
+
+    return results;
 }
 
 // ========== Query & Debug ==========

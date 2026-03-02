@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pipeline/perf.h"
+
 #include <cuda_runtime.h>
 #include <memory>
 #include <string>
@@ -72,10 +74,11 @@ struct DAGNode {
     // Execution state
     bool is_executed;
     cudaEvent_t completion_event;       // When this stage completes
+    cudaEvent_t start_event;            // When this stage starts (profiling only, nullptr = disabled)
     
     DAGNode(Stage* s = nullptr) 
         : id(-1), stage(s), level(-1), execution_order(-1), 
-          stream(nullptr), is_executed(false), completion_event(nullptr) {}
+          stream(nullptr), is_executed(false), completion_event(nullptr), start_event(nullptr) {}
 };
 
 /**
@@ -225,6 +228,36 @@ public:
     size_t getStreamCount() const { return streams_.size(); }
     void printDAG() const;
     void printBufferLifetimes() const;
+
+    // ========== Profiling ==========
+
+    /**
+     * Enable or disable per-stage CUDA event profiling.
+     *
+     * When enabled, a pair of CUDA events is recorded around each stage's
+     * execute() call during DAG::execute(). Call collectTimings() after
+     * execute() (and after synchronizing all streams) to retrieve results.
+     *
+     * Calling enableProfiling(true) creates start_event for every node that
+     * has already been added to the DAG; nodes added afterward gain start_event
+     * automatically if profiling is still enabled.
+     *
+     * Zero overhead when disabled: no events are created or recorded.
+     */
+    void enableProfiling(bool enable);
+
+    bool isProfilingEnabled() const { return profiling_enabled_; }
+
+    /**
+     * Collect per-stage timing results.
+     *
+     * Synchronizes all DAG-owned CUDA streams so that CUDA event queries are
+     * valid, then reads elapsed time for each node's [start → completion] pair.
+     * Buffer byte counts are taken from the DAG's buffer size table.
+     *
+     * Returns an empty vector if profiling was not enabled.
+     */
+    std::vector<StageTimingResult> collectTimings();
     
 private:
     MemoryPool* mem_pool_;
@@ -248,6 +281,9 @@ private:
     // Memory tracking
     size_t current_memory_usage_;
     size_t peak_memory_usage_;
+
+    // Profiling
+    bool profiling_enabled_;
     
     // ========== Internal Helpers ==========
     

@@ -9,6 +9,9 @@
 
 namespace fz {
 
+// Forward declaration — avoids requiring mempool.h in every stage header
+class MemoryPool;
+
 /**
  * Base class for compression/decompression stages
  * 
@@ -29,6 +32,7 @@ public:
      */
     virtual void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
@@ -101,39 +105,6 @@ public:
      * @return Map of output_name -> actual size written
      */
     virtual std::unordered_map<std::string, size_t> getActualOutputSizesByName() const = 0;
-    
-    /**
-     * Check if stage supports soft-run for better size estimation
-     * 
-     * Soft-run executes the stage to determine output size without
-     * allocating full output buffers. Useful for stages with
-     * data-dependent compression (e.g., bitpacking, RLE).
-     * 
-     * @return true if softRun() is implemented
-     */
-    virtual bool supportsSoftRun() const { return false; }
-    
-    /**
-     * Execute stage in soft-run mode to determine output sizes
-     * 
-     * This runs the compression algorithm with minimal output buffers
-     * (e.g., just counters) to determine actual size requirements
-     * before allocating and running the full kernel.
-     * 
-     * @param stream CUDA stream for execution
-     * @param inputs Array of input device pointers
-     * @param input_sizes Sizes of input buffers
-     * @return Actual output sizes that will be needed
-     * 
-     * @throws std::runtime_error if not supported
-     */
-    virtual std::vector<size_t> softRun(
-        cudaStream_t stream,
-        const std::vector<void*>& inputs,
-        const std::vector<size_t>& input_sizes
-    ) {
-        throw std::runtime_error(getName() + " does not support soft-run");
-    }
     
     // ===== Decompression Support =====
     

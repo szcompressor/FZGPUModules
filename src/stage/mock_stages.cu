@@ -13,10 +13,12 @@ __global__ void scaleKernel(const float* input, float* output, size_t n, bool is
 
 void ScaleStage::execute(
     cudaStream_t stream,
+    MemoryPool* pool,
     const std::vector<void*>& inputs,
     const std::vector<void*>& outputs,
     const std::vector<size_t>& sizes
 ) {
+    (void)pool;
     size_t n = sizes[0] / sizeof(float);
     int block_size = 256;
     int grid_size = (n + block_size - 1) / block_size;

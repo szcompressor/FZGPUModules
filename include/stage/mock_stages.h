@@ -17,10 +17,12 @@ public:
     
     void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override {
+        (void)pool;
         // Simple device-to-device copy
         cudaMemcpyAsync(outputs[0], inputs[0], sizes[0],
                        cudaMemcpyDeviceToDevice, stream);
@@ -68,6 +70,7 @@ public:
     
     void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
@@ -114,10 +117,12 @@ public:
     
     void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override {
+        (void)pool;
         // Copy to both outputs
         cudaMemcpyAsync(outputs[0], inputs[0], sizes[0],
                        cudaMemcpyDeviceToDevice, stream);
@@ -167,10 +172,12 @@ public:
     
     void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override {
+        (void)pool;
         // Copy to all three outputs
         cudaMemcpyAsync(outputs[0], inputs[0], sizes[0],
                        cudaMemcpyDeviceToDevice, stream);
@@ -222,10 +229,12 @@ public:
     
     void execute(
         cudaStream_t stream,
+        MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override {
+        (void)pool;
         // Copy both inputs to output sequentially
         size_t offset = 0;
         uint8_t* output = static_cast<uint8_t*>(outputs[0]);

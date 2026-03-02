@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include "mem/mempool.h"
 
 namespace fz {
 
@@ -94,11 +95,13 @@ template<typename T>
 __global__ void scatter_outliers_kernel(
     const T* __restrict__ outlier_values,
     const uint32_t* __restrict__ outlier_indices,
-    const uint32_t outlier_count,
+    const uint32_t* __restrict__ outlier_count_ptr,  // device pointer — no D2H sync needed
     T* __restrict__ output
 ) {
+    // Read count from device; blocks without real work exit cheaply.
+    uint32_t outlier_count = *outlier_count_ptr;
     size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     if (tid < outlier_count) {
         uint32_t idx = outlier_indices[tid];
         // Write the outlier prediction error in quantized units
@@ -409,42 +412,40 @@ void launchLorenzoInverseKernel(
     const uint32_t* outlier_indices,
     const uint32_t* outlier_count_ptr,
     size_t n,
+    size_t max_outliers,    // pre-allocated capacity — avoids D2H count read
     TInput ebx2,
     TCode quant_radius,
     TInput* output,
-    cudaStream_t stream
+    cudaStream_t stream,
+    MemoryPool* pool
 ) {
     constexpr int TileDim = 1024;
     constexpr int Seq = 4;
     constexpr int NumThreads = TileDim / Seq;  // 256
-    
+
     const int grid_size = (n + TileDim - 1) / TileDim;
-    
+
     // Step 0: Initialize output array to 0 because we will scatter outliers into it
     cudaMemsetAsync(output, 0, n * sizeof(TInput), stream);
-    
-    // Step 1: Read outlier count and scatter outliers BEFORE prefix sum
-    // This allows the prefix sum to correctly propagate outlier values
-    uint32_t h_outlier_count = 0;
-    if (outlier_count_ptr != nullptr) {
-        cudaMemcpyAsync(&h_outlier_count, outlier_count_ptr, sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-    }
-    
-    if (h_outlier_count > 0) {
+
+    // Step 1: Scatter outliers BEFORE prefix sum.
+    // Launch with the full allocation capacity so no host-side D2H is needed;
+    // scatter_outliers_kernel reads the actual count from the device pointer and
+    // each thread that exceeds it exits immediately.
+    if (outlier_count_ptr != nullptr && max_outliers > 0) {
         int scatter_block_size = 256;
-        int scatter_grid_size = (h_outlier_count + scatter_block_size - 1) / scatter_block_size;
-        
+        int scatter_grid_size  = (static_cast<int>(max_outliers) + scatter_block_size - 1)
+                                 / scatter_block_size;
+
         scatter_outliers_kernel<TInput>
             <<<scatter_grid_size, scatter_block_size, 0, stream>>>(
-                outlier_errors, outlier_indices, h_outlier_count, output
+                outlier_errors, outlier_indices, outlier_count_ptr, output
             );
-            
+
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             throw std::runtime_error(
-                std::string("scatter_outliers_kernel launch failed: ") + 
+                std::string("scatter_outliers_kernel launch failed: ") +
                 cudaGetErrorString(err)
             );
         }
@@ -465,12 +466,16 @@ void launchLorenzoInverseKernel(
         );
     }
     
-    cudaStreamSynchronize(stream);
-    
-    // Allocate temporary buffer for block sums (only if multi-block)
+    // Allocate temporary buffer for block sums (only if multi-block).
+    // Pool allocation is stream-ordered — the preceding kernels are already
+    // enqueued on the same stream, so no explicit sync is needed here.
     TInput* d_block_sums = nullptr;
     if (grid_size > 1) {
-        cudaMallocAsync(&d_block_sums, grid_size * sizeof(TInput), stream);
+        if (pool) {
+            d_block_sums = static_cast<TInput*>(pool->allocate(grid_size * sizeof(TInput), stream, "lorenzo_block_sums"));
+        } else {
+            cudaMallocAsync(&d_block_sums, grid_size * sizeof(TInput), stream);
+        }
     }
     
     // Step 3: Extract block sums (last element of each block)
@@ -482,7 +487,7 @@ void launchLorenzoInverseKernel(
         
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            if (d_block_sums) cudaFreeAsync(d_block_sums, stream);
+            if (d_block_sums) { if (pool) pool->free(d_block_sums, stream); else cudaFreeAsync(d_block_sums, stream); }
             throw std::runtime_error(
                 std::string("extract_block_sums_kernel launch failed: ") + 
                 cudaGetErrorString(err)
@@ -498,7 +503,7 @@ void launchLorenzoInverseKernel(
         
         err = cudaGetLastError();
         if (err != cudaSuccess) {
-            cudaFreeAsync(d_block_sums, stream);
+            if (pool) pool->free(d_block_sums, stream); else cudaFreeAsync(d_block_sums, stream);
             throw std::runtime_error(
                 std::string("propagate_block_sums_kernel launch failed: ") + 
                 cudaGetErrorString(err)
@@ -508,7 +513,7 @@ void launchLorenzoInverseKernel(
     
     // Cleanup
     if (d_block_sums) {
-        cudaFreeAsync(d_block_sums, stream);
+        if (pool) pool->free(d_block_sums, stream); else cudaFreeAsync(d_block_sums, stream);
     }
 }
 
@@ -523,6 +528,7 @@ LorenzoStage<TInput, TCode>::LorenzoStage(const Config& config)
 template<typename TInput, typename TCode>
 void LorenzoStage<TInput, TCode>::execute(
     cudaStream_t stream,
+    MemoryPool* pool,
     const std::vector<void*>& inputs,
     const std::vector<void*>& outputs,
     const std::vector<size_t>& sizes
@@ -545,6 +551,11 @@ void LorenzoStage<TInput, TCode>::execute(
         // Calculate ebx2 = 2 * error_bound for dequantization
         TInput ebx2 = static_cast<TInput>(2) * config_.error_bound;
         
+        // Derive max outlier capacity from the outlier_errors buffer size.
+        // Passing this to launchLorenzoInverseKernel lets it launch the scatter
+        // kernel without a blocking D2H copy of the actual count.
+        size_t max_outliers = (sizes.size() > 1) ? (sizes[1] / sizeof(TInput)) : 0;
+
         // Launch inverse kernel
         launchLorenzoInverseKernel<TInput, TCode>(
             static_cast<const TCode*>(inputs[0]),      // codes
@@ -552,10 +563,12 @@ void LorenzoStage<TInput, TCode>::execute(
             static_cast<const uint32_t*>(inputs[2]),   // outlier_indices
             static_cast<const uint32_t*>(inputs[3]),   // outlier_count
             num_elements,
+            max_outliers,
             ebx2,
             config_.quant_radius,
             static_cast<TInput*>(outputs[0]),          // reconstructed data
-            stream
+            stream,
+            pool
         );
         
         // Check for launch errors
@@ -701,15 +714,15 @@ template void launchLorenzoKernel<double, uint32_t>(
 
 template void launchLorenzoInverseKernel<float, uint16_t>(
     const uint16_t*, const float*, const uint32_t*, const uint32_t*,
-    size_t, float, uint16_t, float*, cudaStream_t);
+    size_t, size_t, float, uint16_t, float*, cudaStream_t, MemoryPool*);
 template void launchLorenzoInverseKernel<float, uint8_t>(
     const uint8_t*, const float*, const uint32_t*, const uint32_t*,
-    size_t, float, uint8_t, float*, cudaStream_t);
+    size_t, size_t, float, uint8_t, float*, cudaStream_t, MemoryPool*);
 template void launchLorenzoInverseKernel<double, uint16_t>(
     const uint16_t*, const double*, const uint32_t*, const uint32_t*,
-    size_t, double, uint16_t, double*, cudaStream_t);
+    size_t, size_t, double, uint16_t, double*, cudaStream_t, MemoryPool*);
 template void launchLorenzoInverseKernel<double, uint32_t>(
     const uint32_t*, const double*, const uint32_t*, const uint32_t*,
-    size_t, double, uint32_t, double*, cudaStream_t);
+    size_t, size_t, double, uint32_t, double*, cudaStream_t, MemoryPool*);
 
 } // namespace fz

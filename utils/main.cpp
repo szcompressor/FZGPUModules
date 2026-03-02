@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <cuda_runtime.h>
 
 #include "fzmodules.h"
@@ -368,11 +369,11 @@ void test_file_roundtrip() {
 }
 
 // ============================================================
-//  Test 7: Pipeline Inverse Mode (DAG Reversal)
+//  Test 7: Pipeline Diff+RLE Compression
 // ============================================================
 
 void test_pipeline_inverse_mode() {
-    std::cout << "========== Test 7: Pipeline Inverse Mode ==========\n";
+    std::cout << "========== Test 7: Pipeline Diff+RLE Compression ==========\n";
 
     size_t n = 1024;
     size_t data_size = n * sizeof(uint16_t);
@@ -399,11 +400,6 @@ void test_pipeline_inverse_mode() {
     CHECK(compressed_size < data_size, "Compressed size < input size");
     std::cout << "  → " << data_size << " -> " << compressed_size << " bytes ("
               << (float(data_size) / compressed_size) << "x)\n";
-
-    // Switch to inverse mode
-    pipeline.setInverseMode(true);
-    pipeline.finalize();
-    CHECK(true, "setInverseMode(true) + re-finalize succeeded");
 
     cudaFree(d_input);
     std::cout << "\n";
@@ -438,7 +434,7 @@ void test_difference_roundtrip() {
     std::vector<void*> fwd_outputs = { d_diff_out };
     std::vector<size_t> fwd_sizes = { data_size };
 
-    diff.execute(0, fwd_inputs, fwd_outputs, fwd_sizes);
+    diff.execute(0, nullptr, fwd_inputs, fwd_outputs, fwd_sizes);
     cudaDeviceSynchronize();
 
     // Verify diff output: [0, 1, 1, 1, ...]
@@ -459,7 +455,7 @@ void test_difference_roundtrip() {
     std::vector<void*> inv_outputs = { d_restored };
     std::vector<size_t> inv_sizes = { data_size };
 
-    diff.execute(0, inv_inputs, inv_outputs, inv_sizes);
+    diff.execute(0, nullptr, inv_inputs, inv_outputs, inv_sizes);
     cudaDeviceSynchronize();
 
     std::vector<uint16_t> h_restored(n);
@@ -522,11 +518,6 @@ void test_lorenzo_inverse() {
     bool has_nonzero = false;
     for (auto v : h_codes) { if (v != 0) has_nonzero = true; }
     CHECK(has_nonzero, "Quantized codes contain non-zero values");
-
-    // ---- Inverse mode ----
-    comp.setInverseMode(true);
-    comp.finalize();
-    CHECK(true, "Lorenzo pipeline switched to inverse mode");
 
     cudaFree(d_input);
     std::cout << "\n";
@@ -1104,7 +1095,8 @@ void test_climate_data_cldhgh() {
 
     // Compress
     Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
-    
+    comp.enableProfiling(true);
+
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
     lorenzo->setQuantRadius(512); 
@@ -1122,19 +1114,27 @@ void test_climate_data_cldhgh() {
 
     CHECK(compressed_size > 0 && compressed_size < data_size, "Compression produced output smaller than input");
 
-    std::cout << "  → Original:  " << data_size / 1024.0 / 1024.0 << " MB\n";
-    std::cout << "  → Compressed: " << compressed_size / 1024.0 / 1024.0 << " MB (Ratio: " 
+    std::cout << "  → Original:   " << data_size / 1024.0 / 1024.0 << " MB\n";
+    std::cout << "  → Compressed: " << compressed_size / 1024.0 / 1024.0 << " MB (Ratio: "
               << static_cast<double>(data_size) / compressed_size << "x)\n";
+
+    comp.getLastPerfResult().print(std::cout);
 
     // Write to file and clear pipeline memory
     std::string filename = "test_climate.fzm";
     comp.writeToFile(filename, 0);
 
-    // Decompress
+    // Decompress (static method — timed internally, excluding file I/O and H→D copy)
+    // Enable INFO-level logging so runInversePipeline prints its per-level breakdown.
+    Logger::enableStderr(LogLevel::INFO);
+
     void* d_decompressed = nullptr;
     size_t decompressed_size = 0;
-    Pipeline::decompressFromFile(filename, &d_decompressed, &decompressed_size, 0);
-    cudaDeviceSynchronize();
+    PipelinePerfResult decomp_perf;
+    Pipeline::decompressFromFile(filename, &d_decompressed, &decompressed_size, 0, &decomp_perf);
+
+    Logger::setCallback(nullptr);
+    decomp_perf.print(std::cout);
 
     CHECK(d_decompressed != nullptr, "Decompression returned GPU pointer");
 
@@ -1296,6 +1296,180 @@ void test_dag_aware_decompression() {
 }
 
 // ============================================================
+//  Test 21: DAG-native inverse — 3-level deep + 2-wide pipeline
+//
+//  Pipeline topology (forward):
+//
+//    input ──► Lorenzo(L0) ──codes──────► Diff(L1) ──► PassThrough_A(L2) ─► [out]
+//                         └─outlier_errs─► PassThrough_B(L1) ──────────────► [out]
+//                         └─outlier_idxs ──────────────────────────────────► [out]
+//                         └─outlier_count ─────────────────────────────────► [out]
+//
+//  Inverse DAG (what decompress() must build natively):
+//    Level 0 (parallel): inv_PassThrough_A, inv_PassThrough_B
+//    Level 1:            inv_Diff          (waits for inv_PassThrough_A only)
+//    Level 2:            inv_Lorenzo       (waits for inv_Diff AND inv_PassThrough_B)
+//
+//  Fine-grained barrier benefit: inv_Lorenzo waits only for inv_Diff AND inv_PassThrough_B
+//  via cudaStreamWaitEvent per dependency — not for all streams at the previous level.
+// ============================================================
+
+void test_dag_native_inverse_complex() {
+    std::cout << "========== Test 21: DAG-native Inverse (3-level deep, 2-wide) ==========\n";
+    std::cout << "  Lorenzo(L0) → Diff(L1) → PassThrough_A(L2)\n";
+    std::cout << "             └→ PassThrough_B(L1)   [parallel with Diff]\n\n";
+
+    size_t n         = 128 * 1024;
+    size_t data_size = n * sizeof(float);
+    float  eb        = 1.0f;
+
+    float* d_input = createTestData(n, 0, 0.05f);   // 5% outliers
+    std::vector<float> h_original(n);
+    cudaMemcpy(h_original.data(), d_input, data_size, cudaMemcpyDeviceToHost);
+
+    // ── Build forward pipeline ───────────────────────────────────────────────
+    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 4.0f);
+
+    auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(eb);
+    lorenzo->setQuantRadius(32);
+    lorenzo->setOutlierCapacity(0.10f);
+
+    // Level 1, branch A: Diff on codes
+    auto* diff = comp.addStage<DifferenceStage<uint16_t>>();
+    comp.connect(diff, lorenzo, "codes");
+
+    // Level 2: PassThrough chained after Diff
+    auto* pass_a = comp.addStage<PassThroughStage>();
+    comp.connect(pass_a, diff);   // default output name "output"
+
+    // Level 1, branch B (parallel with Diff): PassThrough on outlier_errors
+    auto* pass_b = comp.addStage<PassThroughStage>();
+    comp.connect(pass_b, lorenzo, "outlier_errors");
+
+    comp.finalize();
+
+    // ── Verify DAG structure ─────────────────────────────────────────────────
+    auto* dag = comp.getDAG();
+    int fwd_levels   = static_cast<int>(dag->getLevels().size());
+    int fwd_max_par  = dag->getMaxParallelism();
+    std::cout << "  → Forward DAG levels:          " << fwd_levels  << "\n";
+    std::cout << "  → Forward DAG max parallelism: " << fwd_max_par << "\n";
+
+    CHECK(fwd_levels  >= 3, "Pipeline has 3+ forward levels (depth)");
+    CHECK(fwd_max_par >= 2, "Pipeline has 2+ parallel forward branches (width)");
+
+    // ── Compress ─────────────────────────────────────────────────────────────
+    void*  d_compressed    = nullptr;
+    size_t compressed_size = 0;
+    comp.compress(d_input, data_size, &d_compressed, &compressed_size, 0);
+    cudaDeviceSynchronize();
+
+    CHECK(compressed_size > 0, "Compression produced output");
+    std::cout << "  → Compressed: " << (data_size / 1024.0) << " KB → "
+              << (compressed_size / 1024.0) << " KB\n";
+
+    // ── Path A: decompress() — DAG-native inverse ────────────────────────────
+    void*  d_decomp_a    = nullptr;
+    size_t decomp_size_a = 0;
+    comp.decompress(d_compressed, data_size, &d_decomp_a, &decomp_size_a, 0);
+    cudaDeviceSynchronize();
+
+    CHECK(d_decomp_a   != nullptr,   "decompress() returned GPU pointer");
+    CHECK(decomp_size_a == data_size, "decompress() output size matches original");
+
+    double max_err_a = 0.0;
+    if (d_decomp_a && decomp_size_a == data_size) {
+        std::vector<float> h_a(n);
+        cudaMemcpy(h_a.data(), d_decomp_a, data_size, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < n; i++) {
+            double e = std::abs(h_original[i] - h_a[i]);
+            if (e > max_err_a) max_err_a = e;
+        }
+    }
+    CHECK(max_err_a <= eb + 1e-6, "decompress() max error within Lorenzo bound");
+    std::cout << "  → decompress()         max_err=" << max_err_a << " (bound=" << eb << ")\n";
+
+    // ── Path B: decompressFromFile() — runInversePipeline (reference path) ───
+    std::string filename = "test_dag_complex.fzm";
+    comp.writeToFile(filename, 0);
+
+    void*  d_decomp_b    = nullptr;
+    size_t decomp_size_b = 0;
+    Pipeline::decompressFromFile(filename, &d_decomp_b, &decomp_size_b, 0);
+    cudaDeviceSynchronize();
+
+    CHECK(d_decomp_b   != nullptr,    "decompressFromFile() returned GPU pointer");
+    CHECK(decomp_size_b == data_size, "decompressFromFile() output size matches original");
+
+    double max_err_b = 0.0;
+    if (d_decomp_b && decomp_size_b == data_size) {
+        std::vector<float> h_b(n);
+        cudaMemcpy(h_b.data(), d_decomp_b, data_size, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < n; i++) {
+            double e = std::abs(h_original[i] - h_b[i]);
+            if (e > max_err_b) max_err_b = e;
+        }
+    }
+    CHECK(max_err_b <= eb + 1e-6, "decompressFromFile() max error within bound");
+    std::cout << "  → decompressFromFile() max_err=" << max_err_b << " (bound=" << eb << ")\n";
+
+    // ── Both paths produce bit-identical results ─────────────────────────────
+    bool paths_match = false;
+    if (d_decomp_a && d_decomp_b && decomp_size_a == decomp_size_b) {
+        std::vector<uint8_t> h_ba(decomp_size_a), h_bb(decomp_size_b);
+        cudaMemcpy(h_ba.data(), d_decomp_a, decomp_size_a, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_bb.data(), d_decomp_b, decomp_size_b, cudaMemcpyDeviceToHost);
+        paths_match = (memcmp(h_ba.data(), h_bb.data(), decomp_size_a) == 0);
+    }
+    CHECK(paths_match, "decompress() and decompressFromFile() produce identical output");
+
+    // ── Verify DAG-native inverse respects memory strategy ───────────────────
+    // Run again with MINIMAL strategy to exercise pool pressure path.
+    {
+        Pipeline comp2(data_size, MemoryStrategy::MINIMAL, 4.0f);
+        auto* l2 = comp2.addStage<LorenzoStage<float, uint16_t>>();
+        l2->setErrorBound(eb);  l2->setQuantRadius(32);  l2->setOutlierCapacity(0.10f);
+        auto* d2 = comp2.addStage<DifferenceStage<uint16_t>>();
+        comp2.connect(d2, l2, "codes");
+        auto* pa2 = comp2.addStage<PassThroughStage>();
+        comp2.connect(pa2, d2);
+        auto* pb2 = comp2.addStage<PassThroughStage>();
+        comp2.connect(pb2, l2, "outlier_errors");
+        comp2.finalize();
+
+        void* dc2 = nullptr;  size_t cs2 = 0;
+        comp2.compress(d_input, data_size, &dc2, &cs2, 0);
+        cudaDeviceSynchronize();
+
+        void* dd2 = nullptr;  size_t ds2 = 0;
+        comp2.decompress(dc2, data_size, &dd2, &ds2, 0);
+        cudaDeviceSynchronize();
+
+        CHECK(dd2 != nullptr, "MINIMAL strategy decompress() returned GPU pointer");
+        double me2 = 0.0;
+        if (dd2 && ds2 == data_size) {
+            std::vector<float> hr2(n);
+            cudaMemcpy(hr2.data(), dd2, data_size, cudaMemcpyDeviceToHost);
+            for (size_t i = 0; i < n; i++) {
+                double e = std::abs(h_original[i] - hr2[i]);
+                if (e > me2) me2 = e;
+            }
+        }
+        CHECK(me2 <= eb + 1e-6, "MINIMAL strategy max error within bound");
+        std::cout << "  → MINIMAL strategy max_err=" << me2 << "\n";
+        if (dd2) cudaFree(dd2);
+    }
+
+    // Cleanup
+    cudaFree(d_input);
+    if (d_decomp_a) cudaFree(d_decomp_a);
+    if (d_decomp_b) cudaFree(d_decomp_b);
+    std::remove(filename.c_str());
+    std::cout << "\n";
+}
+
+// ============================================================
 //  Main
 // ============================================================
 
@@ -1345,6 +1519,7 @@ int main() {
         test_difference_file_roundtrip();
         test_climate_data_cldhgh();
         test_dag_aware_decompression();
+        test_dag_native_inverse_complex();
     } catch (const std::exception& e) {
         std::cerr << "\n✗ EXCEPTION: " << e.what() << "\n";
         g_tests_failed++;

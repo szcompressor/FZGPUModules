@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pipeline/dag.h"
+#include "pipeline/perf.h"
 #include "stage/stage.h"
 #include "stage/stage_factory.h"
 #include "mem/mempool.h"
@@ -66,38 +67,10 @@ public:
     void setMemoryStrategy(MemoryStrategy strategy);
     
     /**
-     * Set inverse mode for decompression
-     * 
-     * When enabled:
-     * - All stages toggle to inverse mode (compression ↔ decompression)
-     * - DAG connections reverse during next finalize()
-     * - Former sinks become sources, former source becomes sink
-     * 
-     * Usage:
-     *   pipeline.compress(...);
-     *   pipeline.setInverseMode(true);
-     *   pipeline.finalize();  // Rebuilds with reversed connections
-     *   pipeline.decompress(...);
-     * 
-     * @param inverse True for decompression, false for compression
-     */
-    void setInverseMode(bool inverse);
-    
-    /**
      * Configure number of parallel streams for execution
      * Must be called before finalize()
      */
     void setNumStreams(int num_streams);
-    
-    /**
-     * Enable soft-run mode for better size estimation
-     * When enabled, stages that support softRun() will execute twice:
-     * 1. Soft-run to determine actual output size
-     * 2. Full run with correctly sized output buffer
-     * 
-     * Trade-off: Better memory efficiency vs. 2x execution time
-     */
-    void enableSoftRun(bool enable);
     
     // ========== Builder API ==========
     
@@ -234,8 +207,35 @@ public:
     
     // ========== Verification & Stats ==========
     
-    // ========== Query & Debug ==========
-    
+    // ========== Profiling ==========
+
+    /**
+     * Enable or disable per-stage CUDA event profiling.
+     *
+     * When enabled:
+     *   - A CUDA start/completion event pair is recorded around every stage
+     *     execute() call inside the DAG.
+     *   - compress() and decompress() measure host-side wall time with
+     *     std::chrono::steady_clock.
+     *   - After each call, results are available via getLastPerfResult().
+     *
+     * Has zero overhead when disabled (no events created or recorded).
+     * Can be toggled between calls without re-finalizing the pipeline.
+     */
+    void enableProfiling(bool enable);
+
+    bool isProfilingEnabled() const { return profiling_enabled_; }
+
+    /**
+     * Return the performance snapshot captured during the most recent
+     * compress() or decompress() call.
+     *
+     * The result is only valid after at least one compress()/decompress()
+     * call with profiling enabled.  Use PipelinePerfResult::print() for a
+     * human-readable summary.
+     */
+    const PipelinePerfResult& getLastPerfResult() const { return last_perf_result_; }
+
     /**
      * Get the underlying DAG (for advanced use cases)
      */
@@ -323,25 +323,23 @@ public:
     
     /**
      * Decompress data from file
-     * 
+     *
      * One-shot decompression: reads file, reconstructs pipeline, and decompresses.
-     * 
-     * @param filename Input FZM file path
-     * @param d_output [out] Device pointer to decompressed data
+     *
+     * @param filename    Input FZM file path
+     * @param d_output    [out] Device pointer to decompressed data
      * @param output_size [out] Size of decompressed data
-     * @param stream CUDA stream for operations (default: 0)
-     * 
-     * Note: This is a convenience method. For more control, use:
-     *   1. readHeader() to get metadata
-     *   2. loadCompressedData() to load to GPU
-     *   3. Build decompression pipeline manually
-     *   4. Call decompress()
+     * @param stream      CUDA stream for operations (default: 0)
+     * @param perf_out    Optional: if non-null, populated with GPU compute timing
+     *                    (excludes file I/O and H→D copy; dag_elapsed_ms covers
+     *                    only runInversePipeline + the final D→D output copy).
      */
     static void decompressFromFile(
         const std::string& filename,
         void** d_output,
         size_t* output_size,
-        cudaStream_t stream = 0
+        cudaStream_t stream = 0,
+        PipelinePerfResult* perf_out = nullptr
     );
 
 private:
@@ -354,13 +352,6 @@ private:
      * - Verify buffer counts match stage expectations
      */
     void validate();
-    
-    /**
-     * Determine buffer sizes based on strategy
-     * - PREALLOCATE: Use estimateOutputSizes()
-     * - MINIMAL/PIPELINE: Use soft-run or conservative estimates
-     */
-    void determineBufferSizes();
     
     // ===== Finalize Helpers (split from monolithic finalize()) =====
     
@@ -429,20 +420,28 @@ private:
      *                          Must be pre-seeded with all leaf (compressed) buffers.
      * @param uncompressed_size Upper bound for inverse output allocation
      * @param pool              Memory pool for scratch allocations
-     * @param stream            CUDA stream
+     * @param stream            Fallback CUDA stream (used when num_streams <= 1)
+     * @param num_streams       Number of CUDA streams for intra-level parallelism.
+     *                          0 = auto-detect from topology (recommended).
      * @return {d_ptr, size} of final result (pool-allocated — caller must copy and free)
      *
-     * Limitations:
-     *   - Stages with multiple forward inputs (fan-in) will only have their first
-     *     forward input reconstructed as the inverse output. Full fan-out inverse
-     *     support requires stages that produce multiple outputs in inverse mode.
+     * Parallelism model (mirrors the forward DAG):
+     *   - Specs are grouped by their forward execution level (computed from the
+     *     dependency graph encoded in fwd_input_ids / fwd_output_ids).
+     *   - Groups are processed in reverse level order (last compression level first).
+     *   - Within a group, specs are launched concurrently across dedicated CUDA streams
+     *     and synchronized with cudaStreamWaitEvent between groups.
+     *   - Fan-in inverse (forward merge ↔ inverse split): allocates one output buffer
+     *     per fwd_input_id so every forward input is reconstructed in parallel.
      */
     static std::pair<void*, size_t> runInversePipeline(
         const std::vector<InverseStageSpec>& specs,
         std::unordered_map<int, std::pair<void*, size_t>>& live_bufs,
         size_t uncompressed_size,
         MemoryPool& pool,
-        cudaStream_t stream
+        cudaStream_t stream,
+        int num_streams = 0,
+        std::vector<StageTimingResult>* timing_out = nullptr
     );
 
     // =====
@@ -511,9 +510,6 @@ private:
     std::unique_ptr<CompressionDAG> dag_;        // Internal DAG
     MemoryStrategy strategy_;
     
-    // Inverse mode (for decompression)
-    bool is_inverse_mode_;
-    
     // Stage management
     std::vector<std::unique_ptr<Stage>> stages_; // Owned stages
     std::unordered_map<Stage*, DAGNode*> stage_to_node_; // Mapping
@@ -529,8 +525,12 @@ private:
     
     // Configuration
     int num_streams_;
-    bool soft_run_enabled_;
     bool is_finalized_;
+    bool soft_run_enabled_;   ///< Future: enable soft-run buffer sizing pass
+
+    // Profiling
+    bool profiling_enabled_;
+    PipelinePerfResult last_perf_result_;
     
     // Input/output tracking
     DAGNode* input_node_;                        // Source stage

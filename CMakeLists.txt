@@ -164,6 +164,7 @@ add_library(FZMOD::predictors ALIAS fzmod_predictors)
 add_library(fzmod_pipeline
   src/pipeline/compressor.cpp
   src/pipeline/dag.cpp
+  src/pipeline/perf.cpp
   src/pipeline/stat.cpp
   src/stage/mock_stages.cu
 )

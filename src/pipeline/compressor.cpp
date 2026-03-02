@@ -1,6 +1,7 @@
 #include "pipeline/compressor.h"
 #include "fzm_format.h"
 #include "log.h"
+#include <chrono>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -13,10 +14,10 @@ namespace fz {
 
 Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_multiplier)
     : strategy_(strategy),
-      is_inverse_mode_(false),
       num_streams_(1),
-      soft_run_enabled_(false),
       is_finalized_(false),
+      soft_run_enabled_(false),
+      profiling_enabled_(false),
       input_node_(nullptr),
       input_buffer_id_(-1),
       d_concat_buffer_(nullptr),
@@ -59,28 +60,9 @@ void Pipeline::setNumStreams(int num_streams) {
     num_streams_ = num_streams;
 }
 
-void Pipeline::enableSoftRun(bool enable) {
-    if (is_finalized_) {
-        throw std::runtime_error("Cannot enable soft-run after finalization");
-    }
-    soft_run_enabled_ = enable;
-}
-
-void Pipeline::setInverseMode(bool inverse) {
-    // Toggle all stages to inverse mode
-    for (auto& stage_ptr : stages_) {
-        stage_ptr->setInverse(inverse);
-    }
-    
-    is_inverse_mode_ = inverse;
-    
-    // Must re-finalize to rebuild DAG with reversed connections
-    if (is_finalized_) {
-        is_finalized_ = false;
-        
-        FZ_LOG(INFO, "Switched to %s mode, pipeline needs re-finalization",
-               inverse ? "decompression" : "compression");
-    }
+void Pipeline::enableProfiling(bool enable) {
+    profiling_enabled_ = enable;
+    dag_->enableProfiling(enable);
 }
 
 // ========== Builder API ===========
@@ -122,6 +104,7 @@ int Pipeline::connect(Stage* dependent, Stage* producer, const std::string& outp
     if (!connected) {
         // Shouldn't happen since addStage pre-allocates all outputs
         int buffer_id = dag_->addDependency(dep_node, prod_node, 1, output_index);
+        (void)buffer_id;
         FZ_LOG(WARN, "Had to create new buffer for %s.%s (should have been pre-allocated)",
                producer->getName().c_str(), output_name.c_str());
     }
@@ -174,11 +157,6 @@ void Pipeline::finalize() {
         throw std::runtime_error("Pipeline already finalized");
     }
     
-    // Rebuild DAG connections if in inverse mode
-    if (is_inverse_mode_) {
-        rebuildInverseConnections();
-    }
-    
     validate();
     
     auto [sources, sinks] = identifyTopology();
@@ -215,89 +193,384 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
     std::unordered_map<int, std::pair<void*, size_t>>& live_bufs,
     size_t uncompressed_size,
     MemoryPool& pool,
-    cudaStream_t stream
+    cudaStream_t fallback_stream,
+    int num_streams,
+    std::vector<StageTimingResult>* timing_out
 ) {
     if (specs.empty()) {
         throw std::runtime_error("runInversePipeline: no stages to execute");
     }
 
-    // Track which live_bufs entries were pool-allocated here
-    // (vs. externally provided leaf buffers that must not be freed)
+    // ── Step 1: Build fwd_output_buf → spec_index map ─────────────────────────
+    // Used to identify which spec produced a given buffer (for level computation).
+    std::unordered_map<int, int> output_buf_to_spec;
+    for (int i = 0; i < static_cast<int>(specs.size()); i++) {
+        for (int buf_id : specs[i].fwd_output_ids) {
+            output_buf_to_spec[buf_id] = i;
+        }
+    }
+
+    // ── Step 2: Compute forward level for each spec ───────────────────────────
+    // Specs arrive in forward topological order, so a simple forward pass suffices.
+    // level[i] = max(level[j] + 1) for all j whose fwd_output_ids feed spec i.
+    std::vector<int> spec_level(specs.size(), 0);
+    for (int i = 0; i < static_cast<int>(specs.size()); i++) {
+        for (int buf_id : specs[i].fwd_input_ids) {
+            auto it = output_buf_to_spec.find(buf_id);
+            if (it != output_buf_to_spec.end()) {
+                int producer = it->second;
+                spec_level[i] = std::max(spec_level[i], spec_level[producer] + 1);
+            }
+        }
+    }
+
+    int max_fwd_level = *std::max_element(spec_level.begin(), spec_level.end());
+
+    // Group spec indices by forward level
+    std::vector<std::vector<int>> fwd_groups(max_fwd_level + 1);
+    for (int i = 0; i < static_cast<int>(specs.size()); i++) {
+        fwd_groups[spec_level[i]].push_back(i);
+    }
+
+    // Max inverse parallelism = widest forward level
+    int max_par = 0;
+    for (const auto& g : fwd_groups) {
+        max_par = std::max(max_par, static_cast<int>(g.size()));
+    }
+
+    // ── Step 3: Create CUDA streams and per-stream events ─────────────────────
+    int n_streams = (num_streams > 0) ? num_streams : max_par;
+    n_streams = std::max(1, std::min(n_streams, max_par));
+
+    std::vector<cudaStream_t> inv_streams;
+    bool owns_streams = (n_streams > 1);
+    if (owns_streams) {
+        inv_streams.resize(n_streams);
+        for (auto& s : inv_streams) {
+            cudaStreamCreate(&s);
+        }
+    } else {
+        inv_streams.push_back(fallback_stream);
+    }
+
+    // One event per stream — records when the most recent work on that stream finished.
+    // Used to synchronise the next batch: each stream waits for ALL events from the
+    // previous batch before starting (conservative level barrier, same pattern as
+    // the forward DAG's cudaStreamWaitEvent per dependency).
+    std::vector<cudaEvent_t> batch_events(n_streams, nullptr);
+    for (auto& e : batch_events) {
+        cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+    }
+    // Track which events carry valid signals (false before first batch)
+    std::vector<bool> event_has_work(n_streams, false);
+
+    // ── Step 4: Track pool-owned buffer IDs for safe freeing ──────────────────
     std::unordered_set<int> pool_owned;
 
-    // Process stages in reverse forward order (last compression stage first)
-    for (int i = static_cast<int>(specs.size()) - 1; i >= 0; i--) {
-        const auto& spec = specs[i];
-        Stage* stage = spec.stage;
+    // ── Timing infrastructure ─────────────────────────────────────────────────
+    struct LevelTiming {
+        int   fwd_level;
+        int   n_specs;
+        float wait_ms;    // cudaStreamWaitEvent setup
+        float alloc_ms;   // pool.allocate() across all stages in level
+        float exec_ms;    // stage->execute() across all stages in level
+        float sizes_ms;   // getActualOutputSizesByName() across all stages
+        float sync_ms;    // cudaStreamSynchronize at end of level
+        float free_ms;    // pool.free() across all freed buffers
+        float total_ms;   // wall-clock for the whole level
+    };
+    std::vector<LevelTiming> level_timings;
+    level_timings.reserve(max_fwd_level + 1);
 
-        // Gather inverse inputs: these are the forward outputs of this stage
-        std::vector<void*> inv_inputs;
-        std::vector<size_t> inv_sizes;
-        for (int buf_id : spec.fwd_output_ids) {
-            auto it = live_bufs.find(buf_id);
-            if (it != live_bufs.end() && it->second.first) {
-                inv_inputs.push_back(it->second.first);
-                inv_sizes.push_back(it->second.second);
-            } else {
-                FZ_LOG(WARN, "Stage '%s': inverse input buffer %d not found in live_bufs",
-                       stage->getName().c_str(), buf_id);
-                inv_inputs.push_back(nullptr);
-                inv_sizes.push_back(0);
+    float grand_wait_ms = 0, grand_alloc_ms = 0, grand_exec_ms = 0;
+    float grand_sizes_ms = 0, grand_sync_ms = 0, grand_free_ms = 0;
+
+    // ── Per-stage CUDA event timing ───────────────────────────────────────────
+    struct StageEventInfo {
+        cudaEvent_t cuda_start, cuda_end;
+        Stage*      stage_ptr;
+        int         inv_level;
+        size_t      input_bytes;
+        int         spec_idx;
+    };
+    std::vector<StageEventInfo> level_stage_cuda_infos; // reset each level
+    std::vector<StageTimingResult> collected_stage_timings;
+
+    auto t_inv_start = std::chrono::steady_clock::now();
+
+    // ── Step 5: Execute in reverse level order (last fwd level first) ─────────
+    for (int fwd_level = max_fwd_level; fwd_level >= 0; fwd_level--) {
+        const auto& group = fwd_groups[fwd_level];
+        auto t_level_start = std::chrono::steady_clock::now();
+
+        // ── Phase A: stream barrier setup ────────────────────────────────────
+        auto t_wait_start = std::chrono::steady_clock::now();
+        // Before this batch: each stream must wait for ALL events from the previous
+        // batch to ensure every upstream inverse result is ready in live_bufs.
+        if (fwd_level < max_fwd_level) {
+            for (int si = 0; si < n_streams; si++) {
+                for (int ei = 0; ei < n_streams; ei++) {
+                    if (event_has_work[ei]) {
+                        cudaStreamWaitEvent(inv_streams[si], batch_events[ei]);
+                    }
+                }
             }
         }
+        auto t_wait_end = std::chrono::steady_clock::now();
 
-        // Allocate inverse output buffer (conservative upper bound)
-        // TODO: support fan-out inverse (multiple fwd_input_ids -> multiple inv outputs)
-        void* d_inv_out = pool.allocate(uncompressed_size, stream, "inv_stage_out");
-        if (!d_inv_out) {
-            throw std::runtime_error(
-                "MemoryPool allocation failed for inverse stage '" + stage->getName() + "'");
+        float level_alloc_ms = 0, level_exec_ms = 0, level_sizes_ms = 0;
+
+        // ── Phase B: launch all specs in this group ───────────────────────────
+        // Launch all specs in this group concurrently (round-robin over streams)
+        for (int gi = 0; gi < static_cast<int>(group.size()); gi++) {
+            int spec_idx = group[gi];
+            const auto& spec = specs[spec_idx];
+            Stage* stage = spec.stage;
+            int si = gi % n_streams;
+            cudaStream_t exec_stream = inv_streams[si];
+
+            // Inverse inputs = forward outputs of this stage
+            std::vector<void*> inv_inputs;
+            std::vector<size_t> inv_sizes;
+            for (int buf_id : spec.fwd_output_ids) {
+                auto it = live_bufs.find(buf_id);
+                if (it != live_bufs.end() && it->second.first) {
+                    inv_inputs.push_back(it->second.first);
+                    inv_sizes.push_back(it->second.second);
+                } else {
+                    FZ_LOG(WARN, "Stage '%s' (fwd_level=%d): inv input buf %d missing",
+                           stage->getName().c_str(), fwd_level, buf_id);
+                    inv_inputs.push_back(nullptr);
+                    inv_sizes.push_back(0);
+                }
+            }
+
+            // Inverse outputs = one buffer per forward input of this stage.
+            // For a single-input forward stage (most common): one output.
+            // For a fan-in forward stage (merge): one output per forward input,
+            //   all allocated and passed to the stage so it can reconstruct all branches.
+            std::vector<void*> inv_outputs;
+
+            // ── Time pool allocation ──────────────────────────────────────────
+            auto t_alloc_start = std::chrono::steady_clock::now();
+            for (int buf_id : spec.fwd_input_ids) {
+                void* buf = pool.allocate(uncompressed_size, exec_stream, "inv_out");
+                if (!buf) {
+                    // Cleanup before throwing
+                    for (int id : pool_owned) {
+                        if (live_bufs.count(id) && live_bufs[id].first) {
+                            pool.free(live_bufs[id].first, fallback_stream);
+                        }
+                    }
+                    if (owns_streams) {
+                        for (auto e : batch_events) cudaEventDestroy(e);
+                        for (auto s : inv_streams) cudaStreamDestroy(s);
+                    }
+                    throw std::runtime_error(
+                        "MemoryPool alloc failed for inverse stage '" + stage->getName() + "'");
+                }
+                inv_outputs.push_back(buf);
+                live_bufs[buf_id] = { buf, 0 };  // size filled in after execute
+                pool_owned.insert(buf_id);
+            }
+            auto t_alloc_end = std::chrono::steady_clock::now();
+            level_alloc_ms += std::chrono::duration<float, std::milli>(t_alloc_end - t_alloc_start).count();
+
+            // ── Time stage execute ────────────────────────────────────────────
+            StageEventInfo sei;
+            sei.stage_ptr   = stage;
+            sei.inv_level   = max_fwd_level - fwd_level;
+            sei.spec_idx    = spec_idx;
+            sei.input_bytes = 0;
+            for (size_t sz : inv_sizes) sei.input_bytes += sz;
+            cudaEventCreate(&sei.cuda_start);
+            cudaEventCreate(&sei.cuda_end);
+            cudaEventRecord(sei.cuda_start, exec_stream);
+            auto t_exec_start = std::chrono::steady_clock::now();
+            stage->execute(exec_stream, &pool, inv_inputs, inv_outputs, inv_sizes);
+            auto t_exec_end = std::chrono::steady_clock::now();
+            cudaEventRecord(sei.cuda_end, exec_stream);
+            level_stage_cuda_infos.push_back(std::move(sei));
+            level_exec_ms += std::chrono::duration<float, std::milli>(t_exec_end - t_exec_start).count();
+
+            // ── Time size retrieval ───────────────────────────────────────────
+            auto t_sizes_start = std::chrono::steady_clock::now();
+            // Retrieve actual output sizes by name and update live_bufs
+            auto out_sizes = stage->getActualOutputSizesByName();
+            auto out_names = stage->getOutputNames();
+            for (size_t j = 0; j < spec.fwd_input_ids.size(); j++) {
+                int buf_id = spec.fwd_input_ids[j];
+                size_t actual = uncompressed_size;
+                if (j < out_names.size()) {
+                    auto sz_it = out_sizes.find(out_names[j]);
+                    if (sz_it != out_sizes.end()) actual = sz_it->second;
+                }
+                live_bufs[buf_id].second = actual;
+            }
+            auto t_sizes_end = std::chrono::steady_clock::now();
+            level_sizes_ms += std::chrono::duration<float, std::milli>(t_sizes_end - t_sizes_start).count();
+
+            FZ_LOG(DEBUG,
+                   "Inverse '%s' (fwd_level=%d, stream=%d): %zu in -> %zu out, "
+                   "first_out=%.2f KB  [alloc=%.3f ms, exec=%.3f ms]",
+                   stage->getName().c_str(), fwd_level, si,
+                   inv_inputs.size(), inv_outputs.size(),
+                   (inv_outputs.empty() ? 0.0
+                    : live_bufs[spec.fwd_input_ids[0]].second / 1024.0),
+                   std::chrono::duration<float, std::milli>(t_alloc_end - t_alloc_start).count(),
+                   std::chrono::duration<float, std::milli>(t_exec_end - t_exec_start).count());
+
+            // Record this stream's completion for the next batch barrier
+            cudaEventRecord(batch_events[si], exec_stream);
+            event_has_work[si] = true;
         }
 
-        std::vector<void*> inv_outputs = { d_inv_out };
-        stage->execute(stream, inv_inputs, inv_outputs, inv_sizes);
-        cudaStreamSynchronize(stream);
-
-        // Determine actual output size
-        size_t actual_size = uncompressed_size;
-        auto out_sizes = stage->getActualOutputSizesByName();
-        auto out_names = stage->getOutputNames();
-        if (!out_names.empty()) {
-            auto sz_it = out_sizes.find(out_names[0]);
-            if (sz_it != out_sizes.end()) actual_size = sz_it->second;
-        }
-
-        // Store result keyed by the stage's first forward input buffer ID
-        if (!spec.fwd_input_ids.empty()) {
-            int result_id = spec.fwd_input_ids[0];
-            live_bufs[result_id] = { d_inv_out, actual_size };
-            pool_owned.insert(result_id);
-        }
-
-        FZ_LOG(DEBUG, "Inverse '%s': %zu inputs -> %.2f KB",
-               stage->getName().c_str(), inv_inputs.size(), actual_size / 1024.0);
-
-        // Free pool-owned intermediate inputs that are no longer needed
-        // (forward outputs of this stage that were computed by earlier inverse stages)
-        for (int buf_id : spec.fwd_output_ids) {
-            if (pool_owned.count(buf_id)) {
-                pool.free(live_bufs.at(buf_id).first, stream);
-                live_bufs.erase(buf_id);
-                pool_owned.erase(buf_id);
+        // ── Phase C: sync — forces CPU to wait for GPU kernels ────────────────
+        auto t_sync_start = std::chrono::steady_clock::now();
+        // After this batch completes (sync before freeing consumed inputs)
+        for (int si = 0; si < n_streams; si++) {
+            if (event_has_work[si]) {
+                cudaStreamSynchronize(inv_streams[si]);
             }
         }
+        auto t_sync_end = std::chrono::steady_clock::now();
+
+        // ── Collect CUDA event timings now that all streams have synced ────────
+        for (auto& ci : level_stage_cuda_infos) {
+            float gpu_ms = 0.0f;
+            cudaEventElapsedTime(&gpu_ms, ci.cuda_start, ci.cuda_end);
+            cudaEventDestroy(ci.cuda_start);
+            cudaEventDestroy(ci.cuda_end);
+
+            size_t output_bytes = 0;
+            for (int buf_id : specs[ci.spec_idx].fwd_input_ids) {
+                auto oit = live_bufs.find(buf_id);
+                if (oit != live_bufs.end()) output_bytes += oit->second.second;
+            }
+
+            StageTimingResult str;
+            str.name         = ci.stage_ptr->getName();
+            str.level        = ci.inv_level;
+            str.elapsed_ms   = gpu_ms;
+            str.input_bytes  = ci.input_bytes;
+            str.output_bytes = output_bytes;
+            collected_stage_timings.push_back(std::move(str));
+        }
+        level_stage_cuda_infos.clear();
+
+        // ── Phase D: free consumed input buffers ──────────────────────────────
+        auto t_free_start = std::chrono::steady_clock::now();
+        // Free pool-owned buffers that were consumed by this batch
+        // (= fwd_output_ids of specs in this group — produced by the previous batch)
+        for (int gi = 0; gi < static_cast<int>(group.size()); gi++) {
+            for (int buf_id : specs[group[gi]].fwd_output_ids) {
+                if (pool_owned.count(buf_id)) {
+                    pool.free(live_bufs.at(buf_id).first, fallback_stream);
+                    live_bufs.erase(buf_id);
+                    pool_owned.erase(buf_id);
+                }
+            }
+        }
+        auto t_free_end = std::chrono::steady_clock::now();
+
+        auto t_level_end = std::chrono::steady_clock::now();
+
+        LevelTiming lt;
+        lt.fwd_level  = fwd_level;
+        lt.n_specs    = static_cast<int>(group.size());
+        lt.wait_ms    = std::chrono::duration<float, std::milli>(t_wait_end  - t_wait_start ).count();
+        lt.alloc_ms   = level_alloc_ms;
+        lt.exec_ms    = level_exec_ms;
+        lt.sizes_ms   = level_sizes_ms;
+        lt.sync_ms    = std::chrono::duration<float, std::milli>(t_sync_end  - t_sync_start ).count();
+        lt.free_ms    = std::chrono::duration<float, std::milli>(t_free_end  - t_free_start ).count();
+        lt.total_ms   = std::chrono::duration<float, std::milli>(t_level_end - t_level_start).count();
+        level_timings.push_back(lt);
+
+        grand_wait_ms  += lt.wait_ms;
+        grand_alloc_ms += lt.alloc_ms;
+        grand_exec_ms  += lt.exec_ms;
+        grand_sizes_ms += lt.sizes_ms;
+        grand_sync_ms  += lt.sync_ms;
+        grand_free_ms  += lt.free_ms;
     }
 
-    // The result is at specs[0].fwd_input_ids[0] (the forward pipeline source's input)
-    if (specs[0].fwd_input_ids.empty()) {
-        throw std::runtime_error("runInversePipeline: source stage has no forward input IDs");
+    float grand_total_ms = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - t_inv_start).count();
+
+    // ── Export stage timings to caller ────────────────────────────────────────
+    if (timing_out) {
+        *timing_out = std::move(collected_stage_timings);
     }
-    int final_id = specs[0].fwd_input_ids[0];
+
+    // ── Print per-level timing summary ────────────────────────────────────────
+    FZ_LOG(INFO, "");
+    FZ_LOG(INFO, "===== runInversePipeline timing breakdown =====");
+    FZ_LOG(INFO, "  %-10s  %-6s  %-10s  %-10s  %-10s  %-10s  %-10s  %-10s  %-10s",
+           "inv-level", "specs",
+           "wait(ms)", "alloc(ms)", "exec(ms)", "sizes(ms)", "sync(ms)", "free(ms)", "total(ms)");
+    FZ_LOG(INFO, "  %s", std::string(97, '-').c_str());
+    for (const auto& lt : level_timings) {
+        // Inverse level = max_fwd_level - lt.fwd_level  (0 = first to run)
+        int inv_lev = max_fwd_level - lt.fwd_level;
+        FZ_LOG(INFO, "  %-10d  %-6d  %-10.3f  %-10.3f  %-10.3f  %-10.3f  %-10.3f  %-10.3f  %-10.3f",
+               inv_lev, lt.n_specs,
+               lt.wait_ms, lt.alloc_ms, lt.exec_ms,
+               lt.sizes_ms, lt.sync_ms, lt.free_ms, lt.total_ms);
+    }
+    FZ_LOG(INFO, "  %s", std::string(97, '-').c_str());
+    FZ_LOG(INFO, "  %-10s  %-6s  %-10.3f  %-10.3f  %-10.3f  %-10.3f  %-10.3f  %-10.3f  %-10.3f",
+           "TOTAL", "",
+           grand_wait_ms, grand_alloc_ms, grand_exec_ms,
+           grand_sizes_ms, grand_sync_ms, grand_free_ms, grand_total_ms);
+    FZ_LOG(INFO, "");
+    FZ_LOG(INFO, "  Phase breakdown:  wait=%.1f%%  alloc=%.1f%%  exec=%.1f%%  sizes=%.1f%%  sync=%.1f%%  free=%.1f%%",
+           100.f * grand_wait_ms  / grand_total_ms,
+           100.f * grand_alloc_ms / grand_total_ms,
+           100.f * grand_exec_ms  / grand_total_ms,
+           100.f * grand_sizes_ms / grand_total_ms,
+           100.f * grand_sync_ms  / grand_total_ms,
+           100.f * grand_free_ms  / grand_total_ms);
+    FZ_LOG(INFO, "===============================================");
+
+    // ── Step 6: Destroy streams and events ────────────────────────────────────
+    for (auto e : batch_events) cudaEventDestroy(e);
+    if (owns_streams) {
+        for (auto s : inv_streams) cudaStreamDestroy(s);
+    }
+
+    // ── Step 7: Return the final result ───────────────────────────────────────
+    // The source stage is at fwd_level 0. Its forward input (the pipeline input)
+    // is now overwritten in live_bufs with the inverse output = reconstructed data.
+    if (fwd_groups[0].empty() || specs[fwd_groups[0][0]].fwd_input_ids.empty()) {
+        throw std::runtime_error("runInversePipeline: cannot locate final result buffer");
+    }
+    int final_id = specs[fwd_groups[0][0]].fwd_input_ids[0];
     auto it = live_bufs.find(final_id);
     if (it == live_bufs.end() || !it->second.first) {
         throw std::runtime_error("runInversePipeline: no result produced");
     }
     return it->second;
+}
+
+// ── Helper: build per-level timing summary from per-stage CUDA event timings ──
+static std::vector<LevelTimingResult> buildLevelTimings(
+    const std::vector<StageTimingResult>& stages
+) {
+    std::unordered_map<int, LevelTimingResult> level_map;
+    for (const auto& st : stages) {
+        auto& lv = level_map[st.level];
+        lv.level = st.level;
+        lv.parallelism++;
+        lv.elapsed_ms = std::max(lv.elapsed_ms, st.elapsed_ms);
+    }
+    std::vector<LevelTimingResult> levels;
+    for (auto& [lvl, lv] : level_map) levels.push_back(lv);
+    std::sort(levels.begin(), levels.end(),
+              [](const LevelTimingResult& a, const LevelTimingResult& b) {
+                  return a.level < b.level;
+              });
+    return levels;
 }
 
 // =====
@@ -314,29 +587,23 @@ void Pipeline::compress(
     }
     
     input_size_ = input_size;
+
+    // Host-side wall-clock start (covers everything including output gathering)
+    auto t_host_start = std::chrono::steady_clock::now();
     
     // Set external input pointer (zero-copy from user's buffer)
     dag_->setExternalPointer(input_buffer_id_, const_cast<void*>(d_input));
     
-    // Execute DAG
-    // For MINIMAL/PIPELINE with soft-run:
-    if (soft_run_enabled_ && strategy_ != MemoryStrategy::PREALLOCATE) {
-        // Two-phase execution:
-        // 1. Execute with soft-run to determine sizes
-        // 2. Re-execute with correct sizes
-        
-        // TODO: Implement soft-run logic
-        // For each stage that supports it:
-        //   - Run softRun() to get actual output size
-        //   - Update buffer size in DAG
-        //   - Re-allocate with correct size
-        
-        // For now, just execute normally
-        dag_->execute(stream);
-    } else {
-        // Single execution with estimated sizes
-        dag_->execute(stream);
+    // Execute DAG — time this portion separately for dag_elapsed_ms
+    auto t_dag_start = std::chrono::steady_clock::now();
+    dag_->execute(stream);
+    auto t_dag_end = std::chrono::steady_clock::now();
+
+    // If profiling: sync all streams so CUDA events are queryable, then collect
+    if (profiling_enabled_) {
+        cudaStreamSynchronize(stream);
     }
+    auto stage_timings = profiling_enabled_ ? dag_->collectTimings() : std::vector<StageTimingResult>{};
     
     // Capture buffer metadata for file serialization
     buffer_metadata_.clear();
@@ -368,24 +635,44 @@ void Pipeline::compress(
     
     // Get output buffer and size
     if (needs_concat_) {
-        // Multiple sinks: Concatenate all outputs
         concatOutputs(d_output, output_size, stream);
     } else {
-        // Single sink: Return output directly
         *d_output = dag_->getBuffer(output_buffer_ids_[0]);
         
-        // Get actual output size from sink stage using name-based lookup
         auto sizes_by_name = output_nodes_[0]->stage->getActualOutputSizesByName();
         auto output_names = output_nodes_[0]->stage->getOutputNames();
         
-        // Get first output's size
         *output_size = 0;
         if (!output_names.empty() && sizes_by_name.count(output_names[0])) {
             *output_size = sizes_by_name.at(output_names[0]);
         }
     }
+
+    // Host-side wall-clock end
+    auto t_host_end = std::chrono::steady_clock::now();
+
+    float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
+    float dag_ms  = std::chrono::duration<float, std::milli>(t_dag_end  - t_dag_start ).count();
+
+    // Build profiling result
+    if (profiling_enabled_) {
+        PipelinePerfResult r;
+        r.is_compress     = true;
+        r.host_elapsed_ms = host_ms;
+        r.dag_elapsed_ms  = dag_ms;
+        r.input_bytes     = input_size;
+        r.output_bytes    = *output_size;
+        r.stages          = std::move(stage_timings);
+
+        // Build per-level aggregates
+        r.levels = buildLevelTimings(r.stages);
+
+        last_perf_result_ = std::move(r);
+    }
     
-    FZ_LOG(INFO, "Compress complete: %zu -> %zu bytes", input_size, *output_size);
+    FZ_LOG(INFO, "Compress complete: %zu -> %zu bytes (host=%.2f ms, dag=%.2f ms, %.2f GB/s)",
+           input_size, *output_size, host_ms, dag_ms,
+           profiling_enabled_ ? last_perf_result_.throughput_gbs() : 0.0f);
 }
 
 void Pipeline::decompress(
@@ -402,58 +689,245 @@ void Pipeline::decompress(
         throw std::runtime_error("decompress() requires compress() to have been called first");
     }
 
-    FZ_LOG(INFO, "Decompressing in-memory (buffer-id-aware inverse)");
+    auto t_host_start = std::chrono::steady_clock::now();
 
-    // Build InverseStageSpec list from the current (forward) DAG topology.
-    // The buffer IDs recorded in each node precisely describe data flow — no
-    // name heuristics needed.
-    std::vector<InverseStageSpec> specs;
-    for (const auto& level_nodes : dag_->getLevels()) {
-        for (auto* node : level_nodes) {
-            InverseStageSpec spec;
-            spec.stage = node->stage;
-            spec.fwd_input_ids.assign(node->input_buffer_ids.begin(),
-                                      node->input_buffer_ids.end());
-            spec.fwd_output_ids.assign(node->output_buffer_ids.begin(),
-                                       node->output_buffer_ids.end());
-            specs.push_back(std::move(spec));
+    FZ_LOG(INFO, "Decompressing");
+
+    // ── Lookup tables built from the forward DAG state ───────────────────────
+
+    // fwd output buffer ID → its compressed-data metadata
+    std::unordered_map<int, const BufferMetadata*> fwd_buf_to_meta;
+    for (const auto& meta : buffer_metadata_) {
+        fwd_buf_to_meta[meta.buffer_id] = &meta;
+    }
+
+    // fwd output buffer ID → the forward DAGNode that *consumed* it (if any).
+    // Outputs not in this map are direct pipeline outputs (no downstream stage).
+    std::unordered_map<int, DAGNode*> connected_fwd_bufs;
+    for (const auto& conn : connections_) {
+        DAGNode* prod_node = stage_to_node_.at(conn.producer);
+        int buf_id = prod_node->output_index_to_buffer_id.at(conn.output_index);
+        connected_fwd_bufs[buf_id] = stage_to_node_.at(conn.dependent);
+    }
+
+    // ── Switch all stages to inverse mode ────────────────────────────────────
+    for (auto& s : stages_) s->setInverse(true);
+
+    // ── Build the inverse CompressionDAG ─────────────────────────────────────
+    auto inv_dag = std::make_unique<CompressionDAG>(mem_pool_.get(), strategy_);
+    std::unordered_map<Stage*, DAGNode*> inv_nodes;
+
+    // Step 1: Add stages in REVERSE forward topological order.
+    // CompressionDAG::assignLevels() does a single forward pass over nodes_ and
+    // requires parents to appear before children — so the inverse-DAG parents
+    // (= forward-DAG leaves) must be added first.
+    const auto& fwd_levels = dag_->getLevels();
+    for (int fwd_lev = static_cast<int>(fwd_levels.size()) - 1; fwd_lev >= 0; fwd_lev--) {
+        for (auto* fwd_node : fwd_levels[fwd_lev]) {
+            Stage* stage = fwd_node->stage;
+            DAGNode* node = inv_dag->addStage(stage, stage->getName());
+
+            // Pre-allocate one unconnected output slot per inverse output.
+            // (In inverse mode getNumOutputs() returns the correct inverse count.)
+            size_t num_out = stage->getNumOutputs();
+            auto out_names = stage->getOutputNames();
+            for (size_t i = 0; i < num_out; i++) {
+                std::string n = (i < out_names.size()) ? out_names[i] : std::to_string(i);
+                inv_dag->addUnconnectedOutput(node, input_size_,
+                                              static_cast<int>(i),
+                                              stage->getName() + "." + n);
+            }
+            inv_nodes[stage] = node;
         }
     }
 
-    // Seed live_bufs with the pipeline's compressed output buffers
-    std::unordered_map<int, std::pair<void*, size_t>> live_bufs;
-    for (const auto& meta : buffer_metadata_) {
-        live_bufs[meta.buffer_id] = { dag_->getBuffer(meta.buffer_id), meta.actual_size };
-        FZ_LOG(DEBUG, "Compressed buffer id=%d '%s': %zu bytes",
-               meta.buffer_id, meta.name.c_str(), meta.actual_size);
+    // Step 2: Wire inverse inputs in the exact ORDER of the forward node's
+    // output_buffer_ids — this guarantees stage->execute() receives buffers in
+    // the same positional order that fwd_output_ids implied in runInversePipeline.
+    for (int fwd_lev = 0; fwd_lev < static_cast<int>(fwd_levels.size()); fwd_lev++) {
+        for (auto* fwd_node : fwd_levels[fwd_lev]) {
+            Stage* stage = fwd_node->stage;
+            DAGNode* inv_node = inv_nodes[stage];
+
+            for (int fwd_out_buf_id : fwd_node->output_buffer_ids) {
+                auto conn_it = connected_fwd_bufs.find(fwd_out_buf_id);
+
+                if (conn_it != connected_fwd_bufs.end()) {
+                    // This forward output fed a downstream stage.
+                    // In inverse: the downstream stage's inverse PRODUCES this buffer.
+                    DAGNode* fwd_consumer = conn_it->second;
+                    DAGNode* inv_producer = inv_nodes[fwd_consumer->stage];
+
+                    // Determine which output index of inv_producer carries this buffer.
+                    // inv_producer's output[k] reconstructs fwd_consumer's input[k].
+                    const auto& cons_inputs = fwd_consumer->input_buffer_ids;
+                    int pos = -1;
+                    for (int k = 0; k < static_cast<int>(cons_inputs.size()); k++) {
+                        if (cons_inputs[k] == fwd_out_buf_id) { pos = k; break; }
+                    }
+                    if (pos < 0) {
+                        for (auto& s : stages_) s->setInverse(false);
+                        throw std::runtime_error(
+                            "Inverse DAG: buffer " + std::to_string(fwd_out_buf_id) +
+                            " not found in consumer '" + fwd_consumer->name + "' inputs");
+                    }
+
+                    bool ok = inv_dag->connectExistingOutput(inv_producer, inv_node, pos);
+                    if (!ok) {
+                        for (auto& s : stages_) s->setInverse(false);
+                        throw std::runtime_error(
+                            "Inverse DAG: connectExistingOutput failed for output " +
+                            std::to_string(pos) + " of stage '" + inv_producer->name + "'");
+                    }
+
+                    FZ_LOG(DEBUG, "Inverse edge: %s.out[%d] -> %s (fwd_buf=%d)",
+                           inv_producer->name.c_str(), pos,
+                           inv_node->name.c_str(), fwd_out_buf_id);
+                } else {
+                    // Direct pipeline output → inject as external input to inv_node.
+                    auto meta_it = fwd_buf_to_meta.find(fwd_out_buf_id);
+                    if (meta_it == fwd_buf_to_meta.end()) {
+                        for (auto& s : stages_) s->setInverse(false);
+                        throw std::runtime_error(
+                            "Inverse DAG: buf " + std::to_string(fwd_out_buf_id) +
+                            " not found in buffer_metadata_");
+                    }
+                    const BufferMetadata* meta = meta_it->second;
+
+                    inv_dag->setInputBuffer(inv_node, meta->actual_size,
+                                            "inv_ext_" + meta->name);
+                    int ext_buf_id = inv_node->input_buffer_ids.back();
+                    inv_dag->setExternalPointer(ext_buf_id,
+                                                dag_->getBuffer(meta->buffer_id));
+
+                    FZ_LOG(DEBUG, "Inverse external input: '%s' %zu bytes -> stage '%s'",
+                           meta->name.c_str(), meta->actual_size, stage->getName().c_str());
+                }
+            }
+        }
     }
 
-    // Temporarily set all stages to inverse mode
-    for (auto& s : stages_) s->setInverse(true);
-
-    std::pair<void*, size_t> result;
-    try {
-        result = runInversePipeline(specs, live_bufs, input_size, *mem_pool_, stream);
-    } catch (...) {
+    // Step 3: The inverse sink = former forward source (input_node_->stage).
+    // Its first output buffer holds the fully-reconstructed data — mark it
+    // persistent so DAG::execute() doesn't free it before we copy it out.
+    Stage* fwd_source = input_node_->stage;
+    DAGNode* inv_sink = inv_nodes.at(fwd_source);
+    if (inv_sink->output_buffer_ids.empty()) {
         for (auto& s : stages_) s->setInverse(false);
-        throw;
+        throw std::runtime_error("Inverse DAG: sink stage has no output buffers");
     }
-    for (auto& s : stages_) s->setInverse(false);
+    int inv_result_buf_id = inv_sink->output_buffer_ids[0];
+    inv_dag->setBufferPersistent(inv_result_buf_id, true);
 
-    // Copy from pool-managed buffer to a plain cudaMalloc buffer the caller can cudaFree
+    // Step 4: Finalize the inverse DAG (assigns levels and streams).
+    if (profiling_enabled_) {
+        inv_dag->enableProfiling(true);
+    }
+    inv_dag->finalize();
+
+    // Propagate estimated buffer sizes forward through the inverse DAG's levels.
+    // External input sizes were set during setInputBuffer; this propagates them
+    // through internal intermediate buffers using estimateOutputSizes().
+    for (const auto& inv_level_nodes : inv_dag->getLevels()) {
+        for (auto* node : inv_level_nodes) {
+            std::vector<size_t> in_sizes;
+            for (int buf_id : node->input_buffer_ids) {
+                in_sizes.push_back(inv_dag->getBufferSize(buf_id));
+            }
+            auto est = node->stage->estimateOutputSizes(in_sizes);
+            for (size_t i = 0;
+                 i < node->output_buffer_ids.size() && i < est.size(); i++) {
+                inv_dag->updateBufferSize(node->output_buffer_ids[i], est[i]);
+            }
+        }
+    }
+
+    // The inverse sink's output is the reconstructed original data.
+    // Override any estimation with the exact known input_size_ — the inverse
+    // predictor (e.g. Lorenzo) may report codes-size instead of float-data-size.
+    inv_dag->updateBufferSize(inv_result_buf_id, input_size_);
+
+    if (strategy_ == MemoryStrategy::PREALLOCATE) {
+        inv_dag->preallocateBuffers();
+    }
+
+    FZ_LOG(DEBUG, "Inverse DAG: %zu levels, max_parallelism=%d, strategy=%s",
+           inv_dag->getLevels().size(),
+           inv_dag->getMaxParallelism(),
+           strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" :
+           strategy_ == MemoryStrategy::PIPELINE ? "PIPELINE" : "PREALLOCATE");
+
+    // Step 5: Execute — uses fine-grained per-dependency cudaStreamWaitEvent,
+    // stream assignment from assignStreams(), and strategy-aware buffer lifetimes.
+    auto t_dag_start = std::chrono::steady_clock::now();
+    inv_dag->execute(stream);
+    auto t_dag_end = std::chrono::steady_clock::now();
+    cudaStreamSynchronize(stream);
+
+    // Collect per-stage timings (collectTimings() syncs all owned streams internally)
+    auto stage_timings = profiling_enabled_ ? inv_dag->collectTimings() : std::vector<StageTimingResult>{};
+
+    // Step 6: Extract result, copy to a caller-owned cudaMalloc buffer.
+    void* d_inv_result = inv_dag->getBuffer(inv_result_buf_id);
+
+    // Prefer the stage's post-execution actual size over the estimated DAG size.
+    size_t actual_size = inv_dag->getBufferSize(inv_result_buf_id);
+    {
+        auto post_sizes = fwd_source->getActualOutputSizesByName();
+        auto post_names = fwd_source->getOutputNames();
+        if (!post_names.empty() && post_sizes.count(post_names[0])) {
+            actual_size = post_sizes.at(post_names[0]);
+        }
+    }
+
     void* d_final = nullptr;
-    cudaError_t err = cudaMalloc(&d_final, result.second);
+    cudaError_t err = cudaMalloc(&d_final, actual_size);
     if (err != cudaSuccess) {
-        mem_pool_->free(result.first, stream);
+        inv_dag->reset(stream);
+        mem_pool_->free(d_inv_result, stream);
+        for (auto& s : stages_) s->setInverse(false);
         throw std::runtime_error("cudaMalloc for decompress output failed");
     }
-    cudaMemcpyAsync(d_final, result.first, result.second, cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(d_final, d_inv_result, actual_size,
+                    cudaMemcpyDeviceToDevice, stream);
     cudaStreamSynchronize(stream);
-    mem_pool_->free(result.first, stream);
+
+    // Release inverse DAG's pool memory: reset() frees non-persistent
+    // intermediate buffers; the persistent result buffer needs explicit free.
+    inv_dag->reset(stream);
+    mem_pool_->free(d_inv_result, stream);
+    // External input buffers are is_external=true → reset() skips them (correct,
+    // they are owned by the forward DAG and must remain live).
+
+    // Restore forward mode for subsequent compress() calls.
+    for (auto& s : stages_) s->setInverse(false);
 
     *d_output = d_final;
-    *output_size = result.second;
-    FZ_LOG(INFO, "Decompress complete: %zu bytes", result.second);
+    *output_size = actual_size;
+
+    // Host-side wall-clock end
+    auto t_host_end = std::chrono::steady_clock::now();
+    float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
+    float dag_ms  = std::chrono::duration<float, std::milli>(t_dag_end  - t_dag_start ).count();
+
+    // Build profiling result
+    if (profiling_enabled_) {
+        PipelinePerfResult r;
+        r.is_compress     = false;
+        r.host_elapsed_ms = host_ms;
+        r.dag_elapsed_ms  = dag_ms;
+        r.input_bytes     = input_size;
+        r.output_bytes    = actual_size;
+        r.stages          = std::move(stage_timings);
+
+        // Build per-level aggregates
+        r.levels = buildLevelTimings(r.stages);
+
+        last_perf_result_ = std::move(r);
+    }
+
+    FZ_LOG(INFO, "Decompress complete (DAG-native): %zu bytes (host=%.2f ms, dag=%.2f ms)",
+           actual_size, host_ms, dag_ms);
 }
 
 void Pipeline::reset(cudaStream_t stream) {
@@ -620,71 +1094,6 @@ void Pipeline::propagateBufferSizes() {
     FZ_LOG(DEBUG, "Buffer sizes estimated from input hint (%.2f MB)",
            input_size_hint_ / (1024.0 * 1024.0));
 }
-
-void Pipeline::rebuildInverseConnections() {    
-    FZ_LOG(DEBUG, "Rebuilding connections for inverse mode");
-    FZ_LOG(DEBUG, "Original connections: %zu", connections_.size());
-    
-    // Recreate DAG (this clears connections but keeps stage nodes)
-    dag_ = std::make_unique<CompressionDAG>(mem_pool_.get(), strategy_);
-    stage_to_node_.clear();
-    
-    // Re-add all stages to DAG (stages are already in inverse mode)
-    for (auto& stage_ptr : stages_) {
-        Stage* stage = stage_ptr.get();
-        DAGNode* node = dag_->addStage(stage, stage->getName());
-        stage_to_node_[stage] = node;
-        
-        // Pre-allocate outputs for inverse stage
-        size_t num_outputs = stage->getNumOutputs();
-        auto output_names = stage->getOutputNames();
-        
-        for (size_t i = 0; i < num_outputs; i++) {
-            std::string output_name = i < output_names.size() ? output_names[i] : std::to_string(i);
-            std::string tag = stage->getName() + "." + output_name + "_unconnected";
-            dag_->addUnconnectedOutput(node, 1, i, tag);
-        }
-    }
-    
-    // Reverse connections: producer → dependent becomes dependent → producer
-    // In compression: connect(diff, lorenzo, "codes") means diff depends on lorenzo
-    // In decompression: this reverses to lorenzo depends on diff
-    for (auto it = connections_.rbegin(); it != connections_.rend(); ++it) {
-        const auto& orig_conn = *it;
-        
-        // Swap roles: original producer becomes new dependent
-        Stage* new_dependent = orig_conn.producer;
-        Stage* new_producer = orig_conn.dependent;
-        
-        // In inverse mode, stages swap input/output counts
-        // The output that was connected in forward mode should map to the 
-        // corresponding input in reverse mode
-        // For now, use default output name "output" for simple cases
-        std::string new_output_name = "output";
-        
-        // Get nodes
-        auto new_dep_node = stage_to_node_[new_dependent];
-        auto new_prod_node = stage_to_node_[new_producer];
-        
-        // Get output index (use 0 for simple cases)
-        int new_output_idx = new_producer->getOutputIndex(new_output_name);
-        if (new_output_idx < 0) {
-            new_output_idx = 0;  // Default to first output
-        }
-        
-        // Connect
-        dag_->connectExistingOutput(new_prod_node, new_dep_node, new_output_idx);
-        
-        FZ_LOG(TRACE, "Reversed: %s <- %s.%s ==> %s <- %s.%s",
-               orig_conn.dependent->getName().c_str(),
-               orig_conn.producer->getName().c_str(), orig_conn.output_name.c_str(),
-               new_dependent->getName().c_str(),
-               new_producer->getName().c_str(), new_output_name.c_str());
-    }
-    
-    FZ_LOG(DEBUG, "Inverse connections rebuilt");
-}
-// =====
 
 void Pipeline::validate() {
     if (stages_.empty()) {
@@ -1149,7 +1558,8 @@ void Pipeline::decompressFromFile(
     const std::string& filename,
     void** d_output,
     size_t* output_size,
-    cudaStream_t stream
+    cudaStream_t stream,
+    PipelinePerfResult* perf_out
 ) {
     FZ_LOG(INFO, "Decompressing from file: %s", filename.c_str());
 
@@ -1209,11 +1619,17 @@ void Pipeline::decompressFromFile(
                i, entry.name, buf_id, entry.data_size / 1024.0);
     }
 
-    // 6. Run unified inverse pipeline
+    // ── Compute-only timing (excludes file I/O and H→D copy) ─────────────────
+    // runInversePipeline synchronizes at the end of every level internally, so
+    // chrono is accurate here — the host blocks on the GPU inside the call.
+    auto t_compute_start = std::chrono::steady_clock::now();
+
+    std::vector<StageTimingResult> inv_stage_timings;
     std::pair<void*, size_t> result;
     try {
         result = runInversePipeline(specs, live_bufs,
-                                    fh.core.uncompressed_size, local_pool, stream);
+                                    fh.core.uncompressed_size, local_pool, stream,
+                                    0, &inv_stage_timings);
     } catch (...) {
         local_pool.free(d_compressed, stream);
         throw;
@@ -1229,12 +1645,31 @@ void Pipeline::decompressFromFile(
     }
     cudaMemcpyAsync(d_final, result.first, final_size, cudaMemcpyDeviceToDevice, stream);
     cudaStreamSynchronize(stream);
+
+    auto t_compute_end = std::chrono::steady_clock::now();
+    float compute_ms = std::chrono::duration<float, std::milli>(t_compute_end - t_compute_start).count();
+
     local_pool.free(d_compressed, stream);
 
     *d_output = d_final;
     *output_size = final_size;
-    FZ_LOG(INFO, "Decompression complete: %.2f MB -> %zu bytes",
-           fh.core.compressed_size / (1024.0 * 1024.0), final_size);
+
+    if (perf_out) {
+        perf_out->is_compress     = false;
+        perf_out->host_elapsed_ms = compute_ms;
+        perf_out->dag_elapsed_ms  = compute_ms;
+        perf_out->input_bytes     = fh.core.compressed_size;
+        perf_out->output_bytes    = final_size;
+        perf_out->stages          = std::move(inv_stage_timings);
+
+        // Build per-level aggregates from CUDA event stage timings
+        perf_out->levels = buildLevelTimings(perf_out->stages);
+    }
+
+    FZ_LOG(INFO, "Decompression complete: %.2f MB -> %zu bytes (compute=%.2f ms, %.2f GB/s)",
+           fh.core.compressed_size / (1024.0 * 1024.0), final_size,
+           compute_ms,
+           static_cast<float>(final_size) / (compute_ms * 1e-3f) / 1e9f);
 }
 
 

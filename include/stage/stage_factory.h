@@ -5,6 +5,7 @@
 #include "encoders/diff/diff.h"
 #include "encoders/RLE/rle.h"
 #include "predictors/lorenzo/lorenzo.h"
+#include "stage/mock_stages.h"
 
 #include <memory>
 #include <stdexcept>
@@ -99,6 +100,11 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
                 // No config — default to uint16_t
                 stage = new RLEStage<uint16_t>();
             }
+            break;
+        }
+
+        case StageType::PASSTHROUGH: {
+            stage = new PassThroughStage();
             break;
         }
 
