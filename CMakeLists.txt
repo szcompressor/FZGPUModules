@@ -121,7 +121,7 @@ target_include_directories(fzmod_compile_settings INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzmod>
 )
 
 #################
@@ -249,10 +249,33 @@ install(FILES
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
 )
 
+# Export build-tree targets so find_package(FZModules) works without installing
+# by pointing FZModules_DIR at the build directory.
+export(
+  EXPORT FZModulesTargets
+  NAMESPACE FZMOD::
+  FILE "${CMAKE_CURRENT_BINARY_DIR}/FZModulesTargets.cmake"
+)
+
 install(DIRECTORY
   include/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
-  FILES_MATCHING PATTERN "*.h"
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
+)
+
+# modules/ headers are included with relative paths (e.g. "encoders/diff/diff.h")
+# so they must be installed into the same fzmod include root
+install(DIRECTORY
+  modules/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
+)
+
+# src/ headers are also an include root at build time (e.g. "mem/mempool.h")
+install(DIRECTORY
+  src/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
+  FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
 message(STATUS "FZModules configuration complete")
