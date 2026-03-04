@@ -1657,13 +1657,19 @@ void Pipeline::decompressFromFile(
     if (perf_out) {
         perf_out->is_compress     = false;
         perf_out->host_elapsed_ms = compute_ms;
-        perf_out->dag_elapsed_ms  = compute_ms;
         perf_out->input_bytes     = fh.core.compressed_size;
         perf_out->output_bytes    = final_size;
         perf_out->stages          = std::move(inv_stage_timings);
 
         // Build per-level aggregates from CUDA event stage timings
         perf_out->levels = buildLevelTimings(perf_out->stages);
+
+        // dag_elapsed_ms = sum of per-level critical-path durations (CUDA events),
+        // matching how the compress path measures it. Fall back to chrono if no
+        // CUDA event data was collected (all stage times are zero).
+        float dag_ms = 0.0f;
+        for (const auto& lv : perf_out->levels) dag_ms += lv.elapsed_ms;
+        perf_out->dag_elapsed_ms = (dag_ms > 0.0f) ? dag_ms : compute_ms;
     }
 
     FZ_LOG(INFO, "Decompression complete: %.2f MB -> %zu bytes (compute=%.2f ms, %.2f GB/s)",

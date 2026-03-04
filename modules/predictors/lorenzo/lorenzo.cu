@@ -316,16 +316,13 @@ __global__ void lorenzo_quantize_1d_kernel(
         thp_data[i + 1] = s_data[threadIdx.x * Seq + i];
     }
     
-    // Load previous element for Lorenzo prediction
-    // Critical fix: properly handle thread boundaries within block
+    // Load previous element for Lorenzo prediction.
+    // The first thread of every block restarts the chain at 0 (no cross-block
+    // lookahead). This mirrors cuSZ and makes each block's prefix sum fully
+    // independent, eliminating the inter-block propagation pass on decompress.
     if (threadIdx.x > 0) {
-        // Previous element is in shared memory from previous thread
         thp_data[0] = s_data[threadIdx.x * Seq - 1];
-    } else if (block_offset > 0) {
-        // First thread of block: need to load from previous block in global memory
-        thp_data[0] = round(input[block_offset - 1] * ebx2_r);
     } else {
-        // Very first element: no prediction
         thp_data[0] = static_cast<TInput>(0);
     }
     
@@ -451,69 +448,20 @@ void launchLorenzoInverseKernel(
         }
     }
     
-    // Step 2: Launch decompression kernel (dequantize + prefix sum)
-    // This processes the quantized codes and adds the pre-scattered outliers
+    // Step 2: Launch decompression kernel (dequantize + intra-block prefix sum).
+    // Because compression no longer crosses block boundaries, each block's scan
+    // is fully self-contained — no inter-block propagation pass is needed.
     lorenzo_dequantize_1d_kernel<TInput, TCode, TileDim, Seq>
         <<<grid_size, NumThreads, 0, stream>>>(
             quant_codes, n, ebx2, quant_radius, output
         );
-    
+
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(
-            std::string("lorenzo_dequantize_1d_kernel launch failed: ") + 
+            std::string("lorenzo_dequantize_1d_kernel launch failed: ") +
             cudaGetErrorString(err)
         );
-    }
-    
-    // Allocate temporary buffer for block sums (only if multi-block).
-    // Pool allocation is stream-ordered — the preceding kernels are already
-    // enqueued on the same stream, so no explicit sync is needed here.
-    TInput* d_block_sums = nullptr;
-    if (grid_size > 1) {
-        if (pool) {
-            d_block_sums = static_cast<TInput*>(pool->allocate(grid_size * sizeof(TInput), stream, "lorenzo_block_sums"));
-        } else {
-            cudaMallocAsync(&d_block_sums, grid_size * sizeof(TInput), stream);
-        }
-    }
-    
-    // Step 3: Extract block sums (last element of each block)
-    if (grid_size > 1) {
-        extract_block_sums_kernel<TInput>
-            <<<grid_size, 1, 0, stream>>>(
-                output, d_block_sums, n, TileDim
-            );
-        
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            if (d_block_sums) { if (pool) pool->free(d_block_sums, stream); else cudaFreeAsync(d_block_sums, stream); }
-            throw std::runtime_error(
-                std::string("extract_block_sums_kernel launch failed: ") + 
-                cudaGetErrorString(err)
-            );
-        }
-        
-        // Step 4: Propagate block sums to maintain global cumulative sum
-        int prop_grid_size = (n + NumThreads - 1) / NumThreads;
-        propagate_block_sums_kernel<TInput>
-            <<<prop_grid_size, NumThreads, 0, stream>>>(
-                output, d_block_sums, n, TileDim
-            );
-        
-        err = cudaGetLastError();
-        if (err != cudaSuccess) {
-            if (pool) pool->free(d_block_sums, stream); else cudaFreeAsync(d_block_sums, stream);
-            throw std::runtime_error(
-                std::string("propagate_block_sums_kernel launch failed: ") + 
-                cudaGetErrorString(err)
-            );
-        }
-    }
-    
-    // Cleanup
-    if (d_block_sums) {
-        if (pool) pool->free(d_block_sums, stream); else cudaFreeAsync(d_block_sums, stream);
     }
 }
 

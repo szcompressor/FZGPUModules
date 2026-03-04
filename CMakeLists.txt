@@ -202,6 +202,13 @@ add_executable(fzmod-bin utils/main.cpp)
 target_link_libraries(fzmod-bin PRIVATE fzmod)
 set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 
+# ── Profiling target (CLDHGH dataset, marked with cudaProfilerStart/Stop) ─────
+# Build:  cmake --build build --target fzmod-profile
+# Run:    nsys profile --trace=cuda --capture-range=cudaProfilerApi \
+#              -o cldhgh_profile ./build/fzmod-profile
+add_executable(fzmod-profile utils/target.cpp)
+target_link_libraries(fzmod-profile PRIVATE fzmod)
+
 ####################
 ### INSTALLATION ###
 ####################
