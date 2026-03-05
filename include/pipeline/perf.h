@@ -84,10 +84,13 @@ struct PipelinePerfResult {
     std::vector<StageTimingResult> stages; ///< Per-stage results in topological order
     std::vector<LevelTimingResult> levels; ///< Per-level aggregates in level order
 
-    /// Throughput in GB/s: uncompressed data size (input for compress, output for
-    /// decompress) divided by dag_elapsed_ms.  This isolates actual GPU compute
-    /// cost from host-side overhead and file I/O.
+    /// DAG throughput in GB/s: uncompressed data size divided by dag_elapsed_ms.
+    /// Isolates actual GPU compute cost from host-side overhead and file I/O.
     float throughput_gbs() const noexcept;
+
+    /// Pipeline throughput in GB/s: uncompressed data size divided by
+    /// host_elapsed_ms.  Reflects end-to-end latency including host setup.
+    float pipeline_throughput_gbs() const noexcept;
 
     /// Pretty-print a timing table to \p os (defaults to std::cout).
     void print(std::ostream& os) const;

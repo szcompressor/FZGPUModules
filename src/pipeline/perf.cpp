@@ -25,6 +25,12 @@ float PipelinePerfResult::throughput_gbs() const noexcept {
     return static_cast<float>(uncompressed) / (dag_elapsed_ms * 1e-3f) / 1e9f;
 }
 
+float PipelinePerfResult::pipeline_throughput_gbs() const noexcept {
+    if (host_elapsed_ms <= 0.0f) return 0.0f;
+    size_t uncompressed = is_compress ? input_bytes : output_bytes;
+    return static_cast<float>(uncompressed) / (host_elapsed_ms * 1e-3f) / 1e9f;
+}
+
 void PipelinePerfResult::print(std::ostream& os) const {
     const char* mode = is_compress ? "Compress" : "Decompress";
     size_t uncompressed = is_compress ? input_bytes : output_bytes;
@@ -40,8 +46,10 @@ void PipelinePerfResult::print(std::ostream& os) const {
     os << "  Uncompressed:      " << std::setw(9) << (uncompressed / 1048576.0) << " MB\n";
     os << "  Compressed:        " << std::setw(9) << (compressed   / 1048576.0) << " MB\n";
     os << std::setprecision(4);
-    os << "  Throughput:        " << std::setw(9) << throughput_gbs()
-       << " GB/s  (uncompressed / GPU execute time)\n";
+    os << "  DAG throughput:    " << std::setw(9) << throughput_gbs()
+       << " GB/s  (uncompressed / dag_elapsed_ms)\n";
+    os << "  Pipeline thruput:  " << std::setw(9) << pipeline_throughput_gbs()
+       << " GB/s  (uncompressed / host_elapsed_ms)\n";
 
     // ── Level breakdown ───────────────────────────────────────────────────────
     if (!levels.empty()) {

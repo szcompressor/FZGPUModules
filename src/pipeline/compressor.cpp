@@ -678,9 +678,10 @@ void Pipeline::compress(
         last_perf_result_ = std::move(r);
     }
     
-    FZ_LOG(INFO, "Compress complete: %zu -> %zu bytes (host=%.2f ms, dag=%.2f ms, %.2f GB/s)",
+    FZ_LOG(INFO, "Compress complete: %zu -> %zu bytes (host=%.2f ms, dag=%.2f ms, DAG=%.2f GB/s, pipeline=%.2f GB/s)",
            input_size, *output_size, host_ms, dag_ms,
-           profiling_enabled_ ? last_perf_result_.throughput_gbs() : 0.0f);
+           profiling_enabled_ ? last_perf_result_.throughput_gbs() : 0.0f,
+           profiling_enabled_ ? last_perf_result_.pipeline_throughput_gbs() : 0.0f);
 }
 
 void Pipeline::decompress(
@@ -979,8 +980,10 @@ void Pipeline::decompress(
         last_perf_result_ = std::move(r);
     }
 
-    FZ_LOG(INFO, "Decompress complete (DAG-native): %zu bytes (host=%.2f ms, dag=%.2f ms)",
-           actual_size, host_ms, dag_ms);
+    FZ_LOG(INFO, "Decompress complete (DAG-native): %zu bytes (host=%.2f ms, dag=%.2f ms, DAG=%.2f GB/s, pipeline=%.2f GB/s)",
+           actual_size, host_ms, dag_ms,
+           profiling_enabled_ ? last_perf_result_.throughput_gbs() : 0.0f,
+           profiling_enabled_ ? last_perf_result_.pipeline_throughput_gbs() : 0.0f);
 }
 
 void Pipeline::reset(cudaStream_t stream) {
@@ -1710,28 +1713,28 @@ void Pipeline::decompressFromFile(
     *d_output = d_final;
     *output_size = final_size;
 
+    // Compute DAG elapsed from CUDA event stage timings (sum of critical-path levels);
+    // fall back to compute_ms if no event data was collected.
+    auto log_levels = buildLevelTimings(inv_stage_timings);
+    float dag_ms_log = 0.0f;
+    for (const auto& lv : log_levels) dag_ms_log += lv.elapsed_ms;
+    if (dag_ms_log <= 0.0f) dag_ms_log = compute_ms;
+
     if (perf_out) {
         perf_out->is_compress     = false;
         perf_out->host_elapsed_ms = compute_ms;
+        perf_out->dag_elapsed_ms  = dag_ms_log;
         perf_out->input_bytes     = fh.core.compressed_size;
         perf_out->output_bytes    = final_size;
         perf_out->stages          = std::move(inv_stage_timings);
-
-        // Build per-level aggregates from CUDA event stage timings
-        perf_out->levels = buildLevelTimings(perf_out->stages);
-
-        // dag_elapsed_ms = sum of per-level critical-path durations (CUDA events),
-        // matching how the compress path measures it. Fall back to chrono if no
-        // CUDA event data was collected (all stage times are zero).
-        float dag_ms = 0.0f;
-        for (const auto& lv : perf_out->levels) dag_ms += lv.elapsed_ms;
-        perf_out->dag_elapsed_ms = (dag_ms > 0.0f) ? dag_ms : compute_ms;
+        perf_out->levels          = std::move(log_levels);
     }
 
-    FZ_LOG(INFO, "Decompression complete: %.2f MB -> %zu bytes (compute=%.2f ms, %.2f GB/s)",
+    float dag_tput  = static_cast<float>(final_size) / (dag_ms_log  * 1e-3f) / 1e9f;
+    float pipe_tput = static_cast<float>(final_size) / (compute_ms  * 1e-3f) / 1e9f;
+    FZ_LOG(INFO, "Decompression complete: %.2f MB -> %zu bytes (compute=%.2f ms, dag=%.2f ms, DAG=%.2f GB/s, pipeline=%.2f GB/s)",
            fh.core.compressed_size / (1024.0 * 1024.0), final_size,
-           compute_ms,
-           static_cast<float>(final_size) / (compute_ms * 1e-3f) / 1e9f);
+           compute_ms, dag_ms_log, dag_tput, pipe_tput);
 }
 
 
