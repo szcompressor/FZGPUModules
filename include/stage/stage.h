@@ -197,7 +197,20 @@ public:
         (void)size;
         // Default: no config to deserialize
     }
-    
+
+    /**
+     * Called once by Pipeline::compress() after dag->execute() and the stream
+     * has been fully synchronized.
+     *
+     * Stages that need to transfer device-side results back to the host
+     * (e.g. Lorenzo's actual outlier count) should do so here rather than
+     * blocking mid-pipeline inside execute(). The stream is already idle when
+     * this is called, so a plain cudaMemcpy (no async) is safe and cheap.
+     *
+     * Default: no-op.
+     */
+    virtual void postStreamSync(cudaStream_t stream) { (void)stream; }
+
     /**
      * Estimate maximum header size for buffer allocation
      * 

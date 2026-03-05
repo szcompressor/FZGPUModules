@@ -586,40 +586,54 @@ void LorenzoStage<TInput, TCode>::execute(
                 cudaGetErrorString(err)
             );
         }
-        
-        // Read back outlier count to determine actual sizes
-        uint32_t h_outlier_count;
-        cudaMemcpyAsync(&h_outlier_count, outputs[3], sizeof(uint32_t),
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        
-        // Check if outlier count exceeded allocated capacity
-        if (h_outlier_count > max_outliers) {
-            float actual_percent = 100.0f * h_outlier_count / num_elements;
-            float capacity_percent = 100.0f * max_outliers / num_elements;
-            
-            fprintf(stderr, "\n⚠️  ERROR: Lorenzo outlier overflow!\n");
-            fprintf(stderr, "   Detected outliers: %u (%.1f%% of data)\n", 
-                    h_outlier_count, actual_percent);
-            fprintf(stderr, "   Allocated capacity: %zu (%.1f%% of data)\n", 
-                    max_outliers, capacity_percent);
-            fprintf(stderr, "   Outliers beyond capacity were DROPPED - data will be corrupted!\n");
-            fprintf(stderr, "   Solution: Increase outlier_capacity to at least %.1f%%\n\n", 
-                    actual_percent * 1.1f);  // Add 10% margin
-            
-            // Clamp to allocated size to prevent buffer overflow
-            h_outlier_count = max_outliers;
-        }
-        
-        // Store for header generation
-        actual_outlier_count_ = h_outlier_count;
-        
-        // Set actual output sizes
-        actual_output_sizes_[0] = num_elements * sizeof(TCode);           // codes (fixed)
-        actual_output_sizes_[1] = h_outlier_count * sizeof(TInput);       // outlier_errors (variable)
-        actual_output_sizes_[2] = h_outlier_count * sizeof(uint32_t);     // outlier_indices (variable)
-        actual_output_sizes_[3] = sizeof(uint32_t);                        // outlier_count (fixed)
+
+        // Store device pointer to the outlier count output so postStreamSync()
+        // can read it back after the stream is fully synchronized by compress().
+        // We must NOT sync here — doing so stalls the entire DAG mid-pipeline.
+        d_outlier_count_ptr_ = outputs[3];
+
+        // Use max-capacity sizes for now; postStreamSync() will trim them to
+        // the real outlier count once the stream is idle.
+        actual_outlier_count_ = 0;
+        actual_output_sizes_[0] = num_elements * sizeof(TCode);
+        actual_output_sizes_[1] = max_outliers * sizeof(TInput);
+        actual_output_sizes_[2] = max_outliers * sizeof(uint32_t);
+        actual_output_sizes_[3] = sizeof(uint32_t);
     }
+}
+
+template<typename TInput, typename TCode>
+void LorenzoStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
+    // Only applies to compression mode and only when execute() set the ptr.
+    if (is_inverse_ || d_outlier_count_ptr_ == nullptr) return;
+
+    // The stream is fully synchronized by the time Pipeline::compress() calls
+    // us, so a plain (synchronous) cudaMemcpy is safe and adds no extra stall.
+    uint32_t h_outlier_count = 0;
+    cudaMemcpy(&h_outlier_count, d_outlier_count_ptr_, sizeof(uint32_t),
+               cudaMemcpyDeviceToHost);
+    d_outlier_count_ptr_ = nullptr;
+
+    size_t max_outliers = getMaxOutlierCount(num_elements_);
+
+    if (h_outlier_count > max_outliers) {
+        float actual_pct   = 100.0f * h_outlier_count / num_elements_;
+        float capacity_pct = 100.0f * max_outliers   / num_elements_;
+        fprintf(stderr, "\n⚠️  ERROR: Lorenzo outlier overflow!\n");
+        fprintf(stderr, "   Detected outliers: %u (%.1f%% of data)\n",
+                h_outlier_count, actual_pct);
+        fprintf(stderr, "   Allocated capacity: %zu (%.1f%% of data)\n",
+                max_outliers, capacity_pct);
+        fprintf(stderr, "   Outliers beyond capacity were DROPPED - data will be corrupted!\n");
+        fprintf(stderr, "   Solution: Increase outlier_capacity to at least %.1f%%\n\n",
+                actual_pct * 1.1f);
+        h_outlier_count = static_cast<uint32_t>(max_outliers);
+    }
+
+    actual_outlier_count_      = h_outlier_count;
+    actual_output_sizes_[1]    = h_outlier_count * sizeof(TInput);
+    actual_output_sizes_[2]    = h_outlier_count * sizeof(uint32_t);
+    // [0] codes and [3] outlier_count are already correct from execute()
 }
 
 template<typename TInput, typename TCode>

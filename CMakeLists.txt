@@ -209,6 +209,12 @@ set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 add_executable(fzmod-profile utils/target.cpp)
 target_link_libraries(fzmod-profile PRIVATE fzmod)
 
+# TODO: remove or make more generic
+# nvtx3.hpp ships with Nsight Systems — add its include path so target.cpp can use it
+target_include_directories(fzmod-profile PRIVATE
+    /opt/nvidia/nsight-systems/2025.1.3/target-linux-x64/nvtx/include
+)
+
 ####################
 ### INSTALLATION ###
 ####################

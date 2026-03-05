@@ -599,10 +599,16 @@ void Pipeline::compress(
     dag_->execute(stream);
     auto t_dag_end = std::chrono::steady_clock::now();
 
-    // If profiling: sync all streams so CUDA events are queryable, then collect
-    if (profiling_enabled_) {
-        cudaStreamSynchronize(stream);
+    // required for postStreamSync() and cuda events
+    cudaStreamSynchronize(stream);
+
+    // Allow stages to finalize host-side state from GPU results
+    // (e.g. Lorenzo reads back actual outlier count and trims output sizes).
+    for (auto& stage_ptr : stages_) {
+        stage_ptr->postStreamSync(stream);
     }
+
+    // If profiling: collect CUDA event timings (stream already synced above)
     auto stage_timings = profiling_enabled_ ? dag_->collectTimings() : std::vector<StageTimingResult>{};
     
     // Capture buffer metadata for file serialization

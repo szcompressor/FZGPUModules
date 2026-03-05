@@ -9,3 +9,4 @@ temp/
 *.tmp
 *.fzmodules
 docs/
+*.nsys-rep

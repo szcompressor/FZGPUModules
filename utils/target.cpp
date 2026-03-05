@@ -5,12 +5,13 @@
  * on the CESM ATM CLDHGH dataset (1800x3600 float32).
  *
  * Usage:
- *   nsys profile --trace=cuda,nvtx -o cldhgh_profile ./build/fzmod-profile
+ *   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o cldhgh_profile ./build/fzmod-profile
  *   nsys-ui cldhgh_profile.nsys-rep
  */
 
 #include "fzmodules.h"
 #include <cuda_profiler_api.h>
+#include <nvtx3/nvtx3.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -82,23 +83,30 @@ int main() {
 
     // ── Warm-up pass (excluded from profiler timeline — cudaProfilerStart not called yet)
     {
+        nvtx3::scoped_range warmup{"warmup"};
         std::cout << "[profile] Warm-up pass...\n";
 
-        Pipeline p(data_bytes, MemoryStrategy::MINIMAL, 3.0f);
+        Pipeline p(data_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
         setup_pipeline(p);
 
         void*  d_comp  = nullptr;
         size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
-        cudaDeviceSynchronize();
+        {
+            nvtx3::scoped_range r{"warmup::compress"};
+            p.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
+            cudaDeviceSynchronize();
+        }
 
         static const std::string warmup_file = "cldhgh_warmup.fzm";
         p.writeToFile(warmup_file, 0);
 
         void*  d_decomp  = nullptr;
         size_t decomp_sz = 0;
-        Pipeline::decompressFromFile(warmup_file, &d_decomp, &decomp_sz, 0, nullptr);
-        cudaDeviceSynchronize();
+        {
+            nvtx3::scoped_range r{"warmup::decompress"};
+            Pipeline::decompressFromFile(warmup_file, &d_decomp, &decomp_sz, 0, nullptr);
+            cudaDeviceSynchronize();
+        }
 
         if (d_decomp) cudaFree(d_decomp);
         std::remove(warmup_file.c_str());
@@ -114,11 +122,14 @@ int main() {
         // Compress
         void*  d_compressed  = nullptr;
         size_t compressed_sz = 0;
-        Pipeline comp(data_bytes, MemoryStrategy::MINIMAL, 3.0f);
+        Pipeline comp(data_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
         comp.enableProfiling(true);
         setup_pipeline(comp);
-        comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
-        cudaDeviceSynchronize();
+        {
+            nvtx3::scoped_range r{"compress"};
+            comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
+            cudaDeviceSynchronize();
+        }
 
         std::cout << "\n[profile] ── Compress ──────────────────────────────\n";
         std::cout << "  Original:   " << data_bytes / 1024.0 / 1024.0 << " MB\n";
@@ -132,9 +143,12 @@ int main() {
         void*            d_decompressed = nullptr;
         size_t           decompressed_sz = 0;
         PipelinePerfResult decomp_perf;
-        Pipeline::decompressFromFile(
-            out_file, &d_decompressed, &decompressed_sz, 0, &decomp_perf);
-        cudaDeviceSynchronize();
+        {
+            nvtx3::scoped_range r{"decompress"};
+            Pipeline::decompressFromFile(
+                out_file, &d_decompressed, &decompressed_sz, 0, &decomp_perf);
+            cudaDeviceSynchronize();
+        }
 
         std::cout << "\n[profile] ── Decompress ────────────────────────────\n";
         decomp_perf.print(std::cout);

@@ -70,7 +70,7 @@ public:
     };
     
     explicit LorenzoStage(const Config& config = Config());
-    
+
     void execute(
         cudaStream_t stream,
         MemoryPool* pool,
@@ -78,6 +78,13 @@ public:
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
+
+    /**
+     * Reads back the actual outlier count from the device (4 bytes) and trims
+     * actual_output_sizes_ to the real values.  Called by Pipeline::compress()
+     * after the stream is synchronized — avoids a mid-pipeline stall.
+     */
+    void postStreamSync(cudaStream_t stream) override;
     
     std::string getName() const override { return "Lorenzo1D"; }
     size_t getNumInputs() const override { return is_inverse_ ? 4 : 1; }
@@ -173,6 +180,9 @@ private:
     size_t num_elements_ = 0;           // Track for header
     uint32_t actual_outlier_count_ = 0; // Track for header
     bool is_inverse_ = false;           // false = compress, true = decompress
+    /// Device pointer to the outlier_count output buffer.  Set during
+    /// execute() (compress mode) and consumed once by postStreamSync().
+    const void* d_outlier_count_ptr_ = nullptr;
     
     // Helper to get data type enums
     DataType getInputDataType() const {
