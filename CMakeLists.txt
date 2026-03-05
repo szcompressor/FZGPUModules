@@ -209,11 +209,35 @@ set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
 add_executable(fzmod-profile utils/target.cpp)
 target_link_libraries(fzmod-profile PRIVATE fzmod)
 
-# TODO: remove or make more generic
-# nvtx3.hpp ships with Nsight Systems — add its include path so target.cpp can use it
-target_include_directories(fzmod-profile PRIVATE
-    /opt/nvidia/nsight-systems/2025.1.3/target-linux-x64/nvtx/include
+# Locate nvtx3/nvtx3.hpp — ships with Nsight Systems but the path differs
+# across machines (standalone install vs. bundled inside CUDA toolkit).
+find_path(NVTX3_INCLUDE_DIR
+    NAMES nvtx3/nvtx3.hpp
+    HINTS
+        # Cluster: nsight-systems bundled inside the CUDA toolkit tree
+        "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
+        "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
+        "${CUDAToolkit_ROOT_DIR}/nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
+        # Derived from nvcc location (covers any version glob)
+        "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
+        "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
+        "${CUDAToolkit_BIN_DIR}/../nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
+        # WSL / workstation: standalone Nsight Systems install
+        "/opt/nvidia/nsight-systems/2025.1.3/target-linux-x64/nvtx/include"
+        "/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nvtx/include"
+        "/opt/nvidia/nsight-systems/2024.4.2/target-linux-x64/nvtx/include"
+        # Fallback: CUDA toolkit headers
+        "${CUDAToolkit_ROOT_DIR}/targets/x86_64-linux/include"
+    DOC "Path containing nvtx3/nvtx3.hpp"
 )
+
+if(NVTX3_INCLUDE_DIR)
+    message(STATUS "Found NVTX3 headers: ${NVTX3_INCLUDE_DIR}")
+    target_include_directories(fzmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
+else()
+    message(WARNING "nvtx3/nvtx3.hpp not found — fzmod-profile may not compile.\n"
+                    "Override with: -DNVTX3_INCLUDE_DIR=/path/to/nvtx/include")
+endif()
 
 ####################
 ### INSTALLATION ###
