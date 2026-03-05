@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include "mem/mempool.h"
+#include "cuda_check.h"
 
 namespace fz {
 
@@ -423,7 +424,7 @@ void launchLorenzoInverseKernel(
     const int grid_size = (n + TileDim - 1) / TileDim;
 
     // Step 0: Initialize output array to 0 because we will scatter outliers into it
-    cudaMemsetAsync(output, 0, n * sizeof(TInput), stream);
+    FZ_CUDA_CHECK(cudaMemsetAsync(output, 0, n * sizeof(TInput), stream));
 
     // Step 1: Scatter outliers BEFORE prefix sum.
     // Launch with the full allocation capacity so no host-side D2H is needed;
@@ -555,7 +556,7 @@ void LorenzoStage<TInput, TCode>::execute(
         }
         
         // Initialize outlier count to 0
-        cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream);
+        FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream));
         
         // Calculate ebx2_r = 1 / (2 * error_bound) for pre-quantization
         TInput ebx2_r = static_cast<TInput>(1) / (static_cast<TInput>(2) * config_.error_bound);
@@ -610,8 +611,8 @@ void LorenzoStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
     // The stream is fully synchronized by the time Pipeline::compress() calls
     // us, so a plain (synchronous) cudaMemcpy is safe and adds no extra stall.
     uint32_t h_outlier_count = 0;
-    cudaMemcpy(&h_outlier_count, d_outlier_count_ptr_, sizeof(uint32_t),
-               cudaMemcpyDeviceToHost);
+    FZ_CUDA_CHECK(cudaMemcpy(&h_outlier_count, d_outlier_count_ptr_, sizeof(uint32_t),
+               cudaMemcpyDeviceToHost));
     d_outlier_count_ptr_ = nullptr;
 
     size_t max_outliers = getMaxOutlierCount(num_elements_);

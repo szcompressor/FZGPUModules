@@ -1,6 +1,7 @@
 #include "pipeline/compressor.h"
 #include "fzm_format.h"
 #include "log.h"
+#include "cuda_check.h"
 #include <chrono>
 #include <iostream>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <vector>
 #include <unordered_set>
+#include <nvtx3/nvtx3.hpp>
 
 namespace fz {
 
@@ -247,7 +249,7 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
     if (owns_streams) {
         inv_streams.resize(n_streams);
         for (auto& s : inv_streams) {
-            cudaStreamCreate(&s);
+            FZ_CUDA_CHECK(cudaStreamCreate(&s));
         }
     } else {
         inv_streams.push_back(fallback_stream);
@@ -259,7 +261,7 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
     // the forward DAG's cudaStreamWaitEvent per dependency).
     std::vector<cudaEvent_t> batch_events(n_streams, nullptr);
     for (auto& e : batch_events) {
-        cudaEventCreateWithFlags(&e, cudaEventDisableTiming);
+        FZ_CUDA_CHECK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
     }
     // Track which events carry valid signals (false before first batch)
     std::vector<bool> event_has_work(n_streams, false);
@@ -311,7 +313,7 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
             for (int si = 0; si < n_streams; si++) {
                 for (int ei = 0; ei < n_streams; ei++) {
                     if (event_has_work[ei]) {
-                        cudaStreamWaitEvent(inv_streams[si], batch_events[ei]);
+                        FZ_CUDA_CHECK(cudaStreamWaitEvent(inv_streams[si], batch_events[ei]));
                     }
                 }
             }
@@ -383,13 +385,13 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
             sei.spec_idx    = spec_idx;
             sei.input_bytes = 0;
             for (size_t sz : inv_sizes) sei.input_bytes += sz;
-            cudaEventCreate(&sei.cuda_start);
-            cudaEventCreate(&sei.cuda_end);
-            cudaEventRecord(sei.cuda_start, exec_stream);
+            FZ_CUDA_CHECK(cudaEventCreate(&sei.cuda_start));
+            FZ_CUDA_CHECK(cudaEventCreate(&sei.cuda_end));
+            FZ_CUDA_CHECK(cudaEventRecord(sei.cuda_start, exec_stream));
             auto t_exec_start = std::chrono::steady_clock::now();
             stage->execute(exec_stream, &pool, inv_inputs, inv_outputs, inv_sizes);
             auto t_exec_end = std::chrono::steady_clock::now();
-            cudaEventRecord(sei.cuda_end, exec_stream);
+            FZ_CUDA_CHECK(cudaEventRecord(sei.cuda_end, exec_stream));
             level_stage_cuda_infos.push_back(std::move(sei));
             level_exec_ms += std::chrono::duration<float, std::milli>(t_exec_end - t_exec_start).count();
 
@@ -421,7 +423,7 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
                    std::chrono::duration<float, std::milli>(t_exec_end - t_exec_start).count());
 
             // Record this stream's completion for the next batch barrier
-            cudaEventRecord(batch_events[si], exec_stream);
+            FZ_CUDA_CHECK(cudaEventRecord(batch_events[si], exec_stream));
             event_has_work[si] = true;
         }
 
@@ -430,7 +432,7 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
         // After this batch completes (sync before freeing consumed inputs)
         for (int si = 0; si < n_streams; si++) {
             if (event_has_work[si]) {
-                cudaStreamSynchronize(inv_streams[si]);
+                FZ_CUDA_CHECK(cudaStreamSynchronize(inv_streams[si]));
             }
         }
         auto t_sync_end = std::chrono::steady_clock::now();
@@ -438,9 +440,9 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
         // ── Collect CUDA event timings now that all streams have synced ────────
         for (auto& ci : level_stage_cuda_infos) {
             float gpu_ms = 0.0f;
-            cudaEventElapsedTime(&gpu_ms, ci.cuda_start, ci.cuda_end);
-            cudaEventDestroy(ci.cuda_start);
-            cudaEventDestroy(ci.cuda_end);
+            FZ_CUDA_CHECK_WARN(cudaEventElapsedTime(&gpu_ms, ci.cuda_start, ci.cuda_end));
+            FZ_CUDA_CHECK_WARN(cudaEventDestroy(ci.cuda_start));
+            FZ_CUDA_CHECK_WARN(cudaEventDestroy(ci.cuda_end));
 
             size_t output_bytes = 0;
             for (int buf_id : specs[ci.spec_idx].fwd_input_ids) {
@@ -534,9 +536,9 @@ std::pair<void*, size_t> Pipeline::runInversePipeline(
     FZ_LOG(INFO, "===============================================");
 
     // ── Step 6: Destroy streams and events ────────────────────────────────────
-    for (auto e : batch_events) cudaEventDestroy(e);
+    for (auto e : batch_events) FZ_CUDA_CHECK_WARN(cudaEventDestroy(e));
     if (owns_streams) {
-        for (auto s : inv_streams) cudaStreamDestroy(s);
+        for (auto s : inv_streams) FZ_CUDA_CHECK_WARN(cudaStreamDestroy(s));
     }
 
     // ── Step 7: Return the final result ───────────────────────────────────────
@@ -600,7 +602,7 @@ void Pipeline::compress(
     auto t_dag_end = std::chrono::steady_clock::now();
 
     // required for postStreamSync() and cuda events
-    cudaStreamSynchronize(stream);
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Allow stages to finalize host-side state from GPU results
     // (e.g. Lorenzo reads back actual outlier count and trims output sizes).
@@ -716,6 +718,47 @@ void Pipeline::decompress(
         connected_fwd_bufs[buf_id] = stage_to_node_.at(conn.dependent);
     }
 
+    // ── Build compressed-data pointer map ────────────────────────────────────
+    // Determines which device pointer feeds each compressed buffer in the
+    // inverse DAG.  Three cases:
+    //
+    //  (a) d_input != nullptr, single output (no concat):
+    //        d_input IS the compressed buffer — use it directly.
+    //
+    //  (b) d_input != nullptr, multi-output (concat format):
+    //        Parse the concat layout using the sizes already stored in
+    //        buffer_metadata_ — no GPU read-back needed.
+    //        Format: [num_bufs:u32][size:u64][data]... (see writeConcatBuffer)
+    //
+    //  (c) d_input == nullptr (or not provided):
+    //        Fall back to the forward DAG's own live output buffers.  This is
+    //        the standard in-memory path: call compress() then decompress()
+    //        on the same pipeline instance without resetting it.
+    std::unordered_map<int, void*> compressed_ptrs;
+    if (d_input != nullptr) {
+        if (!needs_concat_) {
+            // Single output — d_input is exactly the one compressed buffer
+            if (!buffer_metadata_.empty()) {
+                compressed_ptrs[buffer_metadata_[0].buffer_id] =
+                    const_cast<void*>(d_input);
+            }
+        } else {
+            // Multi-output concat: compute per-buffer slice offsets
+            size_t byte_offset = sizeof(uint32_t); // skip num_buffers header
+            for (const auto& meta : buffer_metadata_) {
+                byte_offset += sizeof(uint64_t);    // skip per-buffer size field
+                compressed_ptrs[meta.buffer_id] =
+                    static_cast<uint8_t*>(const_cast<void*>(d_input)) + byte_offset;
+                byte_offset += meta.actual_size;
+            }
+        }
+    } else {
+        // Fall back: read directly from the forward DAG's live buffers
+        for (const auto& meta : buffer_metadata_) {
+            compressed_ptrs[meta.buffer_id] = dag_->getBuffer(meta.buffer_id);
+        }
+    }
+
     // ── Switch all stages to inverse mode ────────────────────────────────────
     for (auto& s : stages_) s->setInverse(true);
 
@@ -803,11 +846,15 @@ void Pipeline::decompress(
                     inv_dag->setInputBuffer(inv_node, meta->actual_size,
                                             "inv_ext_" + meta->name);
                     int ext_buf_id = inv_node->input_buffer_ids.back();
-                    inv_dag->setExternalPointer(ext_buf_id,
-                                                dag_->getBuffer(meta->buffer_id));
+                    auto cptr_it = compressed_ptrs.find(fwd_out_buf_id);
+                    void* compressed_buf = (cptr_it != compressed_ptrs.end())
+                        ? cptr_it->second
+                        : dag_->getBuffer(meta->buffer_id); // safety fallback
+                    inv_dag->setExternalPointer(ext_buf_id, compressed_buf);
 
-                    FZ_LOG(DEBUG, "Inverse external input: '%s' %zu bytes -> stage '%s'",
-                           meta->name.c_str(), meta->actual_size, stage->getName().c_str());
+                    FZ_LOG(DEBUG, "Inverse external input: '%s' %zu bytes -> stage '%s' (ptr=%p)",
+                           meta->name.c_str(), meta->actual_size, stage->getName().c_str(),
+                           compressed_buf);
                 }
             }
         }
@@ -868,7 +915,7 @@ void Pipeline::decompress(
     auto t_dag_start = std::chrono::steady_clock::now();
     inv_dag->execute(stream);
     auto t_dag_end = std::chrono::steady_clock::now();
-    cudaStreamSynchronize(stream);
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Collect per-stage timings (collectTimings() syncs all owned streams internally)
     auto stage_timings = profiling_enabled_ ? inv_dag->collectTimings() : std::vector<StageTimingResult>{};
@@ -894,9 +941,9 @@ void Pipeline::decompress(
         for (auto& s : stages_) s->setInverse(false);
         throw std::runtime_error("cudaMalloc for decompress output failed");
     }
-    cudaMemcpyAsync(d_final, d_inv_result, actual_size,
-                    cudaMemcpyDeviceToDevice, stream);
-    cudaStreamSynchronize(stream);
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_final, d_inv_result, actual_size,
+                    cudaMemcpyDeviceToDevice, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Release inverse DAG's pool memory: reset() frees non-persistent
     // intermediate buffers; the persistent result buffer needs explicit free.
@@ -1632,13 +1679,16 @@ void Pipeline::decompressFromFile(
 
     std::vector<StageTimingResult> inv_stage_timings;
     std::pair<void*, size_t> result;
-    try {
-        result = runInversePipeline(specs, live_bufs,
-                                    fh.core.uncompressed_size, local_pool, stream,
-                                    0, &inv_stage_timings);
-    } catch (...) {
-        local_pool.free(d_compressed, stream);
-        throw;
+    {
+        nvtx3::scoped_range compute_range{"decompress::compute"};
+        try {
+            result = runInversePipeline(specs, live_bufs,
+                                        fh.core.uncompressed_size, local_pool, stream,
+                                        0, &inv_stage_timings);
+        } catch (...) {
+            local_pool.free(d_compressed, stream);
+            throw;
+        }
     }
 
     // 7. Copy from pool buffer to a plain cudaMalloc buffer the caller can cudaFree
@@ -1649,8 +1699,8 @@ void Pipeline::decompressFromFile(
         local_pool.free(d_compressed, stream);
         throw std::runtime_error("cudaMalloc for decompressed output failed");
     }
-    cudaMemcpyAsync(d_final, result.first, final_size, cudaMemcpyDeviceToDevice, stream);
-    cudaStreamSynchronize(stream);
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_final, result.first, final_size, cudaMemcpyDeviceToDevice, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     auto t_compute_end = std::chrono::steady_clock::now();
     float compute_ms = std::chrono::duration<float, std::milli>(t_compute_end - t_compute_start).count();

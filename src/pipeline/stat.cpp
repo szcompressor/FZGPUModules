@@ -1,4 +1,5 @@
 #include "pipeline/stat.h"
+#include "cuda_check.h"
 #include <cuda_runtime.h>
 #include <vector>
 #include <cmath>
@@ -13,8 +14,8 @@ ReconstructionStats calculateStatistics(const T* d_original, const T* d_decompre
     
     std::vector<T> h_orig(n);
     std::vector<T> h_decomp(n);
-    cudaMemcpy(h_orig.data(), d_original, n * sizeof(T), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_decomp.data(), d_decompressed, n * sizeof(T), cudaMemcpyDeviceToHost);
+    FZ_CUDA_CHECK(cudaMemcpy(h_orig.data(), d_original, n * sizeof(T), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpy(h_decomp.data(), d_decompressed, n * sizeof(T), cudaMemcpyDeviceToHost));
     
     double sum_sq_err = 0;
     double max_err = 0;

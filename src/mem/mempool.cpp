@@ -6,6 +6,7 @@
 
 #include "mempool.h"
 #include "log.h"
+#include "cuda_check.h"
 
 namespace fz {
 
@@ -142,7 +143,7 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
     // Check stream allocations first
     auto it = allocations_.find(ptr);
     if (it != allocations_.end()) {
-        cudaFreeAsync(ptr, stream);
+        FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         allocations_.erase(it);
         total_frees_++;
         return;
@@ -151,7 +152,7 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
     // Check graph allocations
     auto git = graph_allocations_.find(ptr);
     if (git != graph_allocations_.end()) {
-        cudaFreeAsync(ptr, stream);
+        FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         graph_allocations_.erase(git);
         total_frees_++;
         return;
@@ -163,7 +164,7 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
 void MemoryPool::reset(cudaStream_t stream) {
     // Free all non-graph allocations
     for (auto& pair : allocations_) {
-        cudaFreeAsync(pair.first, stream);
+        FZ_CUDA_CHECK_WARN(cudaFreeAsync(pair.first, stream));
         total_frees_++;
     }
     allocations_.clear();
@@ -175,7 +176,7 @@ void MemoryPool::trim() {
 }
 
 void MemoryPool::synchronize(cudaStream_t stream) {
-    cudaStreamSynchronize(stream);
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 void MemoryPool::printStats() const {

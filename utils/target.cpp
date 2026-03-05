@@ -3,6 +3,7 @@
  *
  * A minimal, focused binary for profiling the Lorenzo + Diff pipeline
  * on the CESM ATM CLDHGH dataset (1800x3600 float32).
+ * All compression and decompression is done in-memory (no file I/O).
  *
  * Usage:
  *   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o cldhgh_profile ./build/fzmod-profile
@@ -10,13 +11,17 @@
  */
 
 #include "fzmodules.h"
+#include "pipeline/stat.h"
 #include <cuda_profiler_api.h>
 #include <nvtx3/nvtx3.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 using namespace fz;
@@ -57,10 +62,10 @@ static float* load_to_device() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  main
+//  Helpers
 // ─────────────────────────────────────────────────────────────
 
-// Helper: configure a fresh compression pipeline in-place.
+// Configure a fresh compression pipeline in-place.
 static void setup_pipeline(Pipeline& p) {
     auto* lorenzo = p.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
@@ -72,6 +77,31 @@ static void setup_pipeline(Pipeline& p) {
 
     p.finalize();
 }
+
+// Print reconstruction quality metrics.
+static void print_stats(const ReconstructionStats& s, size_t n, float eb) {
+    const int W = 14;
+    std::cout << std::fixed;
+    std::cout << "  ┌─ Reconstruction quality ──────────────────────\n";
+    std::cout << "  │  PSNR           " << std::setw(W) << std::setprecision(4)
+              << s.psnr    << "  dB\n";
+    std::cout << "  │  MSE            " << std::setw(W) << std::setprecision(6)
+              << s.mse     << "\n";
+    std::cout << "  │  NRMSE          " << std::setw(W) << std::setprecision(6)
+              << s.nrmse   << "\n";
+    std::cout << "  │  Max error      " << std::setw(W) << std::setprecision(6)
+              << s.max_error
+              << "  (bound=" << eb << ", ratio="
+              << std::setprecision(3) << s.max_error / eb << "x)\n";
+    std::cout << "  │  Value range    " << std::setw(W) << std::setprecision(6)
+              << s.value_range << "\n";
+    std::cout << "  │  Elements       " << std::setw(W) << n << "\n";
+    std::cout << "  └───────────────────────────────────────────────\n";
+}
+
+// ─────────────────────────────────────────────────────────────
+//  main
+// ─────────────────────────────────────────────────────────────
 
 int main() {
     const size_t data_bytes = N * sizeof(float);
@@ -97,19 +127,15 @@ int main() {
             cudaDeviceSynchronize();
         }
 
-        static const std::string warmup_file = "cldhgh_warmup.fzm";
-        p.writeToFile(warmup_file, 0);
-
         void*  d_decomp  = nullptr;
         size_t decomp_sz = 0;
         {
             nvtx3::scoped_range r{"warmup::decompress"};
-            Pipeline::decompressFromFile(warmup_file, &d_decomp, &decomp_sz, 0, nullptr);
+            p.decompress(nullptr, 0, &d_decomp, &decomp_sz, 0);
             cudaDeviceSynchronize();
         }
 
         if (d_decomp) cudaFree(d_decomp);
-        std::remove(warmup_file.c_str());
     }
 
     // ── Profiled pass  (nsys captures only this region)
@@ -117,14 +143,13 @@ int main() {
     {
         std::cout << "[profile] Profiled pass...\n";
 
-        static const std::string out_file = "cldhgh_profile.fzm";
-
-        // Compress
-        void*  d_compressed  = nullptr;
-        size_t compressed_sz = 0;
         Pipeline comp(data_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
         comp.enableProfiling(true);
         setup_pipeline(comp);
+
+        // ── Compress ────────────────────────────────────────────
+        void*  d_compressed  = nullptr;
+        size_t compressed_sz = 0;
         {
             nvtx3::scoped_range r{"compress"};
             comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
@@ -137,24 +162,36 @@ int main() {
                   << " MB  (ratio " << static_cast<double>(data_bytes) / compressed_sz << "x)\n";
         comp.getLastPerfResult().print(std::cout);
 
-        comp.writeToFile(out_file, 0);
-
-        // Decompress
-        void*            d_decompressed = nullptr;
-        size_t           decompressed_sz = 0;
-        PipelinePerfResult decomp_perf;
+        // ── Decompress (in-memory) ───────────────────────────────
+        void*  d_decompressed  = nullptr;
+        size_t decompressed_sz = 0;
         {
             nvtx3::scoped_range r{"decompress"};
-            Pipeline::decompressFromFile(
-                out_file, &d_decompressed, &decompressed_sz, 0, &decomp_perf);
+            // Pass the compressed pointer so the inverse path uses our buffer
+            // rather than reading directly from the forward DAG's memory.
+            comp.decompress(d_compressed, compressed_sz, &d_decompressed, &decompressed_sz, 0);
             cudaDeviceSynchronize();
         }
 
         std::cout << "\n[profile] ── Decompress ────────────────────────────\n";
-        decomp_perf.print(std::cout);
+        std::cout << "  Reconstructed: " << decompressed_sz / 1024.0 / 1024.0 << " MB\n";
+        comp.getLastPerfResult().print(std::cout);
+
+        // ── Reconstruction quality ───────────────────────────────
+        std::cout << "\n[profile] ── Quality ───────────────────────────────\n";
+        if (d_decompressed && decompressed_sz == data_bytes) {
+            auto stats = calculateStatistics<float>(
+                d_input,
+                static_cast<const float*>(d_decompressed),
+                N
+            );
+            print_stats(stats, N, EB);
+        } else {
+            std::cout << "  [WARN] Size mismatch — skipping stats "
+                      << "(got " << decompressed_sz << " vs " << data_bytes << ")\n";
+        }
 
         if (d_decompressed) cudaFree(d_decompressed);
-        std::remove(out_file.c_str());
     }
     cudaProfilerStop();
 

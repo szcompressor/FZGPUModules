@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include "mem/mempool.h"
+#include "cuda_check.h"
 
 namespace fz {
 
@@ -145,9 +146,9 @@ void RLEStage<T>::execute(
         
         // Read the number of runs from the first uint32_t
         uint32_t num_runs;
-        cudaMemcpyAsync(&num_runs, inputs[0], sizeof(uint32_t), 
-                       cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&num_runs, inputs[0], sizeof(uint32_t), 
+                       cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         
         if (num_runs == 0) {
             actual_output_sizes_ = {0};
@@ -170,7 +171,7 @@ void RLEStage<T>::execute(
         if (pool) {
             d_run_offsets = static_cast<uint32_t*>(pool->allocate(num_runs * sizeof(uint32_t), stream, "rle_run_offsets"));
         } else {
-            cudaMallocAsync(&d_run_offsets, num_runs * sizeof(uint32_t), stream);
+            FZ_CUDA_CHECK(cudaMallocAsync(&d_run_offsets, num_runs * sizeof(uint32_t), stream));
         }
         
         // Compute prefix sum of run_lengths using CUB
@@ -181,15 +182,15 @@ void RLEStage<T>::execute(
         d_temp_storage = pool
             ? pool->allocate(temp_storage_bytes, stream, "rle_cub_decomp_temp")
             : nullptr;
-        if (!pool) cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+        if (!pool) FZ_CUDA_CHECK(cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream));
         cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
                                       run_lengths, d_run_offsets, num_runs, stream);
         
         // Get total output size (last element of prefix sum)
         uint32_t total_output_size;
-        cudaMemcpyAsync(&total_output_size, d_run_offsets + num_runs - 1, 
-                       sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&total_output_size, d_run_offsets + num_runs - 1, 
+                       sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Launch decompression kernel
         launchRLEDecompressKernel<T>(
@@ -203,7 +204,7 @@ void RLEStage<T>::execute(
         
         // Cleanup
         if (pool) { pool->free(d_run_offsets, stream); pool->free(d_temp_storage, stream); }
-        else { cudaFreeAsync(d_run_offsets, stream); cudaFreeAsync(d_temp_storage, stream); }
+        else { FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_run_offsets, stream)); FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_temp_storage, stream)); }
         
         actual_output_sizes_ = {total_output_size * sizeof(T)};
         
@@ -216,8 +217,8 @@ void RLEStage<T>::execute(
         if (n == 0) {
             // Write num_runs = 0
             uint32_t zero = 0;
-            cudaMemcpyAsync(outputs[0], &zero, sizeof(uint32_t), 
-                           cudaMemcpyHostToDevice, stream);
+            FZ_CUDA_CHECK(cudaMemcpyAsync(outputs[0], &zero, sizeof(uint32_t), 
+                           cudaMemcpyHostToDevice, stream));
             actual_output_sizes_ = {sizeof(uint32_t)};
             return;
         }
@@ -233,8 +234,8 @@ void RLEStage<T>::execute(
             d_is_boundary = static_cast<uint8_t*>(pool->allocate(n * sizeof(uint8_t), stream, "rle_is_boundary"));
             d_boundary_scan = static_cast<uint32_t*>(pool->allocate(n * sizeof(uint32_t), stream, "rle_boundary_scan"));
         } else {
-            cudaMallocAsync(&d_is_boundary, n * sizeof(uint8_t), stream);
-            cudaMallocAsync(&d_boundary_scan, n * sizeof(uint32_t), stream);
+            FZ_CUDA_CHECK(cudaMallocAsync(&d_is_boundary, n * sizeof(uint8_t), stream));
+            FZ_CUDA_CHECK(cudaMallocAsync(&d_boundary_scan, n * sizeof(uint32_t), stream));
         }
         uint32_t* d_boundary_positions = nullptr;  // allocated after counting runs
         
@@ -246,7 +247,7 @@ void RLEStage<T>::execute(
         if (err1 != cudaSuccess) {
             throw std::runtime_error(std::string("rle_mark_boundaries_kernel failed: ") + cudaGetErrorString(err1));
         }
-        cudaStreamSynchronize(stream);
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Compute prefix sum to count runs and get run IDs
         void* d_temp_storage = nullptr;
@@ -256,21 +257,21 @@ void RLEStage<T>::execute(
         d_temp_storage = pool
             ? pool->allocate(temp_storage_bytes, stream, "rle_cub_scan_temp")
             : nullptr;
-        if (!pool) cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream);
+        if (!pool) FZ_CUDA_CHECK(cudaMallocAsync(&d_temp_storage, temp_storage_bytes, stream));
         cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
                                       d_is_boundary, d_boundary_scan, n, stream);
         
         // Get total number of runs
         uint32_t num_runs;
-        cudaMemcpyAsync(&num_runs, d_boundary_scan + n - 1, sizeof(uint32_t),
-                       cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&num_runs, d_boundary_scan + n - 1, sizeof(uint32_t),
+                       cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Allocate array for boundary positions
         if (pool) {
             d_boundary_positions = static_cast<uint32_t*>(pool->allocate(num_runs * sizeof(uint32_t), stream, "rle_boundary_pos"));
         } else {
-            cudaMallocAsync(&d_boundary_positions, num_runs * sizeof(uint32_t), stream);
+            FZ_CUDA_CHECK(cudaMallocAsync(&d_boundary_positions, num_runs * sizeof(uint32_t), stream));
         }
         
         // Phase 2: Scatter boundary positions to compact array
@@ -281,7 +282,7 @@ void RLEStage<T>::execute(
         if (err2 != cudaSuccess) {
             throw std::runtime_error(std::string("scatter_boundary_positions_kernel failed: ") + cudaGetErrorString(err2));
         }
-        cudaStreamSynchronize(stream);
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Allocate output buffer for compressed data
         // Layout: [num_runs] [values] [PAD] [run_lengths]
@@ -295,8 +296,8 @@ void RLEStage<T>::execute(
         uint8_t* output_base = static_cast<uint8_t*>(outputs[0]);
         
         // Write num_runs
-        cudaMemcpyAsync(output_base, &num_runs, sizeof(uint32_t),
-                       cudaMemcpyHostToDevice, stream);
+        FZ_CUDA_CHECK(cudaMemcpyAsync(output_base, &num_runs, sizeof(uint32_t),
+                       cudaMemcpyHostToDevice, stream));
         
         T* d_compressed_values = reinterpret_cast<T*>(output_base + sizeof(uint32_t));
         uint32_t* d_run_lengths = reinterpret_cast<uint32_t*>(
@@ -313,7 +314,7 @@ void RLEStage<T>::execute(
         if (err3 != cudaSuccess) {
             throw std::runtime_error(std::string("rle_extract_runs_kernel failed: ") + cudaGetErrorString(err3));
         }
-        cudaStreamSynchronize(stream);
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Cleanup
         if (pool) {
@@ -322,10 +323,10 @@ void RLEStage<T>::execute(
             pool->free(d_boundary_positions, stream);
             pool->free(d_temp_storage, stream);
         } else {
-            cudaFreeAsync(d_is_boundary, stream);
-            cudaFreeAsync(d_boundary_scan, stream);
-            cudaFreeAsync(d_boundary_positions, stream);
-            cudaFreeAsync(d_temp_storage, stream);
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_is_boundary, stream));
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_boundary_scan, stream));
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_boundary_positions, stream));
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_temp_storage, stream));
         }
         
         actual_output_sizes_ = {compressed_size};

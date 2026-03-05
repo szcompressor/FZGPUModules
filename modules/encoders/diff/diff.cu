@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include "mem/mempool.h"
+#include "cuda_check.h"
 
 namespace fz {
 
@@ -40,14 +41,14 @@ void launchUndoDifferenceKernel(const T* input, T* output, size_t n, cudaStream_
     if (pool) {
         d_temp = pool->allocate(temp_bytes, stream, "diff_cub_temp");
     } else {
-        cudaMallocAsync(&d_temp, temp_bytes, stream);
+        FZ_CUDA_CHECK(cudaMallocAsync(&d_temp, temp_bytes, stream));
     }
 
     // Step 3: run the scan
     cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, input, output, n_int, stream);
 
     // Step 4: free temp storage (stream-ordered — safe to issue immediately)
-    if (pool) { pool->free(d_temp, stream); } else { cudaFreeAsync(d_temp, stream); }
+    if (pool) { pool->free(d_temp, stream); } else { FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_temp, stream)); }
 }
 
 template<typename T>

@@ -180,16 +180,34 @@ public:
     );
     
     /**
-     * Execute decompression pipeline
-     * 
-     * Similar to compress() but assumes pipeline was built for decompression
-     * (i.e., stages are reverse operations like RLE decode, Lorenzo restore)
-     * 
-     * Deserialization architecture:
-     * - Takes FZMHeaderCore + arrays from file (parsed on CPU)
-     * - Calls Stage::deserializeHeader() for each stage
-     * - Each stage reads its own config from FZMBufferEntry.stage_config
-     * - GPU buffer contains only data, extracted using byte offsets
+     * Execute in-memory decompression (inverse of compress())
+     *
+     * Reconstructs the original data by running the pipeline stages in reverse.
+     * Must be called on the same Pipeline instance that ran compress(), without
+     * an intervening reset().
+     *
+     * @param d_input  Device pointer to compressed data (may be nullptr).
+     *                 - nullptr / omitted: reads compressed buffers directly
+     *                   from the forward DAG's live memory (simplest path —
+     *                   safe immediately after compress()).
+     *                 - non-null, single output: treated as the one compressed
+     *                   buffer (useful when the caller holds its own copy).
+     *                 - non-null, multi-output: must point to a concat buffer
+     *                   in the format produced by compress() with multiple sinks
+     *                   ([num_bufs:u32][size:u64][data]...).
+     * @param input_size  Size of d_input in bytes (ignored when d_input is nullptr).
+     * @param d_output    [out] Newly cudaMalloc'd device pointer; caller must
+     *                    cudaFree() the result.
+     * @param output_size [out] Bytes in *d_output (== original uncompressed size).
+     * @param stream      CUDA stream to use (default: 0).
+     *
+     * Typical in-memory round-trip (benchmarking):
+     * @code
+     *   pipeline.compress(d_in, n, &d_comp, &comp_sz, stream);
+     *   pipeline.decompress(nullptr, 0, &d_out, &out_sz, stream);
+     *   // or equivalently:
+     *   pipeline.decompress(d_comp, comp_sz, &d_out, &out_sz, stream);
+     * @endcode
      */
     void decompress(
         const void* d_input,

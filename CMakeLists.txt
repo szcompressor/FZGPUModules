@@ -233,6 +233,8 @@ find_path(NVTX3_INCLUDE_DIR
 
 if(NVTX3_INCLUDE_DIR)
     message(STATUS "Found NVTX3 headers: ${NVTX3_INCLUDE_DIR}")
+    # fzmod_pipeline uses nvtx3 internally (decompressFromFile compute range)
+    target_include_directories(fzmod_pipeline PRIVATE ${NVTX3_INCLUDE_DIR})
     target_include_directories(fzmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
 else()
     message(WARNING "nvtx3/nvtx3.hpp not found — fzmod-profile may not compile.\n"

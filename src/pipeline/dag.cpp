@@ -2,6 +2,7 @@
 #include "stage/stage.h"
 #include "mem/mempool.h"
 #include "log.h"
+#include "cuda_check.h"
 
 #include <algorithm>
 #include <iostream>
@@ -53,17 +54,17 @@ CompressionDAG::~CompressionDAG() {
     // Clean up nodes
     for (auto* node : nodes_) {
         if (node->completion_event) {
-            cudaEventDestroy(node->completion_event);
+            FZ_CUDA_CHECK_WARN(cudaEventDestroy(node->completion_event));
         }
         if (node->start_event) {
-            cudaEventDestroy(node->start_event);
+            FZ_CUDA_CHECK_WARN(cudaEventDestroy(node->start_event));
         }
         delete node;
     }
     
     if (owns_streams_) {
         for (auto stream : streams_) {
-            cudaStreamDestroy(stream);
+            FZ_CUDA_CHECK_WARN(cudaStreamDestroy(stream));
         }
     }
 }
@@ -77,8 +78,8 @@ DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
     
     cudaError_t preErr = cudaGetLastError();
     if (preErr != cudaSuccess) {
-        std::cerr << "[DAG] WARNING: Pre-existing CUDA error in addStage (before cudaEventCreate): " 
-                  << cudaGetErrorString(preErr) << std::endl;
+        FZ_LOG(WARN, "Pre-existing CUDA error in addStage (before cudaEventCreate): %s",
+               cudaGetErrorString(preErr));
         // Error is now cleared
     }
     
@@ -349,8 +350,7 @@ void CompressionDAG::finalize() {
                 cudaStream_t stream;
                 cudaError_t err = cudaStreamCreate(&stream);
                 if (err != cudaSuccess) {
-                    std::cerr << "[DAG] ERROR: Failed to create stream " << i 
-                              << ": " << cudaGetErrorString(err) << std::endl;
+                    FZ_LOG(WARN, "Failed to create CUDA stream %d: %s", i, cudaGetErrorString(err));
                     // Clean up already created streams
                     for (auto s : streams_) {
                         cudaStreamDestroy(s);
@@ -393,7 +393,7 @@ void CompressionDAG::execute(cudaStream_t stream) {
             
             // Wait for all dependencies to complete
             for (auto* dep : node->dependencies) {
-                cudaStreamWaitEvent(exec_stream, dep->completion_event);
+                FZ_CUDA_CHECK(cudaStreamWaitEvent(exec_stream, dep->completion_event));
             }
             
             // Allocate output buffers based on strategy
@@ -419,7 +419,7 @@ void CompressionDAG::execute(cudaStream_t stream) {
             
             // Record stage start for profiling (before kernel launch)
             if (profiling_enabled_ && node->start_event) {
-                cudaEventRecord(node->start_event, exec_stream);
+                FZ_CUDA_CHECK(cudaEventRecord(node->start_event, exec_stream));
             }
 
             // Call stage execute
@@ -428,7 +428,7 @@ void CompressionDAG::execute(cudaStream_t stream) {
             }
             
             // Record completion for dependent stages (and profiling end)
-            cudaEventRecord(node->completion_event, exec_stream);
+            FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, exec_stream));
             node->is_executed = true;
             
             // Decrement ref count on input buffers and free if needed
@@ -659,19 +659,14 @@ void CompressionDAG::enableProfiling(bool enable) {
         // Create start_event for all nodes that were added before this call
         for (auto* node : nodes_) {
             if (!node->start_event) {
-                cudaError_t err = cudaEventCreate(&node->start_event);
-                if (err != cudaSuccess) {
-                    // Non-fatal: log and leave start_event null (timing skipped for this node)
-                    std::cerr << "[DAG] WARNING: Could not create profiling event for '"
-                              << node->name << "': " << cudaGetErrorString(err) << "\n";
-                }
+                FZ_CUDA_CHECK_WARN(cudaEventCreate(&node->start_event));
             }
         }
     } else {
         // Destroy and null out all start events to reclaim resources
         for (auto* node : nodes_) {
             if (node->start_event) {
-                cudaEventDestroy(node->start_event);
+                FZ_CUDA_CHECK_WARN(cudaEventDestroy(node->start_event));
                 node->start_event = nullptr;
             }
         }
@@ -684,7 +679,7 @@ std::vector<StageTimingResult> CompressionDAG::collectTimings() {
     // Sync all owned streams so that CUDA event queries are valid.
     // (node streams may differ from the fallback stream passed to execute())
     for (auto s : streams_) {
-        if (s) cudaStreamSynchronize(s);
+        if (s) FZ_CUDA_CHECK(cudaStreamSynchronize(s));
     }
 
     std::vector<StageTimingResult> results;
@@ -702,8 +697,8 @@ std::vector<StageTimingResult> CompressionDAG::collectTimings() {
                                                node->start_event,
                                                node->completion_event);
         if (err != cudaSuccess) {
-            std::cerr << "[DAG] WARNING: cudaEventElapsedTime failed for '"
-                      << node->name << "': " << cudaGetErrorString(err) << "\n";
+            FZ_LOG(WARN, "cudaEventElapsedTime failed for '%s': %s",
+                   node->name.c_str(), cudaGetErrorString(err));
             r.elapsed_ms = -1.0f;
         }
 
