@@ -59,6 +59,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable")
 endif()
 
+option(BUILD_TESTING "Build tests" ON)
+if(BUILD_TESTING)
+    add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
 ################################
 ### SANITIZERS CONFIGURATION ###
 ################################
