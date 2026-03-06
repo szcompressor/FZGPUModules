@@ -29,6 +29,8 @@ enum class StageType : uint16_t {
     BITPACK = 7,
     SPLIT = 10,
     MERGE = 11,
+    LORENZO_2D = 12,
+    LORENZO_3D = 13,
     // Add more as needed
 };
 
@@ -261,6 +263,8 @@ inline std::string dataTypeToString(DataType type) {
 inline std::string stageTypeToString(StageType type) {
     switch (type) {
         case StageType::LORENZO_1D: return "Lorenzo1D";
+        case StageType::LORENZO_2D: return "Lorenzo2D";
+        case StageType::LORENZO_3D: return "Lorenzo3D";
         case StageType::DIFFERENCE: return "Difference";
         case StageType::SCALE: return "Scale";
         case StageType::PASSTHROUGH: return "PassThrough";

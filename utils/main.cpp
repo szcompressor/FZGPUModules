@@ -1457,6 +1457,210 @@ void test_dag_native_inverse_complex() {
 }
 
 // ============================================================
+//  Test: Lorenzo 2D / 3D Roundtrip Sanity Check
+// ============================================================
+
+// Helper: RAII device buffer (narrow scope, avoids dragging in gtest helpers)
+struct DevBuf {
+    void* ptr = nullptr;
+    size_t bytes = 0;
+    DevBuf() = default;
+    explicit DevBuf(size_t n) : bytes(n) { cudaMalloc(&ptr, n); }
+    ~DevBuf() { if (ptr) cudaFree(ptr); }
+    DevBuf(const DevBuf&) = delete;
+    DevBuf& operator=(const DevBuf&) = delete;
+    template<typename T> T* as() const { return reinterpret_cast<T*>(ptr); }
+};
+
+// Run one Lorenzo forward+inverse cycle directly through LorenzoStage.
+// Returns max-absolute-error vs the original host data.
+static float lorenzo_roundtrip(
+    const std::vector<float>& h_input,
+    size_t nx, size_t ny, size_t nz,
+    float error_bound,
+    int quant_radius = 512
+) {
+    const size_t n         = h_input.size();
+    const size_t in_bytes  = n * sizeof(float);
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    MemoryPoolConfig cfg(in_bytes, 12.0f);
+    MemoryPool pool(cfg);
+
+    // ── Forward stage ─────────────────────────────────────────────────────
+    LorenzoStage<float, uint16_t> fwd;
+    fwd.setErrorBound(error_bound);
+    fwd.setQuantRadius(static_cast<uint16_t>(quant_radius));
+    fwd.setOutlierCapacity(0.25f);
+    fwd.setDims(nx, ny, nz);
+
+    auto est = fwd.estimateOutputSizes({in_bytes});
+
+    DevBuf d_in(in_bytes);
+    cudaMemcpyAsync(d_in.ptr, h_input.data(), in_bytes, cudaMemcpyHostToDevice, stream);
+
+    DevBuf d_codes  (est[0]);
+    DevBuf d_errors (est[1]);
+    DevBuf d_indices(est[2]);
+    DevBuf d_count  (est[3]);
+
+    // Zero the outlier count up-front (execute() does its own memset, but be safe)
+    cudaMemsetAsync(d_count.ptr, 0, est[3], stream);
+
+    std::vector<void*> fwd_in  = {d_in.ptr};
+    std::vector<void*> fwd_out = {d_codes.ptr, d_errors.ptr, d_indices.ptr, d_count.ptr};
+    std::vector<size_t> fwd_sz = {in_bytes};
+
+    fwd.execute(stream, &pool, fwd_in, fwd_out, fwd_sz);
+    cudaStreamSynchronize(stream);
+    fwd.postStreamSync(stream);
+
+    auto actual = fwd.getActualOutputSizesByName();
+    size_t codes_bytes   = actual.count("codes")           ? actual.at("codes")           : est[0];
+    size_t errors_bytes  = actual.count("outlier_errors")  ? actual.at("outlier_errors")  : est[1];
+    size_t indices_bytes = actual.count("outlier_indices") ? actual.at("outlier_indices") : est[2];
+    size_t count_bytes   = actual.count("outlier_count")   ? actual.at("outlier_count")   : est[3];
+
+    // ── Read back outlier count for reporting ─────────────────────────────
+    uint32_t h_outlier_count = 0;
+    cudaMemcpy(&h_outlier_count, d_count.ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    (void)h_outlier_count;   // used by caller indirectly via output below
+
+    // ── Inverse stage ─────────────────────────────────────────────────────
+    LorenzoStage<float, uint16_t> inv;
+    inv.setInverse(true);
+
+    // Transfer config from forward stage
+    uint8_t cfg_buf[128] = {};
+    size_t  cfg_sz = fwd.serializeHeader(0, cfg_buf, sizeof(cfg_buf));
+    inv.deserializeHeader(cfg_buf, cfg_sz);
+
+    DevBuf d_out(n * sizeof(float));
+
+    std::vector<void*> inv_in  = {d_codes.ptr, d_errors.ptr, d_indices.ptr, d_count.ptr};
+    std::vector<void*> inv_out = {d_out.ptr};
+    std::vector<size_t> inv_sz = {codes_bytes, errors_bytes, indices_bytes, count_bytes};
+
+    inv.execute(stream, &pool, inv_in, inv_out, inv_sz);
+    cudaStreamSynchronize(stream);
+
+    // ── Compare ───────────────────────────────────────────────────────────
+    std::vector<float> h_recon(n);
+    cudaMemcpy(h_recon.data(), d_out.ptr, n * sizeof(float), cudaMemcpyDeviceToHost);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        float e = std::abs(h_recon[i] - h_input[i]);
+        if (e > max_err) max_err = e;
+    }
+
+    cudaStreamDestroy(stream);
+    return max_err;
+}
+
+void test_lorenzo_2d_3d() {
+    std::cout << "========== Test: Lorenzo 2D / 3D Roundtrip ==========\n";
+
+    constexpr float EB = 1e-2f;
+
+    // ── 2D: smooth ramp surface 128×64 ────────────────────────────────────
+    {
+        constexpr size_t NX = 128, NY = 64;
+        constexpr size_t N  = NX * NY;
+
+        std::vector<float> h(N);
+        for (size_t y = 0; y < NY; y++)
+            for (size_t x = 0; x < NX; x++)
+                h[y * NX + x] = std::sin(x * 0.05f) * std::cos(y * 0.07f) * 10.0f;
+
+        float max_err = lorenzo_roundtrip(h, NX, NY, 1, EB);
+        std::cout << "  2D (" << NX << "×" << NY << ")  max_err=" << max_err
+                  << "  bound=" << EB << "\n";
+        CHECK(max_err <= EB * 1.01f,
+              "Lorenzo2D smooth roundtrip within error_bound");
+    }
+
+    // ── 2D: uniform constant surface (should have ≤1 outlier per column) ──
+    {
+        constexpr size_t NX = 64, NY = 64;
+        constexpr size_t N  = NX * NY;
+
+        std::vector<float> h(N, 3.14f);
+        float max_err = lorenzo_roundtrip(h, NX, NY, 1, EB);
+        std::cout << "  2D constant (" << NX << "×" << NY << ")  max_err=" << max_err << "\n";
+        CHECK(max_err <= EB * 1.01f,
+              "Lorenzo2D constant surface roundtrip within error_bound");
+    }
+
+    // ── 2D: linear ramp (predictable for 2D Lorenzo) ──────────────────────
+    {
+        constexpr size_t NX = 256, NY = 128;
+        constexpr size_t N  = NX * NY;
+
+        std::vector<float> h(N);
+        for (size_t i = 0; i < N; i++)
+            h[i] = static_cast<float>(i % NX) * 0.001f
+                 + static_cast<float>(i / NX) * 0.001f;
+
+        float max_err = lorenzo_roundtrip(h, NX, NY, 1, EB);
+        std::cout << "  2D linear ramp (" << NX << "×" << NY << ")  max_err=" << max_err << "\n";
+        CHECK(max_err <= EB * 1.01f,
+              "Lorenzo2D linear ramp roundtrip within error_bound");
+    }
+
+    // ── 3D: smooth 32×32×32 cube ──────────────────────────────────────────
+    {
+        constexpr size_t NX = 32, NY = 32, NZ = 32;
+        constexpr size_t N  = NX * NY * NZ;
+
+        std::vector<float> h(N);
+        for (size_t z = 0; z < NZ; z++)
+            for (size_t y = 0; y < NY; y++)
+                for (size_t x = 0; x < NX; x++) {
+                    size_t idx = z * NX * NY + y * NX + x;
+                    h[idx] = std::sin(x * 0.1f) * std::cos(y * 0.1f) * (1.0f + z * 0.02f);
+                }
+
+        float max_err = lorenzo_roundtrip(h, NX, NY, NZ, EB);
+        std::cout << "  3D (" << NX << "×" << NY << "×" << NZ << ")  max_err=" << max_err
+                  << "  bound=" << EB << "\n";
+        CHECK(max_err <= EB * 1.01f,
+              "Lorenzo3D smooth roundtrip within error_bound");
+    }
+
+    // ── 3D: constant volume ────────────────────────────────────────────────
+    {
+        constexpr size_t NX = 16, NY = 16, NZ = 16;
+        constexpr size_t N  = NX * NY * NZ;
+
+        std::vector<float> h(N, 2.718f);
+        float max_err = lorenzo_roundtrip(h, NX, NY, NZ, EB);
+        std::cout << "  3D constant (" << NX << "×" << NY << "×" << NZ << ")  max_err=" << max_err << "\n";
+        CHECK(max_err <= EB * 1.01f,
+              "Lorenzo3D constant volume roundtrip within error_bound");
+    }
+
+    // ── 3D: linear ramp (should compress near-losslessly) ─────────────────
+    {
+        constexpr size_t NX = 40, NY = 24, NZ = 16;
+        constexpr size_t N  = NX * NY * NZ;
+
+        std::vector<float> h(N);
+        for (size_t i = 0; i < N; i++)
+            h[i] = static_cast<float>(i) * 0.001f;
+
+        float max_err = lorenzo_roundtrip(h, NX, NY, NZ, EB);
+        std::cout << "  3D linear ramp (" << NX << "×" << NY << "×" << NZ << ")  max_err=" << max_err << "\n";
+        CHECK(max_err <= EB * 1.01f,
+              "Lorenzo3D linear ramp roundtrip within error_bound");
+    }
+
+    std::cout << "\n";
+}
+
+// ============================================================
 //  Main
 // ============================================================
 
@@ -1486,6 +1690,7 @@ int main() {
     std::cout << "\n";
 
     try {
+        test_lorenzo_2d_3d();
         test_logging_system();
         test_simple_pipeline();
         test_output_sizes_by_name();

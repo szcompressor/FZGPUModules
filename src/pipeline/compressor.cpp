@@ -26,7 +26,8 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       concat_buffer_capacity_(0),
       needs_concat_(false),
       input_size_(0),
-      input_size_hint_(input_data_size) {
+      input_size_hint_(input_data_size),
+      dims_({0, 1, 1}) {
     
     // Create memory pool with configuration
     MemoryPoolConfig pool_config(input_data_size, pool_multiplier);

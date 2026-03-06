@@ -6,7 +6,9 @@
 #include "stage/stage_factory.h"
 #include "mem/mempool.h"
 #include "fzm_format.h"
+#include "predictors/lorenzo/lorenzo.h"
 
+#include <array>
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
@@ -71,6 +73,27 @@ public:
      * Must be called before finalize()
      */
     void setNumStreams(int num_streams);
+
+    /**
+     * Set spatial dimensions of the dataset (default: 1-D, {n, 1, 1}).
+     * Controls which Lorenzo predictor variant is automatically selected by
+     * addLorenzo() and is forwarded to LorenzoStage::Config::dims.
+     *
+     * @param x  Size of the fastest (x) dimension (must be > 0)
+     * @param y  Size of the y dimension (1 = 1-D or 2-D collapsed)
+     * @param z  Size of the z dimension (1 = 1-D or 2-D)
+     *
+     * Examples:
+     *   pipeline.setDims(1000000);        // 1-D, 1 M elements
+     *   pipeline.setDims(1024, 512);      // 2-D, 512 x 1024
+     *   pipeline.setDims(256, 256, 128);  // 3-D
+     */
+    void setDims(size_t x, size_t y = 1, size_t z = 1) {
+        dims_ = {x, y, z};
+    }
+    void setDims(std::array<size_t, 3> dims) { dims_ = dims; }
+
+    std::array<size_t, 3> getDims() const { return dims_; }
     
     // ========== Builder API ==========
     
@@ -140,14 +163,47 @@ public:
     
     /**
      * Finalize the pipeline for execution
-     * 
+     *
      * - Validates topology (no cycles, all stages connected)
      * - Assigns execution levels
      * - For PREALLOCATE mode: estimates and allocates all buffers
-     * 
+     *
      * Must be called before compress/decompress
      */
     void finalize();
+
+    // ========== Convenience Stage Builders ==========
+
+    /**
+     * Add a Lorenzo predictor stage with automatic dimensionality selection.
+     *
+     * The correct 1-D / 2-D / 3-D variant is chosen from the pipeline's
+     * current dims (set via setDims()).  If setDims() was never called the
+     * stage defaults to 1-D Lorenzo.
+     *
+     * @param error_bound      Absolute pointwise error tolerance
+     * @param quant_radius     Quantization radius (default 32768 for uint16_t)
+     * @param outlier_capacity Fraction of data to reserve for outliers (default 0.2)
+     * @return Pointer to the created stage (owned by Pipeline)
+     *
+     * Example:
+     *   pipeline.setDims(nx, ny);           // 2-D dataset
+     *   auto* lrz = pipeline.addLorenzo(1e-4f);
+     *   pipeline.connect(rle, lrz, "codes");
+     */
+    template<typename TInput = float, typename TCode = uint16_t>
+    LorenzoStage<TInput, TCode>* addLorenzo(
+        float error_bound,
+        int   quant_radius     = 32768,
+        float outlier_capacity = 0.2f
+    ) {
+        typename LorenzoStage<TInput, TCode>::Config cfg;
+        cfg.error_bound      = error_bound;
+        cfg.quant_radius     = quant_radius;
+        cfg.outlier_capacity = outlier_capacity;
+        cfg.dims             = dims_;
+        return addStage<LorenzoStage<TInput, TCode>>(cfg);
+    }
     
     // ========== Execution ==========
     
@@ -561,9 +617,14 @@ private:
     
     // Current input size (set during compress)
     size_t input_size_;
-    
+
     // Input size hint from constructor (for initial buffer estimation)
     size_t input_size_hint_;
+
+    // Spatial dimensions of the dataset (x=fast, y, z).
+    // Used by addLorenzo() to select 1-D/2-D/3-D automatically.
+    // Default {0,1,1} means "1-D, infer x from input size".
+    std::array<size_t, 3> dims_;
     
     // ===== File Serialization State =====
     

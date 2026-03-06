@@ -28,8 +28,10 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
     Stage* stage = nullptr;
 
     switch (type) {
-        case StageType::LORENZO_1D: {
-            // Lorenzo needs template params from config
+        case StageType::LORENZO_1D:
+        case StageType::LORENZO_2D:
+        case StageType::LORENZO_3D: {
+            // Lorenzo 1-D/2-D/3-D — same template types; dims are restored by deserializeHeader()
             if (config_size >= sizeof(LorenzoConfig)) {
                 LorenzoConfig lc;
                 std::memcpy(&lc, config, sizeof(LorenzoConfig));
