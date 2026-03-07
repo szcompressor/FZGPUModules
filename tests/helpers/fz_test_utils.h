@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * Shared test utilities for FZModules unit tests.
+ * Shared test utilities for FZGPUModules unit tests.
  *
  * Provides:
  *   - CudaBuffer<T>   – RAII device allocation (cudaMalloc / cudaFree)

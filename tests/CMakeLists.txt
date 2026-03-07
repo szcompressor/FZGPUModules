@@ -2,7 +2,7 @@
 # tests/CMakeLists.txt
 #
 # One executable per test file.  Each target:
-#   - links the relevant FZModules library + GTest::gtest_main
+#   - links the relevant FZGPUModules library + GTest::gtest_main
 #   - is registered with CTest via add_test()
 #
 # Run all tests:
@@ -31,7 +31,7 @@ function(fz_add_test)
     )
 
     # Reuse the same compile settings (C++17, CUDA arch flags, etc.)
-    target_link_libraries(${ARG_NAME} PRIVATE fzmod_compile_settings)
+    target_link_libraries(${ARG_NAME} PRIVATE fzgmod_compile_settings)
 
     add_test(NAME ${ARG_NAME} COMMAND ${ARG_NAME})
 
@@ -45,26 +45,26 @@ endfunction()
 fz_add_test(
     NAME    test_difference
     SOURCES test_difference.cpp
-    LIBS    fzmod_encoders fzmod_mem
+    LIBS    fzgmod_encoders fzgmod_mem
 )
 
 # ─── RLE encoder ──────────────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_rle
     SOURCES test_rle.cpp
-    LIBS    fzmod_encoders fzmod_mem
+    LIBS    fzgmod_encoders fzgmod_mem
 )
 
 # ─── Lorenzo predictor ────────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_lorenzo
     SOURCES test_lorenzo.cpp
-    LIBS    fzmod_predictors fzmod_mem
+    LIBS    fzgmod_predictors fzgmod_mem
 )
 
 # ─── Full pipeline (compress + decompress) ────────────────────────────────────
 fz_add_test(
     NAME    test_pipeline
     SOURCES test_pipeline.cpp
-    LIBS    fzmod
+    LIBS    fzgmod
 )

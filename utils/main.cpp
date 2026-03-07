@@ -1,5 +1,5 @@
 /**
- * FZModules Integration Test Suite
+ * FZGPUModules Integration Test Suite
  *
  * Tests the current state of the library after recent improvements:
  *   1. Logging system (fz::Logger)
@@ -12,7 +12,7 @@
  *   8. DAG-aware inverse decompression (runInversePipeline refactor)
  */
 
-#include "fzmodules.h"
+#include "fzgpumodules.h"
 
 using namespace fz;
 
@@ -518,7 +518,7 @@ void test_lorenzo_inverse() {
 void test_logging_with_pipeline() {
     std::cout << "========== Test 10: Logging Integration ==========\n";
     std::cout << "Running a pipeline with fz::Logger enabled at INFO level.\n";
-    std::cout << "Log output appears below between [fzmod:*] markers.\n\n";
+    std::cout << "Log output appears below between [fzgmod:*] markers.\n\n";
 
     Logger::enableStderr(LogLevel::DEBUG);
 
@@ -1666,7 +1666,7 @@ void test_lorenzo_2d_3d() {
 
 int main() {
     std::cout << "======================================\n";
-    std::cout << "FZModules Integration Test Suite\n";
+    std::cout << "FZGPUModules Integration Test Suite\n";
     std::cout << "======================================\n";
 
     // Check CUDA device

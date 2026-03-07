@@ -6,7 +6,7 @@ include(CMakeFindDependencyMacro)
 find_dependency(CUDAToolkit REQUIRED)
 
 # CCCL (and cudax) are bundled with the CUDA Toolkit.
-# They appear as transitive deps in FZModulesTargets.cmake because CUDA::cudart
+# They appear as transitive deps in FZGPUModulesTargets.cmake because CUDA::cudart
 # pulls them in on CUDA 12+. We must resolve them before including the targets file.
 set(CCCL_ENABLE_UNSTABLE ON)
 find_dependency(CCCL REQUIRED
@@ -17,6 +17,6 @@ find_dependency(CCCL REQUIRED
 )
 
 # Include the targets file
-include("${CMAKE_CURRENT_LIST_DIR}/FZModulesTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/FZGPUModulesTargets.cmake")
 
-check_required_components(FZModules)
+check_required_components(FZGPUModules)

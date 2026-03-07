@@ -36,7 +36,7 @@ void PipelinePerfResult::print(std::ostream& os) const {
     size_t uncompressed = is_compress ? input_bytes : output_bytes;
     size_t compressed   = is_compress ? output_bytes : input_bytes;
 
-    os << "\n======== FZModules Performance Report (" << mode << ") ========\n";
+    os << "\n======== FZGPUModules Performance Report (" << mode << ") ========\n";
 
     // ── Overall summary ──────────────────────────────────────────────────────
     os << std::fixed << std::setprecision(3);

@@ -14,7 +14,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "fzmodules.h"
+#include "fzgpumodules.h"
 
 #include <cmath>
 #include <cstdio>
@@ -158,7 +158,7 @@ TEST(Pipeline, FileRoundTrip) {
     stream.sync();
 
     // ── Compress and write to a temp file ─────────────────────────────────
-    const std::string tmp_file = "/tmp/fzmod_test_roundtrip.fzm";
+    const std::string tmp_file = "/tmp/fzgmod_test_roundtrip.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();

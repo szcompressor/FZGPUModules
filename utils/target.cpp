@@ -6,11 +6,11 @@
  * All compression and decompression is done in-memory (no file I/O).
  *
  * Usage:
- *   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o cldhgh_profile ./build/fzmod-profile
+ *   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi -o cldhgh_profile ./build/fzgmod-profile
  *   nsys-ui cldhgh_profile.nsys-rep
  */
 
-#include "fzmodules.h"
+#include "fzgpumodules.h"
 #include "pipeline/stat.h"
 #include <cuda_profiler_api.h>
 #include <nvtx3/nvtx3.hpp>

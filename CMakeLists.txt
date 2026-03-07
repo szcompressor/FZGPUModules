@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
-project(FZModules LANGUAGES CUDA CXX C VERSION 1.0)
+project(FZGPUModules LANGUAGES CUDA CXX C VERSION 1.0)
 
 ########################
 ### GENERAL SETTINGS ###
@@ -9,7 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_SHARED_LIBS "prefer shared libraries" ON)
 include(GNUInstallDirs)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 find_package(CUDAToolkit REQUIRED)
@@ -102,9 +102,9 @@ endif()
 ### COMPILER SETTINGS ###
 #########################
 
-add_library(fzmod_compile_settings INTERFACE)
+add_library(fzgmod_compile_settings INTERFACE)
 target_compile_options(
-  fzmod_compile_settings 
+  fzgmod_compile_settings 
   INTERFACE 
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda>
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--expt-relaxed-constexpr>
@@ -112,24 +112,24 @@ target_compile_options(
 
 if(NOT USE_SANITIZER STREQUAL "Compute")
   target_compile_options(
-    fzmod_compile_settings
+    fzgmod_compile_settings
     INTERFACE
       $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-lineinfo>
   )
 endif()
 
-target_compile_features(fzmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
-target_link_libraries(fzmod_compile_settings INTERFACE CUDA::cudart)
+target_compile_features(fzgmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
+target_link_libraries(fzgmod_compile_settings INTERFACE CUDA::cudart)
 
 ###########################
 ### INCLUDE DIRECTORIES ###
 ###########################
 
-target_include_directories(fzmod_compile_settings INTERFACE
+target_include_directories(fzgmod_compile_settings INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzmod>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzgmod>
 )
 
 #################
@@ -137,84 +137,84 @@ target_include_directories(fzmod_compile_settings INTERFACE
 #################
 
 #### Memory Management
-add_library(fzmod_mem
+add_library(fzgmod_mem
   src/mem/mempool.cpp
 )
-target_link_libraries(fzmod_mem
+target_link_libraries(fzgmod_mem
   PUBLIC
-  fzmod_compile_settings
+  fzgmod_compile_settings
 )
 
 #### Encoders Module
-add_library(fzmod_encoders
+add_library(fzgmod_encoders
   modules/encoders/bitpacking/bitpacking.cu
   modules/encoders/diff/diff.cu
   modules/encoders/RLE/rle.cu
 )
-target_link_libraries(fzmod_encoders
+target_link_libraries(fzgmod_encoders
   PUBLIC
-  fzmod_compile_settings
+  fzgmod_compile_settings
   CUDA::cudart
 )
-add_library(FZMOD::encoders ALIAS fzmod_encoders)
+add_library(FZGMOD::encoders ALIAS fzgmod_encoders)
 
 #### Predictors Module
-add_library(fzmod_predictors
+add_library(fzgmod_predictors
   modules/predictors/lorenzo/lorenzo.cu
 )
-target_link_libraries(fzmod_predictors
+target_link_libraries(fzgmod_predictors
   PUBLIC
-  fzmod_compile_settings
+  fzgmod_compile_settings
   CUDA::cudart
 )
-add_library(FZMOD::predictors ALIAS fzmod_predictors)
+add_library(FZGMOD::predictors ALIAS fzgmod_predictors)
 
-add_library(fzmod_pipeline
+add_library(fzgmod_pipeline
   src/pipeline/compressor.cpp
   src/pipeline/dag.cpp
   src/pipeline/perf.cpp
   src/pipeline/stat.cpp
   src/stage/mock_stages.cu
 )
-target_link_libraries(fzmod_pipeline
+target_link_libraries(fzgmod_pipeline
   PUBLIC
-  fzmod_compile_settings
-  fzmod_mem
-  fzmod_encoders
-  fzmod_predictors
+  fzgmod_compile_settings
+  fzgmod_mem
+  fzgmod_encoders
+  fzgmod_predictors
   CUDA::cudart
 )
-add_library(FZMOD::pipeline ALIAS fzmod_pipeline)
+add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
 
 #### Combined Library
-add_library(fzmod
+add_library(fzgmod
   utils/cli/cli.cpp
 )
-target_link_libraries(fzmod
+target_link_libraries(fzgmod
   PUBLIC
-  fzmod_compile_settings
-  fzmod_mem
-  fzmod_encoders
-  fzmod_predictors
-  fzmod_pipeline
+  fzgmod_compile_settings
+  fzgmod_mem
+  fzgmod_encoders
+  fzgmod_predictors
+  fzgmod_pipeline
   CUDA::cudart
 )
-add_library(FZMOD::fzmod ALIAS fzmod)
+add_library(FZGMOD::fzgmod ALIAS fzgmod)
 
 ###################
 ### EXECUTABLES ###
 ###################
 
-add_executable(fzmod-bin utils/main.cpp)
-target_link_libraries(fzmod-bin PRIVATE fzmod)
-set_target_properties(fzmod-bin PROPERTIES OUTPUT_NAME fzmod)
+add_executable(fzgmod-bin utils/main.cpp)
+target_link_libraries(fzgmod-bin PRIVATE fzgmod)
+set_target_properties(fzgmod-bin PROPERTIES OUTPUT_NAME fzgmod)
 
 # ── Profiling target (CLDHGH dataset, marked with cudaProfilerStart/Stop) ─────
-# Build:  cmake --build build --target fzmod-profile
+# Build:  cmake --build build --target fzgmod-profile
 # Run:    nsys profile --trace=cuda --capture-range=cudaProfilerApi \
-#              -o cldhgh_profile ./build/fzmod-profile
-add_executable(fzmod-profile utils/target.cpp)
-target_link_libraries(fzmod-profile PRIVATE fzmod)
+#              -o cldhgh_profile ./build/fzgmod-profile
+add_executable(fzgmod-profile utils/target.cpp)
+target_link_libraries(fzgmod-profile PRIVATE fzgmod)
 
 # Locate nvtx3/nvtx3.hpp — ships with Nsight Systems but the path differs
 # across machines (standalone install vs. bundled inside CUDA toolkit).
@@ -240,11 +240,11 @@ find_path(NVTX3_INCLUDE_DIR
 
 if(NVTX3_INCLUDE_DIR)
     message(STATUS "Found NVTX3 headers: ${NVTX3_INCLUDE_DIR}")
-    # fzmod_pipeline uses nvtx3 internally (decompressFromFile compute range)
-    target_include_directories(fzmod_pipeline PRIVATE ${NVTX3_INCLUDE_DIR})
-    target_include_directories(fzmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
+    # fzgmod_pipeline uses nvtx3 internally (decompressFromFile compute range)
+    target_include_directories(fzgmod_pipeline PRIVATE ${NVTX3_INCLUDE_DIR})
+    target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
 else()
-    message(WARNING "nvtx3/nvtx3.hpp not found — fzmod-profile may not compile.\n"
+    message(WARNING "nvtx3/nvtx3.hpp not found — fzgmod-profile may not compile.\n"
                     "Override with: -DNVTX3_INCLUDE_DIR=/path/to/nvtx/include")
 endif()
 
@@ -252,80 +252,80 @@ endif()
 ### INSTALLATION ###
 ####################
 
-install(TARGETS fzmod_compile_settings EXPORT FZModulesTargets)
+install(TARGETS fzgmod_compile_settings EXPORT FZGPUModulesTargets)
 install(TARGETS 
-  fzmod_mem
-  fzmod_encoders
-  fzmod_predictors
-  fzmod_pipeline
-  fzmod 
-  EXPORT FZModulesTargets
+  fzgmod_mem
+  fzgmod_encoders
+  fzgmod_predictors
+  fzgmod_pipeline
+  fzgmod 
+  EXPORT FZGPUModulesTargets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-install(TARGETS fzmod-bin
+install(TARGETS fzgmod-bin
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 install(
-  EXPORT FZModulesTargets
-  NAMESPACE FZMOD::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
+  EXPORT FZGPUModulesTargets
+  NAMESPACE FZGMOD::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZGPUModules
 )
 
 include(CMakePackageConfigHelpers)
 
 configure_package_config_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FZModulesConfig.cmake.in
-  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfig.cmake"
-  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FZGPUModulesConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZGPUModules
 )
 
 write_basic_package_version_file(
-  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfigVersion.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesConfigVersion.cmake"
   VERSION "${PROJECT_VERSION}"
   COMPATIBILITY AnyNewerVersion
 )
 
 install(FILES 
-  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfig.cmake"
-  "${CMAKE_CURRENT_BINARY_DIR}/FZModulesConfigVersion.cmake"
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZModules
+  "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZGPUModules
 )
 
-# Export build-tree targets so find_package(FZModules) works without installing
-# by pointing FZModules_DIR at the build directory.
+# Export build-tree targets so find_package(FZGPUModules) works without installing
+# by pointing FZGPUModules_DIR at the build directory.
 export(
-  EXPORT FZModulesTargets
-  NAMESPACE FZMOD::
-  FILE "${CMAKE_CURRENT_BINARY_DIR}/FZModulesTargets.cmake"
+  EXPORT FZGPUModulesTargets
+  NAMESPACE FZGMOD::
+  FILE "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesTargets.cmake"
 )
 
 install(DIRECTORY
   include/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzgmod
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
 # modules/ headers are included with relative paths (e.g. "encoders/diff/diff.h")
-# so they must be installed into the same fzmod include root
+# so they must be installed into the same fzgmod include root
 install(DIRECTORY
   modules/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzgmod
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
 # src/ headers are also an include root at build time (e.g. "mem/mempool.h")
 install(DIRECTORY
   src/
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzmod
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzgmod
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
-message(STATUS "FZModules configuration complete")
+message(STATUS "FZGPUModules configuration complete")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")

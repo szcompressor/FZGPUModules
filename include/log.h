@@ -23,7 +23,7 @@ enum class LogLevel {
  * Usage:
  *   // Enable logging to stderr:
  *   fz::Logger::setCallback([](fz::LogLevel level, const char* msg) {
- *       fprintf(stderr, "[fzmod] %s\n", msg);
+ *       fprintf(stderr, "[fzgmod] %s\n", msg);
  *   });
  *
  *   // Or use the built-in stderr helper:
@@ -52,7 +52,7 @@ public:
                     case LogLevel::INFO:  tag = "INFO";  break;
                     case LogLevel::WARN:  tag = "WARN";  break;
                 }
-                fprintf(stderr, "[fzmod:%s] %s\n", tag, msg);
+                fprintf(stderr, "[fzgmod:%s] %s\n", tag, msg);
             }
         });
     }

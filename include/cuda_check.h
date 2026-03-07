@@ -35,7 +35,7 @@
         cudaError_t _fz_cuda_err_ = (call);                                      \
         if (_fz_cuda_err_ != cudaSuccess) {                                      \
             throw std::runtime_error(                                            \
-                std::string("[fzmod] CUDA error at " __FILE__ ":") +             \
+                std::string("[fzgmod] CUDA error at " __FILE__ ":") +             \
                 std::to_string(__LINE__) +                                       \
                 " — " #call " → " +                                              \
                 cudaGetErrorString(_fz_cuda_err_));                              \
