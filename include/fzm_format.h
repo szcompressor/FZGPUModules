@@ -10,10 +10,32 @@ namespace fz {
 // Following cuSZ's pattern: fixed-size header with offset table
 
 constexpr uint32_t FZM_MAGIC = 0x464D5A32;  // "FZM2" in hex
-constexpr uint16_t FZM_VERSION = 2;         // v2: variable-length header
+
+// Version encoding: high byte = major, low byte = minor.
+// Major mismatch (reader.major != file.major) → throw.
+// Minor mismatch (reader.minor != file.minor) → warn, continue.
+// Old files written before the split used a bare integer (e.g. 3); those are
+// treated as major = value, minor = 0, so FZM_VERSION = 0x0300 is backward-
+// compatible with files that stored version = 3.
+constexpr uint8_t  FZM_VERSION_MAJOR = 3;
+constexpr uint8_t  FZM_VERSION_MINOR = 0;
+constexpr uint16_t FZM_VERSION = (static_cast<uint16_t>(FZM_VERSION_MAJOR) << 8)
+                                | static_cast<uint16_t>(FZM_VERSION_MINOR);
+
+// Extract major/minor from a raw version field read from disk.
+// Files written before the major/minor split stored a small integer (e.g. 3);
+// values ≤ 0xFF are treated as (major = value, minor = 0).
+constexpr uint8_t fzmVersionMajor(uint16_t v) {
+    return (v <= 0xFF) ? static_cast<uint8_t>(v) : static_cast<uint8_t>(v >> 8);
+}
+constexpr uint8_t fzmVersionMinor(uint16_t v) {
+    return (v <= 0xFF) ? 0u : static_cast<uint8_t>(v & 0xFF);
+}
+
 constexpr size_t FZM_MAX_BUFFERS = 32;     // Max pipeline outputs
 constexpr size_t FZM_MAX_NAME_LEN = 64;    // Max output name length
 constexpr size_t FZM_STAGE_CONFIG_SIZE = 128;  // Max stage config size
+constexpr size_t FZM_MAX_SOURCES = 4;      // Max pipeline source stages
 
 // ===== Stage Type IDs =====
 // Used to identify which stage produced a buffer
@@ -141,13 +163,13 @@ static_assert(sizeof(FZMBufferEntry) == 256, "FZMBufferEntry must be 256 bytes")
 // Variable-length format: FZMHeaderCore followed by FZMStageInfo[] and FZMBufferEntry[]
 //
 // On-disk layout:
-//   [FZMHeaderCore]                           (48 bytes)
+//   [FZMHeaderCore]                           (72 bytes)
 //   [FZMStageInfo × num_stages]               (256 × num_stages bytes)
 //   [FZMBufferEntry × num_buffers]            (256 × num_buffers bytes)
 //   [compressed data payload]                 (compressed_size bytes)
 //
 // header_size tells where the data begins
-// For a 2-stage, 3-buffer pipeline: 48 + 512 + 768 = 1328 bytes
+// For a 2-stage, 3-buffer pipeline: 72 + 512 + 768 = 1352 bytes
 
 struct FZMHeaderCore {
     // Magic and version
@@ -156,17 +178,24 @@ struct FZMHeaderCore {
     uint16_t num_buffers;        // Number of buffer segments (2B)
     
     // Global metadata
-    uint64_t uncompressed_size;  // Original input data size (8B)
+    uint64_t uncompressed_size;  // Sum of all source sizes (8B) — kept for pool sizing
     uint64_t compressed_size;    // Total compressed data size (8B)
     uint64_t header_size;        // Total header size including stage/buffer arrays (8B)
     
     // Pipeline metadata
     uint32_t num_stages;         // Number of stages in pipeline (4B)
-    uint32_t reserved1;          // Padding (4B)
+    uint16_t num_sources;        // Number of source (input) stages (2B)
+    uint16_t reserved1;          // Padding (2B)
     
-    uint8_t reserved2[8];        // Future expansion (8B)
+    // Per-source uncompressed sizes (v3+).
+    // Indexed in forward topological source-discovery order (same order
+    // as the InputSpec vector passed to compress()).
+    // source_uncompressed_sizes[0..num_sources-1] are valid.
+    // For single-source pipelines num_sources==1 and
+    // source_uncompressed_sizes[0] == uncompressed_size.
+    uint64_t source_uncompressed_sizes[FZM_MAX_SOURCES];  // (32B)
     
-    // Total: 48 bytes
+    // Total: 4+2+2+8+8+8+4+2+2+32 = 72 bytes
     
     FZMHeaderCore() {
         magic = FZM_MAGIC;
@@ -176,8 +205,9 @@ struct FZMHeaderCore {
         compressed_size = 0;
         header_size = sizeof(FZMHeaderCore);
         num_stages = 0;
+        num_sources = 0;
         reserved1 = 0;
-        memset(reserved2, 0, sizeof(reserved2));
+        memset(source_uncompressed_sizes, 0, sizeof(source_uncompressed_sizes));
     }
     
     /** Compute total header size from stage/buffer counts */
@@ -187,7 +217,7 @@ struct FZMHeaderCore {
              + num_buffers * sizeof(FZMBufferEntry);
     }
 };
-static_assert(sizeof(FZMHeaderCore) == 48, "FZMHeaderCore must be 48 bytes");
+static_assert(sizeof(FZMHeaderCore) == 72, "FZMHeaderCore must be 72 bytes");
 
 // ===== Stage-Specific Config Structures =====
 // 

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include "mem/mempool.h"
 #include "cuda_check.h"
+#include "log.h"
 
 namespace fz {
 
@@ -684,16 +685,28 @@ void LorenzoStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
     size_t max_outliers = getMaxOutlierCount(num_elements_);
 
     if (h_outlier_count > max_outliers) {
-        float actual_pct   = 100.0f * h_outlier_count / num_elements_;
-        float capacity_pct = 100.0f * max_outliers   / num_elements_;
-        fprintf(stderr, "\n⚠️  ERROR: Lorenzo outlier overflow!\n");
-        fprintf(stderr, "   Detected outliers: %u (%.1f%% of data)\n",
-                h_outlier_count, actual_pct);
-        fprintf(stderr, "   Allocated capacity: %zu (%.1f%% of data)\n",
-                max_outliers, capacity_pct);
-        fprintf(stderr, "   Outliers beyond capacity were DROPPED - data will be corrupted!\n");
-        fprintf(stderr, "   Solution: Increase outlier_capacity to at least %.1f%%\n\n",
-                actual_pct * 1.1f);
+        if (config_.outlier_capacity == 0.0f) {
+            // Capacity intentionally zero: all outliers are silently dropped.
+            // This is a deliberate lossy trade-off; no warning is needed.
+            FZ_LOG(DEBUG,
+                   "Lorenzo: outlier_capacity=0, silently dropped %u outlier(s) "
+                   "(%.1f%% of data). Reconstruction error for these elements "
+                   "may exceed the error bound.",
+                   h_outlier_count,
+                   100.0f * h_outlier_count / static_cast<float>(num_elements_));
+        } else {
+            // Non-zero capacity but still overflowed — unexpected, warn loudly.
+            float actual_pct   = 100.0f * h_outlier_count
+                                 / static_cast<float>(num_elements_);
+            float capacity_pct = 100.0f * max_outliers
+                                 / static_cast<float>(num_elements_);
+            FZ_LOG(WARN,
+                   "Lorenzo outlier overflow! Detected %u (%.1f%%) outliers but "
+                   "only %.1f%% capacity allocated. Outliers beyond capacity were "
+                   "DROPPED — data will be corrupted for those elements. "
+                   "Increase outlier_capacity to at least %.1f%%.",
+                   h_outlier_count, actual_pct, capacity_pct, actual_pct * 1.1f);
+        }
         h_outlier_count = static_cast<uint32_t>(max_outliers);
     }
 

@@ -33,6 +33,8 @@ MemoryPool::MemoryPool(const MemoryPoolConfig& config)
       mem_pool_(nullptr),
       total_allocations_(0),
       total_frees_(0),
+      current_allocated_bytes_(0),
+      overflow_warned_(false),
       initialized_(false) {
     
     // Set device
@@ -83,6 +85,15 @@ void MemoryPool::initializeMemPool() {
     // 2. Enable opportunistic reuse if configured
     if (config_.enable_reuse) {
         int reuse = 1;
+        // Allow reuse of freed memory in streams whose event dependencies are satisfied.
+        // This is the most important attribute for our DAG: every node waits on its
+        // dependencies via cudaStreamWaitEvent before executing, so the driver can
+        // safely recycle memory freed by a completed predecessor.
+        err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolReuseFollowEventDependencies, &reuse);
+        if (err != cudaSuccess) {
+            cudaGetLastError(); // Clear error
+        }
+
         err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolReuseAllowOpportunistic, &reuse);
         if (err != cudaSuccess) {
             cudaGetLastError(); // Clear error
@@ -134,6 +145,19 @@ void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& 
     }
     total_allocations_++;
     
+    // Update running host-side total and warn once if we exceed the configured size.
+    // The CUDA pool itself will grow beyond the threshold (it is not a hard cap), but
+    // exceeding it is a sign that the pool was sized too conservatively for this workload.
+    current_allocated_bytes_ += size;
+    if (!overflow_warned_ && current_allocated_bytes_ > config_.getPoolSize()) {
+        overflow_warned_ = true;
+        FZ_LOG(WARN, "MemoryPool: live allocations (%.2f MB) exceeded configured pool size "
+               "(%.2f MB). The CUDA pool will grow automatically, but consider increasing "
+               "the pool_multiplier or pool_override_bytes to avoid driver-level re-pinning.",
+               current_allocated_bytes_ / (1024.0 * 1024.0),
+               config_.getPoolSize() / (1024.0 * 1024.0));
+    }
+    
     return ptr;
 }
 
@@ -143,6 +167,7 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
     // Check stream allocations first
     auto it = allocations_.find(ptr);
     if (it != allocations_.end()) {
+        current_allocated_bytes_ -= it->second.size;
         FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         allocations_.erase(it);
         total_frees_++;
@@ -152,6 +177,7 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
     // Check graph allocations
     auto git = graph_allocations_.find(ptr);
     if (git != graph_allocations_.end()) {
+        current_allocated_bytes_ -= git->second.size;
         FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         graph_allocations_.erase(git);
         total_frees_++;
@@ -164,10 +190,22 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
 void MemoryPool::reset(cudaStream_t stream) {
     // Free all non-graph allocations
     for (auto& pair : allocations_) {
+        current_allocated_bytes_ -= pair.second.size;
         FZ_CUDA_CHECK_WARN(cudaFreeAsync(pair.first, stream));
         total_frees_++;
     }
     allocations_.clear();
+
+    // Reset per-run tracking so the next compress/decompress call gets a clean slate.
+    current_allocated_bytes_ = 0;  // graph_allocations_ are intentionally excluded
+    overflow_warned_ = false;
+
+    // Reset the CUDA high-water mark so getPeakUsage() reflects only the *next* run.
+    // This is a write of 0 to cudaMemPoolAttrUsedMemHigh; the driver supports it since
+    // CUDA 11.2.  Non-fatal if unsupported on older runtimes.
+    uint64_t zero = 0;
+    cudaError_t err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &zero);
+    if (err != cudaSuccess) cudaGetLastError(); // clear, non-fatal
 }
 
 void MemoryPool::trim() {

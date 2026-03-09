@@ -149,6 +149,13 @@ public:
     void printStats() const;
     
     /**
+     * Get configured pool capacity (the size hint passed at construction).
+     * The CUDA pool itself is soft-capped by ReleaseThreshold, not hard-capped,
+     * so this is used only for overflow warnings.
+     */
+    size_t getConfiguredSize() const { return config_.getPoolSize(); }
+
+    /**
      * Get CUDA mempool handle (for advanced usage)
      */
     cudaMemPool_t getMemPool() const { return mem_pool_; }
@@ -169,6 +176,13 @@ private:
     // Statistics
     size_t total_allocations_;
     size_t total_frees_;
+    // Host-side running total of currently live bytes (matches what we asked for,
+    // not the driver's internal bookkeeping).  Used for overflow detection without
+    // querying a CUDA attribute on every hot-path allocation.
+    size_t current_allocated_bytes_;
+    // Set the first time current_allocated_bytes_ exceeds the configured pool size
+    // so we only emit the overflow warning once per reset() cycle.
+    bool overflow_warned_;
     
     bool initialized_;
     

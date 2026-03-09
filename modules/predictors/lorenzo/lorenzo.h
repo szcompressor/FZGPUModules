@@ -9,7 +9,7 @@
 #include <cstring>
 
 namespace fz {
-    
+
 
 // ===== Lorenzo Stage-Specific Config =====
 // Serialized into FZMBufferEntry.stage_config[128]
@@ -130,7 +130,7 @@ public:
     void setErrorBound(TInput error_bound) { config_.error_bound = error_bound; }
     void setQuantRadius(TCode radius) { config_.quant_radius = radius; }
     void setOutlierCapacity(float capacity) { config_.outlier_capacity = capacity; }
-    void setDims(std::array<size_t, 3> dims) { config_.dims = dims; }
+    void setDims(const std::array<size_t, 3>& dims) override { config_.dims = dims; }
     void setDims(size_t x, size_t y = 1, size_t z = 1) { config_.dims = {x, y, z}; }
 
     TInput getErrorBound() const { return config_.error_bound; }

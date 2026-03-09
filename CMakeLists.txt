@@ -66,6 +66,8 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
+option(BUILD_PROFILING "Build profiling target with NVTX3/nsys instrumentation" OFF)
+
 ################################
 ### SANITIZERS CONFIGURATION ###
 ################################
@@ -171,6 +173,9 @@ add_library(FZGMOD::predictors ALIAS fzgmod_predictors)
 
 add_library(fzgmod_pipeline
   src/pipeline/compressor.cpp
+  src/pipeline/compressor_exec.cpp
+  src/pipeline/compressor_inverse_dag.cpp
+  src/pipeline/compressor_io.cpp
   src/pipeline/dag.cpp
   src/pipeline/perf.cpp
   src/pipeline/stat.cpp
@@ -209,43 +214,69 @@ add_executable(fzgmod-bin utils/main.cpp)
 target_link_libraries(fzgmod-bin PRIVATE fzgmod)
 set_target_properties(fzgmod-bin PROPERTIES OUTPUT_NAME fzgmod)
 
-# ── Profiling target (CLDHGH dataset, marked with cudaProfilerStart/Stop) ─────
-# Build:  cmake --build build --target fzgmod-profile
-# Run:    nsys profile --trace=cuda --capture-range=cudaProfilerApi \
-#              -o cldhgh_profile ./build/fzgmod-profile
-add_executable(fzgmod-profile utils/target.cpp)
-target_link_libraries(fzgmod-profile PRIVATE fzgmod)
+######################
+### PROFILING MODE ###
+######################
 
-# Locate nvtx3/nvtx3.hpp — ships with Nsight Systems but the path differs
-# across machines (standalone install vs. bundled inside CUDA toolkit).
-find_path(NVTX3_INCLUDE_DIR
-    NAMES nvtx3/nvtx3.hpp
-    HINTS
-        # Cluster: nsight-systems bundled inside the CUDA toolkit tree
-        "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
-        "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
-        "${CUDAToolkit_ROOT_DIR}/nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
-        # Derived from nvcc location (covers any version glob)
-        "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
-        "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
-        "${CUDAToolkit_BIN_DIR}/../nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
-        # WSL / workstation: standalone Nsight Systems install
-        "/opt/nvidia/nsight-systems/2025.1.3/target-linux-x64/nvtx/include"
-        "/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nvtx/include"
-        "/opt/nvidia/nsight-systems/2024.4.2/target-linux-x64/nvtx/include"
-        # Fallback: CUDA toolkit headers
-        "${CUDAToolkit_ROOT_DIR}/targets/x86_64-linux/include"
-    DOC "Path containing nvtx3/nvtx3.hpp"
-)
+if(BUILD_PROFILING)
+    message(STATUS "Profiling mode enabled — NVTX3/nsys instrumentation active")
 
-if(NVTX3_INCLUDE_DIR)
-    message(STATUS "Found NVTX3 headers: ${NVTX3_INCLUDE_DIR}")
-    # fzgmod_pipeline uses nvtx3 internally (decompressFromFile compute range)
-    target_include_directories(fzgmod_pipeline PRIVATE ${NVTX3_INCLUDE_DIR})
-    target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
-else()
-    message(WARNING "nvtx3/nvtx3.hpp not found — fzgmod-profile may not compile.\n"
-                    "Override with: -DNVTX3_INCLUDE_DIR=/path/to/nvtx/include")
+    # Preprocessor guard consumed by #ifdef FZ_PROFILING_ENABLED in source files.
+    # Enables NVTX annotations in fzgmod_pipeline (decompressFromFile) and
+    # cudaProfilerStart/Stop in the fzgmod-profile binary.
+    target_compile_definitions(fzgmod_compile_settings INTERFACE FZ_PROFILING_ENABLED)
+
+    # Retain frame pointers so nsys CPU-sampling stack walks are complete.
+    target_compile_options(fzgmod_compile_settings INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>
+        $<$<COMPILE_LANGUAGE:C>:-fno-omit-frame-pointer>
+    )
+    # Note: -lineinfo for CUDA device code is already set in fzgmod_compile_settings
+    # above for all non-Compute-sanitizer builds.
+
+    # ── Locate nvtx3/nvtx3.hpp ────────────────────────────────────────────────
+    # Ships with Nsight Systems but the path differs across machines
+    # (standalone install vs. bundled inside CUDA toolkit).
+    find_path(NVTX3_INCLUDE_DIR
+        NAMES nvtx3/nvtx3.hpp
+        HINTS
+            # Cluster: nsight-systems bundled inside the CUDA toolkit tree
+            "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
+            "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
+            "${CUDAToolkit_ROOT_DIR}/nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
+            # Derived from nvcc location (covers any version glob)
+            "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
+            "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
+            "${CUDAToolkit_BIN_DIR}/../nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
+            # WSL / workstation: standalone Nsight Systems install
+            "/opt/nvidia/nsight-systems/2025.1.3/target-linux-x64/nvtx/include"
+            "/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nvtx/include"
+            "/opt/nvidia/nsight-systems/2024.4.2/target-linux-x64/nvtx/include"
+            # Fallback: CUDA toolkit headers
+            "${CUDAToolkit_ROOT_DIR}/targets/x86_64-linux/include"
+        DOC "Path containing nvtx3/nvtx3.hpp"
+    )
+
+    if(NVTX3_INCLUDE_DIR)
+        message(STATUS "Found NVTX3 headers: ${NVTX3_INCLUDE_DIR}")
+        # fzgmod_pipeline compiles compressor.cpp which uses nvtx3 behind
+        # #ifdef FZ_PROFILING_ENABLED — it needs the headers when profiling is on.
+        target_include_directories(fzgmod_pipeline PRIVATE ${NVTX3_INCLUDE_DIR})
+    else()
+        message(WARNING "nvtx3/nvtx3.hpp not found — profiling builds may not compile.\n"
+                        "Override with: -DNVTX3_INCLUDE_DIR=/path/to/nvtx/include")
+    endif()
+
+    # ── Profiling executable ──────────────────────────────────────────────────
+    # Build:  cmake --build build --target fzgmod-profile
+    # Run:    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
+    #              -o cldhgh_profile ./build/fzgmod-profile
+    #         nsys-ui cldhgh_profile.nsys-rep
+    add_executable(fzgmod-profile utils/target.cpp)
+    target_link_libraries(fzgmod-profile PRIVATE fzgmod)
+    if(NVTX3_INCLUDE_DIR)
+        target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
+    endif()
 endif()
 
 ####################

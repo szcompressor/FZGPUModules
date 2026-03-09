@@ -206,6 +206,162 @@ TEST(Pipeline, FileRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: repeated compress+decompress with *different* data each iteration.
+// Verifies that pipeline state from a previous run never bleeds into the next.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, RepeatCompressDifferentData) {
+    CudaStream stream;
+    constexpr size_t N  = 4096;
+    constexpr float  EB = 1e-2f;
+    size_t in_bytes = N * sizeof(float);
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(EB);
+    lorenzo->setQuantRadius(512);
+    pipeline.finalize();
+
+    // Three datasets with different characteristics
+    std::vector<std::vector<float>> datasets = {
+        make_smooth_data(N),
+        std::vector<float>(N, 3.14f),   // constant
+        [&]{ auto v = make_smooth_data(N); for (auto& x:v) x *= 0.01f; return v; }(),  // small range
+    };
+
+    for (int iter = 0; iter < 3; iter++) {
+        pipeline.reset(stream);
+
+        CudaBuffer<float> d_in(N);
+        d_in.upload(datasets[iter], stream);
+        stream.sync();
+
+        void*  d_comp = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        EXPECT_GT(comp_sz, 0u) << "Iteration " << iter << ": empty compressed output";
+
+        void*  d_dec = nullptr;
+        size_t dec_sz = 0;
+        pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream);
+        ASSERT_NE(d_dec, nullptr) << "Iteration " << iter << ": null decompressed pointer";
+        ASSERT_EQ(dec_sz, in_bytes)  << "Iteration " << iter << ": wrong decompressed size";
+
+        std::vector<float> h_recon(N);
+        FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+        cudaFree(d_dec);
+
+        float max_err = 0.0f;
+        for (size_t i = 0; i < N; i++)
+            max_err = std::max(max_err, std::abs(h_recon[i] - datasets[iter][i]));
+        EXPECT_LE(max_err, EB * 1.01f)
+            << "Iteration " << iter << ": max error " << max_err << " exceeds " << EB;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I4: Lorenzo → RLE — codes branch fed into RLE encoder
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, LorenzoPlusRLERoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;  // 16 K floats
+    constexpr float  EB = 1e-2f;
+
+    auto h_input = make_smooth_data(N);
+    size_t in_bytes = N * sizeof(float);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+
+    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(EB);
+    lorenzo->setQuantRadius(512);
+    lorenzo->setOutlierCapacity(0.2f);
+
+    auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
+    pipeline.connect(rle, lorenzo, "codes");
+    // outliers output of Lorenzo is left unconnected → becomes a pipeline output
+
+    pipeline.finalize();
+
+    void*  d_compressed = nullptr;
+    size_t cmp_sz       = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_compressed, &cmp_sz, stream);
+    EXPECT_GT(cmp_sz, 0u);
+
+    void*  d_decompressed = nullptr;
+    size_t dcmp_sz        = 0;
+    pipeline.decompress(nullptr, cmp_sz, &d_decompressed, &dcmp_sz, stream);
+    ASSERT_NE(d_decompressed, nullptr);
+    EXPECT_EQ(dcmp_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_decompressed, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_decompressed);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Lorenzo+RLE max error " << max_err << " exceeds bound " << EB;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I5: Lorenzo → Difference → RLE (3-stage pipeline)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, LorenzoDiffRLERoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-2f;
+
+    auto h_input = make_smooth_data(N);
+    size_t in_bytes = N * sizeof(float);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+
+    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(EB);
+    lorenzo->setQuantRadius(512);
+    lorenzo->setOutlierCapacity(0.2f);
+
+    auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
+    pipeline.connect(diff, lorenzo, "codes");
+
+    auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
+    pipeline.connect(rle, diff);
+    // Lorenzo outliers remain unconnected → second pipeline output
+
+    pipeline.finalize();
+
+    void*  d_compressed = nullptr;
+    size_t cmp_sz       = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_compressed, &cmp_sz, stream);
+    EXPECT_GT(cmp_sz, 0u);
+
+    void*  d_decompressed = nullptr;
+    size_t dcmp_sz        = 0;
+    pipeline.decompress(nullptr, cmp_sz, &d_decompressed, &dcmp_sz, stream);
+    ASSERT_NE(d_decompressed, nullptr);
+    EXPECT_EQ(dcmp_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_decompressed, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_decompressed);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Lorenzo+Diff+RLE max error " << max_err << " exceeds bound " << EB;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test: compress, pipeline reset, compress again — state resets cleanly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, RepeatCompress) {
@@ -240,5 +396,42 @@ TEST(Pipeline, RepeatCompress) {
         pipeline.decompress(nullptr, out_sz, &d_dec, &dec_sz, stream);
         ASSERT_NE(d_dec, nullptr) << "Iteration " << iter;
         cudaFree(d_dec);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIM4: addLorenzo() correctly forwards pipeline dims_ to stage config.
+//
+// Verifies that setDims() + addLorenzo() produces the same ndim() as manually
+// calling setDims() on a LorenzoStage directly.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, AddLorenzoForwardsDims) {
+    // 1D: default (no setDims call)
+    {
+        Pipeline p1(256 * sizeof(float), MemoryStrategy::MINIMAL);
+        auto* lrz1 = p1.addLorenzo<float, uint16_t>(1e-2f);
+        EXPECT_EQ(lrz1->ndim(), 1) << "Default should be 1D";
+    }
+
+    // 2D: setDims(nx, ny) before addLorenzo
+    {
+        constexpr size_t NX = 32, NY = 32;
+        Pipeline p2(NX * NY * sizeof(float), MemoryStrategy::MINIMAL);
+        p2.setDims(NX, NY);
+        auto* lrz2 = p2.addLorenzo<float, uint16_t>(1e-2f);
+        EXPECT_EQ(lrz2->ndim(), 2) << "setDims(nx,ny) should give 2D via addLorenzo()";
+        auto dims2 = lrz2->getDims();
+        EXPECT_EQ(dims2[0], NX);
+        EXPECT_EQ(dims2[1], NY);
+        EXPECT_EQ(dims2[2], 1u);
+    }
+
+    // 3D: setDims(nx, ny, nz) before addLorenzo
+    {
+        constexpr size_t NX = 16, NY = 16, NZ = 16;
+        Pipeline p3(NX * NY * NZ * sizeof(float), MemoryStrategy::MINIMAL);
+        p3.setDims(NX, NY, NZ);
+        auto* lrz3 = p3.addLorenzo<float, uint16_t>(1e-2f);
+        EXPECT_EQ(lrz3->ndim(), 3) << "setDims(nx,ny,nz) should give 3D via addLorenzo()";
     }
 }

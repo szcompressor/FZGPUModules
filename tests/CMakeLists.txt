@@ -59,12 +59,40 @@ fz_add_test(
 fz_add_test(
     NAME    test_lorenzo
     SOURCES test_lorenzo.cpp
-    LIBS    fzgmod_predictors fzgmod_mem
+    LIBS    fzgmod_predictors fzgmod_mem fzgmod
 )
 
 # ─── Full pipeline (compress + decompress) ────────────────────────────────────
 fz_add_test(
     NAME    test_pipeline
     SOURCES test_pipeline.cpp
+    LIBS    fzgmod
+)
+
+# ─── Memory strategy comparison (MINIMAL / PIPELINE / PREALLOCATE) ────────────
+fz_add_test(
+    NAME    test_memory_strategies
+    SOURCES test_memory_strategies.cpp
+    LIBS    fzgmod
+)
+
+# ─── Pipeline error-handling / invalid-usage guards ───────────────────────────
+fz_add_test(
+    NAME    test_pipeline_errors
+    SOURCES test_pipeline_errors.cpp
+    LIBS    fzgmod
+)
+
+# ─── Data pattern correctness (corner-case inputs) ───────────────────────────
+fz_add_test(
+    NAME    test_data_patterns
+    SOURCES test_data_patterns.cpp
+    LIBS    fzgmod
+)
+
+# ─── File I/O + FZM header format ─────────────────────────────────────────────
+fz_add_test(
+    NAME    test_file_io
+    SOURCES test_file_io.cpp
     LIBS    fzgmod
 )

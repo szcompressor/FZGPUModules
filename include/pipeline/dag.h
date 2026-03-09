@@ -229,6 +229,20 @@ public:
     void printDAG() const;
     void printBufferLifetimes() const;
 
+    /**
+     * Enable or disable runtime buffer overwrite detection.
+     *
+     * When enabled, after each stage's execute() call the DAG compares the
+     * stage's reported actual output sizes against the allocated buffer
+     * capacities and throws std::runtime_error if any output exceeded its
+     * buffer.  This check is also always active in debug builds (NDEBUG not
+     * defined) regardless of this flag.
+     *
+     * @param enable  true to activate, false to deactivate (default: false)
+     */
+    void enableBoundsCheck(bool enable) { bounds_check_enabled_ = enable; }
+    bool isBoundsCheckEnabled() const   { return bounds_check_enabled_; }
+
     // ========== Profiling ==========
 
     /**
@@ -284,6 +298,9 @@ private:
 
     // Profiling
     bool profiling_enabled_;
+
+    // Runtime buffer overwrite detection (always on in debug builds)
+    bool bounds_check_enabled_;
     
     // ========== Internal Helpers ==========
     

@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "predictors/lorenzo/lorenzo.h"
+#include "fzgpumodules.h"
 
 #include <cmath>
 #include <vector>
@@ -558,4 +559,54 @@ TEST(Lorenzo3DStage, StageTypeIds) {
     s3d.setDims(32, 32, 32);
     EXPECT_EQ(s3d.getStageTypeId(),
               static_cast<uint16_t>(StageType::LORENZO_3D)) << "3D stage type";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L9 / DP14: LorenzoStage<double, uint16_t> — verifies the double CUDA kernel
+//            instantiation and checks round-trip is within error_bound.
+//
+//            Uses the Pipeline API (handles all buffer sizing automatically).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(LorenzoDoubleStage, RoundTripWithinErrorBound) {
+    constexpr size_t N  = 1 << 14;  // 16 K doubles
+    constexpr double EB = 1e-3;
+
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<double>(i) * 0.01) * 50.0
+                   + std::cos(static_cast<double>(i) * 0.003) * 20.0;
+
+    CudaStream stream;
+    size_t in_bytes = N * sizeof(double);
+    CudaBuffer<double> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<double, uint16_t>>();
+    lrz->setErrorBound(static_cast<float>(EB));
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    EXPECT_GT(comp_sz, 0u) << "Double compressed output is empty";
+
+    void*  d_decomp  = nullptr;
+    size_t decomp_sz = 0;
+    pipeline.decompress(nullptr, comp_sz, &d_decomp, &decomp_sz, stream);
+    ASSERT_NE(d_decomp, nullptr);
+    ASSERT_EQ(decomp_sz, in_bytes);
+
+    std::vector<double> h_out(N);
+    cudaMemcpyAsync(h_out.data(), d_decomp, in_bytes, cudaMemcpyDeviceToHost, stream);
+    stream.sync();
+    cudaFree(d_decomp);
+
+    for (size_t i = 0; i < N; i++) {
+        EXPECT_LE(std::abs(h_out[i] - h_input[i]), EB * 1.01)
+            << "Error exceeds bound at element " << i;
+    }
 }

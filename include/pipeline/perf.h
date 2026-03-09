@@ -64,7 +64,7 @@ struct LevelTimingResult {
  *                      such as buffer metadata collection, concat, and any
  *                      pipeline construction (e.g. decompressFromFile setup).
  *                      Useful for end-to-end benchmarking but not throughput.
- *   dag_elapsed_ms   — time spent solely inside dag->execute() / runInversePipeline,
+ *   dag_elapsed_ms   — time spent solely inside dag->execute() (GPU compute, ms)
  *                      i.e. the actual GPU compute excluding all host setup.
  *                      This is the denominator for throughput_gbs().
  *   stage elapsed_ms — per-stage GPU time from paired CUDA events; most accurate
@@ -77,7 +77,7 @@ struct LevelTimingResult {
 struct PipelinePerfResult {
     bool   is_compress;     ///< true = compress pass, false = decompress pass
     float  host_elapsed_ms; ///< Total host-side wall time including setup (ms)
-    float  dag_elapsed_ms;  ///< GPU compute time only — dag->execute() / runInversePipeline (ms)
+    float  dag_elapsed_ms;  ///< GPU compute time only — dag->execute() (ms)
     size_t input_bytes;     ///< Bytes fed into the pipeline
     size_t output_bytes;    ///< Bytes produced by the pipeline
 

@@ -206,26 +206,35 @@ public:
     }
     
     // ========== Execution ==========
-    
+
     /**
-     * Execute compression pipeline
-     * 
-     * @param d_input Device pointer to input data
-     * @param input_size Size of input data in bytes
-     * @param d_output [out] Device pointer to output (may be allocated)
-     * @param output_size [out] Actual output size in bytes
-     * @param stream CUDA stream for execution (default: 0)
-     * 
-     * Buffer sizing behavior:
-     * - PREALLOCATE: All buffers pre-allocated, d_output set to final buffer
-     * - MINIMAL/PIPELINE: Buffers allocated dynamically, d_output may change
-     * 
-     * Serialization architecture:
-     * - Pipeline builds FZMHeaderCore + stage/buffer arrays on CPU using Stage::serializeHeader()
-     * - Each stage serializes its own config (Lorenzo, Huffman, etc.)
-     * - GPU buffer contains ONLY data (no headers intermixed)
-     * - Headers stored separately in Pipeline::header_ for file I/O
-     * - This follows cuSZ pattern: header on CPU, data on GPU
+     * Input specification for multi-source compression.
+     *
+     * @param source  Pointer to the source stage that will receive this data.
+     *                Must be a stage already added to the pipeline that has no
+     *                upstream producers (i.e. a DAG root).
+     * @param d_data  Device pointer to the raw input for this source.
+     * @param size    Size of d_data in bytes.
+     */
+    struct InputSpec {
+        Stage*      source;
+        const void* d_data;
+        size_t      size;
+    };
+
+    /**
+     * Execute compression pipeline — single-source convenience overload.
+     *
+     * Equivalent to:
+     *   compress({InputSpec{sources[0], d_input, input_size}}, d_output, output_size, stream)
+     *
+     * Throws if the pipeline has more than one source stage.
+     *
+     * @param d_input     Device pointer to input data
+     * @param input_size  Size of input data in bytes
+     * @param d_output    [out] Device pointer to compressed output
+     * @param output_size [out] Actual compressed size in bytes
+     * @param stream      CUDA stream for execution (default: 0)
      */
     void compress(
         const void* d_input,
@@ -234,13 +243,60 @@ public:
         size_t* output_size,
         cudaStream_t stream = 0
     );
+
+    /**
+     * Execute compression pipeline — multi-source overload.
+     *
+     * Provide one InputSpec per source stage in the pipeline.  Order within
+     * the vector does not matter; each spec is matched to its source stage by
+     * pointer identity.
+     *
+     * @param inputs      One InputSpec per pipeline source stage.
+     * @param d_output    [out] Device pointer to compressed output
+     * @param output_size [out] Actual compressed size in bytes
+     * @param stream      CUDA stream for execution (default: 0)
+     */
+    void compress(
+        const std::vector<InputSpec>& inputs,
+        void** d_output,
+        size_t* output_size,
+        cudaStream_t stream = 0
+    );
+
+    /**
+     * Set a per-source input size hint for buffer pre-sizing.
+     *
+     * For multi-source pipelines, call this once per source stage after
+     * adding stages but before finalize().  The hint seeds
+     * propagateBufferSizes() so that downstream buffer estimates are
+     * accurate.  Falls back to the constructor's input_data_size for any
+     * source without an explicit hint.
+     *
+     * @param source  Source stage pointer (must be a DAG root).
+     * @param size    Expected input size in bytes.
+     */
+    void setInputSizeHint(Stage* source, size_t size) {
+        per_source_hints_[source] = size;
+    }
     
     /**
-     * Execute in-memory decompression (inverse of compress())
+     * Execute in-memory decompression (inverse of compress()).
      *
      * Reconstructs the original data by running the pipeline stages in reverse.
      * Must be called on the same Pipeline instance that ran compress(), without
      * an intervening reset().
+     *
+     * For single-source pipelines:
+     *   *d_output is a newly cudaMalloc'd buffer containing the raw decompressed
+     *   data.  *output_size is the exact decompressed size in bytes.
+     *
+     * For multi-source pipelines:
+     *   *d_output is a newly cudaMalloc'd buffer containing all decompressed
+     *   sources concatenated in the same format as the multi-output compress()
+     *   result: [num_bufs:u32][size1:u64][data1][size2:u64][data2]...
+     *   Sources are ordered to match the order of input_nodes_ (the forward
+     *   source discovery order from finalize()).
+     *   Use decompressMulti() to receive individual per-source buffers instead.
      *
      * @param d_input  Device pointer to compressed data (may be nullptr).
      *                 - nullptr / omitted: reads compressed buffers directly
@@ -254,7 +310,7 @@ public:
      * @param input_size  Size of d_input in bytes (ignored when d_input is nullptr).
      * @param d_output    [out] Newly cudaMalloc'd device pointer; caller must
      *                    cudaFree() the result.
-     * @param output_size [out] Bytes in *d_output (== original uncompressed size).
+     * @param output_size [out] Bytes in *d_output.
      * @param stream      CUDA stream to use (default: 0).
      *
      * Typical in-memory round-trip (benchmarking):
@@ -270,6 +326,29 @@ public:
         size_t input_size,
         void** d_output,
         size_t* output_size,
+        cudaStream_t stream = 0
+    );
+
+    /**
+     * In-memory decompression — multi-source variant.
+     *
+     * Identical to decompress() but returns one {device_ptr, size} pair per
+     * source stage instead of concatenating.  The order matches the forward
+     * source discovery order (same as the InputSpec vector passed to compress()).
+     * Each returned device pointer is a newly cudaMalloc'd allocation; the
+     * caller is responsible for calling cudaFree() on each one.
+     *
+     * For single-source pipelines this is equivalent to the scalar decompress()
+     * overload and returns a vector of size 1.
+     *
+     * @param d_input     Same semantics as decompress().
+     * @param input_size  Same semantics as decompress().
+     * @param stream      CUDA stream to use (default: 0).
+     * @return Vector of {device pointer, byte count}, one entry per source.
+     */
+    std::vector<std::pair<void*, size_t>> decompressMulti(
+        const void* d_input = nullptr,
+        size_t      input_size = 0,
         cudaStream_t stream = 0
     );
     
@@ -400,20 +479,24 @@ public:
      *
      * One-shot decompression: reads file, reconstructs pipeline, and decompresses.
      *
-     * @param filename    Input FZM file path
-     * @param d_output    [out] Device pointer to decompressed data
-     * @param output_size [out] Size of decompressed data
-     * @param stream      CUDA stream for operations (default: 0)
-     * @param perf_out    Optional: if non-null, populated with GPU compute timing
-     *                    (excludes file I/O and H→D copy; dag_elapsed_ms covers
-     *                    only runInversePipeline + the final D→D output copy).
+     * @param filename          Input FZM file path
+     * @param d_output          [out] Device pointer to decompressed data
+     * @param output_size       [out] Size of decompressed data
+     * @param stream            CUDA stream for operations (default: 0)
+     * @param perf_out          Optional: if non-null, populated with GPU compute timing
+     *                          (excludes file I/O and H→D copy).
+     * @param pool_override_bytes  If non-zero, skip the automatic pool-size calculation
+     *                             and use this value directly. Use only when the pipeline
+     *                             topology has unusual characteristics (e.g. extreme fanout)
+     *                             that the header-derived estimate cannot account for.
      */
     static void decompressFromFile(
         const std::string& filename,
         void** d_output,
         size_t* output_size,
         cudaStream_t stream = 0,
-        PipelinePerfResult* perf_out = nullptr
+        PipelinePerfResult* perf_out = nullptr,
+        size_t pool_override_bytes = 0
     );
 
 private:
@@ -463,64 +546,6 @@ private:
     void propagateBufferSizes();
     
     /**
-     * Rebuild DAG connections in reverse for decompression
-     * Uses stored connection info to reverse dependency edges
-     */
-    void rebuildInverseConnections();
-
-    // ===== Unified Inverse Execution =====
-
-    /**
-     * Describes a single stage's position in the forward DAG topology.
-     * Used by runInversePipeline to route buffers correctly without name heuristics.
-     */
-    struct InverseStageSpec {
-        Stage* stage;                    ///< Stage to execute (must be in inverse mode)
-        std::vector<int> fwd_input_ids;  ///< Forward-pass input buffer IDs  (= inverse outputs)
-        std::vector<int> fwd_output_ids; ///< Forward-pass output buffer IDs (= inverse inputs)
-    };
-
-    /**
-     * Unified inverse execution engine shared by decompress() and decompressFromFile().
-     *
-     * Processes specs in REVERSE forward order. For each stage:
-     *   - Gathers inverse inputs from live_bufs keyed by fwd_output_ids
-     *   - Executes the stage in inverse mode
-     *   - Stores the result in live_bufs keyed by fwd_input_ids[0]
-     *   - Frees pool-owned intermediate buffers as they are consumed
-     *
-     * @param specs             Forward-ordered stage specifications
-     * @param live_bufs         Mutable map of buffer_id -> {d_ptr, actual_size}.
-     *                          Must be pre-seeded with all leaf (compressed) buffers.
-     * @param uncompressed_size Upper bound for inverse output allocation
-     * @param pool              Memory pool for scratch allocations
-     * @param stream            Fallback CUDA stream (used when num_streams <= 1)
-     * @param num_streams       Number of CUDA streams for intra-level parallelism.
-     *                          0 = auto-detect from topology (recommended).
-     * @return {d_ptr, size} of final result (pool-allocated — caller must copy and free)
-     *
-     * Parallelism model (mirrors the forward DAG):
-     *   - Specs are grouped by their forward execution level (computed from the
-     *     dependency graph encoded in fwd_input_ids / fwd_output_ids).
-     *   - Groups are processed in reverse level order (last compression level first).
-     *   - Within a group, specs are launched concurrently across dedicated CUDA streams
-     *     and synchronized with cudaStreamWaitEvent between groups.
-     *   - Fan-in inverse (forward merge ↔ inverse split): allocates one output buffer
-     *     per fwd_input_id so every forward input is reconstructed in parallel.
-     */
-    static std::pair<void*, size_t> runInversePipeline(
-        const std::vector<InverseStageSpec>& specs,
-        std::unordered_map<int, std::pair<void*, size_t>>& live_bufs,
-        size_t uncompressed_size,
-        MemoryPool& pool,
-        cudaStream_t stream,
-        int num_streams = 0,
-        std::vector<StageTimingResult>* timing_out = nullptr
-    );
-
-    // =====
-    
-    /**
      * Find source stages (no dependencies)
      */
     std::vector<Stage*> getSourceStages() const;
@@ -529,6 +554,62 @@ private:
      * Find sink stages (no dependents)
      */
     std::vector<Stage*> getSinkStages() const;
+
+    // ===== Inverse DAG Helpers =====
+
+    /**
+     * Compact description of one forward stage used by buildInverseDAG().
+     * Callers populate this from either the live DAGNode (decompress path)
+     * or the serialized FZMStageInfo (decompressFromFile path).
+     */
+    struct FwdStageDesc {
+        Stage*           stage;
+        std::vector<int> output_buf_ids;  ///< forward output buffer IDs (positional)
+        std::vector<int> input_buf_ids;   ///< forward input buffer IDs (positional)
+    };
+
+    /// maps fwd_buf_id → {device pointer, size in bytes} for each pipeline-output buffer
+    using PipelineOutputMap = std::unordered_map<int, std::pair<void*, size_t>>;
+
+    /**
+     * Builds, wires, and finalizes an inverse CompressionDAG from a compact
+     * forward-topology description.  Supports pipelines with one or more
+     * source stages (as produced by Phase 1 multi-source compress()).
+     *
+     * Encapsulates Steps 1-5 of the inverse path (shared between decompress()
+     * and decompressFromFile()):
+     *   1. Add stages in reverse forward order, pre-allocate output slots.
+     *   2. Wire: intermediate outputs → connectExistingOutput;
+     *            pipeline-output buffers → setInputBuffer + setExternalPointer.
+     *   3. For every forward source (fwd_stages entry with no input_buf_ids),
+     *      mark its first inverse output as a result buffer and persistent.
+     *   4. Finalize (assigns levels and streams).
+     *   5. Propagate estimated buffer sizes; override each result buffer with
+     *      its exact size from source_sizes.
+     *
+     * The caller is responsible for executing the returned DAG, running
+     * postStreamSync() on all stages, extracting the results, and resetting.
+     *
+     * @param fwd_stages       Stages in FORWARD topological order (source first).
+     * @param pipeline_outputs fwd_buf_id → {d_ptr, size} for every pipeline-output buffer.
+     * @param pool             MemoryPool for inv_dag allocations.
+     * @param strategy         Memory strategy for the inv_dag.
+     * @param source_sizes     Maps each forward source Stage* to its exact
+     *                         uncompressed size in bytes.
+     * @param enable_profiling Enable CUDA event profiling inside the inv_dag.
+     * @return {inv_dag (finalized, ready to execute),
+     *          map of source Stage* → inv result buffer ID}
+     */
+    static std::pair<std::unique_ptr<CompressionDAG>,
+                     std::unordered_map<Stage*, int>>
+    buildInverseDAG(
+        const std::vector<FwdStageDesc>&        fwd_stages,
+        const PipelineOutputMap&                pipeline_outputs,
+        MemoryPool*                             pool,
+        MemoryStrategy                          strategy,
+        const std::unordered_map<Stage*, size_t>& source_sizes,
+        bool                                    enable_profiling
+    );
     
     // ===== Output Concatenation Helpers =====
     
@@ -602,24 +683,40 @@ private:
     bool is_finalized_;
     bool soft_run_enabled_;   ///< Future: enable soft-run buffer sizing pass
 
+    // Track whether compress() has been called at least once so that
+    // writeToFile() can give a clear error if called before compressing, and so
+    // that a subsequent compress() call can implicitly reset the DAG (RC4).
+    bool is_compressed_;  ///< True after the first successful compress() call
+    bool was_compressed_; ///< True between compress() and the next reset()
+
     // Profiling
     bool profiling_enabled_;
     PipelinePerfResult last_perf_result_;
     
     // Input/output tracking
-    DAGNode* input_node_;                        // Source stage
+    std::vector<DAGNode*> input_nodes_;          // Source stages (one per pipeline input)
     std::vector<DAGNode*> output_nodes_;         // Sink stages (may be multiple)
-    int input_buffer_id_;
+    std::vector<int> input_buffer_ids_;          // External input buffer per source
     std::vector<int> output_buffer_ids_;         // One per sink stage
     void* d_concat_buffer_;                      // Concatenated output buffer (if multi-sink)
     size_t concat_buffer_capacity_;              // Allocated size of concat buffer
     bool needs_concat_;                          // True if multiple sinks detected
     
-    // Current input size (set during compress)
+    // Current input size (set during compress; sum over all sources)
     size_t input_size_;
 
-    // Input size hint from constructor (for initial buffer estimation)
+    // Per-source actual input sizes recorded during the most recent compress().
+    // Ordered to match input_nodes_ (source discovery order from finalize()).
+    // Used by decompress()/decompressMulti() to size each inverse result buffer.
+    std::vector<size_t> source_input_sizes_;
+
+    // Input size hint from constructor (for initial buffer estimation).
+    // Applied to all sources that lack a per_source_hints_ entry.
     size_t input_size_hint_;
+
+    // Per-source size hints set via setInputSizeHint().  Overrides
+    // input_size_hint_ for the matching source stage during propagateBufferSizes().
+    std::unordered_map<Stage*, size_t> per_source_hints_;
 
     // Spatial dimensions of the dataset (x=fast, y, z).
     // Used by addLorenzo() to select 1-D/2-D/3-D automatically.

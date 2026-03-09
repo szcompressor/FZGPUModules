@@ -4,12 +4,12 @@
  * Tests the current state of the library after recent improvements:
  *   1. Logging system (fz::Logger)
  *   2. API cleanup (getActualOutputSizesByName)
- *   3. Variable-length FZM header (FZMHeaderCore v2)
+ *   3. Variable-length FZM header (FZMHeaderCore v3, per-source sizes)
  *   4. Cached buffer propagation
  *   5. Optional DAG cycle detection (#ifdef FZ_DAG_VALIDATE)
  *   6. Pipeline inverse mode (DAG reversal)
  *   7. File I/O (write + read round-trip)
- *   8. DAG-aware inverse decompression (runInversePipeline refactor)
+ *   8. DAG-aware inverse decompression (unified inv_dag path)
  */
 
 #include "fzgpumodules.h"
@@ -242,7 +242,7 @@ void test_variable_length_header() {
     std::cout << "========== Test 5: Variable-Length FZM Header ==========\n";
 
     // Verify struct sizes
-    CHECK(sizeof(FZMHeaderCore) == 48, "FZMHeaderCore is 48 bytes");
+    CHECK(sizeof(FZMHeaderCore) == 72, "FZMHeaderCore is 72 bytes");
     CHECK(sizeof(FZMStageInfo) == 256, "FZMStageInfo is 256 bytes");
     CHECK(sizeof(FZMBufferEntry) == 256, "FZMBufferEntry is 256 bytes");
 
@@ -262,7 +262,7 @@ void test_variable_length_header() {
 
     // Verify magic/version defaults
     CHECK(core.magic == FZM_MAGIC, "Default magic = FZM_MAGIC");
-    CHECK(core.version == FZM_VERSION, "Default version = FZM_VERSION (2)");
+    CHECK(core.version == FZM_VERSION, "Default version = FZM_VERSION (3)");
 
     std::cout << "\n";
 }
@@ -1112,7 +1112,7 @@ void test_climate_data_cldhgh() {
     comp.writeToFile(filename, 0);
 
     // Decompress (static method — timed internally, excluding file I/O and H→D copy)
-    // Enable INFO-level logging so runInversePipeline prints its per-level breakdown.
+    // Enable INFO-level logging for per-level breakdown.
     Logger::enableStderr(LogLevel::INFO);
 
     void* d_decompressed = nullptr;
@@ -1145,18 +1145,18 @@ void test_climate_data_cldhgh() {
 }
 
 // ============================================================
-//  Test 20: DAG-Aware Inverse via runInversePipeline
+//  Test 20: DAG-Aware Inverse
 //
-//  Exercises the refactored decompression engine directly:
+//  Exercises the unified inverse DAG decompression path:
 //    - Multi-output stage (Lorenzo): codes + 3 outlier buffers
 //    - One branch runs through an extra Diff stage (fan-out in the forward DAG)
 //    - Verifies both decompress() and decompressFromFile() produce identical,
-//      within-bound results using the same underlying runInversePipeline()
+//      within-bound results
 //    - Checks that dag_buffer_id is properly written into every FZMBufferEntry
 // ============================================================
 
 void test_dag_aware_decompression() {
-    std::cout << "========== Test 20: DAG-Aware Inverse (runInversePipeline) ==========\n";
+    std::cout << "========== Test 20: DAG-Aware Inverse ==========\n";
     std::cout << "Pipeline: Lorenzo -> Diff(codes)   [outlier buffers go straight to output]\n\n";
 
     size_t n         = 256 * 1024;   // 256K floats = 1 MB
@@ -1222,7 +1222,7 @@ void test_dag_aware_decompression() {
                   << " size=" << (fh.buffers[i].data_size / 1024.0) << " KB\n";
     }
 
-    // ---- Path A: decompress() — uses live DAG + runInversePipeline ----
+    // ---- Path A: decompress() — DAG-native inverse ----
     void*  d_decomp_a    = nullptr;
     size_t decomp_size_a = 0;
     comp.decompress(d_compressed, data_size, &d_decomp_a, &decomp_size_a, 0);
@@ -1377,7 +1377,7 @@ void test_dag_native_inverse_complex() {
     CHECK(max_err_a <= eb + 1e-6, "decompress() max error within Lorenzo bound");
     std::cout << "  → decompress()         max_err=" << max_err_a << " (bound=" << eb << ")\n";
 
-    // ── Path B: decompressFromFile() — runInversePipeline (reference path) ───
+    // ── Path B: decompressFromFile() — reconstructs stages from header ───
     std::string filename = "test_dag_complex.fzm";
     comp.writeToFile(filename, 0);
 

@@ -12,8 +12,10 @@
 
 #include "fzgpumodules.h"
 #include "pipeline/stat.h"
+#ifdef FZ_PROFILING_ENABLED
 #include <cuda_profiler_api.h>
 #include <nvtx3/nvtx3.hpp>
+#endif
 
 #include <cmath>
 #include <cstdio>
@@ -113,7 +115,9 @@ int main() {
 
     // ── Warm-up pass (excluded from profiler timeline — cudaProfilerStart not called yet)
     {
+#ifdef FZ_PROFILING_ENABLED
         nvtx3::scoped_range warmup{"warmup"};
+#endif
         std::cout << "[profile] Warm-up pass...\n";
 
         Pipeline p(data_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
@@ -122,7 +126,9 @@ int main() {
         void*  d_comp  = nullptr;
         size_t comp_sz = 0;
         {
+#ifdef FZ_PROFILING_ENABLED
             nvtx3::scoped_range r{"warmup::compress"};
+#endif
             p.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
             cudaDeviceSynchronize();
         }
@@ -130,7 +136,9 @@ int main() {
         void*  d_decomp  = nullptr;
         size_t decomp_sz = 0;
         {
+#ifdef FZ_PROFILING_ENABLED
             nvtx3::scoped_range r{"warmup::decompress"};
+#endif
             p.decompress(nullptr, 0, &d_decomp, &decomp_sz, 0);
             cudaDeviceSynchronize();
         }
@@ -139,7 +147,9 @@ int main() {
     }
 
     // ── Profiled pass  (nsys captures only this region)
+#ifdef FZ_PROFILING_ENABLED
     cudaProfilerStart();
+#endif
     {
         std::cout << "[profile] Profiled pass...\n";
 
@@ -151,7 +161,9 @@ int main() {
         void*  d_compressed  = nullptr;
         size_t compressed_sz = 0;
         {
+#ifdef FZ_PROFILING_ENABLED
             nvtx3::scoped_range r{"compress"};
+#endif
             comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
             cudaDeviceSynchronize();
         }
@@ -166,7 +178,9 @@ int main() {
         void*  d_decompressed  = nullptr;
         size_t decompressed_sz = 0;
         {
+#ifdef FZ_PROFILING_ENABLED
             nvtx3::scoped_range r{"decompress"};
+#endif
             // Pass the compressed pointer so the inverse path uses our buffer
             // rather than reading directly from the forward DAG's memory.
             comp.decompress(d_compressed, compressed_sz, &d_decompressed, &decompressed_sz, 0);
@@ -193,7 +207,9 @@ int main() {
 
         if (d_decompressed) cudaFree(d_decompressed);
     }
+#ifdef FZ_PROFILING_ENABLED
     cudaProfilerStop();
+#endif
 
     cudaFree(d_input);
     std::cout << "\n[profile] Done.\n";

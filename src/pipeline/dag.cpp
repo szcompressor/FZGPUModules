@@ -43,7 +43,8 @@ CompressionDAG::CompressionDAG(MemoryPool* mem_pool, MemoryStrategy strategy)
       max_level_(0),
       current_memory_usage_(0),
       peak_memory_usage_(0),
-      profiling_enabled_(false) {
+      profiling_enabled_(false),
+      bounds_check_enabled_(false) {
     
     if (!mem_pool_) {
         throw std::invalid_argument("MemoryPool cannot be null");
@@ -290,8 +291,8 @@ void CompressionDAG::finalize() {
         buffer.remaining_consumers = buffer.consumer_stage_ids.size();
     }
     
-#ifdef FZ_DAG_VALIDATE
-    // Kahn's algorithm cycle detection: verify this is a valid DAG
+    // Kahn's algorithm cycle detection: verify this is a valid DAG.
+    // Always enabled — a cycle is always a programming error.
     {
         // Build in-degree map
         std::unordered_map<int, int> in_degree;
@@ -329,14 +330,14 @@ void CompressionDAG::finalize() {
         
         if (visited != static_cast<int>(nodes_.size())) {
             throw std::runtime_error(
-                "Cycle detected in DAG! Topological sort visited " +
+                "Cyclic dependency detected in pipeline graph! "
+                "Topological sort visited " +
                 std::to_string(visited) + " of " +
                 std::to_string(nodes_.size()) + " nodes"
             );
         }
         FZ_LOG(DEBUG, "DAG validation passed: %zu nodes, no cycles", nodes_.size());
     }
-#endif
     
     // Assign execution levels based on dependencies
     assignLevels();
@@ -425,6 +426,54 @@ void CompressionDAG::execute(cudaStream_t stream) {
             // Call stage execute
             if (node->stage) {
                 node->stage->execute(exec_stream, mem_pool_, inputs, outputs, sizes);
+
+                // Propagate actual output sizes to buffer metadata so that
+                // downstream stages receive the real decoded data size rather
+                // than the conservative estimate from estimateOutputSizes().
+                // This is critical for variable-size encoders (e.g. RLEStage
+                // inverse mode returns 2× the compressed size as an upper bound,
+                // which would cause Lorenzo inverse to over-allocate its memset).
+                {
+                    auto actual_by_name = node->stage->getActualOutputSizesByName();
+                    auto out_names      = node->stage->getOutputNames();
+                    for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
+                        std::string name = (k < out_names.size())
+                            ? out_names[k] : std::to_string(k);
+                        auto it = actual_by_name.find(name);
+                        if (it != actual_by_name.end() && it->second > 0) {
+                            buffers_[node->output_buffer_ids[k]].size = it->second;
+                        }
+                    }
+                }
+
+                // Buffer overwrite bounds check.
+                // Lambda captures node/buffers_ by reference; defined once and
+                // invoked depending on build type and runtime flag.
+                auto do_bounds_check = [&]() {
+                    auto out_names = node->stage->getOutputNames();
+                    auto actual    = node->stage->getActualOutputSizesByName();
+                    for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
+                        int    bid = node->output_buffer_ids[k];
+                        size_t cap = buffers_[bid].allocated_size;
+                        if (cap == 0) continue;  // not yet allocated (MINIMAL, first run)
+                        std::string name = (k < out_names.size())
+                            ? out_names[k] : std::to_string(k);
+                        auto sz_it = actual.find(name);
+                        if (sz_it != actual.end() && sz_it->second > cap) {
+                            throw std::runtime_error(
+                                "Buffer overwrite detected: stage '" + node->name +
+                                "' output '" + name + "' wrote " +
+                                std::to_string(sz_it->second) + " bytes into a " +
+                                std::to_string(cap) + "-byte buffer");
+                        }
+                    }
+                };
+
+#ifndef NDEBUG
+                do_bounds_check();  // Always check in debug builds
+#else
+                if (bounds_check_enabled_) do_bounds_check();  // Opt-in in release
+#endif
             }
             
             // Record completion for dependent stages (and profiling end)
@@ -451,8 +500,10 @@ void CompressionDAG::reset(cudaStream_t stream) {
     // Free all non-persistent buffers
     for (auto& [buffer_id, buffer] : buffers_) {
         if (buffer.is_allocated && !buffer.is_persistent && !buffer.is_external) {
-            mem_pool_->free(buffer.d_ptr, stream);
-            current_memory_usage_ -= buffer.allocated_size;
+            if (buffer.d_ptr) {
+                mem_pool_->free(buffer.d_ptr, stream);
+                current_memory_usage_ -= buffer.allocated_size;
+            }
             buffer.is_allocated = false;
             buffer.d_ptr = nullptr;
             buffer.allocated_size = 0;
@@ -534,6 +585,17 @@ void CompressionDAG::allocateBuffer(int buffer_id, cudaStream_t stream) {
 
     if (buffer.is_external) {
         return;  // External buffer, don't allocate/free
+    }
+
+    // Zero-size buffers: mark as "allocated" with a null device pointer.
+    // This arises when a stage legitimately produces no output (e.g.
+    // outlier arrays when outlier_capacity == 0.0f).  Stages must handle
+    // nullptr gracefully when their capacity indicates zero elements.
+    if (buffer.size == 0) {
+        buffer.is_allocated   = true;
+        buffer.allocated_size = 0;
+        buffer.d_ptr          = nullptr;
+        return;
     }
 
     if (buffer.is_allocated) {

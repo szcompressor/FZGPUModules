@@ -146,6 +146,61 @@ TEST(DifferenceStage, ConstantInput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: single-element input (no neighbour → passthrough)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, SingleElement) {
+    CudaStream stream;
+    auto pool = make_test_pool(64);
+
+    std::vector<float> h_input = {42.0f};
+
+    DifferenceStage<float> fwd;
+    auto h_diff = run_diff_stage(fwd, h_input, stream, *pool);
+    ASSERT_EQ(h_diff.size(), 1u);
+    EXPECT_FLOAT_EQ(h_diff[0], 42.0f);  // single element: no diff, value passes through
+
+    DifferenceStage<float> inv;
+    inv.setInverse(true);
+    auto h_recon = run_diff_stage(inv, h_diff, stream, *pool);
+    ASSERT_EQ(h_recon.size(), 1u);
+    EXPECT_FLOAT_EQ(h_recon[0], 42.0f);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: uint16_t alternating max / min — exercises unsigned wrap-around
+//
+// For uint16_t, subtraction is modular:
+//   diff[0] = 0
+//   diff[1] = 65535 - 0     = 65535
+//   diff[2] = 0 - 65535     = 1     (wraps)
+//   diff[3] = 65535 - 0     = 65535
+//   ...
+// The inverse (prefix-sum) must also use modular addition to recover the
+// original sequence exactly.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, Uint16WrappingArithmetic) {
+    CudaStream stream;
+    auto pool = make_test_pool(128 * sizeof(uint16_t));
+
+    constexpr size_t N = 64;
+    std::vector<uint16_t> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = (i % 2 == 0) ? uint16_t(0) : std::numeric_limits<uint16_t>::max();
+
+    DifferenceStage<uint16_t> fwd;
+    auto h_diff = run_diff_stage(fwd, h_input, stream, *pool);
+    ASSERT_EQ(h_diff.size(), N);
+
+    DifferenceStage<uint16_t> inv;
+    inv.setInverse(true);
+    auto h_recon = run_diff_stage(inv, h_diff, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    for (size_t i = 0; i < N; i++)
+        EXPECT_EQ(h_recon[i], h_input[i]) << "Mismatch at index " << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test: large random-ish data round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, LargeRoundTrip) {
@@ -174,4 +229,33 @@ TEST(DifferenceStage, LargeRoundTrip) {
     // values up to ~100 the worst-case accumulated error is O(N * eps * max_val)
     // ≈ 64K * 1.2e-7 * 100 ≈ 7.6e-4, so 1e-3 is the appropriate bound.
     EXPECT_LT(max_err, 1e-3f) << "Max reconstruction error too large: " << max_err;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: 1 M float elements — correctness at scale, no OOM
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, OneMillion) {
+    CudaStream stream;
+    constexpr size_t N = 1 << 20;  // 1 M floats
+    auto pool = make_test_pool(N * sizeof(float) * 4);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<float>(i) * 1e-5f) * 100.0f;
+
+    DifferenceStage<float> fwd;
+    auto h_diff = run_diff_stage(fwd, h_input, stream, *pool);
+    ASSERT_EQ(h_diff.size(), N);
+
+    DifferenceStage<float> inv;
+    inv.setInverse(true);
+    auto h_recon = run_diff_stage(inv, h_diff, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    // Float32 prefix-sum over 1 M values of magnitude ~100 accumulates
+    // O(N * eps * max_val) ≈ 1M * 1.2e-7 * 100 ≈ 0.012 maximum floating error.
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LT(max_err, 0.1f) << "1M element max reconstruction error: " << max_err;
 }

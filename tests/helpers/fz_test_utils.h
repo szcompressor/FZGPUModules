@@ -4,19 +4,26 @@
  * Shared test utilities for FZGPUModules unit tests.
  *
  * Provides:
- *   - CudaBuffer<T>   – RAII device allocation (cudaMalloc / cudaFree)
- *   - CudaStream      – RAII cudaStream_t
- *   - h2d / d2h       – convenience host↔device copy helpers
- *   - make_test_pool  – build a MemoryPool sized for a test with n bytes of data
+ *   - CudaBuffer<T>        – RAII device allocation (cudaMalloc / cudaFree)
+ *   - CudaStream           – RAII cudaStream_t
+ *   - h2d / d2h            – convenience host↔device copy helpers
+ *   - make_test_pool       – build a MemoryPool sized for a test with n bytes of data
+ *   - make_random_floats   – reproducible seeded random float data
+ *   - max_abs_error        – max absolute element-wise difference between two vectors
+ *   - gpu_free_bytes       – current GPU free memory (for leak checks)
  */
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <fstream>
 #include <vector>
 
 #include "mem/mempool.h"
@@ -112,6 +119,68 @@ inline std::unique_ptr<fz::MemoryPool> make_test_pool(size_t data_bytes,
                                                        float  multiplier = 10.0f) {
     fz::MemoryPoolConfig cfg(data_bytes, multiplier);
     return std::make_unique<fz::MemoryPool>(cfg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generate a vector of N floats in [-1, 1] using a deterministic seed so
+// tests are reproducible across runs.
+// ─────────────────────────────────────────────────────────────────────────────
+inline std::vector<float> make_random_floats(size_t n, uint64_t seed = 42) {
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::vector<float> v(n);
+    for (auto& x : v) x = dist(rng);
+    return v;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Max absolute element-wise difference.
+// Asserts inside GTest if sizes differ.
+// ─────────────────────────────────────────────────────────────────────────────
+inline float max_abs_error(const std::vector<float>& orig,
+                            const std::vector<float>& recon) {
+    EXPECT_EQ(orig.size(), recon.size()) << "max_abs_error: size mismatch";
+    float err = 0.0f;
+    size_t n = std::min(orig.size(), recon.size());
+    for (size_t i = 0; i < n; i++)
+        err = std::max(err, std::abs(recon[i] - orig[i]));
+    return err;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Query how many bytes are free on the current CUDA device.
+// Useful as a before/after check in memory-leak tests.
+// ─────────────────────────────────────────────────────────────────────────────
+inline size_t gpu_free_bytes() {
+    size_t free_bytes = 0, total_bytes = 0;
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+    return free_bytes;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Overwrite a single byte in an existing file at byte_offset.
+// Used to corrupt magic numbers, version fields, etc. in FZM files.
+// ─────────────────────────────────────────────────────────────────────────────
+inline void make_corrupt_file(const std::string& path,
+                               size_t             byte_offset,
+                               uint8_t            new_value) {
+    std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!f)
+        throw std::runtime_error("make_corrupt_file: cannot open " + path);
+    f.seekp(static_cast<std::streamoff>(byte_offset));
+    f.write(reinterpret_cast<const char*>(&new_value), 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Replace a file with a stub containing only n_bytes of zero bytes.
+// Used to simulate truncated or partially-written files.
+// ─────────────────────────────────────────────────────────────────────────────
+inline void write_stub_file(const std::string& path, size_t n_bytes) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f)
+        throw std::runtime_error("write_stub_file: cannot open " + path);
+    std::vector<char> buf(n_bytes, '\0');
+    f.write(buf.data(), static_cast<std::streamsize>(n_bytes));
 }
 
 } // namespace fz_test

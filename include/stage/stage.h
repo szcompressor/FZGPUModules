@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <stdexcept>
@@ -197,6 +198,20 @@ public:
         (void)size;
         // Default: no config to deserialize
     }
+
+    /**
+     * Called once by Pipeline::finalize() after all stages are connected and
+     * before the first compress/decompress execution.  Gives stages a chance
+     * to update their internal dimensionality — useful when setDims() is
+     * called on the Pipeline after stages are already constructed.
+     *
+     * The default implementation is a no-op.  Stages that depend on spatial
+     * dimensions (e.g. LorenzoStage) should override this and update their
+     * internal config so the correct kernel variant is selected at execute().
+     *
+     * @param dims  {x, y, z} extents of the dataset (z==1 → 2-D; y==z==1 → 1-D)
+     */
+    virtual void setDims(const std::array<size_t, 3>& dims) { (void)dims; }
 
     /**
      * Called once by Pipeline::compress() after dag->execute() and the stream

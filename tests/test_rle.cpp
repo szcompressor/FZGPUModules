@@ -17,9 +17,11 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "encoders/RLE/rle.h"
+#include "fzgpumodules.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 using namespace fz;
@@ -88,6 +90,60 @@ static std::vector<T> run_rle_inverse(RLEStage<T>&               stage,
     auto h_out = d_out.download(stream);
     h_out.resize(act_n);
     return h_out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: single-element input (one run of length 1)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(RLEStage, SingleElement) {
+    CudaStream stream;
+    auto pool = make_test_pool(256);
+
+    std::vector<uint16_t> h_input = {99};
+
+    RLEStage<uint16_t> fwd;
+    auto h_encoded = run_rle_forward(fwd, h_input, stream, *pool);
+
+    // Encoded: [num_runs=1 : u32][val=99 : u16][count=1 : u32] = 10 bytes
+    EXPECT_GE(h_encoded.size(), sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint32_t));
+
+    RLEStage<uint16_t> inv;
+    inv.setInverse(true);
+    auto h_decoded = run_rle_inverse(inv, h_encoded, 1, stream, *pool);
+
+    ASSERT_EQ(h_decoded.size(), 1u);
+    EXPECT_EQ(h_decoded[0], uint16_t(99));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: num_runs header field matches actual number of distinct runs
+//
+// The first 4 bytes of the encoded buffer store num_runs as a uint32_t.
+// For the sequence [7,7,7, 42,42, 1] we expect exactly 3 runs.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(RLEStage, NumRunsHeaderField) {
+    CudaStream stream;
+    auto pool = make_test_pool(4096);
+
+    // 3 distinct runs: (7×3), (42×2), (1×1)
+    std::vector<uint16_t> h_input = {7, 7, 7, 42, 42, 1};
+
+    RLEStage<uint16_t> fwd;
+    auto h_encoded = run_rle_forward(fwd, h_input, stream, *pool);
+
+    // The format starts with num_runs as a uint32_t
+    ASSERT_GE(h_encoded.size(), sizeof(uint32_t)) << "Encoded buffer too small to contain num_runs";
+    uint32_t num_runs = 0;
+    std::memcpy(&num_runs, h_encoded.data(), sizeof(uint32_t));
+    EXPECT_EQ(num_runs, 3u) << "Expected 3 runs for {7,7,7,42,42,1}";
+
+    // Round-trip should still be perfect
+    RLEStage<uint16_t> inv;
+    inv.setInverse(true);
+    auto h_decoded = run_rle_inverse(inv, h_encoded, h_input.size(), stream, *pool);
+    ASSERT_EQ(h_decoded.size(), h_input.size());
+    for (size_t i = 0; i < h_input.size(); i++)
+        EXPECT_EQ(h_decoded[i], h_input[i]) << "Round-trip mismatch at " << i;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
