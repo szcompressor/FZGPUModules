@@ -62,6 +62,13 @@ fz_add_test(
     LIBS    fzgmod_predictors fzgmod_mem fzgmod
 )
 
+# ─── Quantizer predictor (ABS / NOA / REL error-bound modes) ─────────────────
+fz_add_test(
+    NAME    test_quantizer
+    SOURCES test_quantizer.cpp
+    LIBS    fzgmod_predictors fzgmod_mem
+)
+
 # ─── Full pipeline (compress + decompress) ────────────────────────────────────
 fz_add_test(
     NAME    test_pipeline

@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
-set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures to compile for")
+set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for" FORCE)
 
 #####################
 ### WSL DETECTION ###
@@ -163,6 +163,7 @@ add_library(FZGMOD::encoders ALIAS fzgmod_encoders)
 #### Predictors Module
 add_library(fzgmod_predictors
   modules/predictors/lorenzo/lorenzo.cu
+  modules/predictors/quantizer/quantizer.cu
 )
 target_link_libraries(fzgmod_predictors
   PUBLIC

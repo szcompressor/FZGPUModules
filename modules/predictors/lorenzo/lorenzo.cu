@@ -1,4 +1,5 @@
 #include "predictors/lorenzo/lorenzo.h"
+#include "predictors/predictor_utils.cuh"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
@@ -471,7 +472,9 @@ void launchLorenzoInverseKernel(
 
 template<typename TInput, typename TCode>
 LorenzoStage<TInput, TCode>::LorenzoStage(const Config& config)
-    : config_(config) {
+    : config_(config),
+      computed_abs_eb_(static_cast<TInput>(config.error_bound)),
+      computed_value_base_(config.precomputed_value_base) {
     actual_output_sizes_.resize(4, 0);
 }
 
@@ -498,8 +501,9 @@ void LorenzoStage<TInput, TCode>::execute(
             return;
         }
 
-        // Calculate ebx2 = 2 * error_bound for dequantization
-        TInput ebx2 = static_cast<TInput>(2) * config_.error_bound;
+        // Calculate ebx2 = 2 * abs_error_bound for dequantization.
+        // computed_abs_eb_ was set by deserializeHeader (always the absolute bound).
+        TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
 
         // Derive max outlier capacity from the outlier_errors buffer size.
         size_t max_outliers = (sizes.size() > 1) ? (sizes[1] / sizeof(TInput)) : 0;
@@ -592,8 +596,44 @@ void LorenzoStage<TInput, TCode>::execute(
         // Initialize outlier count to 0
         FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream));
 
-        // Calculate ebx2_r = 1 / (2 * error_bound) for pre-quantization
-        TInput ebx2_r = static_cast<TInput>(1) / (static_cast<TInput>(2) * config_.error_bound);
+        // ── Resolve absolute error bound ──────────────────────────────────────
+        // For ABS mode: abs_eb = config_.error_bound (no scan needed).
+        // For NOA/REL modes: perform a stream-synchronising min/max scan first,
+        //   then derive the absolute bound.  If the caller pre-computed
+        //   value_base (> 0), skip the scan and use that value instead.
+        if (config_.eb_mode == ErrorBoundMode::ABS) {
+            computed_abs_eb_    = static_cast<TInput>(config_.error_bound);
+            computed_value_base_ = 0.0f;
+        } else {
+            float value_base = config_.precomputed_value_base;
+            if (value_base <= 0.0f) {
+                value_base = computeValueBase<TInput>(
+                    static_cast<const TInput*>(inputs[0]),
+                    num_elements, config_.eb_mode, stream, pool);
+            }
+            computed_value_base_ = value_base;
+
+            if (value_base <= 0.0f) {
+                FZ_LOG(WARN,
+                    "LorenzoStage: value_base is zero for %s mode "
+                    "(constant or empty data?); falling back to ABS",
+                    config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL");
+                computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
+            } else {
+                computed_abs_eb_ = static_cast<TInput>(config_.error_bound)
+                                   * static_cast<TInput>(value_base);
+            }
+            FZ_LOG(DEBUG,
+                "LorenzoStage %s: user_eb=%.6g value_base=%.6g -> abs_eb=%.6g",
+                config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL",
+                static_cast<double>(config_.error_bound),
+                static_cast<double>(value_base),
+                static_cast<double>(computed_abs_eb_));
+        }
+
+        // Calculate ebx2_r = 1 / (2 * abs_error_bound) for pre-quantization
+        TInput ebx2_r = static_cast<TInput>(1)
+                        / (static_cast<TInput>(2) * computed_abs_eb_);
 
         int eff_ndim = ndim();
 

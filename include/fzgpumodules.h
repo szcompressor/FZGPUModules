@@ -32,3 +32,4 @@
 #include "encoders/diff/diff.h"    // Difference coding
 #include "encoders/RLE/rle.h"      // Run-length encoding
 #include "predictors/lorenzo/lorenzo.h"  // Lorenzo predictor
+#include "predictors/quantizer/quantizer.h"  // Direct-value quantizer

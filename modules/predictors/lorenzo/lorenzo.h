@@ -11,6 +11,36 @@
 namespace fz {
 
 
+// ===== Error Bound Mode =====
+
+/**
+ * How the user-specified error bound is interpreted.
+ *
+ * ABS  — absolute error bound.  The error for every element satisfies
+ *         |x_orig - x_recon| <= eb.  This is the default.
+ *
+ * REL  — point-wise relative error bound (PFPL definition).
+ *         e_rel = |x_orig - x_recon| / |x_orig| <= eb.
+ *
+ *         For LorenzoStage this is a GLOBAL approximation only:
+ *           abs_eb = eb * max(|data|)
+ *         Because Lorenzo quantises prediction *differences* with a fixed
+ *         step size, a true per-element guarantee cannot be made.  Values
+ *         much smaller than max(|data|) may exceed the per-element ratio.
+ *
+ *         For an exact per-element REL bound (PFPL log2-space algorithm),
+ *         use QuantizerStage<TInput, uint32_t> with REL mode instead.
+ *
+ * NOA  — norm-of-absolute, a.k.a. value-range relative (PFPL definition).
+ *         abs_eb = eb * (max(data) - min(data))
+ *         Equivalent to what most other compressors call "relative".
+ */
+enum class ErrorBoundMode : uint8_t {
+    ABS = 0,
+    REL = 1,
+    NOA = 2,
+};
+
 // ===== Lorenzo Stage-Specific Config =====
 // Serialized into FZMBufferEntry.stage_config[128]
 
@@ -21,24 +51,27 @@ namespace fz {
  * and fits into the generic 128-byte stage_config buffer in FZMBufferEntry.
  */
 struct LorenzoConfig {
-    float error_bound;        // Error bound used in compression (4B)
+    float error_bound;        // Absolute error bound after mode conversion (4B)
     uint32_t quant_radius;    // Quantization radius (4B)
     uint32_t num_elements;    // Number of elements (4B)
     uint32_t outlier_count;   // Actual number of outliers (4B)
     DataType input_type;      // Original input type (1B)
     DataType code_type;       // Quantization code type (1B)
     uint8_t  ndim;            // Spatial dimensionality: 1, 2, or 3 (0 treated as 1) (1B)
-    uint8_t  reserved0;       // Padding (1B)
+    uint8_t  eb_mode;         // ErrorBoundMode (was reserved0) (1B)
     uint32_t dim_x;           // X dimension length (fastest, 0 = infer from num_elements) (4B)
     uint32_t dim_y;           // Y dimension length (1 for 1D) (4B)
     uint32_t dim_z;           // Z dimension length (1 for 1D/2D) (4B)
+    float    user_eb;         // Original user-specified error bound (4B)
+    float    value_base;      // value_range (NOA) or max(|data|) (REL) used in conversion (4B)
 
-    // Total: 32 bytes (fits easily in 128B stage_config)
+    // Total: 40 bytes (fits easily in 128B stage_config)
 
     LorenzoConfig()
         : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
-          ndim(1), reserved0(0), dim_x(0), dim_y(1), dim_z(1) {}
+          ndim(1), eb_mode(0), dim_x(0), dim_y(1), dim_z(1),
+          user_eb(0.0f), value_base(0.0f) {}
 };
 static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
@@ -65,7 +98,7 @@ public:
      * Configuration for Lorenzo predictor
      */
     struct Config {
-        float error_bound = 1e-3;           // Error bound for quantization
+        float error_bound = 1e-3;           // Error bound value (interpretation depends on eb_mode)
         int quant_radius = 32768;           // Quantization radius (2^15 for uint16_t)
         float outlier_capacity = 0.2f;      // Fraction of input size to allocate for outliers (0-1)
         // Spatial dimensions: dims[0]=x (fastest), dims[1]=y, dims[2]=z.
@@ -74,6 +107,12 @@ public:
         // dims[2]==1             → 2-D Lorenzo
         // otherwise             → 3-D Lorenzo
         std::array<size_t, 3> dims = {0, 1, 1};
+        ErrorBoundMode eb_mode = ErrorBoundMode::ABS;
+        // Pre-computed value_range (NOA) or max(|data|) (REL).
+        // When 0 (default), execute() auto-computes it via a device scan.
+        // Set to a positive value to skip the scan (e.g. when the caller
+        // already knows value_range from a prior compression pass).
+        float precomputed_value_base = 0.0f;
 
         Config() = default;
         Config(TInput eb, TCode radius = 32768, float outlier_cap = 0.2f,
@@ -131,12 +170,18 @@ public:
     void setQuantRadius(TCode radius) { config_.quant_radius = radius; }
     void setOutlierCapacity(float capacity) { config_.outlier_capacity = capacity; }
     void setDims(const std::array<size_t, 3>& dims) override { config_.dims = dims; }
+    void setErrorBoundMode(ErrorBoundMode mode) { config_.eb_mode = mode; }
+    // Provide a pre-computed value_range (NOA) or max(|data|) (REL) to skip
+    // the internal data scan during execute().  Pass 0 to re-enable auto-scan.
+    void setValueBase(float value_base) { config_.precomputed_value_base = value_base; }
     void setDims(size_t x, size_t y = 1, size_t z = 1) { config_.dims = {x, y, z}; }
 
     TInput getErrorBound() const { return config_.error_bound; }
     TCode  getQuantRadius() const { return config_.quant_radius; }
     float  getOutlierCapacity() const { return config_.outlier_capacity; }
     std::array<size_t, 3> getDims() const { return config_.dims; }
+    ErrorBoundMode getErrorBoundMode() const { return config_.eb_mode; }
+    float getValueBase() const { return config_.precomputed_value_base; }
 
     /// Returns the effective spatial dimensionality (1, 2, or 3).
     int ndim() const {
@@ -177,16 +222,19 @@ public:
         }
 
         LorenzoConfig config;
-        config.error_bound   = config_.error_bound;
+        config.error_bound   = static_cast<float>(computed_abs_eb_);  // abs bound used by decompressor
         config.quant_radius  = static_cast<uint32_t>(config_.quant_radius);
         config.num_elements  = static_cast<uint32_t>(num_elements_);
         config.outlier_count = actual_outlier_count_;
         config.input_type    = getInputDataType();
         config.code_type     = getCodeDataType();
         config.ndim          = static_cast<uint8_t>(ndim());
+        config.eb_mode       = static_cast<uint8_t>(config_.eb_mode);
         config.dim_x         = static_cast<uint32_t>(config_.dims[0]);
         config.dim_y         = static_cast<uint32_t>(config_.dims[1]);
         config.dim_z         = static_cast<uint32_t>(config_.dims[2]);
+        config.user_eb       = static_cast<float>(config_.error_bound);  // original user-specified value
+        config.value_base    = computed_value_base_;
 
         std::memcpy(header_buffer, &config, sizeof(LorenzoConfig));
         return sizeof(LorenzoConfig);
@@ -198,17 +246,31 @@ public:
     }
     
     void deserializeHeader(const uint8_t* header_buffer, size_t size) override {
-        if (size < sizeof(LorenzoConfig)) {
+        // Minimum size is the original 32-byte layout (before user_eb/value_base were added).
+        constexpr size_t kLegacySize = 32;
+        if (size < kLegacySize) {
             throw std::runtime_error("Invalid Lorenzo config size");
         }
 
         LorenzoConfig config;
-        std::memcpy(&config, header_buffer, sizeof(LorenzoConfig));
+        std::memcpy(&config, header_buffer, std::min(size, sizeof(LorenzoConfig)));
 
+        // error_bound in the header is always the absolute bound used at compression.
         config_.error_bound  = config.error_bound;
+        computed_abs_eb_     = static_cast<TInput>(config.error_bound);
         config_.quant_radius = static_cast<TCode>(config.quant_radius);
         num_elements_        = config.num_elements;
         actual_outlier_count_= config.outlier_count;
+        // New fields: present only in headers written by this version or later.
+        if (size >= sizeof(LorenzoConfig)) {
+            config_.eb_mode                = static_cast<ErrorBoundMode>(config.eb_mode);
+            config_.precomputed_value_base = config.value_base;
+            computed_value_base_           = config.value_base;
+        } else {
+            config_.eb_mode                = ErrorBoundMode::ABS;
+            config_.precomputed_value_base = 0.0f;
+            computed_value_base_           = 0.0f;
+        }
 
         // Restore spatial dimensions; handle old (pre-dims) files gracefully
         int eff_ndim = (config.ndim == 0) ? 1 : static_cast<int>(config.ndim);
@@ -236,9 +298,16 @@ public:
 private:
     Config config_;
     std::vector<size_t> actual_output_sizes_;
-    size_t num_elements_ = 0;           // Track for header
-    uint32_t actual_outlier_count_ = 0; // Track for header
-    bool is_inverse_ = false;           // false = compress, true = decompress
+    size_t num_elements_ = 0;              // Track for header
+    uint32_t actual_outlier_count_ = 0;    // Track for header
+    bool is_inverse_ = false;              // false = compress, true = decompress
+    /// Actual absolute error bound used in kernel launches.
+    /// For ABS mode this equals config_.error_bound.  For REL/NOA modes it is
+    /// the converted value computed during execute() after the data scan.
+    TInput computed_abs_eb_ = 0;
+    /// Scaling factor used in the conversion: value_range (NOA) or max(|data|) (REL).
+    /// Stored so serializeHeader() can embed it in the output stream.
+    float computed_value_base_ = 0.0f;
     /// Device pointer to the outlier_count output buffer.  Set during
     /// execute() (compress mode) and consumed once by postStreamSync().
     const void* d_outlier_count_ptr_ = nullptr;

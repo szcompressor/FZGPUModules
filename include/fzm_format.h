@@ -53,6 +53,7 @@ enum class StageType : uint16_t {
     MERGE = 11,
     LORENZO_2D = 12,
     LORENZO_3D = 13,
+    QUANTIZER = 14,
     // Add more as needed
 };
 
@@ -303,6 +304,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::BITPACK: return "BitPack";
         case StageType::SPLIT: return "Split";
         case StageType::MERGE: return "Merge";
+        case StageType::QUANTIZER: return "Quantizer";
         default: return "Unknown";
     }
 }

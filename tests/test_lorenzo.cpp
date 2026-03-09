@@ -542,6 +542,93 @@ TEST(Lorenzo3DStage, SerializeDeserializeDims) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NOA error-bound mode (norm-of-absolute): abs_eb = user_eb * (max - min)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 1D smooth sinusoid with NOA mode.
+TEST(LorenzoNOA, SmoothRoundTrip) {
+    CudaStream stream;
+    constexpr size_t N       = 1024;
+    constexpr float  USER_EB = 0.01f;   // 1 % of value range
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.05f) * 10.0f;
+
+    // Compute expected absolute bound on host for the EXPECT.
+    float vmin = *std::min_element(h_input.begin(), h_input.end());
+    float vmax = *std::max_element(h_input.begin(), h_input.end());
+    float expected_abs_eb = USER_EB * (vmax - vmin);
+
+    LorenzoStage<float, uint16_t> fwd;
+    fwd.setErrorBound(USER_EB);
+    fwd.setErrorBoundMode(ErrorBoundMode::NOA);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.2f);
+
+    auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, *pool);
+    EXPECT_GT(fwd_result.codes_bytes, 0u) << "NOA forward produced no codes";
+
+    LorenzoStage<float, uint16_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+    auto h_recon = run_lorenzo_inverse(inv, fwd_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    // Allow 2 % tolerance: the GPU min/max scan may differ by at most one ULP
+    // from the host reference, and Lorenzo's quantisation adds one step of 2*eb.
+    EXPECT_LE(max_err, expected_abs_eb * 1.02f)
+        << "NOA 1D max_err=" << max_err
+        << " exceeds expected_abs_eb=" << expected_abs_eb;
+}
+
+// NOA eb_mode survives serialise/deserialise after a real compression pass.
+TEST(LorenzoNOA, SerializeDeserializeMode) {
+    CudaStream stream;
+    constexpr size_t N = 256;
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.05f) * 10.0f;
+
+    LorenzoStage<float, uint16_t> src;
+    src.setErrorBound(0.02f);
+    src.setErrorBoundMode(ErrorBoundMode::NOA);
+    src.setQuantRadius(512);
+    src.setOutlierCapacity(0.2f);
+
+    // A real forward pass is required so computed_abs_eb_ is populated before
+    // serializeHeader() is called — without execute() the absolute bound is 0.
+    auto fwd_result = run_lorenzo_forward(src, h_input, stream, *pool);
+    (void)fwd_result;
+
+    uint8_t cfg[128] = {};
+    size_t  sz = src.serializeHeader(0, cfg, sizeof(cfg));
+    ASSERT_GE(sz, sizeof(LorenzoConfig));
+
+    LorenzoStage<float, uint16_t> dst;
+    dst.setInverse(true);
+    dst.deserializeHeader(cfg, sz);
+
+    // serializeHeader stores computed_abs_eb_ as error_bound and the mode.
+    // After deserializing, getErrorBound() returns the absolute bound (not user_eb),
+    // and getErrorBoundMode() returns the mode that was active during compression.
+    EXPECT_EQ(dst.getErrorBoundMode(), ErrorBoundMode::NOA)
+        << "ErrorBoundMode should survive header round-trip";
+    // The absolute bound must be positive (NOA multiplied user_eb by value_range > 0).
+    EXPECT_GT(dst.getErrorBound(), 0.0f)
+        << "Computed absolute bound should be positive after NOA compression";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Lorenzo3DStage: getStageTypeId() returns correct enum values per dimensionality
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Lorenzo3DStage, StageTypeIds) {
