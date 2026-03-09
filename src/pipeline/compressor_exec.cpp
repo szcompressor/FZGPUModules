@@ -47,8 +47,6 @@ void Pipeline::compress(
             " input(s), got " + std::to_string(inputs.size()));
     }
 
-    // RC4: If compress() was called before without an explicit reset(), reset
-    // the DAG state implicitly so re-compression is transparently safe.
     if (was_compressed_) {
         dag_->reset(stream);
         was_compressed_ = false;

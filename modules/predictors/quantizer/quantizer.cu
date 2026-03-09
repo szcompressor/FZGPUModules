@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
@@ -38,15 +39,16 @@ __global__ void quantizer_abs_fwd_kernel(
     if (i >= n) return;
 
     TInput x = in[i];
-    // Round to nearest quantization bin
+    // Round to nearest quantization bin (signed, centred at 0)
     int q = __float2int_rn((float)x * (float)ebx2_r);
-    int stored = q + (int)quant_radius;
 
-    // stored must be in (0, 2*quant_radius) to be representable
-    if (stored > 0 && stored < (int)quant_radius * 2) {
-        codes[i] = static_cast<TCode>(stored);
+    // |q| < quant_radius means representable in TCode (two's-complement)
+    if (q > -(int)quant_radius && q < (int)quant_radius) {
+        codes[i] = static_cast<TCode>(q);   // signed stored as two's-complement in TCode
     } else {
-        codes[i] = 0;  // outlier sentinel
+        // Outlier: code value doesn't matter — scatter_assign_kernel overwrites the
+        // position with the true value.  Store 0 for consistency.
+        codes[i] = static_cast<TCode>(0);
         uint32_t slot = atomicAdd(outlier_count, 1u);
         if (slot < static_cast<uint32_t>(max_outliers)) {
             outlier_vals[slot] = x;
@@ -71,12 +73,12 @@ __global__ void quantizer_abs_inv_kernel(
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    TCode c = codes[i];
-    if (c != 0) {
-        int q = static_cast<int>(c) - static_cast<int>(quant_radius);
-        out[i] = static_cast<TInput>(q) * ebx2;
-    }
-    // c == 0: outlier placeholder — scatter_assign_kernel will fill this in
+    // Reinterpret the unsigned code as signed two's-complement to recover q.
+    // Outlier positions will be overwritten by scatter_assign_kernel afterward,
+    // so whatever dequant writes there is harmless.
+    int q = static_cast<int>(
+        static_cast<typename std::make_signed<TCode>::type>(codes[i]));
+    out[i] = static_cast<TInput>(q) * ebx2;
 }
 
 // =============================================================================

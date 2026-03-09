@@ -158,8 +158,7 @@ void Pipeline::finalize() {
         throw std::runtime_error("Pipeline already finalized");
     }
     
-    // Push current dims to all stages so late setDims() calls are honoured.
-    // Stages that don't care (no setDims override) ignore this via the no-op default.
+    // Push current dims to all stages so late setDims() calls are honoured
     for (const auto& stage_ptr : stages_) {
         stage_ptr->setDims(dims_);
     }

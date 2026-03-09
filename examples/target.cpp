@@ -69,13 +69,20 @@ static float* load_to_device() {
 
 // Configure a fresh compression pipeline in-place.
 static void setup_pipeline(Pipeline& p) {
-    auto* lorenzo = p.addStage<LorenzoStage<float, uint16_t>>();
-    lorenzo->setErrorBound(EB);
-    lorenzo->setQuantRadius(512);
-    lorenzo->setOutlierCapacity(0.15f);
+    // auto* lorenzo = p.addStage<LorenzoStage<float, uint16_t>>();
+    // lorenzo->setErrorBound(EB);
+    // lorenzo->setQuantRadius(512);
+    // lorenzo->setOutlierCapacity(0.15f);
+
+    auto* quantizer = p.addStage<QuantizerStage<float, uint16_t>>();
+    quantizer->setErrorBound(EB);
+    quantizer->setErrorBoundMode(ErrorBoundMode::ABS);
+    quantizer->setQuantRadius(32768);
+    quantizer->setOutlierCapacity(0.1f);
 
     auto* diff = p.addStage<DifferenceStage<uint16_t>>();
-    p.connect(diff, lorenzo, "codes");
+    p.connect(diff, quantizer, "codes");
+    // p.connect(diff, lorenzo, "codes");
 
     p.finalize();
 }

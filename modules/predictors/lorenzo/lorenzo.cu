@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
@@ -217,7 +218,10 @@ __global__ void lorenzo_dequantize_1d_kernel(
         
         if (global_id < n && local_id < TileDim) {
             // Dequantize: code - radius → prediction error
-            TInput delta = static_cast<TInput>(s_codes[local_id]) - static_cast<TInput>(quant_radius);
+            // Reinterpret unsigned code as signed two's-complement to recover the
+            // signed delta stored during compression (q, not q+radius).
+            TInput delta = static_cast<TInput>(
+                static_cast<typename std::make_signed<TCode>::type>(s_codes[local_id]));
             
             // Inject any scattered outlier prediction errors BEFORE prefix sum
             delta += output[global_id];
@@ -342,13 +346,14 @@ __global__ void lorenzo_quantize_1d_kernel(
             bool quantizable = fabs(delta) < static_cast<TInput>(quant_radius);
             
             if (quantizable) {
-                // Quantize: delta is already in quantization units, just offset to positive range
-                // delta ∈ (-radius, radius) → code ∈ (0, 2*radius)
-                TInput candidate = delta + static_cast<TInput>(quant_radius);
-                s_codes[threadIdx.x * Seq + i] = static_cast<TCode>(candidate);
+                // Store signed delta directly (two's-complement in TCode).
+                // Distribution is centred at 0 which is optimal for downstream
+                // entropy coders (Huffman / ANS).
+                s_codes[threadIdx.x * Seq + i] = static_cast<TCode>(static_cast<int>(delta));
             } else {
-                // Outlier: write radius (dequantizes to 0 = neutral for prefix sum)
-                s_codes[threadIdx.x * Seq + i] = quant_radius;
+                // Outlier: store 0 so this position contributes nothing to the
+                // prefix sum.  The true delta is replayed via scatter_outliers_kernel.
+                s_codes[threadIdx.x * Seq + i] = static_cast<TCode>(0);
                 
                 // Store outlier prediction error (not original value!)
                 uint32_t outlier_idx = atomicAdd(outlier_count, 1);
@@ -868,8 +873,9 @@ __global__ void lorenzo_quantize_2d_kernel(
 
         if (is_valid) {
             bool quantizable = fabsf(center[i]) < static_cast<TInput>(quant_radius);
-            TInput candidate = center[i] + static_cast<TInput>(quant_radius);
-            out_codes[gid]   = quantizable ? static_cast<TCode>(candidate) : quant_radius;
+            out_codes[gid]   = quantizable
+                ? static_cast<TCode>(static_cast<int>(center[i]))
+                : static_cast<TCode>(0);   // 0 contributes 0 to prefix sum
 
             if (!quantizable) {
                 uint32_t cur_idx = atomicAdd(out_outlier_count, 1u);
@@ -912,8 +918,8 @@ __global__ void lorenzo_dequantize_2d_kernel(
         auto gid = get_gid(i);
         if (gix < data_lenx && (giy_base + i) < data_leny) {
             thp_data[i] = inout_data[gid]
-                          + static_cast<TInput>(in_codes[gid])
-                          - static_cast<TInput>(quant_radius);
+                + static_cast<TInput>(
+                    static_cast<typename std::make_signed<TCode>::type>(in_codes[gid]));
         }
     }
 
@@ -1022,8 +1028,9 @@ __global__ void lorenzo_quantize_3d_kernel(
         bool is_valid = (gix < data_lenx && giy < data_leny && (uint32_t)giz(z - 1) < data_lenz);
         if (is_valid) {
             bool quantizable = fabsf(delta[z]) < static_cast<TInput>(quant_radius);
-            TInput candidate = delta[z] + static_cast<TInput>(quant_radius);
-            out_codes[gid(z - 1)] = quantizable ? static_cast<TCode>(candidate) : quant_radius;
+            out_codes[gid(z - 1)] = quantizable
+                ? static_cast<TCode>(static_cast<int>(delta[z]))
+                : static_cast<TCode>(0);   // 0 contributes 0 to prefix sum
 
             if (!quantizable) {
                 uint32_t cur_idx = atomicAdd(out_outlier_count, 1u);
@@ -1075,8 +1082,8 @@ __global__ void lorenzo_dequantize_3d_kernel(
     for (int y = 0; y < Yseq; y++) {
         if (gix < data_lenx && (uint32_t)giy(y) < data_leny && giz < data_lenz) {
             thread_private[y] = inout_data[gid(y)]
-                                + static_cast<TInput>(in_codes[gid(y)])
-                                - static_cast<TInput>(quant_radius);
+                + static_cast<TInput>(
+                    static_cast<typename std::make_signed<TCode>::type>(in_codes[gid(y)]));
         }
     }
 

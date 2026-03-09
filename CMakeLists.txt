@@ -211,9 +211,17 @@ add_library(FZGMOD::fzgmod ALIAS fzgmod)
 ### EXECUTABLES ###
 ###################
 
-add_executable(fzgmod-bin utils/main.cpp)
+add_executable(fzgmod-bin examples/main.cpp)
 target_link_libraries(fzgmod-bin PRIVATE fzgmod)
-set_target_properties(fzgmod-bin PROPERTIES OUTPUT_NAME fzgmod)
+set_target_properties(fzgmod-bin PROPERTIES
+    OUTPUT_NAME fzgmod
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# ── Standalone Lorenzo code-distribution analyser ─────────────────────────────
+add_executable(analyze_lorenzo examples/analyze_lorenzo.cpp)
+target_link_libraries(analyze_lorenzo PRIVATE fzgmod)
+set_target_properties(analyze_lorenzo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 ######################
 ### PROFILING MODE ###
@@ -273,8 +281,10 @@ if(BUILD_PROFILING)
     # Run:    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
     #              -o cldhgh_profile ./build/fzgmod-profile
     #         nsys-ui cldhgh_profile.nsys-rep
-    add_executable(fzgmod-profile utils/target.cpp)
+    add_executable(fzgmod-profile examples/target.cpp)
     target_link_libraries(fzgmod-profile PRIVATE fzgmod)
+    set_target_properties(fzgmod-profile PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
     if(NVTX3_INCLUDE_DIR)
         target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
     endif()
