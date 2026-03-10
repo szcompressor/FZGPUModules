@@ -9,7 +9,6 @@
 #include <unordered_set>
 #include <vector>
 
-
 namespace fz {
 
 Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_multiplier)

@@ -230,9 +230,16 @@ public:
      *
      * Throws if the pipeline has more than one source stage.
      *
+     * OWNERSHIP: *d_output points into the Pipeline's internal memory pool.
+     * The caller must NOT call cudaFree() on it.  The pointer is valid until
+     * the next compress() / reset() call on this Pipeline, or until the
+     * Pipeline is destroyed.  This is intentionally zero-copy (contrast with
+     * decompress(), which always returns a freshly cudaMalloc'd buffer that
+     * the caller IS responsible for freeing).
+     *
      * @param d_input     Device pointer to input data
      * @param input_size  Size of input data in bytes
-     * @param d_output    [out] Device pointer to compressed output
+     * @param d_output    [out] Pool-owned pointer to compressed output — do NOT cudaFree
      * @param output_size [out] Actual compressed size in bytes
      * @param stream      CUDA stream for execution (default: 0)
      */
@@ -251,8 +258,11 @@ public:
      * the vector does not matter; each spec is matched to its source stage by
      * pointer identity.
      *
+     * OWNERSHIP: same as the single-source overload — *d_output points into
+     * the Pipeline's internal pool.  Do NOT call cudaFree() on it.
+     *
      * @param inputs      One InputSpec per pipeline source stage.
-     * @param d_output    [out] Device pointer to compressed output
+     * @param d_output    [out] Pool-owned pointer to compressed output — do NOT cudaFree
      * @param output_size [out] Actual compressed size in bytes
      * @param stream      CUDA stream for execution (default: 0)
      */
@@ -393,6 +403,23 @@ public:
      * Get the underlying DAG (for advanced use cases)
      */
     CompressionDAG* getDAG() { return dag_.get(); }
+
+    /**
+     * Enable runtime buffer-overwrite detection.
+     *
+     * After each stage executes, the DAG checks that the stage's reported
+     * actual output size does not exceed the allocated buffer capacity.  A
+     * violation throws std::runtime_error immediately with a descriptive
+     * message naming the stage and output slot.
+     *
+     * In debug builds (-DNDEBUG absent) the check runs unconditionally
+     * regardless of this flag.  This opt-in lets you activate it in release
+     * builds for production debug sessions without a full recompile.
+     *
+     * Zero overhead when disabled in release builds.
+     */
+    void enableBoundsCheck(bool enable) { dag_->enableBoundsCheck(enable); }
+    bool isBoundsCheckEnabled() const   { return dag_->isBoundsCheckEnabled(); }
     
     /**
      * Get memory usage statistics

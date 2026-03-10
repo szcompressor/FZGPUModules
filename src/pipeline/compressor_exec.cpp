@@ -71,6 +71,33 @@ void Pipeline::compress(
                 "' is not a pipeline source stage");
         }
         size_t idx = static_cast<size_t>(std::distance(input_nodes_.begin(), idx_it));
+
+        // Guard: null device pointer is always a programming error.
+        if (spec.d_data == nullptr) {
+            throw std::runtime_error(
+                "compress(): InputSpec for source stage '" + spec.source->getName() +
+                "' has a null device pointer");
+        }
+
+        // Guard: data must not exceed the hint used to size buffers at
+        // finalize().  A larger payload means output buffers were
+        // under-allocated from estimateOutputSizes(), which leads to silent
+        // data truncation (the stage only sees the hint-sized slice) or, for
+        // stages with exact estimates, a buffer overwrite.
+        {
+            auto hint_it = per_source_hints_.find(spec.source);
+            size_t hint = (hint_it != per_source_hints_.end())
+                ? hint_it->second : input_size_hint_;
+            if (hint > 0 && spec.size > hint) {
+                throw std::runtime_error(
+                    "compress(): InputSpec for source stage '" + spec.source->getName() +
+                    "' data size (" + std::to_string(spec.size) +
+                    " bytes) exceeds the finalize-time buffer size hint (" +
+                    std::to_string(hint) + " bytes); "
+                    "re-construct the pipeline with a larger input size hint");
+            }
+        }
+
         dag_->setExternalPointer(input_buffer_ids_[idx], const_cast<void*>(spec.d_data));
         source_input_sizes_[idx] = spec.size;
         input_size_ += spec.size;
@@ -132,7 +159,14 @@ void Pipeline::compress(
             buffer_metadata_.push_back(meta);
         }
 
-        // Get output buffer and size
+        // Get output buffer and size.
+        //
+        // OWNERSHIP CONTRACT: both paths below hand the caller a pointer into
+        // the Pipeline's internal memory pool (d_concat_buffer_ or the DAG
+        // pool).  The caller must NOT call cudaFree() on *d_output.
+        // This is intentionally zero-copy.  Contrast with decompress(), which
+        // always cudaMalloc's a fresh buffer that the caller IS responsible for
+        // freeing.
         if (needs_concat_) {
             concatOutputs(d_output, output_size, stream);
         } else {

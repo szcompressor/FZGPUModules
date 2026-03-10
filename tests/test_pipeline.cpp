@@ -400,6 +400,128 @@ TEST(Pipeline, RepeatCompress) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: PREALLOCATE pipeline reused across multiple compress+decompress calls
+// without reset() between iterations.
+//
+// This mirrors ARM A of the repeated-profiling example (profile_repeat.cpp),
+// which exposed reuse bugs. Verifies that compressed output and reconstruction
+// accuracy are correct on every iteration when the same input is used.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, RepeatedCompressPreallocateSameData) {
+    CudaStream stream;
+    constexpr size_t N      = 1 << 14;  // 16 K floats
+    constexpr float  EB     = 1e-2f;
+    constexpr int    N_RUNS = 5;
+
+    auto h_input = make_smooth_data(N);
+    size_t in_bytes = N * sizeof(float);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    // Single PREALLOCATE pipeline — mirrors ARM A of profile_repeat
+    Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
+
+    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(EB);
+    lorenzo->setQuantRadius(512);
+    lorenzo->setOutlierCapacity(0.2f);
+
+    auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
+    pipeline.connect(diff, lorenzo, "codes");
+
+    pipeline.finalize();
+
+    for (int iter = 0; iter < N_RUNS; ++iter) {
+        void*  d_comp  = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+
+        EXPECT_GT(comp_sz, 0u) << "Iteration " << iter << ": empty compressed output";
+
+        void*  d_dec  = nullptr;
+        size_t dec_sz = 0;
+        pipeline.decompress(nullptr, comp_sz, &d_dec, &dec_sz, stream);
+
+        ASSERT_NE(d_dec, nullptr) << "Iteration " << iter << ": null decompressed pointer";
+        ASSERT_EQ(dec_sz, in_bytes) << "Iteration " << iter << ": wrong decompressed size";
+
+        std::vector<float> h_recon(N);
+        FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+        cudaFree(d_dec);
+
+        float max_err = 0.0f;
+        for (size_t i = 0; i < N; i++)
+            max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+        EXPECT_LE(max_err, EB * 1.01f)
+            << "Iteration " << iter << ": max error " << max_err << " exceeds bound " << EB;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: PREALLOCATE pipeline reused with different data on each call.
+//
+// Ensures that no stale compressed state from one iteration bleeds into the
+// next decompression when the pipeline is reused without reset().
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-2f;
+    size_t in_bytes = N * sizeof(float);
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
+
+    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(EB);
+    lorenzo->setQuantRadius(512);
+    lorenzo->setOutlierCapacity(0.2f);
+
+    auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
+    pipeline.connect(diff, lorenzo, "codes");
+
+    pipeline.finalize();
+
+    std::vector<std::vector<float>> datasets = {
+        make_smooth_data(N),
+        std::vector<float>(N, 3.14f),   // constant
+        [&] { auto v = make_smooth_data(N); for (auto& x : v) x *= 0.5f;    return v; }(),
+        [&] { auto v = make_smooth_data(N); for (auto& x : v) x += 100.0f;  return v; }(),
+        std::vector<float>(N, 0.0f),    // all zeros
+    };
+
+    for (int iter = 0; iter < static_cast<int>(datasets.size()); ++iter) {
+        CudaBuffer<float> d_in(N);
+        d_in.upload(datasets[iter], stream);
+        stream.sync();
+
+        void*  d_comp  = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+
+        EXPECT_GT(comp_sz, 0u) << "Iteration " << iter << ": empty compressed output";
+
+        void*  d_dec  = nullptr;
+        size_t dec_sz = 0;
+        pipeline.decompress(nullptr, comp_sz, &d_dec, &dec_sz, stream);
+
+        ASSERT_NE(d_dec, nullptr) << "Iteration " << iter << ": null decompressed pointer";
+        ASSERT_EQ(dec_sz, in_bytes) << "Iteration " << iter << ": wrong decompressed size";
+
+        std::vector<float> h_recon(N);
+        FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+        cudaFree(d_dec);
+
+        float max_err = 0.0f;
+        for (size_t i = 0; i < N; i++)
+            max_err = std::max(max_err, std::abs(h_recon[i] - datasets[iter][i]));
+        EXPECT_LE(max_err, EB * 1.01f)
+            << "Iteration " << iter << ": max error " << max_err << " exceeds bound " << EB;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DIM4: addLorenzo() correctly forwards pipeline dims_ to stage config.
 //
 // Verifies that setDims() + addLorenzo() produces the same ndim() as manually

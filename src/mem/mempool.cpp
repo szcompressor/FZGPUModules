@@ -48,7 +48,22 @@ MemoryPool::MemoryPool(const MemoryPoolConfig& config)
 
 MemoryPool::~MemoryPool() {
     if (!initialized_) return;
-    
+
+    // Free any remaining stream-ordered allocations with cudaFreeAsync before
+    // destroying the pool.  cudaMemPoolDestroy hangs if live allocations exist.
+    // Use stream 0 and synchronize so all frees complete before the pool is torn down.
+    for (auto& [ptr, info] : allocations_) {
+        cudaFreeAsync(ptr, /*stream=*/0);
+    }
+    allocations_.clear();
+
+    for (auto& [ptr, info] : graph_allocations_) {
+        cudaFreeAsync(ptr, /*stream=*/0);
+    }
+    graph_allocations_.clear();
+
+    cudaDeviceSynchronize();  // drain stream 0 before pool destruction
+
     // Destroy memory pool
     if (mem_pool_) {
         cudaMemPoolDestroy(mem_pool_);

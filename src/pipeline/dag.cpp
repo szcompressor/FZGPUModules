@@ -52,6 +52,25 @@ CompressionDAG::CompressionDAG(MemoryPool* mem_pool, MemoryStrategy strategy)
 }
 
 CompressionDAG::~CompressionDAG() {
+    // Free all outstanding buffer allocations before the MemoryPool is destroyed.
+    //
+    // With PREALLOCATE, buffers are allocated once in preallocateBuffers() and
+    // intentionally kept alive across compress() calls (reset() skips freeing them).
+    // With MINIMAL/PIPELINE, any buffers still live here are edge-case leftovers.
+    // Either way we must cudaFreeAsync them before calling cudaMemPoolDestroy, otherwise
+    // the pool destructor will hang waiting for the stream-ordered allocations to be freed.
+    //
+    // Use stream 0 then synchronize so the frees complete before the pool is torn down.
+    for (auto& [buffer_id, buffer] : buffers_) {
+        if (buffer.is_allocated && !buffer.is_external && buffer.d_ptr) {
+            mem_pool_->free(buffer.d_ptr, /*stream=*/0);
+            buffer.is_allocated = false;
+            buffer.d_ptr = nullptr;
+        }
+    }
+    // Drain stream 0 so all cudaFreeAsync calls above complete before ~MemoryPool runs.
+    cudaDeviceSynchronize();
+
     // Clean up nodes
     for (auto* node : nodes_) {
         if (node->completion_event) {
@@ -497,19 +516,25 @@ void CompressionDAG::execute(cudaStream_t stream) {
 }
 
 void CompressionDAG::reset(cudaStream_t stream) {
-    // Free all non-persistent buffers
     for (auto& [buffer_id, buffer] : buffers_) {
-        if (buffer.is_allocated && !buffer.is_persistent && !buffer.is_external) {
-            if (buffer.d_ptr) {
-                mem_pool_->free(buffer.d_ptr, stream);
-                current_memory_usage_ -= buffer.allocated_size;
+        // PREALLOCATE: buffers are owned for the lifetime of the DAG (they were
+        // allocated once in preallocateBuffers() and execute() never re-allocates
+        // them).  Freeing them here would leave every stage with a dangling pointer
+        // on the next execute() call.  Skip the free; just restore the ref-count.
+        if (strategy_ != MemoryStrategy::PREALLOCATE) {
+            if (buffer.is_allocated && !buffer.is_persistent && !buffer.is_external) {
+                if (buffer.d_ptr) {
+                    mem_pool_->free(buffer.d_ptr, stream);
+                    current_memory_usage_ -= buffer.allocated_size;
+                }
+                buffer.is_allocated = false;
+                buffer.d_ptr = nullptr;
+                buffer.allocated_size = 0;
             }
-            buffer.is_allocated = false;
-            buffer.d_ptr = nullptr;
-            buffer.allocated_size = 0;
         }
-        
-        // Reset consumer count
+
+        // Always restore consumer ref-count so the next execute() pass can
+        // decrement it correctly.
         buffer.remaining_consumers = buffer.consumer_stage_ids.size();
     }
     
@@ -518,7 +543,9 @@ void CompressionDAG::reset(cudaStream_t stream) {
         node->is_executed = false;
     }
     
-    current_memory_usage_ = 0;
+    if (strategy_ != MemoryStrategy::PREALLOCATE) {
+        current_memory_usage_ = 0;
+    }
 }
 
 // ========== Buffer Management ==========

@@ -282,3 +282,94 @@ TEST(PipelineErrors, CompressDecompressCompressNoReset) {
         << "RC4: second-compress result max_err=" << max_err
         << " exceeds bound " << EB;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E9: compress() with a null device pointer in InputSpec → throws
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PipelineErrors, NullInputPointerThrows) {
+    constexpr size_t N        = 1024;
+    const size_t     in_bytes = N * sizeof(float);
+
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    p.finalize();
+
+    CudaStream stream;
+    void*  d_out  = nullptr;
+    size_t out_sz = 0;
+
+    // nullptr device pointer — the guard in compress() must reject this before
+    // anything hits the GPU.
+    EXPECT_THROW(
+        p.compress(nullptr, in_bytes, &d_out, &out_sz, stream),
+        std::runtime_error
+    ) << "Null device pointer in InputSpec should throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E10: compress() with data size larger than the finalize-time hint → throws
+//
+// The pipeline is built with a 1 KB hint, but compress() is called with 4 KB.
+// The guard must detect that buffer estimates from finalize() are stale and
+// reject the call before any GPU work begins.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PipelineErrors, InputSizeExceedsHintThrows) {
+    constexpr size_t HINT_BYTES  = 1024 * sizeof(float);
+    constexpr size_t LARGE_BYTES = 4096 * sizeof(float);
+
+    Pipeline p(HINT_BYTES, MemoryStrategy::MINIMAL);
+    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    p.finalize();
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(4096);
+    {
+        auto data = make_random_floats(4096, 7);
+        d_in.upload(data, stream);
+        stream.sync();
+    }
+
+    void*  d_out  = nullptr;
+    size_t out_sz = 0;
+    EXPECT_THROW(
+        p.compress(d_in.void_ptr(), LARGE_BYTES, &d_out, &out_sz, stream),
+        std::runtime_error
+    ) << "Data size exceeding finalize-time hint should throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E11: Buffer overwrite detection via enableBoundsCheck()
+//
+// OverreportingStage deliberately underestimates output size in
+// estimateOutputSizes() (returns N/2) but then reports N as its actual output
+// size via getActualOutputSizesByName().  With PREALLOCATE strategy the output
+// buffer is allocated at N/2 bytes upfront; when the stage claims to have
+// written N bytes the bounds-check logic in CompressionDAG::execute() must
+// throw "Buffer overwrite detected".
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PipelineErrors, BoundsCheckDetectsOverreport) {
+    constexpr size_t N        = 512;  // elements — divisible so N/2 is exact
+    const size_t     in_bytes = N * sizeof(float);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.addStage<OverreportingStage>();
+    p.enableBoundsCheck(true);
+    p.finalize();
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    {
+        auto data = make_random_floats(N, 13);
+        d_in.upload(data, stream);
+        stream.sync();
+    }
+
+    void*  d_out  = nullptr;
+    size_t out_sz = 0;
+    EXPECT_THROW(
+        p.compress(d_in.void_ptr(), in_bytes, &d_out, &out_sz, stream),
+        std::runtime_error
+    ) << "OverreportingStage should trigger bounds-check throw";
+}

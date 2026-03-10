@@ -279,4 +279,63 @@ private:
     size_t actual_output_size_;
 };
 
+/**
+ * Mock stage: underestimate output size but report a larger actual size.
+ *
+ * Used exclusively to test buffer-overwrite detection.  execute() only writes
+ * half the input to the output buffer (so no actual GPU memory is corrupted),
+ * but getActualOutputSizesByName() lies and reports the full input size.
+ * When the pipeline uses MemoryStrategy::PREALLOCATE (so the output buffer is
+ * allocated from the underestimated size) and bounds-checking is enabled,
+ * CompressionDAG::execute() should throw "Buffer overwrite detected".
+ */
+class OverreportingStage : public Stage {
+public:
+    OverreportingStage() : actual_reported_size_(0) {}
+
+    void execute(
+        cudaStream_t stream,
+        MemoryPool* pool,
+        const std::vector<void*>& inputs,
+        const std::vector<void*>& outputs,
+        const std::vector<size_t>& sizes
+    ) override {
+        (void)pool;
+        // Only copy half of the input so we don't overrun the allocated buffer,
+        // but claim we wrote the full input size.
+        size_t safe_write = sizes[0] / 2;
+        cudaMemcpyAsync(outputs[0], inputs[0], safe_write,
+                        cudaMemcpyDeviceToDevice, stream);
+        actual_reported_size_ = sizes[0];  // lie: report full input size
+    }
+
+    std::string getName()       const override { return "OverreportingStage"; }
+    size_t      getNumInputs()  const override { return 1; }
+    size_t      getNumOutputs() const override { return 1; }
+
+    std::vector<size_t> estimateOutputSizes(
+        const std::vector<size_t>& input_sizes
+    ) const override {
+        // Deliberately underestimate so the PREALLOCATE buffer is sized small.
+        return {input_sizes[0] / 2};
+    }
+
+    std::unordered_map<std::string, size_t>
+    getActualOutputSizesByName() const override {
+        return {{"output", actual_reported_size_}};  // inflated vs. allocated cap
+    }
+
+    uint16_t getStageTypeId() const override {
+        return static_cast<uint16_t>(StageType::PASSTHROUGH);
+    }
+
+    uint8_t getOutputDataType(size_t output_index) const override {
+        (void)output_index;
+        return static_cast<uint8_t>(DataType::UINT8);
+    }
+
+private:
+    size_t actual_reported_size_;
+};
+
 } // namespace fz
