@@ -14,7 +14,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
-set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for" FORCE)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
+endif()
 
 #####################
 ### WSL DETECTION ###
