@@ -29,7 +29,12 @@
 #include "log.h"
 
 // Real stages
-#include "encoders/diff/diff.h"    // Difference coding
-#include "encoders/RLE/rle.h"      // Run-length encoding
-#include "predictors/lorenzo/lorenzo.h"  // Lorenzo predictor
-#include "predictors/quantizer/quantizer.h"  // Direct-value quantizer
+#include "encoders/diff/diff.h"               // Difference coding
+#include "encoders/RLE/rle.h"                 // Run-length encoding
+#include "predictors/lorenzo/lorenzo.h"       // Lorenzo predictor
+#include "predictors/quantizer/quantizer.h"   // Direct-value quantizer
+#include "transforms/zigzag/zigzag_stage.h"      // Zigzag encode/decode stage
+#include "transforms/negabinary/negabinary.h"     // Negabinary utilities
+#include "transforms/negabinary/negabinary_stage.h" // NegabinaryStage
+#include "transforms/bitshuffle/bitshuffle_stage.h"   // BitshuffleStage
+#include "transforms/rze/rze_stage.h"                   // RZEStage

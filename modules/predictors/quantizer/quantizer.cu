@@ -1,5 +1,6 @@
 #include "predictors/quantizer/quantizer.h"
 #include "predictors/predictor_utils.cuh"
+#include "transforms/zigzag/zigzag.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <limits>
@@ -8,6 +9,7 @@
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
+#include <limits>
 
 namespace fz {
 
@@ -24,10 +26,11 @@ namespace fz {
  * round(value/step) = -quant_radius would require |value| = quant_radius * step,
  * which exceeds the outlier threshold anyway).
  */
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool ZigzagCodes = false>
 __global__ void quantizer_abs_fwd_kernel(
     const TInput* __restrict__ in, size_t n,
     TInput ebx2_r,          // 1 / (2 * abs_eb)
+    float  threshold,       // |x| >= threshold → forced outlier (pass inf to disable)
     TCode  quant_radius,
     TCode* __restrict__     codes,
     TInput* __restrict__    outlier_vals,
@@ -42,9 +45,15 @@ __global__ void quantizer_abs_fwd_kernel(
     // Round to nearest quantization bin (signed, centred at 0)
     int q = __float2int_rn((float)x * (float)ebx2_r);
 
-    // |q| < quant_radius means representable in TCode (two's-complement)
-    if (q > -(int)quant_radius && q < (int)quant_radius) {
-        codes[i] = static_cast<TCode>(q);   // signed stored as two's-complement in TCode
+    // |q| < quant_radius and |x| < threshold → representable
+    if (q > -(int)quant_radius && q < (int)quant_radius && fabsf((float)x) < threshold) {
+        if constexpr (ZigzagCodes) {
+            // Zigzag-encode: signed q → unsigned code clustering near 0
+            using SCode = typename std::make_signed<TCode>::type;
+            codes[i] = static_cast<TCode>(Zigzag<SCode>::encode(static_cast<SCode>(q)));
+        } else {
+            codes[i] = static_cast<TCode>(q);  // signed stored as two's-complement in TCode
+        }
     } else {
         // Outlier: code value doesn't matter — scatter_assign_kernel overwrites the
         // position with the true value.  Store 0 for consistency.
@@ -58,12 +67,52 @@ __global__ void quantizer_abs_fwd_kernel(
 }
 
 /**
+ * Forward ABS/NOA in-place outlier variant (LC-reference encoding style).
+ *
+ * Outliers (|bin| >= quant_radius  OR  |x| >= threshold) are stored as their
+ * raw IEEE-754 bit pattern directly in the codes array.  Valid codes are
+ * TCMS (zigzag) encoded so the inverse sentinel check (code >> 1) >= quant_radius
+ * is unambiguous:
+ *   - Valid TCMS codes are in [0, 2 * quant_radius)
+ *   - Normal float bits are always >= 0x00800000, which exceeds 2 * quant_radius
+ *     for all practical values (quant_radius <= 1 << 22).
+ *
+ * REQUIREMENT: sizeof(TCode) == sizeof(TInput)  (use float / uint32_t pair).
+ */
+template<typename TInput, typename TCode>
+__global__ void quantizer_abs_fwd_inplace_kernel(
+    const TInput* __restrict__ in, size_t n,
+    TInput ebx2_r,
+    float  threshold,
+    TCode  quant_radius,
+    TCode* __restrict__ codes
+) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    TInput x  = in[i];
+    float  fx = static_cast<float>(x);
+    int    q  = __float2int_rn(fx * static_cast<float>(ebx2_r));
+
+    if (q > -(int)quant_radius && q < (int)quant_radius && fabsf(fx) < threshold) {
+        // TCMS (zigzag) encode: valid codes are in [0, 2 * quant_radius)
+        uint32_t uq = static_cast<uint32_t>((q << 1) ^ (q >> 31));
+        codes[i] = static_cast<TCode>(uq);
+    } else {
+        // In-place outlier: store raw IEEE-754 bit pattern of x in codes[i]
+        TCode raw;
+        __builtin_memcpy(&raw, &x, sizeof(TCode));
+        codes[i] = raw;
+    }
+}
+
+/**
  * Inverse: quantization code → value (ABS/NOA modes).
  *
  * code = 0 means outlier — those positions are left as 0 (from the preceding
  * cudaMemset) and will be overwritten by scatter_assign_kernel.
  */
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool ZigzagCodes = false>
 __global__ void quantizer_abs_inv_kernel(
     const TCode* __restrict__ codes, size_t n,
     TInput ebx2,            // 2 * abs_eb
@@ -73,12 +122,49 @@ __global__ void quantizer_abs_inv_kernel(
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    // Reinterpret the unsigned code as signed two's-complement to recover q.
-    // Outlier positions will be overwritten by scatter_assign_kernel afterward,
-    // so whatever dequant writes there is harmless.
-    int q = static_cast<int>(
-        static_cast<typename std::make_signed<TCode>::type>(codes[i]));
+    int q;
+    if constexpr (ZigzagCodes) {
+        // Zigzag-decode: unsigned code → signed quantization index
+        using SCode = typename std::make_signed<TCode>::type;
+        q = static_cast<int>(Zigzag<SCode>::decode(codes[i]));
+    } else {
+        // Reinterpret the unsigned code as signed two's-complement to recover q.
+        // Outlier positions will be overwritten by scatter_assign_kernel afterward,
+        // so whatever dequant writes there is harmless.
+        q = static_cast<int>(static_cast<typename std::make_signed<TCode>::type>(codes[i]));
+    }
     out[i] = static_cast<TInput>(q) * ebx2;
+}
+
+/**
+ * Inverse ABS/NOA in-place outlier variant.
+ *
+ * Detects outliers via (code >> 1) >= quant_radius (provably safe — see
+ * quantizer_abs_fwd_inplace_kernel comment).  No scatter pass required.
+ * TCMS decode used for valid codes (requires zigzag encoding on forward pass).
+ */
+template<typename TInput, typename TCode>
+__global__ void quantizer_abs_inv_inplace_kernel(
+    const TCode* __restrict__ codes, size_t n,
+    TInput ebx2,
+    TCode  quant_radius,
+    TInput* __restrict__ out
+) {
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    TCode code = codes[i];
+    if ((code >> 1) >= quant_radius) {
+        // Outlier: reinterpret raw bits as TInput
+        TInput x;
+        __builtin_memcpy(&x, &code, sizeof(TInput));
+        out[i] = x;
+    } else {
+        // TCMS (zigzag) decode: even code → q = code/2, odd code → q = -(code+1)/2
+        int32_t c = static_cast<int32_t>(static_cast<uint32_t>(code));
+        int q = (c & 1) ? -((c + 1) >> 1) : (c >> 1);
+        out[i] = static_cast<TInput>(q) * ebx2;
+    }
 }
 
 // =============================================================================
@@ -150,6 +236,7 @@ __global__ void quantizer_rel_fwd_kernel(
     float log2eb_r,             // 1 / log2eb
     float one_plus_eb,          // 1 + epsilon
     float one_over_one_plus_eb, // 1 / (1 + epsilon)
+    float threshold,            // |x| >= threshold → forced outlier (pass inf to disable)
     TCode quant_radius,
     TCode* __restrict__    codes,
     TInput* __restrict__   outlier_vals,
@@ -161,6 +248,17 @@ __global__ void quantizer_rel_fwd_kernel(
     if (i >= n) return;
 
     float x = static_cast<float>(in[i]);
+
+    // ── Threshold check: force outlier if |x| >= threshold ─────────────────
+    if (fabsf(x) >= threshold) {
+        codes[i] = 0;
+        uint32_t slot = atomicAdd(outlier_count, 1u);
+        if (slot < static_cast<uint32_t>(max_outliers)) {
+            outlier_vals[slot] = in[i];
+            outlier_idxs[slot] = static_cast<uint32_t>(i);
+        }
+        return;
+    }
 
     // ── Special-case detection ──────────────────────────────────────────────
     // Zero, denormals (expo == 0), inf/NaN (expo == 255) → lossless outlier.
@@ -183,7 +281,12 @@ __global__ void quantizer_rel_fwd_kernel(
     bool  is_neg = (x < 0.0f);
     float abs_x  = is_neg ? -x : x;
 
-    float log_f  = log2approx(abs_x);
+    // Use hardware log2 (2 ULP error) instead of log2approx so that bin
+    // selection is accurate even for tight error bounds like 1e-3.
+    // log2approx has up to 0.086-bit error; for eb=1e-3, log2eb_r≈346, so
+    // the approximation error shifts the bin by ~30 positions and pushes
+    // ~7% of valid elements into the outlier path.
+    float log_f   = __log2f(abs_x);
     int   log_bin = __float2int_rn(log_f * log2eb_r);  // round to nearest bin
 
     uint32_t stored = pack_rel_code(log_bin, is_neg);
@@ -194,9 +297,12 @@ __global__ void quantizer_rel_fwd_kernel(
              && (stored <= static_cast<uint32_t>(std::numeric_limits<TCode>::max()));
 
     if (fits) {
-        // ── Verification: guard against fast-approx error ──────────────────
+        // ── Verification: check actual reconstruction is within error bound ─────
+        // Use __exp2f (hardware, ~2 ULP) instead of pow2approx: the linear
+        // 1+frac approximation has ~5% error at frac≈0.6, far exceeding
+        // the ±0.1% window at eb=1e-3.
         float log_recon = static_cast<float>(log_bin) * log2eb;
-        float abs_recon = pow2approx(log_recon);
+        float abs_recon = exp2f(log_recon);
         float lower     = abs_x * one_over_one_plus_eb;
         float upper     = abs_x * one_plus_eb;
 
@@ -239,7 +345,10 @@ __global__ void quantizer_rel_inv_kernel(
     int      abs_lb    = static_cast<int>(code_val >> 2);
     int      log_bin   = is_neg_lb ? -abs_lb : abs_lb;
 
-    float abs_recon = pow2approx(static_cast<float>(log_bin) * log2eb);
+    // Use __exp2f (hardware, ~2 ULP) for accurate reconstruction.
+    // pow2approx has ~5% error at fractional parts near 0.6, which exceeds
+    // even loose error bounds and corrupts the decompressed data.
+    float abs_recon = exp2f(static_cast<float>(log_bin) * log2eb);
     out[i] = static_cast<TInput>(is_neg_x ? -abs_recon : abs_recon);
 }
 
@@ -265,6 +374,7 @@ std::vector<size_t> QuantizerStage<TInput, TCode>::estimateOutputSizes(
         return {num_elements * sizeof(TInput)};
     }
     size_t n = input_sizes.empty() ? 0 : input_sizes[0] / sizeof(TInput);
+    if (isInplaceMode()) return {n * sizeof(TCode)};  // codes only, no scatter buffers
     size_t max_outliers = getMaxOutlierCount(n);
     return {
         n            * sizeof(TCode),    // codes
@@ -283,12 +393,15 @@ void QuantizerStage<TInput, TCode>::execute(
     const std::vector<size_t>& sizes
 ) {
     // =========================================================================
-    // DECOMPRESSION MODE — 4 inputs → 1 output
+    // DECOMPRESSION MODE — 4 inputs → 1 output (1 input in inplace mode)
     // =========================================================================
     if (is_inverse_) {
-        if (inputs.size() < 4 || outputs.empty() || sizes.size() < 4) {
+        const size_t expected_inputs = isInplaceMode() ? 1 : 4;
+        if (inputs.size() < expected_inputs || outputs.empty() || sizes.empty()) {
             throw std::runtime_error(
-                "QuantizerStage (inverse): requires 4 inputs and 1 output");
+                isInplaceMode()
+                    ? "QuantizerStage (inverse, inplace): requires 1 input and 1 output"
+                    : "QuantizerStage (inverse): requires 4 inputs and 1 output");
         }
 
         size_t num_elements = sizes[0] / sizeof(TCode);
@@ -297,11 +410,15 @@ void QuantizerStage<TInput, TCode>::execute(
             return;
         }
 
-        size_t max_outliers = sizes.size() > 1 ? sizes[1] / sizeof(TInput) : 0;
+        size_t max_outliers = (!isInplaceMode() && sizes.size() > 1)
+                              ? sizes[1] / sizeof(TInput) : 0;
 
-        // Zero output — outlier positions will be overwritten by scatter
-        FZ_CUDA_CHECK(cudaMemsetAsync(
-            outputs[0], 0, num_elements * sizeof(TInput), stream));
+        // Zero output for scatter-based path (outlier positions overwritten by scatter).
+        // In-place path writes every element directly — no memset needed.
+        if (!isInplaceMode()) {
+            FZ_CUDA_CHECK(cudaMemsetAsync(
+                outputs[0], 0, num_elements * sizeof(TInput), stream));
+        }
 
         constexpr int kBlock = 256;
         int grid = static_cast<int>((num_elements + kBlock - 1) / kBlock);
@@ -320,13 +437,34 @@ void QuantizerStage<TInput, TCode>::execute(
             // ABS / NOA inverse: dequantize with stored abs_eb
             TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
 
-            quantizer_abs_inv_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TCode*>(inputs[0]),
-                num_elements,
-                ebx2,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TInput*>(outputs[0])
-            );
+            if (isInplaceMode()) {
+                // In-place: every element is written directly (no scatter needed)
+                quantizer_abs_inv_inplace_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements, ebx2,
+                    static_cast<TCode>(config_.quant_radius),
+                    static_cast<TInput*>(outputs[0])
+                );
+                FZ_CUDA_CHECK(cudaGetLastError());
+                actual_output_sizes_ = {num_elements * sizeof(TInput)};
+                return;
+            }
+
+            if (config_.zigzag_codes) {
+                quantizer_abs_inv_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements, ebx2,
+                    static_cast<TCode>(config_.quant_radius),
+                    static_cast<TInput*>(outputs[0])
+                );
+            } else {
+                quantizer_abs_inv_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements, ebx2,
+                    static_cast<TCode>(config_.quant_radius),
+                    static_cast<TInput*>(outputs[0])
+                );
+            }
         }
 
         FZ_CUDA_CHECK(cudaGetLastError());
@@ -351,11 +489,16 @@ void QuantizerStage<TInput, TCode>::execute(
     }
 
     // =========================================================================
-    // COMPRESSION MODE — 1 input → 4 outputs
+    // COMPRESSION MODE — 1 input → 4 outputs  (or 1 in inplace mode)
     // =========================================================================
-    if (inputs.empty() || outputs.size() < 4 || sizes.empty()) {
-        throw std::runtime_error(
-            "QuantizerStage: requires 1 input and 4 outputs");
+    {
+        const size_t expected_outputs = isInplaceMode() ? 1 : 4;
+        if (inputs.empty() || outputs.size() < expected_outputs || sizes.empty()) {
+            throw std::runtime_error(
+                isInplaceMode()
+                    ? "QuantizerStage (inplace): requires 1 input and 1 output"
+                    : "QuantizerStage: requires 1 input and 4 outputs");
+        }
     }
 
     size_t input_size   = sizes[0];
@@ -365,12 +508,20 @@ void QuantizerStage<TInput, TCode>::execute(
     num_elements_ = num_elements;
 
     if (num_elements == 0) {
-        for (size_t j = 0; j < 4; j++) actual_output_sizes_[j] = 0;
+        if (isInplaceMode()) {
+            actual_output_sizes_ = {0};
+        } else {
+            for (size_t j = 0; j < 4; j++) actual_output_sizes_[j] = 0;
+        }
         actual_outlier_count_ = 0;
         return;
     }
 
-    FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream));
+    // Zero the outlier_count scalar so atomic increments start from 0.
+    // Not needed in inplace mode (no separate outlier counter buffer).
+    if (!isInplaceMode()) {
+        FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream));
+    }
 
     // ── Resolve absolute error bound ──────────────────────────────────────────
     if (config_.eb_mode == ErrorBoundMode::ABS) {
@@ -423,6 +574,7 @@ void QuantizerStage<TInput, TCode>::execute(
             static_cast<const TInput*>(inputs[0]),
             num_elements,
             log2eb, log2eb_r, opp_eb, oopp_eb,
+            config_.outlier_threshold,
             static_cast<TCode>(config_.quant_radius),
             static_cast<TCode*>(outputs[0]),
             static_cast<TInput*>(outputs[1]),
@@ -435,17 +587,53 @@ void QuantizerStage<TInput, TCode>::execute(
         TInput ebx2_r = static_cast<TInput>(1)
                         / (static_cast<TInput>(2) * computed_abs_eb_);
 
-        quantizer_abs_fwd_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-            static_cast<const TInput*>(inputs[0]),
-            num_elements,
-            ebx2_r,
-            static_cast<TCode>(config_.quant_radius),
-            static_cast<TCode*>(outputs[0]),
-            static_cast<TInput*>(outputs[1]),
-            static_cast<uint32_t*>(outputs[2]),
-            static_cast<uint32_t*>(outputs[3]),
-            max_outliers
-        );
+        if (isInplaceMode()) {
+            // In-place outlier encoding: raw float bits stored in codes array.
+            // Requires zigzag_codes=true and sizeof(TCode)==sizeof(TInput).
+            if (!config_.zigzag_codes)
+                throw std::runtime_error(
+                    "QuantizerStage: setInplaceOutliers(true) requires setZigzagCodes(true)");
+            if (sizeof(TCode) != sizeof(TInput))
+                throw std::runtime_error(
+                    "QuantizerStage: setInplaceOutliers(true) requires sizeof(TCode)==sizeof(TInput) "
+                    "(use QuantizerStage<float, uint32_t>)");
+
+            quantizer_abs_fwd_inplace_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements, ebx2_r,
+                config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0])
+            );
+            FZ_CUDA_CHECK(cudaGetLastError());
+            d_outlier_count_ptr_ = nullptr;
+            actual_output_sizes_ = {num_elements * sizeof(TCode)};
+            return;
+        }
+
+        if (config_.zigzag_codes) {
+            quantizer_abs_fwd_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements, ebx2_r, config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0]),
+                static_cast<TInput*>(outputs[1]),
+                static_cast<uint32_t*>(outputs[2]),
+                static_cast<uint32_t*>(outputs[3]),
+                max_outliers
+            );
+        } else {
+            quantizer_abs_fwd_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements, ebx2_r, config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0]),
+                static_cast<TInput*>(outputs[1]),
+                static_cast<uint32_t*>(outputs[2]),
+                static_cast<uint32_t*>(outputs[3]),
+                max_outliers
+            );
+        }
     }
 
     FZ_CUDA_CHECK(cudaGetLastError());
@@ -495,7 +683,10 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
     cfg.outlier_count    = actual_outlier_count_;
     cfg.input_type       = getInputDataType();
     cfg.code_type        = getCodeDataType();
-    cfg.eb_mode          = static_cast<uint8_t>(config_.eb_mode);
+    cfg.eb_mode           = static_cast<uint8_t>(config_.eb_mode);
+    cfg.zigzag_codes      = config_.zigzag_codes ? uint8_t{1} : uint8_t{0};
+    cfg.outlier_threshold = config_.outlier_threshold;
+    cfg.inplace_outliers  = config_.inplace_outliers ? uint8_t{1} : uint8_t{0};
 
     std::memcpy(buf, &cfg, sizeof(QuantizerConfig));
     return sizeof(QuantizerConfig);
@@ -505,19 +696,30 @@ template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::deserializeHeader(
     const uint8_t* buf, size_t size
 ) {
-    if (size < sizeof(QuantizerConfig))
+    // Accept both old (28-byte) and new (36-byte) header formats.
+    constexpr size_t kMinSize = 28;  // size before outlier_threshold/inplace_outliers fields
+    if (size < kMinSize)
         throw std::runtime_error("Invalid QuantizerConfig size");
 
     QuantizerConfig cfg;
-    std::memcpy(&cfg, buf, sizeof(QuantizerConfig));
+    std::memcpy(&cfg, buf, std::min(size, sizeof(QuantizerConfig)));
 
     config_.error_bound   = cfg.user_error_bound;
     config_.quant_radius  = static_cast<int>(cfg.quant_radius);
     config_.eb_mode       = static_cast<ErrorBoundMode>(cfg.eb_mode);
+    config_.zigzag_codes  = (cfg.zigzag_codes != 0);
     num_elements_         = cfg.num_elements;
     actual_outlier_count_ = cfg.outlier_count;
     computed_abs_eb_      = static_cast<TInput>(cfg.abs_error_bound);
     computed_value_base_  = cfg.value_base;
+    // New fields: default to safe values when reading old-format headers
+    if (size >= sizeof(QuantizerConfig)) {
+        config_.outlier_threshold = cfg.outlier_threshold;
+        config_.inplace_outliers  = (cfg.inplace_outliers != 0);
+    } else {
+        config_.outlier_threshold = std::numeric_limits<float>::infinity();
+        config_.inplace_outliers  = false;
+    }
 }
 
 // =============================================================================

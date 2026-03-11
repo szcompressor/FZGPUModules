@@ -6,6 +6,10 @@
 #include "encoders/RLE/rle.h"
 #include "predictors/lorenzo/lorenzo.h"
 #include "stage/mock_stages.h"
+#include "transforms/zigzag/zigzag_stage.h"
+#include "transforms/negabinary/negabinary_stage.h"
+#include "transforms/bitshuffle/bitshuffle_stage.h"
+#include "transforms/rze/rze_stage.h"
 
 #include <memory>
 #include <stdexcept>
@@ -59,10 +63,35 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
         }
 
         case StageType::DIFFERENCE: {
-            // Diff needs element type from config
-            if (config_size >= 1) {
-                DataType dt;
-                std::memcpy(&dt, config, sizeof(DataType));
+            // Header: [0] TIn DataType, [1] TOut DataType, [2..5] chunk_size.
+            // TIn == TOut → same-type (legacy); TIn signed + TOut unsigned → negabinary-fused.
+            if (config_size >= 2) {
+                DataType tin_dt  = static_cast<DataType>(config[0]);
+                DataType tout_dt = static_cast<DataType>(config[1]);
+                // Negabinary-fused instantiations
+                if      (tin_dt == DataType::INT8  && tout_dt == DataType::UINT8)
+                    stage = new DifferenceStage<int8_t,  uint8_t>();
+                else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16)
+                    stage = new DifferenceStage<int16_t, uint16_t>();
+                else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32)
+                    stage = new DifferenceStage<int32_t, uint32_t>();
+                else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64)
+                    stage = new DifferenceStage<int64_t, uint64_t>();
+                // Same-type instantiations
+                else if (tin_dt == DataType::FLOAT32)  stage = new DifferenceStage<float>();
+                else if (tin_dt == DataType::FLOAT64)  stage = new DifferenceStage<double>();
+                else if (tin_dt == DataType::UINT8)    stage = new DifferenceStage<uint8_t>();
+                else if (tin_dt == DataType::UINT16)   stage = new DifferenceStage<uint16_t>();
+                else if (tin_dt == DataType::UINT32)   stage = new DifferenceStage<uint32_t>();
+                else if (tin_dt == DataType::INT32)    stage = new DifferenceStage<int32_t>();
+                else if (tin_dt == DataType::INT64)    stage = new DifferenceStage<int64_t>();
+                else
+                    throw std::runtime_error("Unsupported Difference data type: "
+                        + std::to_string(static_cast<int>(tin_dt)));
+                stage->deserializeHeader(config, config_size);
+            } else if (config_size >= 1) {
+                // Legacy 1-byte header (same-type only)
+                DataType dt = static_cast<DataType>(config[0]);
                 switch (dt) {
                     case DataType::FLOAT32:  stage = new DifferenceStage<float>(); break;
                     case DataType::FLOAT64:  stage = new DifferenceStage<double>(); break;
@@ -75,9 +104,7 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
                         throw std::runtime_error("Unsupported Difference data type: "
                             + std::to_string(static_cast<int>(dt)));
                 }
-                stage->deserializeHeader(config, config_size);
             } else {
-                // No config — default to float
                 stage = new DifferenceStage<float>();
             }
             break;
@@ -107,6 +134,69 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
 
         case StageType::PASSTHROUGH: {
             stage = new PassThroughStage();
+            break;
+        }
+
+        case StageType::ZIGZAG: {
+            if (config_size >= 2) {
+                DataType tin_dt  = static_cast<DataType>(config[0]);
+                DataType tout_dt = static_cast<DataType>(config[1]);
+                if      (tin_dt == DataType::INT8  && tout_dt == DataType::UINT8)
+                    stage = new ZigzagStage<int8_t,  uint8_t>();
+                else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16)
+                    stage = new ZigzagStage<int16_t, uint16_t>();
+                else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32)
+                    stage = new ZigzagStage<int32_t, uint32_t>();
+                else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64)
+                    stage = new ZigzagStage<int64_t, uint64_t>();
+                else
+                    throw std::runtime_error(
+                        "Unsupported ZigzagStage type pair: TIn="
+                        + std::to_string(static_cast<int>(tin_dt))
+                        + " TOut=" + std::to_string(static_cast<int>(tout_dt)));
+            } else {
+                // Default: int32_t → uint32_t
+                stage = new ZigzagStage<int32_t, uint32_t>();
+            }
+            stage->deserializeHeader(config, config_size);
+            break;
+        }
+
+        case StageType::NEGABINARY: {
+            if (config_size >= 2) {
+                DataType tin_dt  = static_cast<DataType>(config[0]);
+                DataType tout_dt = static_cast<DataType>(config[1]);
+                if      (tin_dt == DataType::INT8  && tout_dt == DataType::UINT8)
+                    stage = new NegabinaryStage<int8_t,  uint8_t>();
+                else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16)
+                    stage = new NegabinaryStage<int16_t, uint16_t>();
+                else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32)
+                    stage = new NegabinaryStage<int32_t, uint32_t>();
+                else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64)
+                    stage = new NegabinaryStage<int64_t, uint64_t>();
+                else
+                    throw std::runtime_error(
+                        "Unsupported NegabinaryStage type pair: TIn="
+                        + std::to_string(static_cast<int>(tin_dt))
+                        + " TOut=" + std::to_string(static_cast<int>(tout_dt)));
+            } else {
+                stage = new NegabinaryStage<int32_t, uint32_t>();
+            }
+            stage->deserializeHeader(config, config_size);
+            break;
+        }
+
+        case StageType::BITSHUFFLE: {
+            auto* s = new BitshuffleStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::RZE: {
+            auto* s = new RZEStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
             break;
         }
 

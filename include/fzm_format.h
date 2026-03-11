@@ -54,7 +54,10 @@ enum class StageType : uint16_t {
     LORENZO_2D = 12,
     LORENZO_3D = 13,
     QUANTIZER = 14,
-    // Add more as needed
+    ZIGZAG     = 15,
+    NEGABINARY = 16,
+    BITSHUFFLE = 17,
+    RZE        = 18,
 };
 
 // ===== Data Type IDs =====
@@ -304,7 +307,11 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::BITPACK: return "BitPack";
         case StageType::SPLIT: return "Split";
         case StageType::MERGE: return "Merge";
-        case StageType::QUANTIZER: return "Quantizer";
+        case StageType::QUANTIZER:  return "Quantizer";
+        case StageType::ZIGZAG:     return "Zigzag";
+        case StageType::NEGABINARY: return "Negabinary";
+        case StageType::BITSHUFFLE: return "Bitshuffle";
+        case StageType::RZE:        return "RZE";
         default: return "Unknown";
     }
 }

@@ -103,3 +103,44 @@ fz_add_test(
     SOURCES test_file_io.cpp
     LIBS    fzgmod
 )
+
+# ─── Zigzag / TCMS transform utilities (host-side) ───────────────────────────
+fz_add_test(
+    NAME    test_zigzag
+    SOURCES test_zigzag.cpp
+    LIBS    fzgmod_compile_settings
+)
+
+# ─── Negabinary transform utilities (host-side) ───────────────────────────────
+fz_add_test(
+    NAME    test_negabinary
+    SOURCES test_negabinary.cpp
+    LIBS    fzgmod_compile_settings
+)
+
+# ─── ZigzagStage GPU round-trip ───────────────────────────────────────────────
+fz_add_test(
+    NAME    test_zigzag_stage
+    SOURCES test_zigzag_stage.cpp
+    LIBS    fzgmod_encoders fzgmod_mem
+)
+
+# ─── NegabinaryStage GPU round-trip ──────────────────────────────────────────
+fz_add_test(
+    NAME    test_negabinary_stage
+    SOURCES test_negabinary_stage.cpp
+    LIBS    fzgmod_encoders fzgmod_mem
+)
+
+# ─── BitshuffleStage GPU round-trip ──────────────────────────────────────────
+fz_add_test(
+    NAME    test_bitshuffle_stage
+    SOURCES test_bitshuffle_stage.cpp
+    LIBS    fzgmod_encoders fzgmod_mem
+)
+# ─── RZEStage GPU round-trip ─────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_rze_stage
+    SOURCES test_rze_stage.cpp
+    LIBS    fzgmod_encoders fzgmod_mem
+)

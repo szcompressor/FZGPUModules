@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace fz {
 
@@ -30,15 +31,20 @@ struct QuantizerConfig {
     DataType input_type;        // Original input type (1B)
     DataType code_type;         // Quantization code type (1B)
     uint8_t  eb_mode;           // ErrorBoundMode (1B)
-    uint8_t  reserved;          // Padding (1B)
+    uint8_t  zigzag_codes;      // 1 if ABS/NOA codes are zigzag-encoded, else 0 (1B)
+    float    outlier_threshold; // ABS/NOA: |x| >= threshold → forced outlier (4B; inf = disabled)
+    uint8_t  inplace_outliers;  // 1 if ABS/NOA encodes outliers in-place (no scatter buffers) (1B)
+    uint8_t  _pad[3];           // padding to keep struct naturally aligned (3B)
 
-    // Total: 28 bytes (fits easily in 128B stage_config)
+    // Total: 36 bytes (fits easily in 128B stage_config)
 
     QuantizerConfig()
         : abs_error_bound(0.0f), user_error_bound(0.0f), value_base(0.0f),
           quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
-          eb_mode(0), reserved(0) {}
+          eb_mode(0), zigzag_codes(0),
+          outlier_threshold(std::numeric_limits<float>::infinity()),
+          inplace_outliers(0), _pad{} {}
 };
 static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
               "QuantizerConfig must fit in FZM_STAGE_CONFIG_SIZE");
@@ -94,6 +100,21 @@ public:
         ErrorBoundMode eb_mode   = ErrorBoundMode::ABS;
         // Pre-computed value_base:  set to > 0 to skip the NOA data scan.
         float precomputed_value_base = 0.0f;
+        // When true, ABS/NOA quantization codes are zigzag-encoded before storage.
+        // Zigzag maps signed integers to unsigned: ..., -2→3, -1→1, 0→0, 1→2, 2→4, ...
+        // This improves compressibility when codes cluster near zero.
+        // Has no effect in REL mode (log-space codes are already unsigned).
+        bool zigzag_codes = false;
+        // ABS/NOA only: values with |x| >= outlier_threshold are always stored
+        // losslessly regardless of the bin check.  Matches the LC reference
+        // `threshold` parameter.  Default: infinity (disabled).
+        float outlier_threshold = std::numeric_limits<float>::infinity();
+        // ABS/NOA only: when true, outlier raw float bits are written in-place
+        // into the codes array (no separate outlier_vals/idxs/count buffers).
+        // The inverse reconstructs by checking (code >> 1) >= quant_radius.
+        // This matches the LC reference encoding and removes the scatter pass.
+        // Must NOT be used with REL mode.
+        bool inplace_outliers = false;
 
         Config() = default;
         Config(TInput eb, ErrorBoundMode mode = ErrorBoundMode::ABS,
@@ -118,11 +139,18 @@ public:
 
     std::string getName() const override { return "Quantizer"; }
 
-    size_t getNumInputs()  const override { return is_inverse_ ? 4 : 1; }
-    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 4; }
+    size_t getNumInputs() const override {
+        if (!is_inverse_) return 1;
+        return isInplaceMode() ? 1 : 4;
+    }
+    size_t getNumOutputs() const override {
+        if (is_inverse_) return 1;
+        return isInplaceMode() ? 1 : 4;
+    }
 
     std::vector<std::string> getOutputNames() const override {
         if (is_inverse_) return {"reconstructed"};
+        if (isInplaceMode()) return {"codes"};
         return {"codes", "outlier_vals", "outlier_idxs", "outlier_count"};
     }
 
@@ -147,6 +175,7 @@ public:
 
     uint8_t getOutputDataType(size_t output_index) const override {
         if (is_inverse_) return static_cast<uint8_t>(getInputDataType());
+        if (isInplaceMode()) return static_cast<uint8_t>(getCodeDataType()); // only codes
         switch (output_index) {
             case 0: return static_cast<uint8_t>(getCodeDataType());
             case 1: return static_cast<uint8_t>(getInputDataType());
@@ -167,11 +196,19 @@ public:
     void setOutlierCapacity(float c)         { config_.outlier_capacity = c; }
     void setErrorBoundMode(ErrorBoundMode m) { config_.eb_mode = m; }
     void setValueBase(float vb)              { config_.precomputed_value_base = vb; }
+    void setZigzagCodes(bool enable)         { config_.zigzag_codes = enable; }
+    /// ABS/NOA: |x| >= threshold → lossless outlier regardless of bin (LC reference parameter).
+    void setOutlierThreshold(float t)        { config_.outlier_threshold = t; }
+    /// ABS/NOA: encode outliers in-place (raw float bits in codes array; no scatter buffers).
+    void setInplaceOutliers(bool enable)     { config_.inplace_outliers = enable; }
 
-    TInput         getErrorBound()     const { return static_cast<TInput>(config_.error_bound); }
-    int            getQuantRadius()    const { return config_.quant_radius; }
-    ErrorBoundMode getErrorBoundMode() const { return config_.eb_mode; }
-    float          getValueBase()      const { return config_.precomputed_value_base; }
+    TInput         getErrorBound()        const { return static_cast<TInput>(config_.error_bound); }
+    int            getQuantRadius()       const { return config_.quant_radius; }
+    ErrorBoundMode getErrorBoundMode()    const { return config_.eb_mode; }
+    float          getValueBase()         const { return config_.precomputed_value_base; }
+    bool           getZigzagCodes()       const { return config_.zigzag_codes; }
+    float          getOutlierThreshold()  const { return config_.outlier_threshold; }
+    bool           getInplaceOutliers()   const { return config_.inplace_outliers; }
 
 private:
     Config config_;
@@ -182,6 +219,12 @@ private:
     TInput   computed_abs_eb_     = static_cast<TInput>(1e-4);
     float    computed_value_base_ = 0.0f;
     const void* d_outlier_count_ptr_ = nullptr;
+
+    // True when ABS/NOA in-place outlier encoding is active (no scatter buffers).
+    bool isInplaceMode() const {
+        return config_.inplace_outliers
+            && config_.eb_mode != ErrorBoundMode::REL;
+    }
 
     DataType getInputDataType() const {
         if (std::is_same<TInput, float>::value)  return DataType::FLOAT32;

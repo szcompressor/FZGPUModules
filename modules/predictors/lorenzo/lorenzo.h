@@ -64,14 +64,16 @@ struct LorenzoConfig {
     uint32_t dim_z;           // Z dimension length (1 for 1D/2D) (4B)
     float    user_eb;         // Original user-specified error bound (4B)
     float    value_base;      // value_range (NOA) or max(|data|) (REL) used in conversion (4B)
+    uint8_t  zigzag_codes;    // 1 if quantization codes are zigzag-encoded, else 0 (1B)
+    uint8_t  reserved[3];     // Reserved for future use, must be zero (3B)
 
-    // Total: 40 bytes (fits easily in 128B stage_config)
+    // Total: 44 bytes (fits easily in 128B stage_config)
 
     LorenzoConfig()
         : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           ndim(1), eb_mode(0), dim_x(0), dim_y(1), dim_z(1),
-          user_eb(0.0f), value_base(0.0f) {}
+          user_eb(0.0f), value_base(0.0f), zigzag_codes(0), reserved{0, 0, 0} {}
 };
 static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
@@ -112,8 +114,11 @@ public:
         // When 0 (default), execute() auto-computes it via a device scan.
         // Set to a positive value to skip the scan (e.g. when the caller
         // already knows value_range from a prior compression pass).
-        float precomputed_value_base = 0.0f;
-
+        float precomputed_value_base = 0.0f;        // When true, quantization codes are zigzag-encoded before storage.
+        // Zigzag maps signed integers to unsigned: ..., -2→3, -1→1, 0→0, 1→2, 2→4, ...
+        // This improves compressibility when codes cluster near zero.
+        // Only supported for 1-D Lorenzo; throws for 2-D or 3-D.
+        bool zigzag_codes = false;
         Config() = default;
         Config(TInput eb, TCode radius = 32768, float outlier_cap = 0.2f,
                std::array<size_t, 3> d = {0, 1, 1})
@@ -174,6 +179,7 @@ public:
     // Provide a pre-computed value_range (NOA) or max(|data|) (REL) to skip
     // the internal data scan during execute().  Pass 0 to re-enable auto-scan.
     void setValueBase(float value_base) { config_.precomputed_value_base = value_base; }
+    void setZigzagCodes(bool enable) { config_.zigzag_codes = enable; }
     void setDims(size_t x, size_t y = 1, size_t z = 1) { config_.dims = {x, y, z}; }
 
     TInput getErrorBound() const { return config_.error_bound; }
@@ -182,6 +188,7 @@ public:
     std::array<size_t, 3> getDims() const { return config_.dims; }
     ErrorBoundMode getErrorBoundMode() const { return config_.eb_mode; }
     float getValueBase() const { return config_.precomputed_value_base; }
+    bool  getZigzagCodes() const { return config_.zigzag_codes; }
 
     /// Returns the effective spatial dimensionality (1, 2, or 3).
     int ndim() const {
@@ -235,6 +242,8 @@ public:
         config.dim_z         = static_cast<uint32_t>(config_.dims[2]);
         config.user_eb       = static_cast<float>(config_.error_bound);  // original user-specified value
         config.value_base    = computed_value_base_;
+        config.zigzag_codes  = config_.zigzag_codes ? uint8_t{1} : uint8_t{0};
+        config.reserved[0]   = 0; config.reserved[1] = 0; config.reserved[2] = 0;
 
         std::memcpy(header_buffer, &config, sizeof(LorenzoConfig));
         return sizeof(LorenzoConfig);
@@ -261,8 +270,9 @@ public:
         config_.quant_radius = static_cast<TCode>(config.quant_radius);
         num_elements_        = config.num_elements;
         actual_outlier_count_= config.outlier_count;
-        // New fields: present only in headers written by this version or later.
-        if (size >= sizeof(LorenzoConfig)) {
+        // New fields: present only in headers written by v1+ (≥40B, added user_eb/value_base/eb_mode).
+        constexpr size_t kV1Size = 40;
+        if (size >= kV1Size) {
             config_.eb_mode                = static_cast<ErrorBoundMode>(config.eb_mode);
             config_.precomputed_value_base = config.value_base;
             computed_value_base_           = config.value_base;
@@ -270,6 +280,12 @@ public:
             config_.eb_mode                = ErrorBoundMode::ABS;
             config_.precomputed_value_base = 0.0f;
             computed_value_base_           = 0.0f;
+        }
+        // zigzag_codes field added in v2 (≥44B).
+        if (size >= sizeof(LorenzoConfig)) {
+            config_.zigzag_codes = (config.zigzag_codes != 0);
+        } else {
+            config_.zigzag_codes = false;
         }
 
         // Restore spatial dimensions; handle old (pre-dims) files gracefully
@@ -351,6 +367,7 @@ void launchLorenzoKernel(
     TCode* d_codes, TInput* d_outlier_errors,
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
     size_t max_outliers, int grid_size,
+    bool zigzag_codes,
     cudaStream_t stream
 );
 
@@ -362,6 +379,7 @@ void launchLorenzoInverseKernel(
     size_t n, size_t max_outliers,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
+    bool zigzag_codes,
     cudaStream_t stream, MemoryPool* pool
 );
 

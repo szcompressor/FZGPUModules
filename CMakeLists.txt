@@ -68,6 +68,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
+option(BUILD_EXAMPLES "Build example executables" OFF)
 option(BUILD_PROFILING "Build profiling target with NVTX3/nsys instrumentation" OFF)
 
 ################################
@@ -154,6 +155,10 @@ add_library(fzgmod_encoders
   modules/encoders/bitpacking/bitpacking.cu
   modules/encoders/diff/diff.cu
   modules/encoders/RLE/rle.cu
+  modules/transforms/zigzag/zigzag_stage.cu
+  modules/transforms/negabinary/negabinary_stage.cu
+  modules/transforms/bitshuffle/bitshuffle_stage.cu
+  modules/transforms/rze/rze_stage.cu
 )
 target_link_libraries(fzgmod_encoders
   PUBLIC
@@ -213,17 +218,31 @@ add_library(FZGMOD::fzgmod ALIAS fzgmod)
 ### EXECUTABLES ###
 ###################
 
-add_executable(fzgmod-bin examples/main.cpp)
-target_link_libraries(fzgmod-bin PRIVATE fzgmod)
-set_target_properties(fzgmod-bin PROPERTIES
-    OUTPUT_NAME fzgmod
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(BUILD_EXAMPLES)
+    add_executable(fzgmod-bin examples/main.cpp)
+    target_link_libraries(fzgmod-bin PRIVATE fzgmod)
+    set_target_properties(fzgmod-bin PROPERTIES
+        OUTPUT_NAME fzgmod
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# ── Standalone Lorenzo code-distribution analyser ─────────────────────────────
-add_executable(analyze_lorenzo examples/analyze_lorenzo.cpp)
-target_link_libraries(analyze_lorenzo PRIVATE fzgmod)
-set_target_properties(analyze_lorenzo PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    # ── Standalone Lorenzo code-distribution analyser ─────────────────────────────
+    add_executable(analyze_lorenzo examples/analyze_lorenzo.cpp)
+    target_link_libraries(analyze_lorenzo PRIVATE fzgmod)
+    set_target_properties(analyze_lorenzo PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # ── Full PFPL pipeline demonstration ──────────────────────────────────────────
+    add_executable(pfpl_example examples/pfpl_pipeline.cpp)
+    target_link_libraries(pfpl_example PRIVATE fzgmod)
+    set_target_properties(pfpl_example PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # ── Stage isolation diagnostic ─────────────────────────────────────────────
+    add_executable(test_quant_only examples/test_quant_only.cpp)
+    target_link_libraries(test_quant_only PRIVATE fzgmod)
+    set_target_properties(test_quant_only PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
 
 ######################
 ### PROFILING MODE ###
@@ -327,9 +346,11 @@ install(TARGETS
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-install(TARGETS fzgmod-bin
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+if(BUILD_EXAMPLES)
+  install(TARGETS fzgmod-bin
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+endif()
 
 install(
   EXPORT FZGPUModulesTargets
@@ -390,3 +411,5 @@ message(STATUS "FZGPUModules configuration complete")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
+message(STATUS "  Build examples: ${BUILD_EXAMPLES}")
+message(STATUS "  Build profiling: ${BUILD_PROFILING}")

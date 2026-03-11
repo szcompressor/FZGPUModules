@@ -134,6 +134,50 @@ inline std::vector<float> make_random_floats(size_t n, uint64_t seed = 42) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Generate a vector of N doubles in [-1, 1] with a deterministic seed.
+// ─────────────────────────────────────────────────────────────────────────────
+inline std::vector<double> make_random_doubles(size_t n, uint64_t seed = 42) {
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::vector<double> v(n);
+    for (auto& x : v) x = dist(rng);
+    return v;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Smooth sinusoidal float vector.
+//   freq      — angular frequency increment per element (radians per step)
+//   amplitude — peak value
+// ─────────────────────────────────────────────────────────────────────────────
+inline std::vector<float> make_sine_floats(size_t n,
+                                            float  freq      = 0.01f,
+                                            float  amplitude = 1.0f) {
+    std::vector<float> v(n);
+    for (size_t i = 0; i < n; i++)
+        v[i] = amplitude * std::sin(static_cast<float>(i) * freq);
+    return v;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Linear ramp: v[i] = i * scale.  Scale defaults to 1.0.
+// ─────────────────────────────────────────────────────────────────────────────
+template <typename T = float>
+inline std::vector<T> make_ramp(size_t n, T scale = T{1}) {
+    std::vector<T> v(n);
+    for (size_t i = 0; i < n; i++)
+        v[i] = static_cast<T>(i) * scale;
+    return v;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constant-fill: every element is val.
+// ─────────────────────────────────────────────────────────────────────────────
+template <typename T = float>
+inline std::vector<T> make_constant(size_t n, T val) {
+    return std::vector<T>(n, val);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Max absolute element-wise difference.
 // Asserts inside GTest if sizes differ.
 // ─────────────────────────────────────────────────────────────────────────────

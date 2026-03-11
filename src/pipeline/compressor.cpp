@@ -3,6 +3,7 @@
 #include "log.h"
 #include "cuda_check.h"
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 #include <algorithm>
 #include <cstdint>
@@ -24,6 +25,10 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       needs_concat_(false),
       input_size_(0),
       input_size_hint_(input_data_size),
+      input_alignment_bytes_(1),
+      d_pad_buf_(nullptr),
+      d_pad_buf_size_(0),
+      original_input_size_(0),
       dims_({0, 1, 1}) {
     
     // Create memory pool with configuration
@@ -39,6 +44,10 @@ Pipeline::~Pipeline() {
     if (d_concat_buffer_ && mem_pool_) {
         mem_pool_->free(d_concat_buffer_, 0);
         d_concat_buffer_ = nullptr;
+    }
+    if (d_pad_buf_) {
+        cudaFree(d_pad_buf_);
+        d_pad_buf_ = nullptr;
     }
 }
 
@@ -174,6 +183,34 @@ void Pipeline::finalize() {
     configureStreamsIfNeeded();
     
     dag_->finalize();
+
+    // ── Compute required input alignment ─────────────────────────────────────
+    // Walk all stages and take the LCM of their alignment requirements.
+    // Chunked stages (Bitshuffle, Difference, RZE) return their chunk size;
+    // other stages return 1 (no requirement).  compress() will transparently
+    // zero-pad the user's input to this boundary when needed.
+    // IMPORTANT: this must run BEFORE propagateBufferSizes() so that the
+    // rounded-up hint drives all downstream buffer size estimates.
+    {
+        size_t align = 1;
+        int chunked_count = 0;
+        for (const auto& stage_ptr : stages_) {
+            const size_t a = stage_ptr->getRequiredInputAlignment();
+            if (a > 1) { align = std::lcm(align, a); ++chunked_count; }
+        }
+        input_alignment_bytes_ = align;
+        if (align > 1) {
+            // Round up the buffer-sizing hint so that propagateBufferSizes()
+            // allocates intermediate buffers large enough for the padded input,
+            // and so the compress() guard check doesn't reject it.
+            input_size_hint_ = ((input_size_hint_ + align - 1) / align) * align;
+            FZ_LOG(INFO,
+                "Input alignment: %zu bytes (LCM of %d chunked stage(s)); "
+                "buffer hint rounded up to %zu bytes",
+                align, chunked_count, input_size_hint_);
+        }
+    }
+
     propagateBufferSizes();
 
     if (strategy_ == MemoryStrategy::PREALLOCATE) {
@@ -302,6 +339,32 @@ int Pipeline::autoDetectUnconnectedOutputs() {
                 
                 FZ_LOG(DEBUG, "Unconnected output -> pipeline output: %s.%s (buffer %d)",
                        stage->getName().c_str(), output_name.c_str(), buffer_id);
+            }
+        }
+
+        // Remove stale pre-allocated buffers for output indices that no longer
+        // exist (e.g. stage's getNumOutputs() decreased after addStage() due to
+        // a config change like setInplaceOutliers(true)).  These "zombie" buffers
+        // would otherwise appear in node->output_buffer_ids and confuse
+        // buildInverseDAG(), which expects every fwd output to be either an
+        // intermediate buffer (consumed by another stage) or a pipeline output.
+        {
+            std::vector<int> stale_indices;
+            for (const auto& [out_idx, buf_id] : node->output_index_to_buffer_id) {
+                if (static_cast<size_t>(out_idx) >= num_outputs)
+                    stale_indices.push_back(out_idx);
+            }
+            for (int out_idx : stale_indices) {
+                int buf_id = node->output_index_to_buffer_id.at(out_idx);
+                node->output_buffer_ids.erase(
+                    std::remove(node->output_buffer_ids.begin(),
+                                node->output_buffer_ids.end(), buf_id),
+                    node->output_buffer_ids.end());
+                node->output_index_to_buffer_id.erase(out_idx);
+                FZ_LOG(DEBUG,
+                    "autoDetect: removed stale output buf %d from stage '%s'"
+                    " (idx=%d >= num_outputs=%zu)",
+                    buf_id, stage->getName().c_str(), out_idx, num_outputs);
             }
         }
     }

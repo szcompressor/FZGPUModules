@@ -737,6 +737,18 @@ private:
     // Used by decompress()/decompressMulti() to size each inverse result buffer.
     std::vector<size_t> source_input_sizes_;
 
+    // Required input alignment in bytes, computed at finalize() as the LCM of
+    // getRequiredInputAlignment() across all stages.  compress() pads the input
+    // to this boundary transparently using d_pad_buf_.
+    size_t input_alignment_bytes_;
+    void*  d_pad_buf_;       ///< Lazily-allocated padding scratch buffer (GPU)
+    size_t d_pad_buf_size_;  ///< Current allocated size of d_pad_buf_
+
+    // When compress() transparently pads the input, this holds the original
+    // (unpadded) byte count.  decompress() uses it to trim the reported output
+    // size back to what the caller originally provided.  0 when no padding.
+    size_t original_input_size_;
+
     // Input size hint from constructor (for initial buffer estimation).
     // Applied to all sources that lack a per_source_hints_ entry.
     size_t input_size_hint_;

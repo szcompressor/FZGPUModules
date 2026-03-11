@@ -126,9 +126,7 @@ TEST(LorenzoStage, SmoothRoundTrip) {
 
     auto pool = make_test_pool(N * sizeof(float) * 20);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.05f) * 10.0f;
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
 
     // Forward
     LorenzoStage<float, uint16_t> fwd;
@@ -500,9 +498,7 @@ TEST(Lorenzo3DStage, LinearRampRoundTrip) {
 
     auto pool = make_test_pool(N * sizeof(float) * 20);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = static_cast<float>(i) * 0.001f;
+    auto h_input = make_ramp<float>(N, 0.001f);
 
     LorenzoStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
@@ -553,9 +549,7 @@ TEST(LorenzoNOA, SmoothRoundTrip) {
 
     auto pool = make_test_pool(N * sizeof(float) * 20);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.05f) * 10.0f;
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
 
     // Compute expected absolute bound on host for the EXPECT.
     float vmin = *std::min_element(h_input.begin(), h_input.end());
@@ -595,9 +589,7 @@ TEST(LorenzoNOA, SerializeDeserializeMode) {
     constexpr size_t N = 256;
     auto pool = make_test_pool(N * sizeof(float) * 20);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.05f) * 10.0f;
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
 
     LorenzoStage<float, uint16_t> src;
     src.setErrorBound(0.02f);
@@ -696,4 +688,344 @@ TEST(LorenzoDoubleStage, RoundTripWithinErrorBound) {
         EXPECT_LE(std::abs(h_out[i] - h_input[i]), EB * 1.01)
             << "Error exceeds bound at element " << i;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ZigzagCodes tests
+// These verify the setZigzagCodes(true) path of LorenzoStage:
+//   1. Round-trip reconstructs within the error bound.
+//   2. Round-trip result matches the non-zigzag path (same accuracy guarantee).
+//   3. The zigzag_codes flag is preserved through serializeHeader/deserializeHeader.
+//   4. Enabling zigzag on a 2D/3D stage throws at execute() time.
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(LorenzoZigzag, SmoothRoundTrip_1D) {
+    CudaStream stream;
+    constexpr size_t N  = 2048;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    // Forward with zigzag enabled
+    LorenzoStage<float, uint16_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.2f);
+    fwd.setZigzagCodes(true);
+    EXPECT_TRUE(fwd.getZigzagCodes());
+
+    auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, *pool);
+    EXPECT_GT(fwd_result.codes_bytes, 0u);
+
+    // Inverse: restore flag via header serialization
+    LorenzoStage<float, uint16_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    size_t cfg_sz = fwd.serializeHeader(0, cfg, sizeof(cfg));
+    inv.deserializeHeader(cfg, cfg_sz);
+    EXPECT_TRUE(inv.getZigzagCodes())
+        << "zigzag_codes flag must survive serializeHeader/deserializeHeader";
+
+    auto h_recon = run_lorenzo_inverse(inv, fwd_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "ZigzagCodes 1D round-trip max_err=" << max_err << " exceeds bound " << EB;
+}
+
+TEST(LorenzoZigzag, MatchesRegularRoundTrip) {
+    // Zigzag only changes the code representation; reconstruction quality must
+    // be identical to the non-zigzag path.
+    CudaStream stream;
+    constexpr size_t N  = 1024;
+    constexpr float  EB = 5e-3f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    auto h_input = make_sine_floats(N, 0.02f, 5.0f);  // cos-like smooth wave
+
+    auto run_and_reconstruct = [&](bool use_zigzag) {
+        LorenzoStage<float, uint16_t> fwd;
+        fwd.setErrorBound(EB);
+        fwd.setQuantRadius(512);
+        fwd.setOutlierCapacity(0.2f);
+        fwd.setZigzagCodes(use_zigzag);
+
+        auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, *pool);
+
+        LorenzoStage<float, uint16_t> inv;
+        inv.setInverse(true);
+        uint8_t cfg[128] = {};
+        inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+        return run_lorenzo_inverse(inv, fwd_result, N, stream, *pool);
+    };
+
+    auto h_no_zz   = run_and_reconstruct(false);
+    auto h_with_zz = run_and_reconstruct(true);
+
+    ASSERT_EQ(h_no_zz.size(), N);
+    ASSERT_EQ(h_with_zz.size(), N);
+
+    float max_diff = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_diff = std::max(max_diff, std::abs(h_no_zz[i] - h_with_zz[i]));
+    EXPECT_LE(max_diff, EB * 0.01f)
+        << "Zigzag and non-zigzag paths should produce identical reconstructions; "
+        << "max_diff=" << max_diff;
+}
+
+TEST(LorenzoZigzag, HeaderSerialization) {
+    // Verify that zigzag_codes=true survives a full header round-trip and that
+    // zigzag_codes=false also round-trips correctly (no cross-contamination).
+    LorenzoStage<float, uint16_t> src_on;
+    src_on.setErrorBound(1e-3f);
+    src_on.setQuantRadius(512);
+    src_on.setZigzagCodes(true);
+
+    LorenzoStage<float, uint16_t> src_off;
+    src_off.setErrorBound(1e-3f);
+    src_off.setQuantRadius(512);
+    src_off.setZigzagCodes(false);
+
+    uint8_t buf_on[128]  = {};
+    uint8_t buf_off[128] = {};
+    size_t sz_on  = src_on.serializeHeader(0, buf_on,  sizeof(buf_on));
+    size_t sz_off = src_off.serializeHeader(0, buf_off, sizeof(buf_off));
+
+    EXPECT_EQ(sz_on,  sizeof(LorenzoConfig));
+    EXPECT_EQ(sz_off, sizeof(LorenzoConfig));
+
+    LorenzoStage<float, uint16_t> dst_on, dst_off;
+    dst_on.setInverse(true);
+    dst_off.setInverse(true);
+    dst_on.deserializeHeader(buf_on,   sz_on);
+    dst_off.deserializeHeader(buf_off, sz_off);
+
+    EXPECT_TRUE(dst_on.getZigzagCodes())
+        << "zigzag_codes=true was not recovered after serialization";
+    EXPECT_FALSE(dst_off.getZigzagCodes())
+        << "zigzag_codes=false was not recovered after serialization";
+}
+
+TEST(LorenzoZigzag, ThrowsFor2D) {
+    // execute() must throw when zigzag_codes=true and ndim()==2.
+    CudaStream stream;
+    constexpr size_t NX = 32, NY = 32;
+    constexpr size_t N  = NX * NY;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    std::vector<float> h_input(N, 1.0f);
+
+    LorenzoStage<float, uint16_t> fwd;
+    fwd.setErrorBound(1e-2f);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.2f);
+    fwd.setDims(NX, NY);
+    fwd.setZigzagCodes(true);
+
+    EXPECT_THROW(run_lorenzo_forward(fwd, h_input, stream, *pool),
+                 std::runtime_error)
+        << "LorenzoStage should throw when zigzag_codes=true and ndim()==2";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Templated helper: run a full forward→inverse round-trip for any (TInput, TCode)
+// combination.  Returns max-absolute reconstruction error.
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename TInput, typename TCode>
+static double run_typed_roundtrip(
+    LorenzoStage<TInput, TCode>& fwd,
+    const std::vector<TInput>&   h_input,
+    cudaStream_t                 stream,
+    fz::MemoryPool&              pool)
+{
+    size_t n        = h_input.size();
+    size_t in_bytes = n * sizeof(TInput);
+
+    CudaBuffer<TInput> d_in(n);
+    d_in.upload(h_input, stream);
+
+    auto est = fwd.estimateOutputSizes({in_bytes});
+
+    CudaBuffer<uint8_t> d_codes  (est[0]);
+    CudaBuffer<uint8_t> d_errors (est[1]);
+    CudaBuffer<uint8_t> d_indices(est[2]);
+    CudaBuffer<uint8_t> d_count  (est[3]);
+
+    std::vector<void*>  fi = {d_in.void_ptr()};
+    std::vector<void*>  fo = {d_codes.void_ptr(), d_errors.void_ptr(),
+                               d_indices.void_ptr(), d_count.void_ptr()};
+    std::vector<size_t> fs = {in_bytes};
+    fwd.execute(stream, &pool, fi, fo, fs);
+    cudaStreamSynchronize(stream);
+    fwd.postStreamSync(stream);
+
+    auto actual = fwd.getActualOutputSizesByName();
+    size_t cb = actual.count("codes")           ? actual.at("codes")           : est[0];
+    size_t eb = actual.count("outlier_errors")  ? actual.at("outlier_errors")  : est[1];
+    size_t ib = actual.count("outlier_indices") ? actual.at("outlier_indices") : est[2];
+    size_t kb = actual.count("outlier_count")   ? actual.at("outlier_count")   : est[3];
+
+    LorenzoStage<TInput, TCode> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+    CudaBuffer<TInput> d_out(n);
+    std::vector<void*>  ii = {d_codes.void_ptr(), d_errors.void_ptr(),
+                               d_indices.void_ptr(), d_count.void_ptr()};
+    std::vector<void*>  io = {d_out.void_ptr()};
+    std::vector<size_t> is = {cb, eb, ib, kb};
+    inv.execute(stream, &pool, ii, io, is);
+    cudaStreamSynchronize(stream);
+
+    auto h_recon = d_out.download(stream);
+    double max_err = 0.0;
+    for (size_t i = 0; i < n; i++) {
+        double e = std::abs(static_cast<double>(h_recon[i]) -
+                            static_cast<double>(h_input[i]));
+        if (e > max_err) max_err = e;
+    }
+    return max_err;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  LorenzoTypeMatrix — tests all four (TInput, TCode) instantiations
+//
+//  The existing LorenzoStage / LorenzoDoubleStage suites only exercise
+//  float/uint16_t.  These tests verify that every instantiation in the .cu
+//  file actually works correctly end-to-end.
+//
+//  Instantiations covered:
+//    LorenzoStage<float,  uint16_t>  — already tested above (regression guard)
+//    LorenzoStage<float,  uint8_t>   — NEW: narrow 8-bit code type
+//    LorenzoStage<double, uint16_t>  — NEW: double-precision input
+//    LorenzoStage<double, uint32_t>  — NEW: double-precision with wide codes
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Smooth sinusoidal regression guard — same type as existing suite
+TEST(LorenzoTypeMatrix, FloatUint16_RoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 2048;
+    constexpr double EB = 1e-2;
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    auto h_in = make_sine_floats(N, 0.05f, 10.0f);
+
+    LorenzoStage<float, uint16_t> fwd;
+    fwd.setErrorBound(static_cast<float>(EB));
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.1f);
+
+    double max_err = run_typed_roundtrip(fwd, h_in, stream, *pool);
+    EXPECT_LE(max_err, EB + 1e-9)
+        << "float/uint16 round-trip max error=" << max_err;
+}
+
+// 8-bit code type: range is ±128 so EB must be generous relative to signal
+TEST(LorenzoTypeMatrix, FloatUint8_RoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 2048;
+    constexpr float  EB = 0.5f;   // wide bound to stay inside uint8 range
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    // Constant ramp — prediction residuals ≈ 0, so very few outliers even
+    // with the narrow uint8_t code range.
+    auto h_in = make_ramp<float>(N, 1.0f);
+
+    LorenzoStage<float, uint8_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setQuantRadius(64);     // 64 * 2 * EB = 64 steps → easily fits uint8
+    fwd.setOutlierCapacity(0.2f);
+
+    double max_err = run_typed_roundtrip(fwd, h_in, stream, *pool);
+    EXPECT_LE(max_err, static_cast<double>(EB) + 1e-6)
+        << "float/uint8 round-trip max error=" << max_err;
+}
+
+// Double-precision input with uint16_t code type
+TEST(LorenzoTypeMatrix, DoubleUint16_RoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 2048;
+    constexpr double EB = 1e-6;   // tight bound to exercise double precision
+    auto pool = make_test_pool(N * sizeof(double) * 20);
+
+    std::vector<double> h_in(N);
+    for (size_t i = 0; i < N; i++)
+        h_in[i] = std::sin(static_cast<double>(i) * 0.05) * 1e-3;
+
+    LorenzoStage<double, uint16_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.1);
+
+    double max_err = run_typed_roundtrip(fwd, h_in, stream, *pool);
+    EXPECT_LE(max_err, EB + 1e-15)
+        << "double/uint16 round-trip max error=" << max_err;
+}
+
+// Double-precision input with wide uint32_t code type
+TEST(LorenzoTypeMatrix, DoubleUint32_RoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 2048;
+    constexpr double EB = 1e-8;
+    auto pool = make_test_pool(N * sizeof(double) * 20);
+
+    std::vector<double> h_in(N);
+    for (size_t i = 0; i < N; i++)
+        h_in[i] = std::cos(static_cast<double>(i) * 0.03) * 1e-4;
+
+    LorenzoStage<double, uint32_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setQuantRadius(65536);
+    fwd.setOutlierCapacity(0.1);
+
+    double max_err = run_typed_roundtrip(fwd, h_in, stream, *pool);
+    EXPECT_LE(max_err, EB + 1e-18)
+        << "double/uint32 round-trip max error=" << max_err;
+}
+
+// Header survives serialization for the double/uint32_t combination
+TEST(LorenzoTypeMatrix, DoubleUint32_HeaderRoundTrip) {
+    CudaStream stream;
+    constexpr size_t N = 1024;
+    auto pool = make_test_pool(N * sizeof(double) * 20);
+
+    // Run execute() so computed_abs_eb_ / quant_radius are populated.
+    std::vector<double> h_in(N);
+    for (size_t i = 0; i < N; i++) h_in[i] = std::cos(static_cast<double>(i) * 0.03) * 1e-4;
+
+    LorenzoStage<double, uint32_t> src;
+    src.setErrorBound(1e-8);
+    src.setQuantRadius(65536);
+    src.setOutlierCapacity(0.1);
+    src.setZigzagCodes(false);
+
+    // Forward pass to populate internal state before serialization.
+    run_typed_roundtrip(src, h_in, stream, *pool);   // warms up computed fields
+
+    uint8_t buf[128] = {};
+    size_t sz = src.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(sz, sizeof(LorenzoConfig));
+
+    LorenzoStage<double, uint32_t> dst;
+    dst.setInverse(true);
+    dst.deserializeHeader(buf, sz);
+
+    // After round-trip: quant_radius and zigzag_codes must match exactly.
+    EXPECT_EQ(dst.getQuantRadius(), static_cast<uint32_t>(65536))
+        << "double/uint32 quant_radius not recovered from header";
+    EXPECT_FALSE(dst.getZigzagCodes())
+        << "double/uint32 zigzag_codes not recovered from header";
+    // The serialized error_bound is the computed abs bound, which for ABS mode
+    // equals setErrorBound value.  It is stored as float, so compare at float precision.
+    EXPECT_NEAR(static_cast<float>(dst.getErrorBound()), 1e-8f, 1e-8f * 2e-7f)
+        << "double/uint32 error_bound not recovered from header";
 }

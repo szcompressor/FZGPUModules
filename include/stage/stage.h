@@ -53,7 +53,15 @@ public:
      * Get expected number of output buffers
      */
     virtual size_t getNumOutputs() const = 0;
-    
+
+    /**
+     * Minimum input size alignment in bytes required by this stage.
+     * Chunked stages return their chunk size; the Pipeline uses the LCM of all
+     * stage alignments at finalize() to transparently zero-pad the input.
+     * Default: 1 (no alignment requirement).
+     */
+    virtual size_t getRequiredInputAlignment() const { return 1; }
+
     /**
      * Get names of all outputs (in order)
      * 

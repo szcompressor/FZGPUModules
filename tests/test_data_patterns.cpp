@@ -111,9 +111,7 @@ TEST(DataPatterns, LinearRamp) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = static_cast<float>(i) * 0.001f;  // ramp in [0, ~16]
+    auto h_input = make_ramp<float>(N, 0.001f);  // ramp in [0, ~16]
 
     float max_err = run_pattern(h_input, EB);
     EXPECT_LE(max_err, EB * 1.01f)
@@ -172,9 +170,7 @@ TEST(DataPatterns, FourMillionFloats) {
     constexpr size_t N  = 1 << 22;  // 4 M
     constexpr float  EB = 1e-2f;
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.001f) * 50.0f;
+    auto h_input = make_sine_floats(N, 0.001f, 50.0f);
 
     float max_err = run_pattern(h_input, EB);
     EXPECT_LE(max_err, EB * 1.01f)
@@ -192,9 +188,7 @@ TEST(DataPatterns, TightErrorBound) {
 
     // Data in [-1, 1]; per-step prediction error ~ 0.05 * amplitude = 0.05
     // Quantization radius 32768 * 1e-5 = 0.33 covers typical errors → codes path
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.05f);  // range [-1, 1]
+    auto h_input = make_sine_floats(N, 0.05f);  // range [-1, 1]
 
     // outlier_capacity=0.5f to handle any that escape the quantizer
     float max_err = run_pattern(h_input, EB, 32768, 0.5f);
@@ -211,9 +205,7 @@ TEST(DataPatterns, LooseErrorBound) {
     constexpr float  EB  = 10.0f;
     constexpr float  EB_tight = 1e-2f;
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f;
+    auto h_input = make_sine_floats(N, 0.01f, 50.0f);
 
     size_t comp_sz_loose = 0, comp_sz_tight = 0;
     float  max_err_loose = run_pattern(h_input, EB, 512, 0.2f, &comp_sz_loose);

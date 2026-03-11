@@ -236,8 +236,35 @@ void Pipeline::compress(
             "Pipeline has " + std::to_string(input_nodes_.size()) +
             " source stages; use compress(const std::vector<InputSpec>&) for multi-source pipelines");
     }
-    compress({InputSpec{input_nodes_[0]->stage, d_input, input_size}},
+
+    // Transparently pad the input to the required chunk boundary.
+    const void* d_source  = d_input;
+    size_t      source_sz = input_size;
+    original_input_size_ = 0;  // reset: no padding applied yet
+    if (input_alignment_bytes_ > 1 && input_size % input_alignment_bytes_ != 0) {
+        const size_t padded = ((input_size + input_alignment_bytes_ - 1)
+                               / input_alignment_bytes_) * input_alignment_bytes_;
+        if (padded > d_pad_buf_size_) {
+            if (d_pad_buf_) cudaFree(d_pad_buf_);
+            FZ_CUDA_CHECK(cudaMalloc(&d_pad_buf_, padded));
+            d_pad_buf_size_ = padded;
+        }
+        FZ_CUDA_CHECK(cudaMemcpy(d_pad_buf_, d_input, input_size, cudaMemcpyDeviceToDevice));
+        FZ_CUDA_CHECK(cudaMemset(static_cast<uint8_t*>(d_pad_buf_) + input_size,
+                                 0, padded - input_size));
+        FZ_LOG(INFO,
+            "Input padded: %zu \u2192 %zu bytes (+%zu bytes for %zu-byte chunk alignment)",
+            input_size, padded, padded - input_size, input_alignment_bytes_);
+        d_source  = d_pad_buf_;
+        source_sz = padded;
+        original_input_size_ = input_size;  // remember for decompress() trimming
+    }
+
+    compress({InputSpec{input_nodes_[0]->stage, d_source, source_sz}},
              d_output, output_size, stream);
+    // source_input_sizes_[0] is left as source_sz (padded) so decompressMulti()
+    // allocates buffers large enough for the inverse pass to write into.
+    // The caller-visible size is trimmed back in decompress() using original_input_size_.
 }
 
 // ========== In-Memory Decompression ==========
@@ -429,6 +456,11 @@ void Pipeline::decompress(
         // Single-source — return raw buffer directly (backward compatible).
         *d_output    = results[0].first;
         *output_size = results[0].second;
+        // If compress() transparently padded the input, trim the reported output
+        // size back to the original (unpadded) byte count.  The tail bytes
+        // (zero-padded) are harmless but should not be visible to the caller.
+        if (original_input_size_ > 0 && *output_size > original_input_size_)
+            *output_size = original_input_size_;
     } else {
         // Multi-source — concatenate in the same format as compress() multi-output:
         //   [num_bufs:u32][size1:u64][data1][size2:u64][data2]...

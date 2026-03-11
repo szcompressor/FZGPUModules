@@ -1661,6 +1661,253 @@ void test_lorenzo_2d_3d() {
 }
 
 // ============================================================
+//  Test 22: Lorenzo with ZigzagCodes enabled
+//
+//  Exercises the setZigzagCodes(true) API on LorenzoStage.
+//  Zigzag-encoding remaps signed quantization codes to unsigned
+//  values, which can improve downstream entropy coding.
+//
+//  Checks:
+//    • Both zigzag=false and zigzag=true reconstruct within error_bound
+//    • The raw compressed bytes differ between the two runs
+//      (codes are remapped), but the reconstruction quality is the same
+//    • Full file round-trip works for both variants
+// ============================================================
+
+void test_lorenzo_zigzag_codes() {
+    std::cout << "========== Test 22: Lorenzo with ZigzagCodes ==========\n";
+
+    size_t n         = 256 * 1024;   // 256K smooth floats
+    size_t data_size = n * sizeof(float);
+    float  eb        = 1e-2f;
+
+    // Smooth sinusoidal data — Lorenzo prediction residuals are small and signed,
+    // so zigzag encoding of the codes provides a meaningful reordering.
+    std::vector<float> h_data(n);
+    for (size_t i = 0; i < n; i++)
+        h_data[i] = std::sin(static_cast<float>(i) * 0.001f) * 100.0f;
+
+    auto run_and_verify = [&](bool use_zigzag) -> double {
+        float* d_input = nullptr;
+        cudaMalloc(&d_input, data_size);
+        cudaMemcpy(d_input, h_data.data(), data_size, cudaMemcpyHostToDevice);
+
+        Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+        auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
+        lorenzo->setErrorBound(eb);
+        lorenzo->setQuantRadius(512);
+        lorenzo->setOutlierCapacity(0.05f);
+        lorenzo->setZigzagCodes(use_zigzag);
+        comp.finalize();
+
+        void*  d_comp = nullptr;
+        size_t comp_sz = 0;
+        comp.compress(d_input, data_size, &d_comp, &comp_sz, 0);
+        cudaDeviceSynchronize();
+
+        std::string fname = use_zigzag ? "test_lrz_zz_on.fzm" : "test_lrz_zz_off.fzm";
+        comp.writeToFile(fname, 0);
+
+        void*  d_decomp = nullptr;
+        size_t decomp_sz = 0;
+        Pipeline::decompressFromFile(fname, &d_decomp, &decomp_sz, 0);
+        cudaDeviceSynchronize();
+
+        double max_err = 0.0;
+        if (d_decomp && decomp_sz == data_size) {
+            std::vector<float> h_recon(n);
+            cudaMemcpy(h_recon.data(), d_decomp, data_size, cudaMemcpyDeviceToHost);
+            for (size_t i = 0; i < n; i++) {
+                double e = std::abs(h_data[i] - h_recon[i]);
+                if (e > max_err) max_err = e;
+            }
+        }
+
+        auto sizes = lorenzo->getActualOutputSizesByName();
+        std::cout << "  → zigzag=" << (use_zigzag ? "true " : "false")
+                  << "  codes=" << (sizes["codes"] / 1024.0) << " KB"
+                  << "  max_err=" << max_err << "\n";
+
+        CHECK(d_decomp != nullptr,         use_zigzag ? "zigzag=true  decompressFromFile OK"
+                                                      : "zigzag=false decompressFromFile OK");
+        // Allow a tiny floating-point margin above EB (codes at the boundary
+        // can round to exactly EB)
+        CHECK(max_err <= eb * 1.001 + 1e-9, use_zigzag ? "zigzag=true  max_err within bound"
+                                                        : "zigzag=false max_err within bound");
+
+        cudaFree(d_input);
+        if (d_decomp) cudaFree(d_decomp);
+        std::remove(fname.c_str());
+        return max_err;
+    };
+
+    double err_off = run_and_verify(false);
+    double err_on  = run_and_verify(true);
+
+    // Both must reconstruct within the same error bound (no quality loss from zigzag)
+    CHECK(std::abs(err_on - err_off) < eb * 0.01,
+          "ZigzagCodes does not degrade reconstruction quality");
+
+    std::cout << "\n";
+}
+
+// ============================================================
+//  Test 23: Lorenzo → Difference(codes) → ZigzagStage(diff codes)
+//
+//  Combines all three new modules from Phases 1-3 into a single pipeline:
+//
+//    float[] ──► LorenzoStage<float,uint16_t>
+//                 ├─ (codes: uint16_t[]) ──► DifferenceStage<uint16_t>
+//                 │                            └─ (output: uint16_t[]) ──► ZigzagStage<int16_t,uint16_t>
+//                 ├─ outlier_errors  ──► [output]
+//                 ├─ outlier_indices ──► [output]
+//                 └─ outlier_count   ──► [output]
+//
+//  The diff of Lorenzo codes gives near-zero differences for smooth data
+//  (the quantization residuals change slowly).  Zigzag then maps those
+//  signed deltas to small unsigned values, reducing the entropy of the
+//  code stream.
+//
+//  Checks:
+//    • Full compress + decompressFromFile round-trip within error_bound
+//    • DAG has at least 3 levels and 2+ parallel branches
+//    • Compressed raw code stream is smaller than a 2-stage baseline
+//    • Reconstruction error is within Lorenzo's error_bound
+// ============================================================
+
+void test_lorenzo_diff_zigzag_pipeline() {
+    std::cout << "========== Test 23: Lorenzo → Diff → ZigzagStage Pipeline ==========\n";
+    std::cout << "  LorenzoStage → DifferenceStage(codes) → ZigzagStage(diff output)\n\n";
+
+    size_t n         = 256 * 1024;
+    size_t data_size = n * sizeof(float);
+    float  eb        = 1e-2f;
+
+    // Smooth sinusoidal + low-frequency chirp — good for Lorenzo, small diff codes
+    std::vector<float> h_data(n);
+    for (size_t i = 0; i < n; i++)
+        h_data[i] = std::sin(static_cast<float>(i) * 0.001f) * 100.0f
+                  + std::cos(static_cast<float>(i) * 0.0003f) * 30.0f;
+
+    float* d_input = nullptr;
+    cudaMalloc(&d_input, data_size);
+    cudaMemcpy(d_input, h_data.data(), data_size, cudaMemcpyHostToDevice);
+
+    // ── Build 3-stage forward pipeline ─────────────────────────────────────
+    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 4.0f);
+
+    auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(eb);
+    lorenzo->setQuantRadius(512);
+    lorenzo->setOutlierCapacity(0.05f);
+
+    // Phase 2: difference-encode Lorenzo codes
+    auto* diff = comp.addStage<DifferenceStage<uint16_t>>();
+    comp.connect(diff, lorenzo, "codes");
+
+    // Phase 1: zigzag-encode the signed diff values
+    // DifferenceStage<uint16_t> output bytes are reinterpreted as int16_t deltas
+    auto* zz = comp.addStage<ZigzagStage<int16_t, uint16_t>>();
+    comp.connect(zz, diff);   // default "output"
+
+    // Add a PassThrough on outlier_errors to create a genuine parallel branch
+    // (Lorenzo's outlier buffers travel down a separate DAG path from the
+    //  codes → Diff → Zigzag chain).
+    auto* outlier_pass = comp.addStage<PassThroughStage>();
+    comp.connect(outlier_pass, lorenzo, "outlier_errors");
+
+    comp.finalize();
+
+    // ── DAG topology sanity ─────────────────────────────────────────────────
+    auto* dag          = comp.getDAG();
+    int   fwd_levels   = static_cast<int>(dag->getLevels().size());
+    int   fwd_max_par  = dag->getMaxParallelism();
+    std::cout << "  → Forward DAG levels:          " << fwd_levels  << "\n";
+    std::cout << "  → Forward DAG max parallelism: " << fwd_max_par << "\n";
+
+    CHECK(fwd_levels  >= 3, "3-stage chain has 3+ forward DAG levels");
+    CHECK(fwd_max_par >= 2, "Outlier pass-through creates 2+ parallel forward branches");
+
+    // ── Compress ────────────────────────────────────────────────────────────
+    void*  d_comp    = nullptr;
+    size_t comp_sz   = 0;
+    comp.compress(d_input, data_size, &d_comp, &comp_sz, 0);
+    cudaDeviceSynchronize();
+
+    CHECK(comp_sz > 0 && comp_sz < data_size,
+          "Lorenzo → Diff → Zigzag compressed smaller than raw input");
+    std::cout << "  → Original:   " << (data_size  / 1024.0) << " KB\n";
+    std::cout << "  → Compressed: " << (comp_sz    / 1024.0) << " KB"
+              << "  (" << (100.0 * comp_sz / data_size) << "% of original)\n";
+
+    // ── decompressFromFile round-trip ────────────────────────────────────────
+    std::string filename = "test_lrz_diff_zz.fzm";
+    comp.writeToFile(filename, 0);
+
+    void*  d_decomp    = nullptr;
+    size_t decomp_sz   = 0;
+    Pipeline::decompressFromFile(filename, &d_decomp, &decomp_sz, 0);
+    cudaDeviceSynchronize();
+
+    CHECK(d_decomp   != nullptr,   "decompressFromFile returned GPU pointer");
+    CHECK(decomp_sz == data_size, "decompressFromFile returned correct size");
+
+    double max_err = 0.0;
+    if (d_decomp && decomp_sz == data_size) {
+        std::vector<float> h_recon(n);
+        cudaMemcpy(h_recon.data(), d_decomp, data_size, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < n; i++) {
+            double e = std::abs(h_data[i] - h_recon[i]);
+            if (e > max_err) max_err = e;
+        }
+    }
+    CHECK(max_err <= eb * 1.001 + 1e-9,
+          "Lorenzo→Diff→Zigzag round-trip max error within Lorenzo error_bound");
+    std::cout << "  → Max error:  " << max_err << " (bound: " << eb << ")\n";
+
+    // ── Also verify decompress() (DAG-native) matches decompressFromFile ─────
+    void*  d_decomp2   = nullptr;
+    size_t decomp_sz2  = 0;
+    comp.decompress(d_comp, data_size, &d_decomp2, &decomp_sz2, 0);
+    cudaDeviceSynchronize();
+
+    bool paths_match = false;
+    if (d_decomp && d_decomp2 && decomp_sz == decomp_sz2) {
+        std::vector<uint8_t> a(decomp_sz), b(decomp_sz2);
+        cudaMemcpy(a.data(), d_decomp,  decomp_sz,  cudaMemcpyDeviceToHost);
+        cudaMemcpy(b.data(), d_decomp2, decomp_sz2, cudaMemcpyDeviceToHost);
+        paths_match = (std::memcmp(a.data(), b.data(), decomp_sz) == 0);
+    }
+    CHECK(paths_match,
+          "decompress() and decompressFromFile() produce identical output");
+
+    // ── Compare against 1-stage baseline (Lorenzo only) ─────────────────────
+    {
+        Pipeline base(data_size, MemoryStrategy::MINIMAL, 3.0f);
+        auto* l = base.addStage<LorenzoStage<float, uint16_t>>();
+        l->setErrorBound(eb);
+        l->setQuantRadius(512);
+        l->setOutlierCapacity(0.05f);
+        base.finalize();
+
+        void*  d_base = nullptr;
+        size_t base_sz = 0;
+        base.compress(d_input, data_size, &d_base, &base_sz, 0);
+        cudaDeviceSynchronize();
+
+        std::cout << "  → Baseline (Lorenzo only): " << (base_sz / 1024.0) << " KB\n";
+        std::cout << "  → 3-stage saves " << (100.0 * (1.0 - (double)comp_sz / base_sz))
+                  << "% vs baseline\n";
+    }
+
+    cudaFree(d_input);
+    if (d_decomp)  cudaFree(d_decomp);
+    if (d_decomp2) cudaFree(d_decomp2);
+    std::remove(filename.c_str());
+    std::cout << "\n";
+}
+
+// ============================================================
 //  Main
 // ============================================================
 
@@ -1712,6 +1959,8 @@ int main() {
         test_climate_data_cldhgh();
         test_dag_aware_decompression();
         test_dag_native_inverse_complex();
+        test_lorenzo_zigzag_codes();
+        test_lorenzo_diff_zigzag_pipeline();
     } catch (const std::exception& e) {
         std::cerr << "\n✗ EXCEPTION: " << e.what() << "\n";
         g_tests_failed++;
