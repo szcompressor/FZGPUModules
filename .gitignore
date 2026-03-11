@@ -10,3 +10,4 @@ temp/
 *.fzmodules
 docs/
 *.nsys-rep
+load-env

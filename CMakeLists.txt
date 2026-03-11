@@ -326,6 +326,15 @@ if(BUILD_PROFILING)
     if(NVTX3_INCLUDE_DIR)
         target_include_directories(fzgmod-profile-repeat PRIVATE ${NVTX3_INCLUDE_DIR})
     endif()
+
+    # ── PFPL pipeline profiling example ──────────────────────────────────────
+    # Build:  cmake --build build --target pfpl_example  (with -DBUILD_PROFILING=ON)
+    # Run:    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
+    #              -o pfpl_profile ./build/bin/pfpl_example 1e-3
+    #         nsys-ui pfpl_profile.nsys-rep
+    if(NVTX3_INCLUDE_DIR)
+        target_include_directories(pfpl_example PRIVATE ${NVTX3_INCLUDE_DIR})
+    endif()
 endif()
 
 ####################

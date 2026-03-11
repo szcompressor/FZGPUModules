@@ -33,12 +33,25 @@
  *     recursively. All-zero or near-zero chunks reduce to a tiny bitmap + header.
  *
  * Usage:
- *   ./build/bin/pfpl_example [error_bound]
+ *   ./build/bin/pfpl_example [error_bound [mode [threshold]]]
  *   ./build/bin/pfpl_example 1e-3
+ *
+ * Profiling (requires -DBUILD_PROFILING=ON):
+ *   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
+ *        -o pfpl_profile ./build/bin/pfpl_example 1e-3
+ *   nsys-ui pfpl_profile.nsys-rep
+ *
+ * The initial compress + decompress + quality check run as the warm-up pass
+ * (outside the cudaProfilerApi capture range).  Only the throughput benchmark
+ * runs are captured, each labelled as an NVTX range bench::compress::<N>.
  */
 
 #include "fzgpumodules.h"
 #include "pipeline/stat.h"
+#ifdef FZ_PROFILING_ENABLED
+#include <cuda_profiler_api.h>
+#include <nvtx3/nvtx3.hpp>
+#endif
 
 #include <cmath>
 #include <algorithm>
@@ -283,23 +296,33 @@ int main(int argc, char* argv[]) {
     build_pfpl_pipeline(comp, eb, mode, threshold);
     comp.enableProfiling(true);
 
-    // ── Compress ──────────────────────────────────────────────────────────
+    // ── Compress (warm-up — outside profiler capture range) ─────────────────
     std::cout << "── Compress ──────────────────────────────────────────────\n";
     void*  d_compressed  = nullptr;
     size_t compressed_sz = 0;
-    comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, /*stream=*/0);
-    cudaDeviceSynchronize();
+    {
+#ifdef FZ_PROFILING_ENABLED
+        nvtx3::scoped_range warmup_compress{"warmup::compress"};
+#endif
+        comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, /*stream=*/0);
+        cudaDeviceSynchronize();
+    }
     print_compression_stats(data_bytes, compressed_sz);
     std::cout << "\n";
     comp.getLastPerfResult().print(std::cout);
 
-    // ── Decompress ────────────────────────────────────────────────────────
+    // ── Decompress (warm-up — outside profiler capture range) ───────────────
     std::cout << "\n── Decompress ────────────────────────────────────────────\n";
     void*  d_reconstructed  = nullptr;
     size_t reconstructed_sz = 0;
-    comp.decompress(d_compressed, compressed_sz,
-                    &d_reconstructed, &reconstructed_sz, /*stream=*/0);
-    cudaDeviceSynchronize();
+    {
+#ifdef FZ_PROFILING_ENABLED
+        nvtx3::scoped_range warmup_decompress{"warmup::decompress"};
+#endif
+        comp.decompress(d_compressed, compressed_sz,
+                        &d_reconstructed, &reconstructed_sz, /*stream=*/0);
+        cudaDeviceSynchronize();
+    }
     std::cout << "  Reconstructed: " << std::fixed << std::setprecision(2)
               << reconstructed_sz / (1024.0 * 1024.0) << " MB\n\n";
     comp.getLastPerfResult().print(std::cout);
@@ -329,6 +352,12 @@ int main(int argc, char* argv[]) {
     // The pipeline 'comp' was built with MemoryStrategy::PREALLOCATE, so all GPU
     // buffers are already resident.  Re-running compress() repeatedly measures
     // steady-state kernel throughput without any allocation overhead.
+    //
+    // nsys capture range covers only this benchmark section; warm-up runs above
+    // are excluded so the profiler timeline shows only steady-state behaviour.
+#ifdef FZ_PROFILING_ENABLED
+    cudaProfilerStart();
+#endif
     {
         using Clock = std::chrono::high_resolution_clock;
         static constexpr int BENCH_RUNS = 5;
@@ -344,6 +373,10 @@ int main(int argc, char* argv[]) {
             void*  d_bench_out  = nullptr;
             size_t bench_out_sz = 0;
 
+#ifdef FZ_PROFILING_ENABLED
+            const std::string range_name = "bench::compress::" + std::to_string(i + 1);
+            nvtx3::scoped_range bench_range{range_name.c_str()};
+#endif
             auto t0 = Clock::now();
             comp.compress(d_input, data_bytes, &d_bench_out, &bench_out_sz, /*stream=*/0);
             cudaDeviceSynchronize();
@@ -391,6 +424,9 @@ int main(int argc, char* argv[]) {
                   << "  Throughput (dag  mean): " << std::setw(6)
                   << tput(static_cast<double>(mean_d)) << " GB/s\n";
     }
+#ifdef FZ_PROFILING_ENABLED
+    cudaProfilerStop();
+#endif
     // ── Cleanup ───────────────────────────────────────────────────────────
     if (d_reconstructed) cudaFree(d_reconstructed);
     cudaFree(d_input);
