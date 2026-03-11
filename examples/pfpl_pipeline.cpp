@@ -41,12 +41,14 @@
 #include "pipeline/stat.h"
 
 #include <cmath>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -322,7 +324,73 @@ int main(int argc, char* argv[]) {
     // All modes are enforced by the quantizer; we just sanity-check PSNR here.
     const bool ok = (stats.psnr > 20.0);
     std::cout << "\n  Status: " << (ok ? "PASS" : "WARN (low PSNR)") << "\n";
+    // ── Throughput benchmark (PREALLOCATE, 5 runs) ──────────────
+    //
+    // The pipeline 'comp' was built with MemoryStrategy::PREALLOCATE, so all GPU
+    // buffers are already resident.  Re-running compress() repeatedly measures
+    // steady-state kernel throughput without any allocation overhead.
+    {
+        using Clock = std::chrono::high_resolution_clock;
+        static constexpr int BENCH_RUNS = 5;
 
+        std::cout << "\n── Throughput benchmark (PREALLOCATE, " << BENCH_RUNS << " runs) ───────────\n";
+
+        std::vector<double> host_ms_v;
+        std::vector<float>  dag_ms_v;
+        host_ms_v.reserve(BENCH_RUNS);
+        dag_ms_v.reserve(BENCH_RUNS);
+
+        for (int i = 0; i < BENCH_RUNS; ++i) {
+            void*  d_bench_out  = nullptr;
+            size_t bench_out_sz = 0;
+
+            auto t0 = Clock::now();
+            comp.compress(d_input, data_bytes, &d_bench_out, &bench_out_sz, /*stream=*/0);
+            cudaDeviceSynchronize();
+            auto t1 = Clock::now();
+
+            const double hms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const float  dms = comp.getLastPerfResult().dag_elapsed_ms;
+
+            host_ms_v.push_back(hms);
+            dag_ms_v.push_back(dms);
+
+            const float host_gbs = static_cast<float>(data_bytes) / (hms * 1e-3) / 1e9f;
+            const float dag_gbs  = static_cast<float>(data_bytes) / (dms * 1e-3f) / 1e9f;
+
+            std::cout << std::fixed
+                      << "  run " << std::setw(2) << (i + 1) << ":  "
+                      << "host " << std::setw(8) << std::setprecision(3) << hms << " ms  "
+                      << std::setw(7) << std::setprecision(2) << host_gbs << " GB/s   "
+                      << "dag " << std::setw(8) << std::setprecision(3) << dms << " ms  "
+                      << std::setw(7) << std::setprecision(2) << dag_gbs  << " GB/s\n";
+        }
+
+        // Summary
+        const double mean_h = std::accumulate(host_ms_v.begin(), host_ms_v.end(), 0.0) / BENCH_RUNS;
+        const float  mean_d = std::accumulate(dag_ms_v.begin(),  dag_ms_v.end(),  0.0f) / BENCH_RUNS;
+        const double min_h  = *std::min_element(host_ms_v.begin(), host_ms_v.end());
+        const float  min_d  = *std::min_element(dag_ms_v.begin(),  dag_ms_v.end());
+        const double max_h  = *std::max_element(host_ms_v.begin(), host_ms_v.end());
+        const float  max_d  = *std::max_element(dag_ms_v.begin(),  dag_ms_v.end());
+
+        const auto tput = [&](double ms) {
+            return static_cast<float>(data_bytes) / (ms * 1e-3) / 1e9f;
+        };
+
+        std::cout << std::fixed
+                  << "  ──────────────────────────────────────────────────────────\n"
+                  << "  host   mean=" << std::setw(8) << std::setprecision(3) << mean_h << " ms  "
+                  << "min=" << std::setw(8) << min_h << " ms  "
+                  << "max=" << std::setw(8) << max_h << " ms\n"
+                  << "  dag    mean=" << std::setw(8) << mean_d << " ms  "
+                  << "min=" << std::setw(8) << min_d << " ms  "
+                  << "max=" << std::setw(8) << max_d << " ms\n"
+                  << "  Throughput (host mean): " << std::setw(6) << std::setprecision(2)
+                  << tput(mean_h) << " GB/s\n"
+                  << "  Throughput (dag  mean): " << std::setw(6)
+                  << tput(static_cast<double>(mean_d)) << " GB/s\n";
+    }
     // ── Cleanup ───────────────────────────────────────────────────────────
     if (d_reconstructed) cudaFree(d_reconstructed);
     cudaFree(d_input);
