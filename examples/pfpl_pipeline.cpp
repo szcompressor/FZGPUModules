@@ -191,6 +191,10 @@ int main(int argc, char* argv[]) {
     void*  d_compressed  = nullptr;
     size_t compressed_sz = 0;
 
+#ifdef FZ_PROFILING_ENABLED
+    cudaProfilerStart();
+#endif
+
     comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
     cudaDeviceSynchronize();
 
@@ -198,10 +202,7 @@ int main(int argc, char* argv[]) {
     std::vector<float> dag_ms_v;
     host_ms_v.reserve(static_cast<size_t>(runs));
     dag_ms_v.reserve(static_cast<size_t>(runs));
-
-#ifdef FZ_PROFILING_ENABLED
-    cudaProfilerStart();
-#endif
+    bool printed_first_run_library_report = false;
 
     for (int i = 0; i < runs; ++i) {
 #ifdef FZ_PROFILING_ENABLED
@@ -225,6 +226,12 @@ int main(int argc, char* argv[]) {
 
         const double hms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         const float  dms = comp.getLastPerfResult().dag_elapsed_ms;
+
+        if (!printed_first_run_library_report) {
+            std::cout << "\n── Library profiling report (run 1, post-warmup) ───────────────\n";
+            comp.getLastPerfResult().print(std::cout);
+            printed_first_run_library_report = true;
+        }
 
         host_ms_v.push_back(hms);
         dag_ms_v.push_back(dms);

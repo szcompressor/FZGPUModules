@@ -12,7 +12,7 @@ namespace fz {
 
 float StageTimingResult::throughput_gbs() const noexcept {
     if (elapsed_ms <= 0.0f) return 0.0f;
-    return static_cast<float>(input_bytes + output_bytes) / (elapsed_ms * 1e-3f) / 1e9f;
+    return static_cast<float>(input_bytes) / (elapsed_ms * 1e-3f) / 1e9f;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ void PipelinePerfResult::print(std::ostream& os) const {
            << std::setw(13) << "Elapsed(ms)"
            << std::setw(12) << "Input(KB)"
            << std::setw(12) << "Output(KB)"
-           << std::setw(11) << "GB/s(R+W)" << "\n";
+              << std::setw(11) << "GB/s(In)" << "\n";
         os << "    " << std::string(name_w + 55, '-') << "\n";
 
         for (const auto& st : stages) {

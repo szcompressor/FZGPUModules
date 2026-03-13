@@ -460,6 +460,72 @@ TEST(Pipeline, RepeatedCompressPreallocateSameData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: repeated compress+decompress on the same input produces identical
+// reconstructed output across runs.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, RepeatedCompressDecompressStableOutput) {
+    CudaStream stream;
+    constexpr size_t N      = 1 << 14;
+    constexpr float  EB     = 1e-2f;
+    constexpr int    N_RUNS = 3;
+
+    auto h_input = make_smooth_data(N);
+    size_t in_bytes = N * sizeof(float);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
+
+    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lorenzo->setErrorBound(EB);
+    lorenzo->setQuantRadius(512);
+    lorenzo->setOutlierCapacity(0.2f);
+
+    auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
+    pipeline.connect(diff, lorenzo, "codes");
+
+    pipeline.finalize();
+
+    std::vector<float> baseline_recon;
+    baseline_recon.reserve(N);
+
+    for (int iter = 0; iter < N_RUNS; ++iter) {
+        void*  d_comp  = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        EXPECT_GT(comp_sz, 0u) << "Iteration " << iter << ": empty compressed output";
+
+        void*  d_dec  = nullptr;
+        size_t dec_sz = 0;
+        pipeline.decompress(nullptr, comp_sz, &d_dec, &dec_sz, stream);
+
+        ASSERT_NE(d_dec, nullptr) << "Iteration " << iter << ": null decompressed pointer";
+        ASSERT_EQ(dec_sz, in_bytes) << "Iteration " << iter << ": wrong decompressed size";
+
+        std::vector<float> h_recon(N);
+        FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+        cudaFree(d_dec);
+
+        float max_err = 0.0f;
+        for (size_t i = 0; i < N; i++)
+            max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+        EXPECT_LE(max_err, EB * 1.01f)
+            << "Iteration " << iter << ": max error " << max_err << " exceeds bound " << EB;
+
+        if (iter == 0) {
+            baseline_recon = h_recon;
+        } else {
+            for (size_t i = 0; i < N; ++i) {
+                EXPECT_FLOAT_EQ(h_recon[i], baseline_recon[i])
+                    << "Mismatch at iteration " << iter << ", index " << i;
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test: PREALLOCATE pipeline reused with different data on each call.
 //
 // Ensures that no stale compressed state from one iteration bleeds into the

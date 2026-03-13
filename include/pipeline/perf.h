@@ -27,7 +27,7 @@ struct StageTimingResult {
     size_t      input_bytes;  ///< Total bytes across all input buffers
     size_t      output_bytes; ///< Total bytes across all output buffers
 
-    /// Combined read+write throughput in GB/s (uses elapsed_ms, not host time).
+    /// Input throughput in GB/s (input_bytes / elapsed_ms, not host time).
     float throughput_gbs() const noexcept;
 };
 
