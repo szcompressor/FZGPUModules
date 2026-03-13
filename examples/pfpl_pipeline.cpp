@@ -184,7 +184,7 @@ int main(int argc, char* argv[]) {
     }
     std::cout << std::fixed << "\n";
 
-    Pipeline comp(data_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
+    Pipeline comp(data_bytes, MemoryStrategy::PREALLOCATE, 5.0f);
     build_pfpl_pipeline(comp, eb, mode, threshold);
     comp.enableProfiling(true);
 
