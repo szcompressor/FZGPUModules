@@ -209,12 +209,6 @@ static void build_pfpl_pipeline(Pipeline& p, float eb, ErrorBoundMode mode = Err
     p.connect(bitshuffle, diff);
 
     // ── Stage 4: RZE (4-level recursive zero-byte elimination) ────────────
-    // Each 16 KB chunk is processed independently by one CUDA block.
-    // Round 1: build 2048-byte bitmap of non-zero bytes, emit non-zero bytes.
-    // Round 2: apply same to the 2048-byte bitmap → 256-byte bitmap + non-zeros.
-    // Round 3: 256 → 32-byte bitmap.
-    // Round 4: 32 → 4-byte bitmap (stored raw, no further recursion).
-    // All-zero chunks produce a 2-byte sentinel (very high compression).
     auto* rze = p.addStage<RZEStage>();
     rze->setChunkSize(CHUNK);
     rze->setLevels(4);
@@ -307,6 +301,12 @@ int main(int argc, char* argv[]) {
         comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, /*stream=*/0);
         cudaDeviceSynchronize();
     }
+    
+    // Create copy to check for buffer mutation.
+    float* d_input_copy = nullptr;
+    cudaMalloc(&d_input_copy, data_bytes);
+    cudaMemcpy(d_input_copy, d_input, data_bytes, cudaMemcpyDeviceToDevice);
+    
     print_compression_stats(data_bytes, compressed_sz);
     std::cout << "\n";
     comp.getLastPerfResult().print(std::cout);
@@ -382,6 +382,19 @@ int main(int argc, char* argv[]) {
             cudaDeviceSynchronize();
             auto t1 = Clock::now();
 
+            void* d_reconstructed_bench = nullptr;
+            size_t reconstructed_sz_bench = 0;
+            comp.decompress(d_bench_out, bench_out_sz, &d_reconstructed_bench, &reconstructed_sz_bench, 0);
+            cudaDeviceSynchronize();
+
+            (void)calculateStatistics<float>(
+                d_input_copy,
+                static_cast<const float*>(d_reconstructed_bench),
+                n
+            );
+
+            cudaFree(d_reconstructed_bench);
+
             const double hms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             const float  dms = comp.getLastPerfResult().dag_elapsed_ms;
 
@@ -430,6 +443,7 @@ int main(int argc, char* argv[]) {
     // ── Cleanup ───────────────────────────────────────────────────────────
     if (d_reconstructed) cudaFree(d_reconstructed);
     cudaFree(d_input);
+    cudaFree(d_input_copy);
 
     std::cout << "\nDone.\n";
     return ok ? 0 : 1;

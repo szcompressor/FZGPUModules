@@ -99,8 +99,17 @@ void Pipeline::compress(
         }
 
         dag_->setExternalPointer(input_buffer_ids_[idx], const_cast<void*>(spec.d_data));
+        dag_->updateBufferSize(input_buffer_ids_[idx], spec.size);
         source_input_sizes_[idx] = spec.size;
         input_size_ += spec.size;
+    }
+
+    // If the pipeline was finalized without constructor/per-source size hints
+    // (input_data_size == 0 and no setInputSizeHint()), outputs may still be
+    // placeholder-sized. Re-estimate from the actual runtime input sizes that
+    // were just written into the DAG to avoid undersized output allocations.
+    if (input_size_hint_ == 0 && per_source_hints_.empty()) {
+        propagateBufferSizes(true);
     }
 
     // Host-side wall-clock start (covers everything including output gathering)
@@ -310,7 +319,10 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     }
 
     // ── Switch all stages to inverse mode ────────────────────────────────────
-    for (auto& s : stages_) s->setInverse(true);
+    for (auto& s : stages_) {
+        s->saveState();
+        s->setInverse(true);
+    }
 
     // ── Assemble forward-topology description ────────────────────────────────
     PipelineOutputMap po_map;
@@ -397,7 +409,10 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
             for (size_t j = 0; j < input_nodes_.size(); j++)
                 mem_pool_->free(inv_dag->getBuffer(
                     inv_result_map.at(input_nodes_[j]->stage)), stream);
-            for (auto& s : stages_) s->setInverse(false);
+            for (auto& s : stages_) {
+                s->setInverse(false);
+                s->restoreState();
+            }
             throw std::runtime_error("cudaMalloc for decompress output failed");
         }
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_final, d_inv_ptr, actual_size,
@@ -412,7 +427,10 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         mem_pool_->free(inv_dag->getBuffer(res_buf_id), stream);
     }
     inv_dag->reset(stream);
-    for (auto& s : stages_) s->setInverse(false);
+    for (auto& s : stages_) {
+        s->setInverse(false);
+        s->restoreState();
+    }
 
     // ── Profiling ─────────────────────────────────────────────────────────────
     auto t_host_end = std::chrono::steady_clock::now();

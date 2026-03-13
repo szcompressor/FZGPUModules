@@ -18,12 +18,14 @@
 #include "cuda_check.h"
 
 #include <cuda_runtime.h>
+#include <cub/device/device_scan.cuh>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <iostream>
 
 namespace fz {
 
@@ -484,6 +486,35 @@ rzeDecodeKernel(
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// stripFlagKernel: clear the high-bit "incompressible" flag from each chunk's
+// stored size so that rzePackKernel copies exactly the right byte count.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+static __global__ void stripFlagKernel(
+    const uint32_t* __restrict__ d_sizes_with_flag,
+    uint32_t*       __restrict__ d_clean_sizes,
+    uint32_t n_chunks)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_chunks)
+        d_clean_sizes[i] = d_sizes_with_flag[i] & 0x7FFFFFFFu;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// addOffsetKernel: shift every element of an uint32 array by a constant.
+// Used to convert the CUB exclusive-scan result (offsets relative to payload
+// start) into absolute offsets within the output buffer (by adding the header
+// size).
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+static __global__ void addOffsetKernel(
+    uint32_t* __restrict__ arr,
+    uint32_t n,
+    uint32_t offset)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) arr[i] += offset;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Pack kernel: copy compressed chunks from a uniform scratch layout
 // (each chunk at scratch[cid * CS]) to a compact output buffer.
 //
@@ -519,8 +550,6 @@ void RZEStage::execute(
     const std::vector<void*>& outputs,
     const std::vector<size_t>& sizes)
 {
-    (void)pool;
-
     if (inputs.empty() || outputs.empty() || sizes.empty())
         throw std::runtime_error("RZEStage: invalid inputs/outputs");
 
@@ -541,95 +570,103 @@ void RZEStage::execute(
     const size_t   n_chunks    = (in_bytes + chunk_size_ - 1) / chunk_size_;
     const uint32_t n_chunks_u  = static_cast<uint32_t>(n_chunks);
     const uint32_t in_bytes_u  = static_cast<uint32_t>(in_bytes);
+    const uint32_t grid256     = (n_chunks_u + 255u) / 256u;
+
+    // ── Grow persistent scratch if the current dataset is larger ─────────
+    // These allocations happen only on the very first call (or if a larger
+    // dataset is seen), not on every compress() invocation.  cudaMalloc is
+    // synchronous but rare; for steady-state repeated calls the branches are
+    // not taken and the GPU pipeline is fully asynchronous.
+    if (n_chunks > scratch_capacity_) {
+        cudaFree(d_scratch_);    d_scratch_    = nullptr;
+        cudaFree(d_sizes_dev_);  d_sizes_dev_  = nullptr;
+        cudaFree(d_clean_dev_);  d_clean_dev_  = nullptr;
+        cudaFree(d_dst_off_dev_);d_dst_off_dev_= nullptr;
+        FZ_CUDA_CHECK(cudaMalloc(&d_scratch_,     n_chunks * static_cast<size_t>(chunk_size_)));
+        FZ_CUDA_CHECK(cudaMalloc(&d_sizes_dev_,   n_chunks * sizeof(uint32_t)));
+        FZ_CUDA_CHECK(cudaMalloc(&d_clean_dev_,   n_chunks * sizeof(uint32_t)));
+        FZ_CUDA_CHECK(cudaMalloc(&d_dst_off_dev_, n_chunks * sizeof(uint32_t)));
+        scratch_capacity_ = n_chunks;
+    }
 
     // ── Forward (compress) ───────────────────────────────────────────────
     if (!is_inverse_) {
-        // Cache original size so that the inverse estimateOutputSizes() can
-        // pre-allocate the correct output buffer on the same pipeline instance.
         cached_orig_bytes_ = in_bytes_u;
 
-        // Allocate scratch: n_chunks * CS bytes (worst-case compressed sizes)
-        uint8_t*  d_scratch = nullptr;
-        uint32_t* d_sizes_dev = nullptr;
-        FZ_CUDA_CHECK(cudaMalloc(&d_scratch,    static_cast<size_t>(n_chunks) * chunk_size_));
-        FZ_CUDA_CHECK(cudaMalloc(&d_sizes_dev,  n_chunks * sizeof(uint32_t)));
+        const size_t header_size = 4 + 4 + 4 * n_chunks;
 
-        // Launch encode kernel
+        // ── (1) Encode: each block writes its compressed chunk to d_scratch_
+        //               and records the (possibly-flagged) size in d_sizes_dev_.
         rzeEncodeKernel<<<static_cast<int>(n_chunks), RZE_TPB, RZE_SMEM_TOTAL, stream>>>(
             static_cast<const uint8_t*>(inputs[0]),
-            d_scratch,
-            d_sizes_dev,
+            d_scratch_,
+            d_sizes_dev_,
             in_bytes_u);
-
         FZ_CUDA_CHECK(cudaGetLastError());
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));  // need sizes on host
 
-        // Read per-chunk sizes back to host
-        std::vector<uint32_t> h_sizes(n_chunks);
-        FZ_CUDA_CHECK(cudaMemcpy(h_sizes.data(), d_sizes_dev,
-                              n_chunks * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-        // Compute packed sizes (strip flag), payload offsets, and total output size
-        // High bit set → chunk stored uncompressed
-        const size_t header_size = 4 + 4 + 4 * n_chunks;  // orig_bytes + n_chunks + sizes[]
-        std::vector<uint32_t> h_clean(n_chunks);   // compressed size (no flag)
-        std::vector<uint32_t> h_dst_off(n_chunks); // dest offset in output (after header)
-
-        size_t payload_bytes = 0;
-        for (size_t i = 0; i < n_chunks; i++) {
-            const uint32_t stored = h_sizes[i] & 0x7FFFFFFFu;
-            h_clean[i]   = stored;
-            h_dst_off[i] = static_cast<uint32_t>(header_size + payload_bytes);
-            payload_bytes += stored;
-        }
-        const size_t total_out = header_size + payload_bytes;
-
-        // Build header on host
-        std::vector<uint32_t> h_header(2 + n_chunks);
-        h_header[0] = in_bytes_u;
-        h_header[1] = n_chunks_u;
-        for (size_t i = 0; i < n_chunks; i++)
-            h_header[2 + i] = h_sizes[i];  // keep flag bit so decoder knows
-
-        // Write header to output device buffer
+        // ── (2) Write header directly to the output buffer (fully async).
+        //    First 8 bytes come from host (2 × uint32); per-chunk sizes are
+        //    D→D copied straight from d_sizes_dev_ (flag bits preserved so
+        //    the decoder can detect uncompressed chunks).
         uint8_t* d_out = static_cast<uint8_t*>(outputs[0]);
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_out, h_header.data(),
-                                   header_size, cudaMemcpyHostToDevice, stream));
+        const uint32_t h_hdr[2] = {in_bytes_u, n_chunks_u};
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_out, h_hdr, 8, cudaMemcpyHostToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_out + 8, d_sizes_dev_,
+                                     n_chunks * sizeof(uint32_t),
+                                     cudaMemcpyDeviceToDevice, stream));
 
-        // Upload packing tables for the pack kernel
-        uint32_t* d_dst_off_dev = nullptr;
-        uint32_t* d_clean_dev   = nullptr;
-        FZ_CUDA_CHECK(cudaMalloc(&d_dst_off_dev, n_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_clean_dev,   n_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_dst_off_dev, h_dst_off.data(),
-                                   n_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_clean_dev, h_clean.data(),
-                                   n_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
+        // ── (3) Strip flag bits → d_clean_dev_ (clean compressed sizes).
+        stripFlagKernel<<<grid256, 256, 0, stream>>>(d_sizes_dev_, d_clean_dev_, n_chunks_u);
 
-        // Pack: copy each chunk from scratch to its final position in output
+        // ── (4) Exclusive prefix sum of clean sizes → d_dst_off_dev_.
+        //    After this, d_dst_off_dev_[i] = sum of clean_sizes[0..i-1] (relative
+        //    to the start of the payload region).  We add header_size below so
+        //    that rzePackKernel can write directly to absolute output offsets.
+        {
+            size_t scan_tmp_bytes = 0;
+            cub::DeviceScan::ExclusiveSum(nullptr, scan_tmp_bytes,
+                                          d_clean_dev_, d_dst_off_dev_,
+                                          static_cast<int>(n_chunks), stream);
+            void* d_scan_tmp = pool
+                ? pool->allocate(scan_tmp_bytes, stream, "rze_cub_scan_tmp")
+                : nullptr;
+            if (!d_scan_tmp && scan_tmp_bytes > 0)
+                FZ_CUDA_CHECK(cudaMallocAsync(&d_scan_tmp, scan_tmp_bytes, stream));
+            cub::DeviceScan::ExclusiveSum(d_scan_tmp, scan_tmp_bytes,
+                                          d_clean_dev_, d_dst_off_dev_,
+                                          static_cast<int>(n_chunks), stream);
+            if (pool && d_scan_tmp)
+                pool->free(d_scan_tmp, stream);
+            else if (d_scan_tmp)
+                FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_scan_tmp, stream));
+        }
+
+        // ── (5) Convert payload-relative offsets to absolute output offsets.
+        addOffsetKernel<<<grid256, 256, 0, stream>>>(
+            d_dst_off_dev_, n_chunks_u, static_cast<uint32_t>(header_size));
+
+        // ── (6) Pack: scatter compressed chunks from uniform scratch to packed output.
         rzePackKernel<<<static_cast<int>(n_chunks), 512, 0, stream>>>(
-            d_scratch, d_out,
-            d_dst_off_dev, d_clean_dev,
+            d_scratch_, d_out,
+            d_dst_off_dev_, d_clean_dev_,
             static_cast<uint32_t>(chunk_size_));
-
         FZ_CUDA_CHECK(cudaGetLastError());
+
+        // ── (7) Read the total output size from the GPU.
+        //    total = d_dst_off_dev_[last] + d_clean_dev_[last]
+        //    Only 8 bytes need to come back from device, keeping the transfer
+        //    cost negligible. This is the one required sync per compress() call.
+        uint32_t h_tail[2] = {0, 0};
+        FZ_CUDA_CHECK(cudaMemcpyAsync(h_tail,     d_dst_off_dev_ + n_chunks - 1,
+                                     sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(h_tail + 1, d_clean_dev_   + n_chunks - 1,
+                                     sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-        cudaFree(d_scratch);
-        cudaFree(d_sizes_dev);
-        cudaFree(d_dst_off_dev);
-        cudaFree(d_clean_dev);
+        size_t total_out = static_cast<size_t>(h_tail[0]) + static_cast<size_t>(h_tail[1]);
 
-        actual_output_size_ = total_out;
-
-        // Pad reported size to the next 4-byte boundary so that any buffers
-        // that follow this one in the pipeline's concatenated compressed stream
-        // (e.g. Quantizer outlier arrays, which use typed uint32_t / float
-        // accesses) start at a 4-byte aligned offset.
-        // The extra 0-3 padding bytes beyond `total_out` are never accessed by
-        // the decode path (it navigates via the per-chunk size table in the
-        // stream header).
-        actual_output_size_ = (actual_output_size_ + 3) & ~size_t(3);
+        // Pad to 4-byte boundary (see original comment).
+        actual_output_size_ = (total_out + 3) & ~size_t(3);
 
     // ── Inverse (decompress) ─────────────────────────────────────────────
     } else {
@@ -637,15 +674,14 @@ void RZEStage::execute(
         const uint8_t* d_in = static_cast<const uint8_t*>(inputs[0]);
         uint8_t*       d_out = static_cast<uint8_t*>(outputs[0]);
 
-        // Read header from device
-        std::vector<uint8_t> h_hdr_raw(8);
-        FZ_CUDA_CHECK(cudaMemcpy(h_hdr_raw.data(), d_in, 8, cudaMemcpyDeviceToHost));
+        // Read 8-byte header prefix to learn orig_total and num_chunks.
+        uint8_t h_hdr_raw[8];
+        FZ_CUDA_CHECK(cudaMemcpy(h_hdr_raw, d_in, 8, cudaMemcpyDeviceToHost));
 
         uint32_t orig_total, num_chunks;
-        std::memcpy(&orig_total,  h_hdr_raw.data() + 0, sizeof(uint32_t));
-        std::memcpy(&num_chunks,  h_hdr_raw.data() + 4, sizeof(uint32_t));
+        std::memcpy(&orig_total,  h_hdr_raw + 0, sizeof(uint32_t));
+        std::memcpy(&num_chunks,  h_hdr_raw + 4, sizeof(uint32_t));
 
-        // Keep cache up-to-date so subsequent inverse estimations are also correct.
         cached_orig_bytes_ = orig_total;
 
         if (num_chunks == 0 || orig_total == 0) {
@@ -653,14 +689,14 @@ void RZEStage::execute(
             return;
         }
 
-        // Read per-chunk size entries from header
+        // Read per-chunk size entries from header (small, host-side only).
         std::vector<uint32_t> h_chunk_entries(num_chunks);
         FZ_CUDA_CHECK(cudaMemcpy(h_chunk_entries.data(), d_in + 8,
                               num_chunks * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
         const size_t header_bytes = 4 + 4 + 4 * num_chunks;
 
-        // Compute per-chunk: compressed in-offset, out-offset, clean comp-size, orig-size
+        // Compute per-chunk decode tables on host (fast integer work).
         std::vector<uint32_t> h_in_off(num_chunks);
         std::vector<uint32_t> h_comp_sz(num_chunks);
         std::vector<uint32_t> h_out_off(num_chunks);
@@ -680,7 +716,6 @@ void RZEStage::execute(
             h_out_off[i] = out_cursor;
             h_is_uncmp[i] = uncmp;
 
-            // Original size for this chunk
             const uint32_t chunk_orig = (i + 1 < num_chunks)
                 ? static_cast<uint32_t>(chunk_size_)
                 : static_cast<uint32_t>(orig_total - out_cursor);
@@ -690,38 +725,37 @@ void RZEStage::execute(
             out_cursor += chunk_orig;
         }
 
-        // Upload decode tables to device
-        uint32_t* d_in_off  = nullptr;
-        uint32_t* d_comp_sz = nullptr;
-        uint32_t* d_out_off = nullptr;
-        uint32_t* d_orig_sz = nullptr;
-        FZ_CUDA_CHECK(cudaMalloc(&d_in_off,  num_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_comp_sz, num_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_out_off, num_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_orig_sz, num_chunks * sizeof(uint32_t)));
-
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_in_off,  h_in_off.data(),  num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_comp_sz, h_comp_sz.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_out_off, h_out_off.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_orig_sz, h_orig_sz.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
-
-        // For uncompressed chunks: memcpy directly (they don't go through decode kernel)
-        // For compressed chunks: decode kernel
-
-        // Gather compressed chunk indices for the kernel
-        std::vector<uint32_t> comp_cids;
-        comp_cids.reserve(num_chunks);
-        for (uint32_t i = 0; i < num_chunks; i++)
-            if (!h_is_uncmp[i]) comp_cids.push_back(i);
-
-        if (!comp_cids.empty()) {
-            rzeDecodeKernel<<<static_cast<int>(num_chunks), RZE_TPB, RZE_SMEM_TOTAL, stream>>>(
-                d_in, d_out,
-                d_in_off, d_comp_sz, d_out_off, d_orig_sz);
-            FZ_CUDA_CHECK(cudaGetLastError());
+        // ── Grow inverse decode-table scratch if needed ───────────────────
+        if (num_chunks > inv_capacity_) {
+            cudaFree(d_inv_in_off_);   d_inv_in_off_   = nullptr;
+            cudaFree(d_inv_comp_sz_);  d_inv_comp_sz_  = nullptr;
+            cudaFree(d_inv_out_off_);  d_inv_out_off_  = nullptr;
+            cudaFree(d_inv_orig_sz_);  d_inv_orig_sz_  = nullptr;
+            FZ_CUDA_CHECK(cudaMalloc(&d_inv_in_off_,  num_chunks * sizeof(uint32_t)));
+            FZ_CUDA_CHECK(cudaMalloc(&d_inv_comp_sz_, num_chunks * sizeof(uint32_t)));
+            FZ_CUDA_CHECK(cudaMalloc(&d_inv_out_off_, num_chunks * sizeof(uint32_t)));
+            FZ_CUDA_CHECK(cudaMalloc(&d_inv_orig_sz_, num_chunks * sizeof(uint32_t)));
+            inv_capacity_ = num_chunks;
         }
 
-        // Copy uncompressed chunks (passthrough)
+        // Upload decode tables asynchronously.
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_inv_in_off_,  h_in_off.data(),
+                                     num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_inv_comp_sz_, h_comp_sz.data(),
+                                     num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_inv_out_off_, h_out_off.data(),
+                                     num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_inv_orig_sz_, h_orig_sz.data(),
+                                     num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
+
+        // Launch decode kernel for all chunks (uncompressed chunks are handled
+        // inside the kernel via passthrough, so no separate branch is needed here).
+        rzeDecodeKernel<<<static_cast<int>(num_chunks), RZE_TPB, RZE_SMEM_TOTAL, stream>>>(
+            d_in, d_out,
+            d_inv_in_off_, d_inv_comp_sz_, d_inv_out_off_, d_inv_orig_sz_);
+        FZ_CUDA_CHECK(cudaGetLastError());
+
+        // Copy uncompressed chunks (passthrough — decoder doesn't handle these).
         for (uint32_t i = 0; i < num_chunks; i++) {
             if (h_is_uncmp[i]) {
                 FZ_CUDA_CHECK(cudaMemcpyAsync(
@@ -733,11 +767,6 @@ void RZEStage::execute(
         }
 
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        cudaFree(d_in_off);
-        cudaFree(d_comp_sz);
-        cudaFree(d_out_off);
-        cudaFree(d_orig_sz);
 
         actual_output_size_ = static_cast<size_t>(orig_total);
     }

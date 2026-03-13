@@ -14,37 +14,53 @@ namespace fz {
 // chunk_elems  > 0  → first element of each chunk is stored as-is.
 //
 // When TOut != T the computed difference is negabinary-encoded before writing.
+//
+// Uses a grid-stride loop so each thread processes multiple elements, matching
+// the PFPL reference pattern (d_DIFFNB).  This improves instruction-level
+// parallelism and reduces grid launch overhead for large arrays.
 template<typename T, typename TOut>
 __global__ void diffKernel(const T* __restrict__ in,
                             TOut* __restrict__ out,
                             size_t n,
                             size_t chunk_elems)
 {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n;
+         idx += stride)
+    {
+        // chunk_elems is always a power-of-2 (chunk_size is 2^k and element sizes
+        // are powers of 2), so the boundary test reduces to a cheap bitwise AND
+        // instead of an expensive runtime integer division (IDIV).
+        bool is_boundary = (idx == 0) ||
+                           (chunk_elems > 0 && ((idx & (chunk_elems - 1)) == 0));
 
-    bool is_boundary = (idx == 0) ||
-                       (chunk_elems > 0 && (idx % chunk_elems == 0));
+        T diff = is_boundary ? in[idx] : (in[idx] - in[idx - 1]);
 
-    T diff = is_boundary ? in[idx] : (in[idx] - in[idx - 1]);
-
-    if constexpr (std::is_same_v<T, TOut>) {
-        out[idx] = diff;
-    } else {
-        out[idx] = Negabinary<T>::encode(diff);
+        if constexpr (std::is_same_v<T, TOut>) {
+            out[idx] = diff;
+        } else {
+            out[idx] = Negabinary<T>::encode(diff);
+        }
     }
 }
 
 // ─── Negabinary decode pass: TOut[] → T[] ────────────────────────────────────
 //
 // Used as the first step of the inverse pass when TOut != T.
+// Grid-stride loop for multi-element-per-thread throughput.
 template<typename T, typename TOut>
 __global__ void negabinaryDecodePassKernel(const TOut* __restrict__ in,
                                             T* __restrict__ out,
                                             size_t n)
 {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) out[idx] = Negabinary<T>::decode(in[idx]);
+    const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
+    for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < n;
+         idx += stride)
+    {
+        out[idx] = Negabinary<T>::decode(in[idx]);
+    }
 }
 
 // ─── Chunked inclusive prefix-sum kernel ─────────────────────────────────────
@@ -92,8 +108,17 @@ template<typename T, typename TOut>
 static void launchDiff(const T* in, TOut* out, size_t n,
                        size_t chunk_elems, cudaStream_t stream)
 {
-    constexpr int kBlock = 256;
-    int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+    // chunk_elems must be a power-of-2 for the bitwise boundary test in the kernel.
+    // All supported chunk_size values (16384, 8192, …) and element sizes are
+    // powers-of-2, so this should never fire in practice.
+    if (chunk_elems > 0 && (chunk_elems & (chunk_elems - 1)) != 0)
+        throw std::runtime_error("DifferenceStage: chunk_elems must be a power-of-2");
+    constexpr int kBlock = 512;
+    // Target ~8 elements per thread for good ILP (matches PFPL's stride pattern
+    // where TPB=512 threads iterate over 4096 elements per chunk).
+    int fullGrid = static_cast<int>((n + kBlock - 1) / kBlock);
+    int grid = fullGrid < (fullGrid / 8 + 1) ? fullGrid : (fullGrid / 8 + 1);
+    if (grid < 1) grid = 1;
     diffKernel<T, TOut><<<grid, kBlock, 0, stream>>>(in, out, n, chunk_elems);
 }
 
@@ -127,7 +152,7 @@ template<typename T>
 static void launchChunkedCumsum(T* data, size_t n,
                                  size_t chunk_elems, cudaStream_t stream)
 {
-    constexpr int kBlock    = 256;
+    constexpr int kBlock    = 512;
     size_t        num_chunks = (n + chunk_elems - 1) / chunk_elems;
     cumsumChunkedKernel<T, kBlock><<<static_cast<int>(num_chunks), kBlock,
                                      0, stream>>>(data, n, chunk_elems);
@@ -174,8 +199,10 @@ void DifferenceStage<T, TOut>::execute(
             }
 
             {
-                constexpr int kBlock = 256;
-                int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+                constexpr int kBlock = 512;
+                int fullGrid = static_cast<int>((n + kBlock - 1) / kBlock);
+                int grid = fullGrid < (fullGrid / 8 + 1) ? fullGrid : (fullGrid / 8 + 1);
+                if (grid < 1) grid = 1;
                 negabinaryDecodePassKernel<T, TOut><<<grid, kBlock, 0, stream>>>(
                     static_cast<const TOut*>(inputs[0]), d_decoded, n);
             }

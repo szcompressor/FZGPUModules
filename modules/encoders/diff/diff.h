@@ -123,10 +123,22 @@ public:
         return 6;
     }
 
+    void saveState() override {
+        saved_chunk_size_ = chunk_size_;
+        saved_actual_output_size_ = actual_output_size_;
+    }
+
+    void restoreState() override {
+        chunk_size_ = saved_chunk_size_;
+        actual_output_size_ = saved_actual_output_size_;
+    }
+
 private:
     size_t actual_output_size_;
+    size_t saved_actual_output_size_ = 0;
     bool   is_inverse_;
     size_t chunk_size_;
+    size_t saved_chunk_size_ = 0;
 
     DataType getInDataTypeEnum() const {
         if (std::is_same_v<T, uint8_t>)  return DataType::UINT8;

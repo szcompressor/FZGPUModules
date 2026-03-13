@@ -189,6 +189,24 @@ public:
     size_t getMaxHeaderSize(size_t) const override { return sizeof(QuantizerConfig); }
     void deserializeHeader(const uint8_t* buf, size_t size) override;
 
+    void saveState() override {
+        saved_config_ = config_;
+        saved_num_elements_ = num_elements_;
+        saved_actual_outlier_count_ = actual_outlier_count_;
+        saved_computed_abs_eb_ = computed_abs_eb_;
+        saved_computed_value_base_ = computed_value_base_;
+        saved_actual_output_sizes_ = actual_output_sizes_;
+    }
+
+    void restoreState() override {
+        config_ = saved_config_;
+        num_elements_ = saved_num_elements_;
+        actual_outlier_count_ = saved_actual_outlier_count_;
+        computed_abs_eb_ = saved_computed_abs_eb_;
+        computed_value_base_ = saved_computed_value_base_;
+        actual_output_sizes_ = saved_actual_output_sizes_;
+    }
+
     // ===== Configuration accessors =====
 
     void setErrorBound(TInput eb)            { config_.error_bound = static_cast<float>(eb); }
@@ -212,12 +230,18 @@ public:
 
 private:
     Config config_;
+    Config saved_config_;
     std::vector<size_t> actual_output_sizes_;
+    std::vector<size_t> saved_actual_output_sizes_;
     size_t   num_elements_        = 0;
+    size_t   saved_num_elements_  = 0;
     uint32_t actual_outlier_count_= 0;
+    uint32_t saved_actual_outlier_count_ = 0;
     bool     is_inverse_          = false;
     TInput   computed_abs_eb_     = static_cast<TInput>(1e-4);
+    TInput   saved_computed_abs_eb_ = static_cast<TInput>(1e-4);
     float    computed_value_base_ = 0.0f;
+    float    saved_computed_value_base_ = 0.0f;
     const void* d_outlier_count_ptr_ = nullptr;
 
     // True when ABS/NOA in-place outlier encoding is active (no scatter buffers).

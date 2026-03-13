@@ -117,11 +117,26 @@ public:
 
     size_t getMaxHeaderSize(size_t) const override { return 5; }
 
+    void saveState() override {
+        saved_block_size_ = block_size_;
+        saved_element_width_ = element_width_;
+        saved_actual_output_size_ = actual_output_size_;
+    }
+
+    void restoreState() override {
+        block_size_ = saved_block_size_;
+        element_width_ = saved_element_width_;
+        actual_output_size_ = saved_actual_output_size_;
+    }
+
 private:
     bool     is_inverse_;
     uint32_t block_size_;    // bytes per chunk
+    uint32_t saved_block_size_ = 0;
     uint8_t  element_width_; // bytes per element (1, 2, 4, or 8)
-    size_t   actual_output_size_;
+    uint8_t  saved_element_width_ = 0;
+    size_t   actual_output_size_ = 0;
+    size_t   saved_actual_output_size_ = 0;
 
     // Validate config and return N_chunk (elements per chunk).
     // block_size must be a multiple of 1024*element_width so that butterfly

@@ -28,26 +28,26 @@ enum class MemoryStrategy {
  * Buffer metadata and lifetime tracking
  */
 struct BufferInfo {
+    size_t size;                        // Currently required size
+    size_t initial_size;                // Original size requested during setup
+    size_t allocated_size;              // Actual reserved size in memory pool
     void* d_ptr;                        // Device pointer
-    size_t size;                        // Size in bytes
-    std::string tag;                    // Debug tag (e.g., "lorenzo_out")
+    std::string tag;                    // Debug tag
     
-    // Lifetime management
-    int producer_stage_id;              // Which stage produces this buffer
-    int producer_output_index;          // Which output index of producer (for multi-output)
-    std::vector<int> consumer_stage_ids; // Which stages consume this buffer
-    int remaining_consumers;            // Reference count - how many consumers left
+    // Lifecycle management
+    int remaining_consumers;            // Current number of stages that still need to read this
+    std::vector<int> consumer_stage_ids;// IDs of all stages that consume this buffer
+    int producer_stage_id;              // ID of stage that produced it (-1 if input)
+    int producer_output_index;          // Which output index of producer this corresponds to
     
-    // Allocation state
     bool is_allocated;
-    size_t allocated_size;              // Bytes actually committed in the pool (may differ from size when size grows)
-    bool is_persistent;                 // Never free (e.g., input/output buffers)
-    bool is_external;                   // Externally managed pointer (don't allocate/free)
+    bool is_persistent;                 // If true, don't free until DAG destruction
+    bool is_external;                   // If true, pointer managed externally
     
     BufferInfo() 
-        : d_ptr(nullptr), size(0), producer_stage_id(-1), producer_output_index(0),
-          remaining_consumers(0), is_allocated(false), allocated_size(0),
-          is_persistent(false), is_external(false) {}
+        : size(0), initial_size(0), allocated_size(0), d_ptr(nullptr), tag(""),
+          remaining_consumers(0), producer_stage_id(-1), producer_output_index(0),
+          is_allocated(false), is_persistent(false), is_external(false) {}
 };
 
 /**

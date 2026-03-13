@@ -567,8 +567,8 @@ void QuantizerStage<TInput, TCode>::execute(
         float opp_eb     = 1.0f + epsilon;
         float oopp_eb    = 1.0f / opp_eb;
 
-        FZ_LOG(DEBUG, "QuantizerStage REL: epsilon=%.6g log2eb=%.6g",
-               static_cast<double>(epsilon), static_cast<double>(log2eb));
+        FZ_LOG(INFO, "QuantizerStage REL: param epsilon=%.6g log2eb=%.6g max_outliers=%zu num_elements=%zu",
+               static_cast<double>(epsilon), static_cast<double>(log2eb), max_outliers, num_elements);
 
         quantizer_rel_fwd_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
             static_cast<const TInput*>(inputs[0]),

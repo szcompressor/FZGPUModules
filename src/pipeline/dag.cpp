@@ -156,8 +156,8 @@ int CompressionDAG::addDependency(DAGNode* dependent, DAGNode* dependency,
         // For now, caller must provide size or we throw
         throw std::runtime_error("Buffer size must be provided for dependency");
     }
-    
     buffer.size = buffer_size;
+    buffer.initial_size = buffer_size;
     buffer.tag = dependency->name + "_to_" + dependent->name;
     buffer.is_persistent = false;
     buffer.producer_output_index = output_index;  // Track which output
@@ -181,6 +181,7 @@ void CompressionDAG::setInputBuffer(DAGNode* node, size_t size, const std::strin
     int buffer_id = next_buffer_id_++;
     BufferInfo& buffer = buffers_[buffer_id];
     buffer.size = size;
+    buffer.initial_size = size;
     buffer.tag = tag;
     buffer.is_persistent = true;  // Input is persistent
     buffer.producer_stage_id = -1;  // External input
@@ -197,6 +198,7 @@ void CompressionDAG::setOutputBuffer(DAGNode* node, size_t size, const std::stri
     int buffer_id = next_buffer_id_++;
     BufferInfo& buffer = buffers_[buffer_id];
     buffer.size = size;
+    buffer.initial_size = size;
     buffer.tag = tag;
     buffer.is_persistent = true;  // Output is persistent
     buffer.producer_output_index = static_cast<int>(node->output_buffer_ids.size());  // Assign sequential index
@@ -214,6 +216,7 @@ int CompressionDAG::addUnconnectedOutput(DAGNode* node, size_t size, int output_
     int buffer_id = next_buffer_id_++;
     BufferInfo& buffer = buffers_[buffer_id];
     buffer.size = size;
+    buffer.initial_size = size;
     buffer.tag = tag;
     buffer.is_persistent = false;  // Temporary buffer (not pipeline output)
     buffer.producer_stage_id = node->id;
@@ -536,6 +539,18 @@ void CompressionDAG::reset(cudaStream_t stream) {
         // Always restore consumer ref-count so the next execute() pass can
         // decrement it correctly.
         buffer.remaining_consumers = buffer.consumer_stage_ids.size();
+
+        // Restore the functional size back to the allocated capacity.
+        // During execute(), stages (like RZE) may shrink buffer.size to
+        // reflect their actual output. If we don't reset this, subsequent 
+        // executions will use the shrunk size, causing data truncation.
+        // We use initial_size to ensure we even restore buffers that shrunk to 0.
+        if (buffer.is_allocated && !buffer.is_external) {
+             buffer.size = buffer.initial_size;
+             // We intentionally do NOT reset buffer.allocated_size because
+             // in PREALLOCATE mode, the pointer is kept and the capacity
+             // must remain valid for do_bounds_check().
+        }
     }
     
     // Reset node execution state
@@ -601,8 +616,9 @@ void CompressionDAG::updateBufferSize(int buffer_id, size_t new_size) {
     if (it == buffers_.end()) {
         throw std::runtime_error("Invalid buffer ID: " + std::to_string(buffer_id));
     }
-    
     it->second.size = new_size;
+    // When propagateBufferSizes sets a new size, it serves as the newly established baseline envelope
+    it->second.initial_size = new_size;
 }
 
 // ========== Internal Implementation ==========
@@ -619,9 +635,11 @@ void CompressionDAG::allocateBuffer(int buffer_id, cudaStream_t stream) {
     // outlier arrays when outlier_capacity == 0.0f).  Stages must handle
     // nullptr gracefully when their capacity indicates zero elements.
     if (buffer.size == 0) {
-        buffer.is_allocated   = true;
-        buffer.allocated_size = 0;
-        buffer.d_ptr          = nullptr;
+        if (!buffer.is_allocated) {
+            buffer.is_allocated   = true;
+            buffer.allocated_size = 0;
+            buffer.d_ptr          = nullptr;
+        }
         return;
     }
 

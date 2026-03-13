@@ -387,22 +387,24 @@ void Pipeline::configureStreamsIfNeeded() {
     }
 }
 
-void Pipeline::propagateBufferSizes() {
-    // Check whether any hint is available
+void Pipeline::propagateBufferSizes(bool force_from_current_inputs) {
+    // Check whether any static hint is available
     bool has_hint = (input_size_hint_ > 0) || !per_source_hints_.empty();
-    if (!has_hint) {
+    if (!has_hint && !force_from_current_inputs) {
         FZ_LOG(DEBUG, "No input size hint, using placeholder buffer sizes");
         return;
     }
 
-    // Seed each source's external input buffer with its per-source hint,
-    // falling back to the global constructor hint when none is set.
-    for (size_t i = 0; i < input_nodes_.size(); i++) {
-        Stage* src_stage = input_nodes_[i]->stage;
-        auto it = per_source_hints_.find(src_stage);
-        size_t hint = (it != per_source_hints_.end()) ? it->second : input_size_hint_;
-        if (hint > 0) {
-            dag_->updateBufferSize(input_buffer_ids_[i], hint);
+    if (!force_from_current_inputs) {
+        // Seed each source's external input buffer with its per-source hint,
+        // falling back to the global constructor hint when none is set.
+        for (size_t i = 0; i < input_nodes_.size(); i++) {
+            Stage* src_stage = input_nodes_[i]->stage;
+            auto it = per_source_hints_.find(src_stage);
+            size_t hint = (it != per_source_hints_.end()) ? it->second : input_size_hint_;
+            if (hint > 0) {
+                dag_->updateBufferSize(input_buffer_ids_[i], hint);
+            }
         }
     }
 
@@ -429,8 +431,12 @@ void Pipeline::propagateBufferSizes() {
         }
     }
     
-    FZ_LOG(DEBUG, "Buffer sizes estimated from input hint (%.2f MB)",
-           input_size_hint_ / (1024.0 * 1024.0));
+    if (force_from_current_inputs) {
+        FZ_LOG(DEBUG, "Buffer sizes estimated from runtime input sizes");
+    } else {
+        FZ_LOG(DEBUG, "Buffer sizes estimated from input hint (%.2f MB)",
+               input_size_hint_ / (1024.0 * 1024.0));
+    }
 }
 
 void Pipeline::validate() {

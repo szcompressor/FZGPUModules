@@ -77,7 +77,31 @@ public:
         , levels_(4)
         , actual_output_size_(0)
         , cached_orig_bytes_(0)
+        // Persistent scratch buffers — allocated on first use, reused thereafter.
+        // Eliminates the blocking cudaMalloc/cudaFree pair that appeared in every
+        // execute() call and was clearly visible as the two cudaMalloc events in nsys.
+        , d_scratch_(nullptr)
+        , d_sizes_dev_(nullptr)
+        , d_clean_dev_(nullptr)
+        , d_dst_off_dev_(nullptr)
+        , d_inv_in_off_(nullptr)
+        , d_inv_comp_sz_(nullptr)
+        , d_inv_out_off_(nullptr)
+        , d_inv_orig_sz_(nullptr)
+        , scratch_capacity_(0)     // # chunks the current scratch allocation can hold
+        , inv_capacity_(0)         // # chunks the current inverse table allocation holds
     {}
+
+    ~RZEStage() {
+        cudaFree(d_scratch_);
+        cudaFree(d_sizes_dev_);
+        cudaFree(d_clean_dev_);
+        cudaFree(d_dst_off_dev_);
+        cudaFree(d_inv_in_off_);
+        cudaFree(d_inv_comp_sz_);
+        cudaFree(d_inv_out_off_);
+        cudaFree(d_inv_orig_sz_);
+    }
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
@@ -166,16 +190,51 @@ public:
 
     size_t getMaxHeaderSize(size_t) const override { return 9; }
 
+    void saveState() override {
+        saved_chunk_size_ = chunk_size_;
+        saved_levels_ = levels_;
+        saved_cached_orig_bytes_ = cached_orig_bytes_;
+    }
+
+    void restoreState() override {
+        chunk_size_ = saved_chunk_size_;
+        levels_ = saved_levels_;
+        cached_orig_bytes_ = saved_cached_orig_bytes_;
+    }
+
 private:
     bool     is_inverse_;
     uint32_t chunk_size_;
+    uint32_t saved_chunk_size_ = 0;
     uint8_t  levels_;
+    uint8_t  saved_levels_ = 0;
     size_t   actual_output_size_;
     // Cached original (uncompressed) byte count.  Set by the forward execute()
     // and persisted in the serialized header so that the inverse
     // estimateOutputSizes() can return the right buffer size even when the
     // inverse stage is constructed cold from a file-based pipeline.
-    uint32_t cached_orig_bytes_;
+    uint32_t cached_orig_bytes_ = 0;
+    uint32_t saved_cached_orig_bytes_ = 0;
+
+    // ── Persistent scratch buffers ──────────────────────────────────────────
+    // Forward path:
+    //   d_scratch_    : per-chunk worst-case output (n_chunks * chunk_size bytes)
+    //   d_sizes_dev_  : raw compressed sizes from rzeEncodeKernel (with flag bit)
+    //   d_clean_dev_  : compressed sizes with flag stripped (for pack offsets)
+    //   d_dst_off_dev_: exclusive-prefix-sum of clean sizes + header offset
+    // Inverse path:
+    //   d_inv_{in_off,comp_sz,out_off,orig_sz}_: per-chunk decode tables
+    // All are allocated once (or grown on demand) and freed in the destructor.
+    uint8_t*  d_scratch_;
+    uint32_t* d_sizes_dev_;
+    uint32_t* d_clean_dev_;
+    uint32_t* d_dst_off_dev_;
+    uint32_t* d_inv_in_off_;
+    uint32_t* d_inv_comp_sz_;
+    uint32_t* d_inv_out_off_;
+    uint32_t* d_inv_orig_sz_;
+    size_t    scratch_capacity_;  // # chunks forward scratch can hold
+    size_t    inv_capacity_;      // # chunks inverse tables can hold
 };
 
 } // namespace fz

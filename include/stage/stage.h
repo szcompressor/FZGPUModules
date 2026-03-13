@@ -208,6 +208,20 @@ public:
     }
 
     /**
+     * Save the current configuration state of the stage.
+     * Called before a decompression pass so that any configuration overwritten by
+     * deserializeHeader() can be restored afterward.
+     */
+    virtual void saveState() {}
+
+    /**
+     * Restore the configuration state of the stage.
+     * Called after a decompression pass to reset the stage to its original
+     * forward-pass configuration.
+     */
+    virtual void restoreState() {}
+
+    /**
      * Called once by Pipeline::finalize() after all stages are connected and
      * before the first compress/decompress execution.  Gives stages a chance
      * to update their internal dimensionality — useful when setDims() is

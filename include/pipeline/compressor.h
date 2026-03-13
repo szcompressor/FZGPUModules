@@ -568,9 +568,14 @@ private:
     void configureStreamsIfNeeded();
     
     /**
-     * Propagate buffer sizes through DAG based on input hint
+     * Propagate buffer sizes through DAG from source sizes.
+     *
+     * By default this uses constructor/per-source hints (finalize-time path).
+     * When force_from_current_inputs=true, it uses the current source buffer
+     * sizes already written into the DAG (compress-time path for zero-hint
+     * pipelines).
      */
-    void propagateBufferSizes();
+    void propagateBufferSizes(bool force_from_current_inputs = false);
     
     /**
      * Find source stages (no dependencies)
