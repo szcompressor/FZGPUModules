@@ -120,24 +120,10 @@ void MemoryPool::initializeMemPool() {
         }
     }
     
-    // 3. Reserve initial pool memory (optional optimization)
-    // Note: Many GPUs require reservations to be at least 2MB and aligned.
-    // Small reservations may fail with "invalid argument".
-    // On-demand allocation works fine, so we only reserve for larger pools.
-    uint64_t reserve_size = config_.getPoolSize();
-    const uint64_t MIN_RESERVE_SIZE = 2 * 1024 * 1024; // 2 MB
-    
-    if (reserve_size >= MIN_RESERVE_SIZE) {
-        // Align to 2MB boundary for better compatibility
-        reserve_size = (reserve_size + MIN_RESERVE_SIZE - 1) & ~(MIN_RESERVE_SIZE - 1);
-        
-        err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolAttrReservedMemCurrent, &reserve_size);
-        if (err != cudaSuccess) {
-            // Non-fatal - memory will be allocated on-demand instead
-            cudaGetLastError(); // Clear error
-        }
-    }
-    // For small pools, skip pre-reservation and let memory allocate on-demand
+    // 3. Optional pre-reservation is intentionally skipped.
+    // cudaMemPoolAttrReservedMemCurrent is query-only and cannot be set via
+    // cudaMemPoolSetAttribute; attempting to do so triggers invalid-argument
+    // API errors in Compute Sanitizer. Let the pool grow on demand.
 }
 
 void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& tag, bool persistent) {

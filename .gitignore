@@ -1,5 +1,6 @@
 .notes/
 *build/
+build-compute/
 .vscode/
 data/
 settings.json
