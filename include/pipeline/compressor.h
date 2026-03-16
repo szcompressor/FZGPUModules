@@ -746,7 +746,7 @@ private:
     // getRequiredInputAlignment() across all stages.  compress() pads the input
     // to this boundary transparently using d_pad_buf_.
     size_t input_alignment_bytes_;
-    void*  d_pad_buf_;       ///< Lazily-allocated padding scratch buffer (GPU)
+    void*  d_pad_buf_;       ///< Lazily-allocated padding scratch buffer (MemoryPool)
     size_t d_pad_buf_size_;  ///< Current allocated size of d_pad_buf_
 
     // When compress() transparently pads the input, this holds the original

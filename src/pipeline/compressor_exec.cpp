@@ -254,13 +254,21 @@ void Pipeline::compress(
         const size_t padded = ((input_size + input_alignment_bytes_ - 1)
                                / input_alignment_bytes_) * input_alignment_bytes_;
         if (padded > d_pad_buf_size_) {
-            if (d_pad_buf_) cudaFree(d_pad_buf_);
-            FZ_CUDA_CHECK(cudaMalloc(&d_pad_buf_, padded));
+            if (d_pad_buf_) {
+                mem_pool_->free(d_pad_buf_, stream);
+                d_pad_buf_ = nullptr;
+            }
+            d_pad_buf_ = mem_pool_->allocate(padded, stream,
+                                             "pipeline_input_pad", /*persistent=*/true);
+            if (!d_pad_buf_) {
+                throw std::runtime_error("Failed to allocate pipeline input pad buffer");
+            }
             d_pad_buf_size_ = padded;
         }
-        FZ_CUDA_CHECK(cudaMemcpy(d_pad_buf_, d_input, input_size, cudaMemcpyDeviceToDevice));
-        FZ_CUDA_CHECK(cudaMemset(static_cast<uint8_t*>(d_pad_buf_) + input_size,
-                                 0, padded - input_size));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_pad_buf_, d_input, input_size,
+                                      cudaMemcpyDeviceToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemsetAsync(static_cast<uint8_t*>(d_pad_buf_) + input_size,
+                                      0, padded - input_size, stream));
         FZ_LOG(INFO,
             "Input padded: %zu \u2192 %zu bytes (+%zu bytes for %zu-byte chunk alignment)",
             input_size, padded, padded - input_size, input_alignment_bytes_);

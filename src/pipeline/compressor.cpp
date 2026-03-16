@@ -45,8 +45,8 @@ Pipeline::~Pipeline() {
         mem_pool_->free(d_concat_buffer_, 0);
         d_concat_buffer_ = nullptr;
     }
-    if (d_pad_buf_) {
-        cudaFree(d_pad_buf_);
+    if (d_pad_buf_ && mem_pool_) {
+        mem_pool_->free(d_pad_buf_, 0);
         d_pad_buf_ = nullptr;
     }
 }
@@ -221,6 +221,27 @@ void Pipeline::finalize() {
         dag_->preallocateBuffers();
     }
 
+    // Pre-allocate input padding scratch from the memory pool so the first
+    // compress() call does not pay a raw cudaMalloc path for alignment padding.
+    if (input_alignment_bytes_ > 1 && input_size_hint_ > 0) {
+        const size_t padded = ((input_size_hint_ + input_alignment_bytes_ - 1)
+                               / input_alignment_bytes_) * input_alignment_bytes_;
+        if (padded > d_pad_buf_size_) {
+            if (d_pad_buf_) {
+                mem_pool_->free(d_pad_buf_, /*stream=*/0);
+                d_pad_buf_ = nullptr;
+                d_pad_buf_size_ = 0;
+            }
+            d_pad_buf_ = mem_pool_->allocate(padded, /*stream=*/0,
+                                             "pipeline_input_pad", /*persistent=*/true);
+            if (!d_pad_buf_) {
+                throw std::runtime_error("Failed to preallocate pipeline input pad buffer");
+            }
+            d_pad_buf_size_ = padded;
+            mem_pool_->synchronize(/*stream=*/0);
+        }
+    }
+
     num_streams_ = std::max(1, static_cast<int>(dag_->getStreamCount()));
     is_finalized_ = true;
     
@@ -244,11 +265,13 @@ void Pipeline::reset(cudaStream_t stream) {
 // ========== Query & Debug ==========
 
 size_t Pipeline::getPeakMemoryUsage() const {
-    return dag_->getPeakMemoryUsage();
+    const size_t dag_peak  = dag_ ? dag_->getPeakMemoryUsage() : 0;
+    const size_t pool_peak = mem_pool_ ? mem_pool_->getPeakUsage() : 0;
+    return std::max(dag_peak, pool_peak);
 }
 
 size_t Pipeline::getCurrentMemoryUsage() const {
-    return dag_->getCurrentMemoryUsage();
+    return dag_ ? dag_->getCurrentMemoryUsage() : 0;
 }
 
 void Pipeline::printPipeline() const {

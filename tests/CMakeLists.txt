@@ -35,9 +35,12 @@ function(fz_add_test)
 
     add_test(NAME ${ARG_NAME} COMMAND ${ARG_NAME})
 
+    set(FZ_TEST_ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+    list(APPEND FZ_TEST_ENVIRONMENT "CUDA_MODULE_LOADING=${FZGMOD_CUDA_MODULE_LOADING_VALUE}")
+
     # Allow tests to find CUDA device at runtime
     set_tests_properties(${ARG_NAME} PROPERTIES
-        ENVIRONMENT "CUDA_VISIBLE_DEVICES=0"
+        ENVIRONMENT "${FZ_TEST_ENVIRONMENT}"
     )
 endfunction()
 

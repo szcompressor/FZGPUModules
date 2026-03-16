@@ -29,6 +29,42 @@
 
 namespace fz {
 
+RZEStage::~RZEStage() {
+    if (d_scratch_) {
+        if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_scratch_, 0);
+        else cudaFree(d_scratch_);
+    }
+    if (d_sizes_dev_) {
+        if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_sizes_dev_, 0);
+        else cudaFree(d_sizes_dev_);
+    }
+    if (d_clean_dev_) {
+        if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_clean_dev_, 0);
+        else cudaFree(d_clean_dev_);
+    }
+    if (d_dst_off_dev_) {
+        if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_dst_off_dev_, 0);
+        else cudaFree(d_dst_off_dev_);
+    }
+
+    if (d_inv_in_off_) {
+        if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_in_off_, 0);
+        else cudaFree(d_inv_in_off_);
+    }
+    if (d_inv_comp_sz_) {
+        if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_comp_sz_, 0);
+        else cudaFree(d_inv_comp_sz_);
+    }
+    if (d_inv_out_off_) {
+        if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_out_off_, 0);
+        else cudaFree(d_inv_out_off_);
+    }
+    if (d_inv_orig_sz_) {
+        if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_orig_sz_, 0);
+        else cudaFree(d_inv_orig_sz_);
+    }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Compile-time constants for CS = 16384, T = uint8_t
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -601,14 +637,53 @@ void RZEStage::execute(
     // synchronous but rare; for steady-state repeated calls the branches are
     // not taken and the GPU pipeline is fully asynchronous.
     if (n_chunks > scratch_capacity_) {
-        cudaFree(d_scratch_);    d_scratch_    = nullptr;
-        cudaFree(d_sizes_dev_);  d_sizes_dev_  = nullptr;
-        cudaFree(d_clean_dev_);  d_clean_dev_  = nullptr;
-        cudaFree(d_dst_off_dev_);d_dst_off_dev_= nullptr;
-        FZ_CUDA_CHECK(cudaMalloc(&d_scratch_,     n_chunks * static_cast<size_t>(chunk_size_)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_sizes_dev_,   n_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_clean_dev_,   n_chunks * sizeof(uint32_t)));
-        FZ_CUDA_CHECK(cudaMalloc(&d_dst_off_dev_, n_chunks * sizeof(uint32_t)));
+        if (d_scratch_) {
+            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_scratch_, stream);
+            else cudaFree(d_scratch_);
+            d_scratch_ = nullptr;
+        }
+        if (d_sizes_dev_) {
+            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_sizes_dev_, stream);
+            else cudaFree(d_sizes_dev_);
+            d_sizes_dev_ = nullptr;
+        }
+        if (d_clean_dev_) {
+            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_clean_dev_, stream);
+            else cudaFree(d_clean_dev_);
+            d_clean_dev_ = nullptr;
+        }
+        if (d_dst_off_dev_) {
+            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_dst_off_dev_, stream);
+            else cudaFree(d_dst_off_dev_);
+            d_dst_off_dev_ = nullptr;
+        }
+
+        if (pool) {
+            d_scratch_ = static_cast<uint8_t*>(pool->allocate(
+                n_chunks * static_cast<size_t>(chunk_size_), stream,
+                "rze_persistent_scratch", /*persistent=*/true));
+            d_sizes_dev_ = static_cast<uint32_t*>(pool->allocate(
+                n_chunks * sizeof(uint32_t), stream,
+                "rze_persistent_sizes", /*persistent=*/true));
+            d_clean_dev_ = static_cast<uint32_t*>(pool->allocate(
+                n_chunks * sizeof(uint32_t), stream,
+                "rze_persistent_clean", /*persistent=*/true));
+            d_dst_off_dev_ = static_cast<uint32_t*>(pool->allocate(
+                n_chunks * sizeof(uint32_t), stream,
+                "rze_persistent_offsets", /*persistent=*/true));
+            if (!d_scratch_ || !d_sizes_dev_ || !d_clean_dev_ || !d_dst_off_dev_) {
+                throw std::runtime_error("RZEStage: failed to allocate persistent forward scratch from MemoryPool");
+            }
+            scratch_pool_owner_ = pool;
+            scratch_from_pool_ = true;
+        } else {
+            FZ_CUDA_CHECK(cudaMalloc(&d_scratch_,     n_chunks * static_cast<size_t>(chunk_size_)));
+            FZ_CUDA_CHECK(cudaMalloc(&d_sizes_dev_,   n_chunks * sizeof(uint32_t)));
+            FZ_CUDA_CHECK(cudaMalloc(&d_clean_dev_,   n_chunks * sizeof(uint32_t)));
+            FZ_CUDA_CHECK(cudaMalloc(&d_dst_off_dev_, n_chunks * sizeof(uint32_t)));
+            scratch_pool_owner_ = nullptr;
+            scratch_from_pool_ = false;
+        }
         scratch_capacity_ = n_chunks;
     }
 
@@ -750,14 +825,53 @@ void RZEStage::execute(
 
         // ── Grow inverse decode-table scratch if needed ───────────────────
         if (num_chunks > inv_capacity_) {
-            cudaFree(d_inv_in_off_);   d_inv_in_off_   = nullptr;
-            cudaFree(d_inv_comp_sz_);  d_inv_comp_sz_  = nullptr;
-            cudaFree(d_inv_out_off_);  d_inv_out_off_  = nullptr;
-            cudaFree(d_inv_orig_sz_);  d_inv_orig_sz_  = nullptr;
-            FZ_CUDA_CHECK(cudaMalloc(&d_inv_in_off_,  num_chunks * sizeof(uint32_t)));
-            FZ_CUDA_CHECK(cudaMalloc(&d_inv_comp_sz_, num_chunks * sizeof(uint32_t)));
-            FZ_CUDA_CHECK(cudaMalloc(&d_inv_out_off_, num_chunks * sizeof(uint32_t)));
-            FZ_CUDA_CHECK(cudaMalloc(&d_inv_orig_sz_, num_chunks * sizeof(uint32_t)));
+            if (d_inv_in_off_) {
+                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_in_off_, stream);
+                else cudaFree(d_inv_in_off_);
+                d_inv_in_off_ = nullptr;
+            }
+            if (d_inv_comp_sz_) {
+                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_comp_sz_, stream);
+                else cudaFree(d_inv_comp_sz_);
+                d_inv_comp_sz_ = nullptr;
+            }
+            if (d_inv_out_off_) {
+                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_out_off_, stream);
+                else cudaFree(d_inv_out_off_);
+                d_inv_out_off_ = nullptr;
+            }
+            if (d_inv_orig_sz_) {
+                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_orig_sz_, stream);
+                else cudaFree(d_inv_orig_sz_);
+                d_inv_orig_sz_ = nullptr;
+            }
+
+            if (pool) {
+                d_inv_in_off_ = static_cast<uint32_t*>(pool->allocate(
+                    num_chunks * sizeof(uint32_t), stream,
+                    "rze_persistent_inv_in_off", /*persistent=*/true));
+                d_inv_comp_sz_ = static_cast<uint32_t*>(pool->allocate(
+                    num_chunks * sizeof(uint32_t), stream,
+                    "rze_persistent_inv_comp_sz", /*persistent=*/true));
+                d_inv_out_off_ = static_cast<uint32_t*>(pool->allocate(
+                    num_chunks * sizeof(uint32_t), stream,
+                    "rze_persistent_inv_out_off", /*persistent=*/true));
+                d_inv_orig_sz_ = static_cast<uint32_t*>(pool->allocate(
+                    num_chunks * sizeof(uint32_t), stream,
+                    "rze_persistent_inv_orig_sz", /*persistent=*/true));
+                if (!d_inv_in_off_ || !d_inv_comp_sz_ || !d_inv_out_off_ || !d_inv_orig_sz_) {
+                    throw std::runtime_error("RZEStage: failed to allocate persistent inverse scratch from MemoryPool");
+                }
+                inv_pool_owner_ = pool;
+                inv_from_pool_ = true;
+            } else {
+                FZ_CUDA_CHECK(cudaMalloc(&d_inv_in_off_,  num_chunks * sizeof(uint32_t)));
+                FZ_CUDA_CHECK(cudaMalloc(&d_inv_comp_sz_, num_chunks * sizeof(uint32_t)));
+                FZ_CUDA_CHECK(cudaMalloc(&d_inv_out_off_, num_chunks * sizeof(uint32_t)));
+                FZ_CUDA_CHECK(cudaMalloc(&d_inv_orig_sz_, num_chunks * sizeof(uint32_t)));
+                inv_pool_owner_ = nullptr;
+                inv_from_pool_ = false;
+            }
             inv_capacity_ = num_chunks;
         }
 

@@ -12,6 +12,8 @@ include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+set(FZGMOD_CUDA_MODULE_LOADING_VALUE "EAGER")
+
 find_package(CUDAToolkit REQUIRED)
 enable_language(CUDA)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
@@ -424,3 +426,4 @@ message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  Build examples: ${BUILD_EXAMPLES}")
 message(STATUS "  Build profiling: ${BUILD_PROFILING}")
+message(STATUS "  CUDA_MODULE_LOADING for tests: ${FZGMOD_CUDA_MODULE_LOADING_VALUE}")

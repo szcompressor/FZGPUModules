@@ -92,16 +92,7 @@ public:
         , inv_capacity_(0)         // # chunks the current inverse table allocation holds
     {}
 
-    ~RZEStage() {
-        cudaFree(d_scratch_);
-        cudaFree(d_sizes_dev_);
-        cudaFree(d_clean_dev_);
-        cudaFree(d_dst_off_dev_);
-        cudaFree(d_inv_in_off_);
-        cudaFree(d_inv_comp_sz_);
-        cudaFree(d_inv_out_off_);
-        cudaFree(d_inv_orig_sz_);
-    }
+    ~RZEStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
@@ -235,6 +226,10 @@ private:
     uint32_t* d_inv_orig_sz_;
     size_t    scratch_capacity_;  // # chunks forward scratch can hold
     size_t    inv_capacity_;      // # chunks inverse tables can hold
+    MemoryPool* scratch_pool_owner_ = nullptr;
+    MemoryPool* inv_pool_owner_ = nullptr;
+    bool        scratch_from_pool_ = false;
+    bool        inv_from_pool_ = false;
 };
 
 } // namespace fz
