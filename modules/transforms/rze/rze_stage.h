@@ -114,6 +114,7 @@ public:
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
+    void postStreamSync(cudaStream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
     std::string getName() const override { return "RZE"; }
@@ -143,9 +144,7 @@ public:
     }
 
     std::unordered_map<std::string, size_t>
-    getActualOutputSizesByName() const override {
-        return {{"output", actual_output_size_}};
-    }
+    getActualOutputSizesByName() const override;
 
     uint16_t getStageTypeId() const override {
         return static_cast<uint16_t>(StageType::RZE);
@@ -224,6 +223,9 @@ private:
     uint32_t* d_inv_comp_sz_;
     uint32_t* d_inv_out_off_;
     uint32_t* d_inv_orig_sz_;
+    mutable bool         tail_readback_pending_ = false;
+    mutable cudaStream_t tail_readback_stream_ = nullptr;
+    mutable uint32_t     tail_last_index_ = 0;
     size_t    scratch_capacity_;  // # chunks forward scratch can hold
     size_t    inv_capacity_;      // # chunks inverse tables can hold
     MemoryPool* scratch_pool_owner_ = nullptr;

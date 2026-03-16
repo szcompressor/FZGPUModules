@@ -599,6 +599,41 @@ static __global__ void rzePackKernel(
         dst[i] = src[i];
 }
 
+void RZEStage::postStreamSync(cudaStream_t /*stream*/) {
+    if (!tail_readback_pending_) return;
+
+    uint32_t tail_off = 0;
+    uint32_t tail_sz  = 0;
+    FZ_CUDA_CHECK(cudaMemcpy(&tail_off, d_dst_off_dev_ + tail_last_index_,
+                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpy(&tail_sz, d_clean_dev_ + tail_last_index_,
+                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    const size_t total_out = static_cast<size_t>(tail_off)
+                           + static_cast<size_t>(tail_sz);
+    actual_output_size_ = (total_out + 3) & ~size_t(3);
+    tail_readback_pending_ = false;
+    tail_readback_stream_ = nullptr;
+}
+
+std::unordered_map<std::string, size_t>
+RZEStage::getActualOutputSizesByName() const {
+    if (tail_readback_pending_) {
+        FZ_CUDA_CHECK(cudaStreamSynchronize(tail_readback_stream_));
+        uint32_t tail_off = 0;
+        uint32_t tail_sz  = 0;
+        FZ_CUDA_CHECK(cudaMemcpy(&tail_off, d_dst_off_dev_ + tail_last_index_,
+                                 sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        FZ_CUDA_CHECK(cudaMemcpy(&tail_sz, d_clean_dev_ + tail_last_index_,
+                                 sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        const size_t total_out = static_cast<size_t>(tail_off)
+                               + static_cast<size_t>(tail_sz);
+        const_cast<RZEStage*>(this)->actual_output_size_ = (total_out + 3) & ~size_t(3);
+        tail_readback_pending_ = false;
+        tail_readback_stream_ = nullptr;
+    }
+    return {{"output", actual_output_size_}};
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // RZEStage::execute
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -611,6 +646,10 @@ void RZEStage::execute(
 {
     if (inputs.empty() || outputs.empty() || sizes.empty())
         throw std::runtime_error("RZEStage: invalid inputs/outputs");
+
+    tail_readback_pending_ = false;
+    tail_readback_stream_ = nullptr;
+    tail_last_index_ = 0;
 
     const size_t in_bytes = sizes[0];
     if (in_bytes == 0) { actual_output_size_ = 0; return; }
@@ -743,28 +782,18 @@ void RZEStage::execute(
         addOffsetKernel<<<grid256, 256, 0, stream>>>(
             d_dst_off_dev_, n_chunks_u, static_cast<uint32_t>(header_size));
 
-        // ── (6) Pack: scatter compressed chunks from uniform scratch to packed output.
+        // ── (6) Mark that output size should be finalized after stream sync.
+        //    total = d_dst_off_dev_[last] + d_clean_dev_[last]
+        tail_last_index_ = n_chunks_u - 1;
+        tail_readback_pending_ = true;
+        tail_readback_stream_ = stream;
+
+        // ── (7) Pack: scatter compressed chunks from uniform scratch to packed output.
         rzePackKernel<<<static_cast<int>(n_chunks), 512, 0, stream>>>(
             d_scratch_, d_out,
             d_dst_off_dev_, d_clean_dev_,
             static_cast<uint32_t>(chunk_size_));
         FZ_CUDA_CHECK(cudaGetLastError());
-
-        // ── (7) Read the total output size from the GPU.
-        //    total = d_dst_off_dev_[last] + d_clean_dev_[last]
-        //    Only 8 bytes need to come back from device, keeping the transfer
-        //    cost negligible. This is the one required sync per compress() call.
-        uint32_t h_tail[2] = {0, 0};
-        FZ_CUDA_CHECK(cudaMemcpyAsync(h_tail,     d_dst_off_dev_ + n_chunks - 1,
-                                     sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(h_tail + 1, d_clean_dev_   + n_chunks - 1,
-                                     sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        size_t total_out = static_cast<size_t>(h_tail[0]) + static_cast<size_t>(h_tail[1]);
-
-        // Pad to 4-byte boundary (see original comment).
-        actual_output_size_ = (total_out + 3) & ~size_t(3);
 
     // ── Inverse (decompress) ─────────────────────────────────────────────
     } else {
