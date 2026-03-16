@@ -238,6 +238,12 @@ if(BUILD_EXAMPLES)
     target_link_libraries(test_quant_only PRIVATE fzgmod)
     set_target_properties(test_quant_only PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # ── Simple API example: Lorenzo + dual encoded branches ───────────────────
+    add_executable(simple_api_lorenzo_dual_branch examples/simple_api_lorenzo_dual_branch.cpp)
+    target_link_libraries(simple_api_lorenzo_dual_branch PRIVATE fzgmod)
+    set_target_properties(simple_api_lorenzo_dual_branch PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
 ######################

@@ -543,12 +543,6 @@ void LorenzoStage<TInput, TCode>::execute(
 
         int eff_ndim = ndim();
 
-        if (config_.zigzag_codes && eff_ndim != 1) {
-            throw std::runtime_error(
-                "LorenzoStage: zigzag_codes is only supported for 1-D Lorenzo. "
-                "Disable zigzag_codes or use a 1-D configuration.");
-        }
-
         if (eff_ndim == 3) {
             // -- 3-D inverse Lorenzo --
             size_t nx = (config_.dims[0] > 0) ? config_.dims[0]
@@ -563,6 +557,7 @@ void LorenzoStage<TInput, TCode>::execute(
                 nx, ny, nz, max_outliers,
                 ebx2, config_.quant_radius,
                 static_cast<TInput*>(outputs[0]),
+                config_.zigzag_codes,
                 stream, pool
             );
         } else if (eff_ndim == 2) {
@@ -578,6 +573,7 @@ void LorenzoStage<TInput, TCode>::execute(
                 nx, ny, max_outliers,
                 ebx2, config_.quant_radius,
                 static_cast<TInput*>(outputs[0]),
+                config_.zigzag_codes,
                 stream, pool
             );
         } else {
@@ -677,12 +673,6 @@ void LorenzoStage<TInput, TCode>::execute(
 
         int eff_ndim = ndim();
 
-        if (config_.zigzag_codes && eff_ndim != 1) {
-            throw std::runtime_error(
-                "LorenzoStage: zigzag_codes is only supported for 1-D Lorenzo. "
-                "Disable zigzag_codes or use a 1-D configuration.");
-        }
-
         if (eff_ndim == 3) {
             // -- 3-D forward Lorenzo --
             size_t nx = (config_.dims[0] > 0) ? config_.dims[0]
@@ -696,7 +686,7 @@ void LorenzoStage<TInput, TCode>::execute(
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
                 static_cast<uint32_t*>(outputs[3]),
-                max_outliers, stream
+                max_outliers, config_.zigzag_codes, stream
             );
         } else if (eff_ndim == 2) {
             // -- 2-D forward Lorenzo --
@@ -710,7 +700,7 @@ void LorenzoStage<TInput, TCode>::execute(
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
                 static_cast<uint32_t*>(outputs[3]),
-                max_outliers, stream
+                max_outliers, config_.zigzag_codes, stream
             );
         } else {
             // -- 1-D forward Lorenzo (original path) --
@@ -860,7 +850,7 @@ template void launchLorenzoInverseKernel<double, uint32_t>(
 // blockDim=(32,4,1), gridDim=(ceil(nx/32), ceil(ny/32), 1).
 // Outlier format: separate errors/indices/count arrays (no ZigZag).
 
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool ZigzagCodes = false>
 __global__ void lorenzo_quantize_2d_kernel(
     const TInput* __restrict__ in_data,
     uint32_t data_lenx, uint32_t data_leny, uint32_t data_leapy,
@@ -915,9 +905,17 @@ __global__ void lorenzo_quantize_2d_kernel(
 
         if (is_valid) {
             bool quantizable = fabsf(center[i]) < static_cast<TInput>(quant_radius);
-            out_codes[gid]   = quantizable
-                ? static_cast<TCode>(static_cast<int>(center[i]))
-                : static_cast<TCode>(0);   // 0 contributes 0 to prefix sum
+            if (quantizable) {
+                if constexpr (ZigzagCodes) {
+                    using SCode = typename std::make_signed<TCode>::type;
+                    out_codes[gid] = static_cast<TCode>(
+                        Zigzag<SCode>::encode(static_cast<SCode>(static_cast<int>(center[i]))));
+                } else {
+                    out_codes[gid] = static_cast<TCode>(static_cast<int>(center[i]));
+                }
+            } else {
+                out_codes[gid] = static_cast<TCode>(0);   // 0 contributes 0 to prefix sum
+            }
 
             if (!quantizable) {
                 uint32_t cur_idx = atomicAdd(out_outlier_count, 1u);
@@ -935,7 +933,7 @@ __global__ void lorenzo_quantize_2d_kernel(
 // Outliers are pre-scattered into inout_data before this kernel is called.
 // blockDim=(32,4,1), gridDim=(ceil(nx/32), ceil(ny/32), 1).
 
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool ZigzagCodes = false>
 __global__ void lorenzo_dequantize_2d_kernel(
     const TCode* __restrict__ in_codes,
     TInput*      __restrict__ inout_data,   // holds scattered outlier deltas on entry, output on exit
@@ -959,9 +957,14 @@ __global__ void lorenzo_dequantize_2d_kernel(
     for (int i = 0; i < Yseq; i++) {
         auto gid = get_gid(i);
         if (gix < data_lenx && (giy_base + i) < data_leny) {
-            thp_data[i] = inout_data[gid]
-                + static_cast<TInput>(
-                    static_cast<typename std::make_signed<TCode>::type>(in_codes[gid]));
+            using SCode = typename std::make_signed<TCode>::type;
+            TInput decoded;
+            if constexpr (ZigzagCodes) {
+                decoded = static_cast<TInput>(Zigzag<SCode>::decode(in_codes[gid]));
+            } else {
+                decoded = static_cast<TInput>(static_cast<SCode>(in_codes[gid]));
+            }
+            thp_data[i] = inout_data[gid] + decoded;
         }
     }
 
@@ -1017,7 +1020,7 @@ __global__ void lorenzo_dequantize_2d_kernel(
 // threadIdx.y ∈ [0,8): covers one TileDim slice in y.
 // z is iterated sequentially per thread (TileDim=8 z-slices per block).
 
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool ZigzagCodes = false>
 __global__ void lorenzo_quantize_3d_kernel(
     const TInput* __restrict__ in_data,
     uint32_t data_lenx, uint32_t data_leny, uint32_t data_leapy,
@@ -1070,9 +1073,17 @@ __global__ void lorenzo_quantize_3d_kernel(
         bool is_valid = (gix < data_lenx && giy < data_leny && (uint32_t)giz(z - 1) < data_lenz);
         if (is_valid) {
             bool quantizable = fabsf(delta[z]) < static_cast<TInput>(quant_radius);
-            out_codes[gid(z - 1)] = quantizable
-                ? static_cast<TCode>(static_cast<int>(delta[z]))
-                : static_cast<TCode>(0);   // 0 contributes 0 to prefix sum
+            if (quantizable) {
+                if constexpr (ZigzagCodes) {
+                    using SCode = typename std::make_signed<TCode>::type;
+                    out_codes[gid(z - 1)] = static_cast<TCode>(
+                        Zigzag<SCode>::encode(static_cast<SCode>(static_cast<int>(delta[z]))));
+                } else {
+                    out_codes[gid(z - 1)] = static_cast<TCode>(static_cast<int>(delta[z]));
+                }
+            } else {
+                out_codes[gid(z - 1)] = static_cast<TCode>(0);   // 0 contributes 0 to prefix sum
+            }
 
             if (!quantizable) {
                 uint32_t cur_idx = atomicAdd(out_outlier_count, 1u);
@@ -1091,7 +1102,7 @@ __global__ void lorenzo_quantize_3d_kernel(
 // Outliers are pre-scattered into inout_data before this kernel is called.
 // blockDim=(32,1,8), gridDim=(ceil(nx/(4*8)), ceil(ny/8), ceil(nz/8)).
 
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool ZigzagCodes = false>
 __global__ void lorenzo_dequantize_3d_kernel(
     const TCode* __restrict__ in_codes,
     TInput*      __restrict__ inout_data,
@@ -1123,9 +1134,14 @@ __global__ void lorenzo_dequantize_3d_kernel(
 #pragma unroll
     for (int y = 0; y < Yseq; y++) {
         if (gix < data_lenx && (uint32_t)giy(y) < data_leny && giz < data_lenz) {
-            thread_private[y] = inout_data[gid(y)]
-                + static_cast<TInput>(
-                    static_cast<typename std::make_signed<TCode>::type>(in_codes[gid(y)]));
+            using SCode = typename std::make_signed<TCode>::type;
+            TInput decoded;
+            if constexpr (ZigzagCodes) {
+                decoded = static_cast<TInput>(Zigzag<SCode>::decode(in_codes[gid(y)]));
+            } else {
+                decoded = static_cast<TInput>(static_cast<SCode>(in_codes[gid(y)]));
+            }
+            thread_private[y] = inout_data[gid(y)] + decoded;
         }
     }
 
@@ -1179,7 +1195,9 @@ void launchLorenzoKernel2D(
     TInput ebx2_r, TCode quant_radius,
     TCode* d_codes, TInput* d_outlier_errors,
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
-    size_t max_outliers, cudaStream_t stream
+    size_t max_outliers,
+    bool zigzag_codes,
+    cudaStream_t stream
 ) {
     constexpr int TileDim = 32;
     constexpr int BDY     = 4;    // NumWarps in y
@@ -1192,13 +1210,23 @@ void launchLorenzoKernel2D(
     );
     uint32_t leapy = static_cast<uint32_t>(nx);
 
-    lorenzo_quantize_2d_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
-        d_input,
-        static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
-        ebx2_r, quant_radius,
-        d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count,
-        max_outliers
-    );
+    if (zigzag_codes) {
+        lorenzo_quantize_2d_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            d_input,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            ebx2_r, quant_radius,
+            d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count,
+            max_outliers
+        );
+    } else {
+        lorenzo_quantize_2d_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            d_input,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            ebx2_r, quant_radius,
+            d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count,
+            max_outliers
+        );
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -1214,6 +1242,7 @@ void launchLorenzoInverseKernel2D(
     size_t nx, size_t ny, size_t max_outliers,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
+    bool zigzag_codes,
     cudaStream_t stream, MemoryPool* pool
 ) {
     (void)pool;
@@ -1247,11 +1276,19 @@ void launchLorenzoInverseKernel2D(
     );
     uint32_t leapy = static_cast<uint32_t>(nx);
 
-    lorenzo_dequantize_2d_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
-        d_codes, d_output,
-        static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
-        quant_radius, ebx2
-    );
+    if (zigzag_codes) {
+        lorenzo_dequantize_2d_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            d_codes, d_output,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            quant_radius, ebx2
+        );
+    } else {
+        lorenzo_dequantize_2d_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            d_codes, d_output,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            quant_radius, ebx2
+        );
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -1267,7 +1304,9 @@ void launchLorenzoKernel3D(
     TInput ebx2_r, TCode quant_radius,
     TCode* d_codes, TInput* d_outlier_errors,
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
-    size_t max_outliers, cudaStream_t stream
+    size_t max_outliers,
+    bool zigzag_codes,
+    cudaStream_t stream
 ) {
     constexpr int TileDim = 8;
 
@@ -1281,14 +1320,25 @@ void launchLorenzoKernel3D(
     uint32_t leapy = static_cast<uint32_t>(nx);
     uint32_t leapz = static_cast<uint32_t>(nx) * static_cast<uint32_t>(ny);
 
-    lorenzo_quantize_3d_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
-        d_input,
-        static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
-        static_cast<uint32_t>(nz), leapz,
-        ebx2_r, quant_radius,
-        d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count,
-        max_outliers
-    );
+    if (zigzag_codes) {
+        lorenzo_quantize_3d_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            d_input,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            static_cast<uint32_t>(nz), leapz,
+            ebx2_r, quant_radius,
+            d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count,
+            max_outliers
+        );
+    } else {
+        lorenzo_quantize_3d_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            d_input,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            static_cast<uint32_t>(nz), leapz,
+            ebx2_r, quant_radius,
+            d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count,
+            max_outliers
+        );
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -1304,6 +1354,7 @@ void launchLorenzoInverseKernel3D(
     size_t nx, size_t ny, size_t nz, size_t max_outliers,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
+    bool zigzag_codes,
     cudaStream_t stream, MemoryPool* pool
 ) {
     (void)pool;
@@ -1338,12 +1389,21 @@ void launchLorenzoInverseKernel3D(
     uint32_t leapy = static_cast<uint32_t>(nx);
     uint32_t leapz = static_cast<uint32_t>(nx) * static_cast<uint32_t>(ny);
 
-    lorenzo_dequantize_3d_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
-        d_codes, d_output,
-        static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
-        static_cast<uint32_t>(nz), leapz,
-        quant_radius, ebx2
-    );
+    if (zigzag_codes) {
+        lorenzo_dequantize_3d_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            d_codes, d_output,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            static_cast<uint32_t>(nz), leapz,
+            quant_radius, ebx2
+        );
+    } else {
+        lorenzo_dequantize_3d_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            d_codes, d_output,
+            static_cast<uint32_t>(nx), static_cast<uint32_t>(ny), leapy,
+            static_cast<uint32_t>(nz), leapz,
+            quant_radius, ebx2
+        );
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -1355,16 +1415,16 @@ void launchLorenzoInverseKernel3D(
 #define INSTANTIATE_LORENZO_ND(TInput, TCode) \
     template void launchLorenzoKernel2D<TInput, TCode>( \
         const TInput*, size_t, size_t, TInput, TCode, \
-        TCode*, TInput*, uint32_t*, uint32_t*, size_t, cudaStream_t); \
+        TCode*, TInput*, uint32_t*, uint32_t*, size_t, bool, cudaStream_t); \
     template void launchLorenzoInverseKernel2D<TInput, TCode>( \
         const TCode*, const TInput*, const uint32_t*, const uint32_t*, \
-        size_t, size_t, size_t, TInput, TCode, TInput*, cudaStream_t, MemoryPool*); \
+        size_t, size_t, size_t, TInput, TCode, TInput*, bool, cudaStream_t, MemoryPool*); \
     template void launchLorenzoKernel3D<TInput, TCode>( \
         const TInput*, size_t, size_t, size_t, TInput, TCode, \
-        TCode*, TInput*, uint32_t*, uint32_t*, size_t, cudaStream_t); \
+        TCode*, TInput*, uint32_t*, uint32_t*, size_t, bool, cudaStream_t); \
     template void launchLorenzoInverseKernel3D<TInput, TCode>( \
         const TCode*, const TInput*, const uint32_t*, const uint32_t*, \
-        size_t, size_t, size_t, size_t, TInput, TCode, TInput*, cudaStream_t, MemoryPool*);
+        size_t, size_t, size_t, size_t, TInput, TCode, TInput*, bool, cudaStream_t, MemoryPool*);
 
 INSTANTIATE_LORENZO_ND(float,  uint16_t)
 INSTANTIATE_LORENZO_ND(float,  uint8_t)

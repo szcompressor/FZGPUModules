@@ -813,26 +813,97 @@ TEST(LorenzoZigzag, HeaderSerialization) {
         << "zigzag_codes=false was not recovered after serialization";
 }
 
-TEST(LorenzoZigzag, ThrowsFor2D) {
-    // execute() must throw when zigzag_codes=true and ndim()==2.
+TEST(LorenzoZigzag, Supports2D) {
+    // zigzag_codes=true should be supported for 2-D Lorenzo and round-trip
+    // within the configured error bound.
     CudaStream stream;
     constexpr size_t NX = 32, NY = 32;
     constexpr size_t N  = NX * NY;
+    constexpr float  EB = 1e-2f;
 
     auto pool = make_test_pool(N * sizeof(float) * 20);
 
-    std::vector<float> h_input(N, 1.0f);
+    std::vector<float> h_input(N);
+    for (size_t y = 0; y < NY; y++) {
+        for (size_t x = 0; x < NX; x++) {
+            size_t i = y * NX + x;
+            h_input[i] = 0.5f * std::sin(static_cast<float>(x) * 0.2f)
+                       + 0.3f * std::cos(static_cast<float>(y) * 0.15f);
+        }
+    }
 
     LorenzoStage<float, uint16_t> fwd;
-    fwd.setErrorBound(1e-2f);
+    fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
     fwd.setDims(NX, NY);
     fwd.setZigzagCodes(true);
 
-    EXPECT_THROW(run_lorenzo_forward(fwd, h_input, stream, *pool),
-                 std::runtime_error)
-        << "LorenzoStage should throw when zigzag_codes=true and ndim()==2";
+    auto result = run_lorenzo_forward(fwd, h_input, stream, *pool);
+
+    LorenzoStage<float, uint16_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+    auto h_recon = run_lorenzo_inverse(inv, result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++) {
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    }
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "2D zigzag round-trip max_err=" << max_err << " exceeds EB=" << EB;
+}
+
+TEST(LorenzoZigzag, Supports3D) {
+    // zigzag_codes=true should be supported for 3-D Lorenzo and round-trip
+    // within the configured error bound.
+    CudaStream stream;
+    constexpr size_t NX = 16, NY = 8, NZ = 8;
+    constexpr size_t N  = NX * NY * NZ;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 24);
+
+    std::vector<float> h_input(N);
+    for (size_t z = 0; z < NZ; z++) {
+        for (size_t y = 0; y < NY; y++) {
+            for (size_t x = 0; x < NX; x++) {
+                size_t i = z * (NX * NY) + y * NX + x;
+                h_input[i] = 0.6f * std::sin(static_cast<float>(x) * 0.17f)
+                           + 0.4f * std::cos(static_cast<float>(y) * 0.21f)
+                           + 0.3f * std::sin(static_cast<float>(z) * 0.29f);
+            }
+        }
+    }
+
+    LorenzoStage<float, uint16_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.2f);
+    fwd.setDims(NX, NY, NZ);
+    fwd.setZigzagCodes(true);
+
+    auto result = run_lorenzo_forward(fwd, h_input, stream, *pool);
+
+    LorenzoStage<float, uint16_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+    auto h_recon = run_lorenzo_inverse(inv, result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++) {
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    }
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "3D zigzag round-trip max_err=" << max_err << " exceeds EB=" << EB;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -117,7 +117,7 @@ public:
         float precomputed_value_base = 0.0f;        // When true, quantization codes are zigzag-encoded before storage.
         // Zigzag maps signed integers to unsigned: ..., -2→3, -1→1, 0→0, 1→2, 2→4, ...
         // This improves compressibility when codes cluster near zero.
-        // Only supported for 1-D Lorenzo; throws for 2-D or 3-D.
+        // Supported for 1-D/2-D/3-D Lorenzo.
         bool zigzag_codes = false;
         Config() = default;
         Config(TInput eb, TCode radius = 32768, float outlier_cap = 0.2f,
@@ -391,7 +391,9 @@ void launchLorenzoKernel2D(
     TInput ebx2_r, TCode quant_radius,
     TCode* d_codes, TInput* d_outlier_errors,
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
-    size_t max_outliers, cudaStream_t stream
+    size_t max_outliers,
+    bool zigzag_codes,
+    cudaStream_t stream
 );
 
 /// 2-D inverse Lorenzo kernel launcher.
@@ -403,6 +405,7 @@ void launchLorenzoInverseKernel2D(
     size_t nx, size_t ny, size_t max_outliers,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
+    bool zigzag_codes,
     cudaStream_t stream, MemoryPool* pool
 );
 
@@ -414,7 +417,9 @@ void launchLorenzoKernel3D(
     TInput ebx2_r, TCode quant_radius,
     TCode* d_codes, TInput* d_outlier_errors,
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
-    size_t max_outliers, cudaStream_t stream
+    size_t max_outliers,
+    bool zigzag_codes,
+    cudaStream_t stream
 );
 
 /// 3-D inverse Lorenzo kernel launcher.
@@ -426,6 +431,7 @@ void launchLorenzoInverseKernel3D(
     size_t nx, size_t ny, size_t nz, size_t max_outliers,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
+    bool zigzag_codes,
     cudaStream_t stream, MemoryPool* pool
 );
 

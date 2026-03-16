@@ -115,7 +115,8 @@ static __device__ int rze_ze_encode(
 
         // One 32-bit ballot per warp → 4 bytes of bitmap per warp per iteration
         const uint32_t mask = __ballot_sync(0xFFFFFFFFu, (unsigned)nz);
-        if (lane == 0) ((uint32_t*)bm)[base / 32 + warp] = mask;
+        if (lane == 0 && (base + warp * 32) < N)
+            ((uint32_t*)bm)[base / 32 + warp] = mask;
 
         // Warp output positions via block prefix sum
         if (lane == 0) ps_work[warp] = (int)__popc(mask);
@@ -163,7 +164,8 @@ static __device__ int rze_re_encode(
         const bool    nr  = active && (v != p);
 
         const uint32_t mask = __ballot_sync(0xFFFFFFFFu, (unsigned)nr);
-        if (lane == 0) ((uint32_t*)bm)[base / 32 + warp] = mask;
+        if (lane == 0 && (base + warp * 32) < N)
+            ((uint32_t*)bm)[base / 32 + warp] = mask;
 
         if (lane == 0) ps_work[warp] = (int)__popc(mask);
         __syncthreads();
@@ -333,6 +335,13 @@ rzeEncodeKernel(
     // ── Level 2: RE encode of bm1 ----------------------------------------
     // bm1 output buffer for level-2 RE goes AFTER wpos in out[]; bm2 into smem
     const int bm1_bytes = (in_size + 7) / 8;  // actual bm1 size
+    if (wpos >= avail || wpos > avail - bm1_bytes) {
+        for (int i = threadIdx.x; i < in_size; i += RZE_TPB)
+            out[i] = in[i];
+        if (threadIdx.x == 0)
+            d_sizes[cid] = (1u << 31) | (uint32_t)in_size;
+        return;
+    }
     const int bm2_nr = rze_re_encode(bm1, bm1_bytes, out + wpos, bm2, ps_work);
     wpos += bm2_nr;
 
@@ -347,6 +356,13 @@ rzeEncodeKernel(
 
     // ── Level 3: RE encode of bm2 ----------------------------------------
     const int bm2_bytes = (bm1_bytes + 7) / 8;
+    if (wpos >= avail || wpos > avail - bm2_bytes) {
+        for (int i = threadIdx.x; i < in_size; i += RZE_TPB)
+            out[i] = in[i];
+        if (threadIdx.x == 0)
+            d_sizes[cid] = (1u << 31) | (uint32_t)in_size;
+        return;
+    }
     const int bm3_nr = rze_re_encode(bm2, bm2_bytes, out + wpos, bm3, ps_work);
     wpos += bm3_nr;
 
@@ -360,6 +376,13 @@ rzeEncodeKernel(
 
     // ── Level 4: RE encode of bm3 ----------------------------------------
     const int bm3_bytes = (bm2_bytes + 7) / 8;
+    if (wpos >= avail - (int)RZE_BM4 || wpos > (avail - (int)RZE_BM4) - bm3_bytes) {
+        for (int i = threadIdx.x; i < in_size; i += RZE_TPB)
+            out[i] = in[i];
+        if (threadIdx.x == 0)
+            d_sizes[cid] = (1u << 31) | (uint32_t)in_size;
+        return;
+    }
     const int bm4_nr = rze_re_encode(bm3, bm3_bytes, out + wpos, bm4, ps_work);
     wpos += bm4_nr;
 
@@ -712,7 +735,7 @@ void RZEStage::execute(
             const uint32_t stored = entry & 0x7FFFFFFFu;
 
             h_in_off[i]  = in_cursor;
-            h_comp_sz[i] = stored;
+            h_comp_sz[i] = uncmp ? 0u : stored;
             h_out_off[i] = out_cursor;
             h_is_uncmp[i] = uncmp;
 

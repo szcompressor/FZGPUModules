@@ -368,87 +368,85 @@ void BitshuffleStage::execute(
 
     const size_t N_chunk = validateConfig();
 
-    if (in_bytes % block_size_ != 0)
-        throw std::runtime_error(
-            "BitshuffleStage: input size (" + std::to_string(in_bytes) +
-            " bytes) is not a multiple of block_size (" +
-            std::to_string(block_size_) + " bytes)");
+    const size_t full_bytes = (in_bytes / block_size_) * block_size_;
+    const size_t tail_bytes = in_bytes - full_bytes;
+    const int grid = static_cast<int>(full_bytes / block_size_);
 
-    const int grid = static_cast<int>(in_bytes / block_size_);
-
-    if (!is_inverse_) {
-        switch (element_width_) {
-            case 1: {
-                const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
-                bitshuffleEncodeKernelBallot<uint8_t>
-                    <<<grid, bdim, 0, stream>>>(
-                    static_cast<const uint8_t*>(inputs[0]),
-                    static_cast<uint32_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
+    if (grid > 0) {
+        if (!is_inverse_) {
+            switch (element_width_) {
+                case 1: {
+                    const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
+                    bitshuffleEncodeKernelBallot<uint8_t>
+                        <<<grid, bdim, 0, stream>>>(
+                        static_cast<const uint8_t*>(inputs[0]),
+                        static_cast<uint32_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                }
+                case 2: {
+                    const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
+                    bitshuffleEncodeKernelBallot<uint16_t>
+                        <<<grid, bdim, 0, stream>>>(
+                        static_cast<const uint16_t*>(inputs[0]),
+                        static_cast<uint32_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                }
+                case 4:
+                    bitshuffleEncodeKernel32
+                        <<<grid, 1024, 0, stream>>>(
+                        static_cast<const uint32_t*>(inputs[0]),
+                        static_cast<uint32_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                case 8:
+                    bitshuffleEncodeKernel64
+                        <<<grid, 1024, 0, stream>>>(
+                        static_cast<const uint64_t*>(inputs[0]),
+                        static_cast<uint64_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                default:
+                    throw std::runtime_error("BitshuffleStage: unsupported element_width");
             }
-            case 2: {
-                const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
-                bitshuffleEncodeKernelBallot<uint16_t>
-                    <<<grid, bdim, 0, stream>>>(
-                    static_cast<const uint16_t*>(inputs[0]),
-                    static_cast<uint32_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
+        } else {
+            switch (element_width_) {
+                case 1: {
+                    const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
+                    bitshuffleDecodeKernelBallot<uint8_t>
+                        <<<grid, bdim, 0, stream>>>(
+                        static_cast<const uint32_t*>(inputs[0]),
+                        static_cast<uint8_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                }
+                case 2: {
+                    const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
+                    bitshuffleDecodeKernelBallot<uint16_t>
+                        <<<grid, bdim, 0, stream>>>(
+                        static_cast<const uint32_t*>(inputs[0]),
+                        static_cast<uint16_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                }
+                case 4:
+                    bitshuffleDecodeKernel32
+                        <<<grid, 1024, 0, stream>>>(
+                        static_cast<const uint32_t*>(inputs[0]),
+                        static_cast<uint32_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                case 8:
+                    bitshuffleDecodeKernel64
+                        <<<grid, 1024, 0, stream>>>(
+                        static_cast<const uint64_t*>(inputs[0]),
+                        static_cast<uint64_t*>(outputs[0]),
+                        static_cast<uint32_t>(N_chunk));
+                    break;
+                default:
+                    throw std::runtime_error("BitshuffleStage: unsupported element_width");
             }
-            case 4:
-                bitshuffleEncodeKernel32
-                    <<<grid, 1024, 0, stream>>>(
-                    static_cast<const uint32_t*>(inputs[0]),
-                    static_cast<uint32_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
-            case 8:
-                bitshuffleEncodeKernel64
-                    <<<grid, 1024, 0, stream>>>(
-                    static_cast<const uint64_t*>(inputs[0]),
-                    static_cast<uint64_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
-            default:
-                throw std::runtime_error("BitshuffleStage: unsupported element_width");
-        }
-    } else {
-        switch (element_width_) {
-            case 1: {
-                const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
-                bitshuffleDecodeKernelBallot<uint8_t>
-                    <<<grid, bdim, 0, stream>>>(
-                    static_cast<const uint32_t*>(inputs[0]),
-                    static_cast<uint8_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
-            }
-            case 2: {
-                const int bdim = static_cast<int>(std::min(N_chunk, size_t(1024)));
-                bitshuffleDecodeKernelBallot<uint16_t>
-                    <<<grid, bdim, 0, stream>>>(
-                    static_cast<const uint32_t*>(inputs[0]),
-                    static_cast<uint16_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
-            }
-            case 4:
-                bitshuffleDecodeKernel32
-                    <<<grid, 1024, 0, stream>>>(
-                    static_cast<const uint32_t*>(inputs[0]),
-                    static_cast<uint32_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
-            case 8:
-                bitshuffleDecodeKernel64
-                    <<<grid, 1024, 0, stream>>>(
-                    static_cast<const uint64_t*>(inputs[0]),
-                    static_cast<uint64_t*>(outputs[0]),
-                    static_cast<uint32_t>(N_chunk));
-                break;
-            default:
-                throw std::runtime_error("BitshuffleStage: unsupported element_width");
         }
     }
 
@@ -457,6 +455,17 @@ void BitshuffleStage::execute(
         throw std::runtime_error(
             std::string("BitshuffleStage kernel launch failed: ") +
             cudaGetErrorString(err));
+
+    if (tail_bytes > 0) {
+        const auto* in_tail = static_cast<const uint8_t*>(inputs[0]) + full_bytes;
+        auto* out_tail = static_cast<uint8_t*>(outputs[0]) + full_bytes;
+        FZ_CUDA_CHECK(cudaMemcpyAsync(
+            out_tail,
+            in_tail,
+            tail_bytes,
+            cudaMemcpyDeviceToDevice,
+            stream));
+    }
 
     actual_output_size_ = in_bytes;
 }

@@ -169,6 +169,10 @@ void Pipeline::finalize() {
     // Push current dims to all stages so late setDims() calls are honoured
     for (const auto& stage_ptr : stages_) {
         stage_ptr->setDims(dims_);
+        auto it = stage_to_node_.find(stage_ptr.get());
+        if (it != stage_to_node_.end() && it->second) {
+            it->second->name = stage_ptr->getName();
+        }
     }
 
     validate();
