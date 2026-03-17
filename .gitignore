@@ -12,3 +12,4 @@ temp/
 docs/
 *.nsys-rep
 load-env
+a.out

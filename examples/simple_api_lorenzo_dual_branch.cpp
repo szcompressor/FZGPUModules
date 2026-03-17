@@ -4,7 +4,7 @@
  *   Lorenzo(+fused quantization, zigzag codes) -> bitshuffle -> RZE
  *
  * Usage:
- *   ./build/bin/simple_api_lorenzo_dual_branch [error_bound]
+ *   ./build/bin/simple_api_lorenzo_dual_branch <input_file> [dim_x] [dim_y] [error_bound]
  */
 
 #include "cuda_check.h"
@@ -20,40 +20,45 @@
 
 using namespace fz;
 
-static constexpr size_t DIM_X = 4096;
-static constexpr size_t DIM_Y = 2048;
-static constexpr size_t N = DIM_X * DIM_Y;
-static constexpr size_t CHUNK = 16384;
-static constexpr size_t MIN_TEST_BYTES = 20ull * 1024ull * 1024ull;
-static_assert(N * sizeof(float) >= MIN_TEST_BYTES,
-              "simple_api_lorenzo_dual_branch input must be >= 20 MiB");
+#include <fstream>
 
-static std::vector<float> make_demo_data() {
-    std::vector<float> h(N);
-    for (size_t y = 0; y < DIM_Y; ++y) {
-        for (size_t x = 0; x < DIM_X; ++x) {
-            const size_t i = y * DIM_X + x;
-            float v = 1.5f * std::sin(0.01f * static_cast<float>(x))
-                    + 0.75f * std::cos(0.02f * static_cast<float>(y));
-            if ((x + y) % 257 == 0) v += 6.0f;
-            h[i] = v;
-        }
-    }
-    return h;
-}
+static constexpr size_t CHUNK = 16384;
 
 int main(int argc, char** argv) {
-    float eb = 1e-3f;
-    if (argc > 1) {
-        eb = std::stof(argv[1]);
-        if (eb <= 0.0f) {
-            std::cerr << "error_bound must be > 0\n";
-            return 1;
-        }
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <input_file> [dim_x=3600] [dim_y=1800] [error_bound=1e-3]\n";
+        return 1;
     }
 
+    std::string input_file = argv[1];
+    size_t dim_x = 3600;
+    size_t dim_y = 1800;
+    float eb = 1e-3f;
+
+    if (argc > 2) dim_x = std::stoul(argv[2]);
+    if (argc > 3) dim_y = std::stoul(argv[3]);
+    if (argc > 4) eb = std::stof(argv[4]);
+
+    if (eb <= 0.0f) {
+        std::cerr << "error_bound must be > 0\n";
+        return 1;
+    }
+
+    const size_t N = dim_x * dim_y;
     const size_t input_bytes = N * sizeof(float);
-    const auto h_input = make_demo_data();
+
+    std::vector<float> h_input(N);
+    std::ifstream infile(input_file, std::ios::binary);
+    if (!infile) {
+        std::cerr << "Error opening file: " << input_file << "\n";
+        return 1;
+    }
+    infile.read(reinterpret_cast<char*>(h_input.data()), input_bytes);
+    if (infile.gcount() != static_cast<std::streamsize>(input_bytes)) {
+        std::cerr << "Read mismatch: expected " << input_bytes << " bytes, got " << infile.gcount() << "\n";
+        return 1;
+    }
+    infile.close();
 
     float* d_input = nullptr;
     FZ_CUDA_CHECK(cudaMalloc(&d_input, input_bytes));
@@ -61,7 +66,7 @@ int main(int argc, char** argv) {
 
     Pipeline p(input_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
     p.enableProfiling(true);
-    p.setDims(DIM_X, DIM_Y, 1);
+    p.setDims(dim_x, dim_y, 1);
 
     auto* lorenzo = p.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
@@ -137,7 +142,7 @@ int main(int argc, char** argv) {
 
     std::cout << std::fixed << std::setprecision(3);
     std::cout << "Simple PFPL-style Lorenzo API example\n";
-    std::cout << "  data grid:     " << DIM_X << " x " << DIM_Y << "\n";
+    std::cout << "  data grid:     " << dim_x << " x " << dim_y << "\n";
     std::cout << "  lorenzo mode:  2D\n";
     std::cout << "  error bound:   " << eb << " (ABS)\n";
     std::cout << "  input bytes:   " << input_bytes << "\n";
