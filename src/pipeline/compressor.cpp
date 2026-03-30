@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -17,12 +18,18 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       num_streams_(1),
       is_finalized_(false),
       soft_run_enabled_(false),
+      warmup_on_finalize_(false),
       is_compressed_(false),
       was_compressed_(false),
       profiling_enabled_(false),
       d_concat_buffer_(nullptr),
       concat_buffer_capacity_(0),
       needs_concat_(false),
+      h_concat_header_(nullptr),
+      h_concat_header_capacity_(0),
+      h_copy_descs_(nullptr),
+      d_copy_descs_(nullptr),
+      copy_descs_capacity_(0),
       input_size_(0),
       input_alignment_bytes_(1),
       d_pad_buf_(nullptr),
@@ -49,6 +56,18 @@ Pipeline::~Pipeline() {
     if (d_pad_buf_ && mem_pool_) {
         mem_pool_->free(d_pad_buf_, 0);
         d_pad_buf_ = nullptr;
+    }
+    if (h_concat_header_) {
+        cudaFreeHost(h_concat_header_);
+        h_concat_header_ = nullptr;
+    }
+    if (h_copy_descs_) {
+        cudaFreeHost(h_copy_descs_);
+        h_copy_descs_ = nullptr;
+    }
+    if (d_copy_descs_) {
+        cudaFree(d_copy_descs_);
+        d_copy_descs_ = nullptr;
     }
 }
 
@@ -245,8 +264,18 @@ void Pipeline::finalize() {
         // buffer is ever created).
         const size_t pad_bytes  = (input_alignment_bytes_ > 1) ? input_size_hint_ : 0;
         const size_t topo_sized = static_cast<size_t>((topo_base + pad_bytes) * kTopoSafetyMargin);
-        mem_pool_->setReleaseThreshold(topo_sized);
-        FZ_LOG(INFO, "Pool threshold: %.2f MB (topo %.2f MB + pad %.2f MB, ×1.1 margin)",
+        // Pin the CUDA pool release threshold to UINT64_MAX regardless of
+        // strategy.  The topo-derived value tells CUDA the *capacity* target,
+        // but a low threshold causes the driver to trim freed pages back to the
+        // OS between compress() calls, forcing re-page-faulting on the next
+        // call — visible as random latency spikes in MINIMAL mode.
+        // UINT64_MAX means "never trim": pages freed inside a call stay warm
+        // in the pool for the next call.  This does NOT change the peak
+        // in-flight footprint (MINIMAL still allocates/frees lazily); it only
+        // keeps the OS-level pages hot across calls.
+        mem_pool_->setReleaseThreshold(std::numeric_limits<uint64_t>::max());
+        FZ_LOG(INFO, "Pool threshold: %.2f MB (topo %.2f MB + pad %.2f MB, ×1.1 margin) "
+               "[release threshold pinned to UINT64_MAX]",
                topo_sized / (1024.0 * 1024.0),
                topo_base  / (1024.0 * 1024.0),
                pad_bytes  / (1024.0 * 1024.0));
@@ -278,12 +307,82 @@ void Pipeline::finalize() {
     }
 
     num_streams_ = std::max(1, static_cast<int>(dag_->getStreamCount()));
+
+    // Pre-allocate pinned concat header buffer.
+    // Size = sizeof(uint32_t) + num_outputs * sizeof(uint64_t).
+    // We use output_buffer_ids_.size() as the output count; if it is still 0
+    // here (single-sink, no concat needed) we skip — needs_concat_ is false.
+    if (needs_concat_ && !output_buffer_ids_.empty()) {
+        const size_t n_outputs = output_buffer_ids_.size();
+
+        // Header buffer: [num_buffers: u32][size_0..N-1: u64]
+        const size_t hdr_bytes  = sizeof(uint32_t) + n_outputs * sizeof(uint64_t);
+        if (h_concat_header_ == nullptr || h_concat_header_capacity_ < hdr_bytes) {
+            if (h_concat_header_) cudaFreeHost(h_concat_header_);
+            FZ_CUDA_CHECK(cudaHostAlloc(&h_concat_header_, hdr_bytes, cudaHostAllocDefault));
+            h_concat_header_capacity_ = hdr_bytes;
+        }
+
+        // Gather kernel descriptor buffers: one CopyDesc per output segment.
+        // Pinned host buffer for CPU packing; device mirror for kernel access.
+        const size_t desc_bytes = n_outputs * sizeof(CopyDesc);
+        if (h_copy_descs_ == nullptr || copy_descs_capacity_ < desc_bytes) {
+            if (h_copy_descs_) cudaFreeHost(h_copy_descs_);
+            if (d_copy_descs_) cudaFree(d_copy_descs_);
+            FZ_CUDA_CHECK(cudaHostAlloc(&h_copy_descs_, desc_bytes, cudaHostAllocDefault));
+            FZ_CUDA_CHECK(cudaMalloc(&d_copy_descs_, desc_bytes));
+            copy_descs_capacity_ = desc_bytes;
+        }
+    }
+
     is_finalized_ = true;
-    
+
     FZ_LOG(INFO, "Finalized with %zu stages, strategy=%s",
            stages_.size(),
-           strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" : 
+           strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" :
            strategy_ == MemoryStrategy::PIPELINE ? "PIPELINE" : "PREALLOCATE");
+
+    if (warmup_on_finalize_ && input_size_hint_ > 0) {
+        FZ_LOG(INFO, "Auto-warmup triggered by setWarmupOnFinalize(true)");
+        warmup(/*stream=*/0);
+    }
+}
+
+void Pipeline::warmup(cudaStream_t stream) {
+    if (!is_finalized_) {
+        throw std::runtime_error("Pipeline must be finalized before warmup()");
+    }
+    if (input_size_hint_ == 0) {
+        FZ_LOG(INFO, "warmup() skipped: no input_size_hint (construct Pipeline with a non-zero size)");
+        return;
+    }
+
+    // Allocate a temporary zero-filled dummy input outside the pool so we
+    // don't disturb the pre-sized pool reservation.
+    void* d_dummy = nullptr;
+    FZ_CUDA_CHECK(cudaMalloc(&d_dummy, input_size_hint_));
+    FZ_CUDA_CHECK(cudaMemsetAsync(d_dummy, 0, input_size_hint_, stream));
+
+    // Suppress profiling so the warmup pass doesn't pollute last_perf_result_.
+    const bool saved_profiling = profiling_enabled_;
+    enableProfiling(false);
+
+    void*  d_out  = nullptr;
+    size_t out_sz = 0;
+    compress(d_dummy, input_size_hint_, &d_out, &out_sz, stream);
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Restore pipeline to a clean state — identical to just after finalize().
+    dag_->reset(stream);
+    was_compressed_ = false;
+    is_compressed_  = false;
+    buffer_metadata_.clear();
+
+    enableProfiling(saved_profiling);
+    cudaFree(d_dummy);
+
+    FZ_LOG(INFO, "Warmup complete — all kernels JIT-compiled (input %.2f MB)",
+           input_size_hint_ / (1024.0 * 1024.0));
 }
 
 void Pipeline::reset(cudaStream_t stream) {
@@ -620,33 +719,46 @@ size_t Pipeline::writeConcatBuffer(
     uint8_t* d_concat_bytes,
     cudaStream_t stream
 ) const {
-    size_t offset = 0;
-    
-    // Write num_buffers header
-    uint32_t num_buffers = static_cast<uint32_t>(outputs.size());
-    cudaMemcpyAsync(d_concat_bytes + offset, &num_buffers, sizeof(uint32_t),
-                   cudaMemcpyHostToDevice, stream);
-    offset += sizeof(uint32_t);
-    
-    // Write each buffer with size header
-    for (const auto& output : outputs) {
-        // Write size header
-        uint64_t size_header = static_cast<uint64_t>(output.actual_size);
-        cudaMemcpyAsync(d_concat_bytes + offset, &size_header, sizeof(uint64_t),
-                       cudaMemcpyHostToDevice, stream);
-        offset += sizeof(uint64_t);
-        
-        // Write buffer data
-        if (output.actual_size > 0) {
-            cudaMemcpyAsync(d_concat_bytes + offset, output.d_ptr, output.actual_size,
-                           cudaMemcpyDeviceToDevice, stream);
-            offset += output.actual_size;
-        }
-        
-        FZ_LOG(TRACE, "Concat: %s - %.1f KB at offset %zu",
-               output.stage_name.c_str(), output.actual_size / 1024.0, offset - output.actual_size);
+    const size_t n = outputs.size();
+
+    // ── Pack the entire header into the pinned host buffer (no API calls) ──
+    // Layout: [num_buffers: u32][size_0: u64][size_1: u64]...[size_N-1: u64]
+    const size_t hdr_bytes = sizeof(uint32_t) + n * sizeof(uint64_t);
+
+    uint8_t* h = static_cast<uint8_t*>(h_concat_header_);
+    *reinterpret_cast<uint32_t*>(h) = static_cast<uint32_t>(n);
+    h += sizeof(uint32_t);
+    for (const auto& out : outputs) {
+        *reinterpret_cast<uint64_t*>(h) = static_cast<uint64_t>(out.actual_size);
+        h += sizeof(uint64_t);
     }
-    
+
+    // ── Build gather descriptors on the CPU (no API calls) ──────────────────
+    // Compute destination offsets with a simple prefix sum; all sizes are
+    // already known from postStreamSync() before writeConcatBuffer is called.
+    CopyDesc* h_descs = static_cast<CopyDesc*>(h_copy_descs_);
+    size_t offset = hdr_bytes;
+    for (size_t i = 0; i < n; i++) {
+        h_descs[i].src   = static_cast<const uint8_t*>(outputs[i].d_ptr);
+        h_descs[i].dst   = d_concat_bytes + offset;
+        h_descs[i].bytes = outputs[i].actual_size;
+        FZ_LOG(TRACE, "Concat desc[%zu]: %s  %.1f KB -> offset %zu",
+               i, outputs[i].stage_name.c_str(), outputs[i].actual_size / 1024.0, offset);
+        offset += outputs[i].actual_size;
+    }
+
+    // ── Two H2D copies + one kernel launch (replaces 1 H2D + N D2D) ─────────
+    // 1. Header (num_buffers + per-segment sizes)
+    cudaMemcpyAsync(d_concat_bytes, h_concat_header_, hdr_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    // 2. Gather descriptors
+    const size_t desc_bytes = n * sizeof(CopyDesc);
+    cudaMemcpyAsync(d_copy_descs_, h_copy_descs_, desc_bytes,
+                    cudaMemcpyHostToDevice, stream);
+    // 3. Gather kernel: one block per segment, 256 threads each
+    launch_gather_kernel(static_cast<const CopyDesc*>(d_copy_descs_),
+                         static_cast<int>(n), 256, stream);
+
     return offset;
 }
 

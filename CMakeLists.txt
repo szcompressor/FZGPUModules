@@ -182,6 +182,7 @@ add_library(fzgmod_pipeline
   src/pipeline/compressor_exec.cpp
   src/pipeline/compressor_inverse_dag.cpp
   src/pipeline/compressor_io.cpp
+  src/pipeline/concat_kernel.cu
   src/pipeline/dag.cpp
   src/pipeline/perf.cpp
   src/pipeline/stat.cpp

@@ -430,6 +430,38 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     CompressionDAG& inv_dag        = *inv_cache_->inv_dag;
     const auto&     inv_result_map = inv_cache_->inv_result_map;
 
+    // ── Pre-allocate caller output buffers and wire as external DAG outputs ───
+    // §4: the inv DAG writes directly into these caller-owned buffers,
+    // eliminating the post-execute pool-buf → cudaMalloc D2D copy.
+    // setExternalPointer() handles pool→external transparently: it frees any
+    // prior pool/persistent allocation and marks the slot external so
+    // allocateBuffer() skips it during execute().
+    std::vector<std::pair<void*, size_t>> results;
+    results.reserve(input_nodes_.size());
+    for (size_t i = 0; i < input_nodes_.size(); i++) {
+        Stage* src_stage  = input_nodes_[i]->stage;
+        auto   buf_it     = inv_result_map.find(src_stage);
+        if (buf_it == inv_result_map.end()) {
+            for (auto& r : results) cudaFree(r.first);
+            for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
+            throw std::runtime_error(
+                "decompressMulti: no inverse result buffer for source stage '" +
+                src_stage->getName() + "'");
+        }
+        int    res_buf_id  = buf_it->second;
+        size_t actual_size = inv_dag.getBufferSize(res_buf_id);
+
+        void*       d_final = nullptr;
+        cudaError_t err     = cudaMalloc(&d_final, actual_size);
+        if (err != cudaSuccess) {
+            for (auto& r : results) cudaFree(r.first);
+            for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
+            throw std::runtime_error("cudaMalloc for decompress output failed");
+        }
+        inv_dag.setExternalPointer(res_buf_id, d_final);
+        results.push_back({d_final, actual_size});
+    }
+
     // ── Execute ───────────────────────────────────────────────────────────────
     auto t_dag_start = std::chrono::steady_clock::now();
     inv_dag.execute(stream);
@@ -444,52 +476,23 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         ? inv_dag.collectTimings()
         : std::vector<StageTimingResult>{};
 
-    // ── Extract results in source-discovery order (matches input_nodes_) ─────
-    // For each source stage, refine the buffer size from postStreamSync output,
-    // then cudaMalloc a persistent copy for the caller.
-    std::vector<std::pair<void*, size_t>> results;
-    results.reserve(input_nodes_.size());
-
+    // ── Refine output sizes from postStreamSync (no copy needed) ─────────────
+    // The inv DAG already wrote into d_final directly. Just update the size
+    // field if the stage reports a smaller actual size post-execution.
     for (size_t i = 0; i < input_nodes_.size(); i++) {
         Stage* src_stage = input_nodes_[i]->stage;
-        auto   buf_it    = inv_result_map.find(src_stage);
-        if (buf_it == inv_result_map.end()) {
-            throw std::runtime_error(
-                "decompressMulti: no inverse result buffer for source stage '" +
-                src_stage->getName() + "'");
-        }
-        int    res_buf_id  = buf_it->second;
-        void*  d_inv_ptr   = inv_dag.getBuffer(res_buf_id);
-        size_t actual_size = inv_dag.getBufferSize(res_buf_id);
-
-        // Prefer the stage's post-execution reported size (e.g. Lorenzo trimming).
-        auto post_sizes = src_stage->getActualOutputSizesByName();
-        auto post_names = src_stage->getOutputNames();
+        auto post_sizes  = src_stage->getActualOutputSizesByName();
+        auto post_names  = src_stage->getOutputNames();
         if (!post_names.empty() && post_sizes.count(post_names[0])) {
-            actual_size = post_sizes.at(post_names[0]);
+            results[i].second = post_sizes.at(post_names[0]);
         }
-
-        void* d_final = nullptr;
-        cudaError_t err = cudaMalloc(&d_final, actual_size);
-        if (err != cudaSuccess) {
-            for (auto& r : results) cudaFree(r.first);
-            inv_dag.reset(stream);
-            for (auto& s : stages_) {
-                s->setInverse(false);
-                s->restoreState();
-            }
-            throw std::runtime_error("cudaMalloc for decompress output failed");
-        }
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_final, d_inv_ptr, actual_size,
-                                      cudaMemcpyDeviceToDevice, stream));
-        results.push_back({d_final, actual_size});
     }
-    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
-    // Result buffers in the cached inv DAG are persistent — do NOT free them.
-    // Intermediate (non-persistent) buffers are freed by reset() in MINIMAL mode.
-    // In PREALLOCATE mode reset() is a no-op for all allocations.
+    // Result buffers are now external (caller-owned via cudaMalloc) — reset()
+    // skips external buffers so they are not freed here.
+    // Intermediate non-external buffers are freed by reset() in MINIMAL mode.
+    // In PREALLOCATE mode reset() is a no-op for non-external allocations.
     inv_dag.reset(stream);
 
     for (auto& s : stages_) {

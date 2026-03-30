@@ -75,6 +75,12 @@ struct DAGNode {
     bool is_executed;
     cudaEvent_t completion_event;       // When this stage completes
     cudaEvent_t start_event;            // When this stage starts (profiling only, nullptr = disabled)
+
+    // Pre-sized scratch vectors for execute() — sized at finalize(), reused
+    // every call to avoid per-call heap allocation of the input/output/sizes arrays.
+    std::vector<void*>  exec_inputs;
+    std::vector<void*>  exec_outputs;
+    std::vector<size_t> exec_sizes;
     
     DAGNode(Stage* s = nullptr) 
         : id(-1), stage(s), level(-1), execution_order(-1), 

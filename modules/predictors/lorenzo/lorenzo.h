@@ -169,7 +169,11 @@ public:
         }
         return result;
     }
-    
+    size_t getActualOutputSize(int index) const override {
+        return (index >= 0 && index < static_cast<int>(actual_output_sizes_.size()))
+            ? actual_output_sizes_[index] : 0;
+    }
+
     // Configuration accessors
     void setErrorBound(TInput error_bound) { config_.error_bound = error_bound; }
     void setQuantRadius(TCode radius) { config_.quant_radius = radius; }

@@ -69,7 +69,10 @@ public:
     std::unordered_map<std::string, size_t> getActualOutputSizesByName() const override {
         return {{"output", actual_output_sizes_.empty() ? 0 : actual_output_sizes_[0]}};
     }
-    
+    size_t getActualOutputSize(int index) const override {
+        return (index == 0 && !actual_output_sizes_.empty()) ? actual_output_sizes_[0] : 0;
+    }
+
     uint16_t getStageTypeId() const override {
         return static_cast<uint16_t>(StageType::RLE);
     }

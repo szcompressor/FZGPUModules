@@ -1,5 +1,6 @@
 #pragma once
 
+#include "pipeline/concat_kernel.h"
 #include "pipeline/dag.h"
 #include "pipeline/perf.h"
 #include "stage/stage.h"
@@ -167,10 +168,45 @@ public:
      * - Validates topology (no cycles, all stages connected)
      * - Assigns execution levels
      * - For PREALLOCATE mode: estimates and allocates all buffers
+     * - If setWarmupOnFinalize(true) was called and input_size_hint > 0,
+     *   automatically runs warmup() to force JIT compilation of all kernels.
      *
      * Must be called before compress/decompress
      */
     void finalize();
+
+    /**
+     * Force JIT compilation of all pipeline kernels by running a dummy
+     * compress() pass on a zero-filled device buffer.
+     *
+     * On first kernel launch CUDA lazily compiles PTX→SASS; this shows up
+     * as a large one-time latency spike (e.g. 35× overhead for stages that
+     * instantiate CUB DeviceScan).  warmup() pays that cost up front so that
+     * the first timed compress() call sees the same latency as steady-state.
+     *
+     * Requires input_size_hint > 0 (passed to the Pipeline constructor) so
+     * the dummy buffer can be sized correctly.  Profiling is suppressed
+     * during the warmup pass and restored afterwards.  The pipeline is left
+     * in a clean state identical to just after finalize() — as if the warmup
+     * call never happened.
+     *
+     * Can also be triggered automatically by calling setWarmupOnFinalize(true)
+     * before finalize().
+     *
+     * @param stream  CUDA stream to use for the warmup pass (default: 0).
+     */
+    void warmup(cudaStream_t stream = 0);
+
+    /**
+     * Control whether finalize() automatically calls warmup().
+     *
+     * When set to true (default: false), finalize() will call warmup(0) after
+     * all buffers have been allocated.  No-op if input_size_hint is 0.
+     *
+     * Must be called before finalize().
+     */
+    void setWarmupOnFinalize(bool enable) { warmup_on_finalize_ = enable; }
+    bool isWarmupOnFinalizeEnabled() const { return warmup_on_finalize_; }
 
     // ========== Convenience Stage Builders ==========
 
@@ -723,6 +759,7 @@ private:
     int num_streams_;
     bool is_finalized_;
     bool soft_run_enabled_;   ///< Future: enable soft-run buffer sizing pass
+    bool warmup_on_finalize_; ///< If true, finalize() auto-calls warmup()
 
     // Track whether compress() has been called at least once so that
     // writeToFile() can give a clear error if called before compressing, and so
@@ -742,6 +779,20 @@ private:
     void* d_concat_buffer_;                      // Concatenated output buffer (if multi-sink)
     size_t concat_buffer_capacity_;              // Allocated size of concat buffer
     bool needs_concat_;                          // True if multiple sinks detected
+
+    // Pinned host buffer for concat header (num_buffers + per-buffer sizes).
+    // Allocated once at finalize() time; avoids N+1 tiny H2D cudaMemcpyAsync
+    // calls — instead we pack the header on the CPU then issue a single H2D copy.
+    void*  h_concat_header_;           ///< cudaHostAlloc'd pinned buffer
+    size_t h_concat_header_capacity_;  ///< allocated size in bytes
+
+    // §2B gather kernel — persistent pinned host + device descriptor buffers.
+    // Sized at finalize() for max_outputs descriptors; reused every compress call.
+    // CPU packs {src, dst, bytes} into h_copy_descs_, one H2D copy delivers
+    // all descriptors, then gather_kernel replaces N D2D cudaMemcpyAsync calls.
+    void*  h_copy_descs_;              ///< pinned host CopyDesc array
+    void*  d_copy_descs_;              ///< device  CopyDesc array
+    size_t copy_descs_capacity_;       ///< allocated capacity in bytes
     
     // Current input size (set during compress; sum over all sources)
     size_t input_size_;

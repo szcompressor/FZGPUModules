@@ -165,6 +165,10 @@ public:
             result[names[i]] = actual_output_sizes_[i];
         return result;
     }
+    size_t getActualOutputSize(int index) const override {
+        return (index >= 0 && index < static_cast<int>(actual_output_sizes_.size()))
+            ? actual_output_sizes_[index] : 0;
+    }
 
     void setInverse(bool inverse) override { is_inverse_ = inverse; }
     bool isInverse() const override        { return is_inverse_; }

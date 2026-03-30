@@ -110,10 +110,29 @@ public:
     /**
      * Get actual output sizes after execution (by name)
      * Used for dynamic buffer sizing in MINIMAL/PIPELINE modes
-     * 
+     *
      * @return Map of output_name -> actual size written
      */
     virtual std::unordered_map<std::string, size_t> getActualOutputSizesByName() const = 0;
+
+    /**
+     * Get actual size of a single output by index after execution (§6).
+     *
+     * Index-based accessor used by the DAG execute() inner loop to propagate
+     * actual output sizes downstream without constructing an unordered_map.
+     * Returns 0 if the index is out of range or the stage has not yet executed.
+     *
+     * Default implementation delegates to getActualOutputSizesByName() for
+     * backward compatibility.  Stages should override this to return directly
+     * from their internal size tracking (a single field lookup).
+     */
+    virtual size_t getActualOutputSize(int index) const {
+        auto names = getOutputNames();
+        if (index < 0 || index >= static_cast<int>(names.size())) return 0;
+        auto m  = getActualOutputSizesByName();
+        auto it = m.find(names[index]);
+        return (it != m.end()) ? it->second : 0;
+    }
     
     // ===== Decompression Support =====
     

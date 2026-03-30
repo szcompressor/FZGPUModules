@@ -634,6 +634,13 @@ RZEStage::getActualOutputSizesByName() const {
     return {{"output", actual_output_size_}};
 }
 
+size_t RZEStage::getActualOutputSize(int index) const {
+    if (index != 0) return 0;
+    // Reuse getActualOutputSizesByName() to ensure tail readback is complete.
+    getActualOutputSizesByName();
+    return actual_output_size_;
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // RZEStage::execute
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

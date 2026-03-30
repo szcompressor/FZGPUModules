@@ -11,15 +11,20 @@
  *   5. Quality verification  — ensures eb is respected at 1e-4 ABS
  *
  * Usage:
- *   ./basic_profiling_example [strategy] [runs] [eb]
+ *   ./basic_profiling_example [strategy] [runs] [eb] [warmup]
  *
  *   strategy : preallocate | minimal          (default: preallocate)
  *   runs     : integer > 0                    (default: 10)
  *   eb       : positive float                 (default: 1e-4)
+ *   warmup   : none | auto | manual           (default: none)
+ *                none   — no warmup; cold call shows full JIT cost
+ *                auto   — setWarmupOnFinalize(true); finalize() warms all kernels
+ *                manual — explicit p.warmup() call after finalize()
  *
  * Examples:
- *   ./basic_profiling_example preallocate 10 1e-4
- *   ./basic_profiling_example minimal 20 1e-4
+ *   ./basic_profiling_example preallocate 10 1e-4 none
+ *   ./basic_profiling_example preallocate 10 1e-4 auto
+ *   ./basic_profiling_example minimal 20 1e-4 manual
  *
  * Nsys capture (GPU+host overhead visible):
  *   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
@@ -82,9 +87,16 @@ static float* load_to_device() {
     return d;
 }
 
+enum class WarmupMode { NONE, AUTO, MANUAL };
+
 // Build the PFPL pipeline: Quantizer → Diff → Bitshuffle → RZE
 // ABS error bound — quant_radius sized for fine quantization at 1e-4
-static void build_pipeline(Pipeline& p, float eb) {
+//
+// warmup_mode:
+//   NONE   — plain finalize(), cold first compress sees full JIT cost
+//   AUTO   — setWarmupOnFinalize(true) before finalize(); finalize() warms all kernels
+//   MANUAL — finalize() then explicit warmup() call
+static void build_pipeline(Pipeline& p, float eb, WarmupMode warmup_mode) {
     auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
     quant->setErrorBound(eb);
     quant->setErrorBoundMode(ErrorBoundMode::ABS);
@@ -107,7 +119,21 @@ static void build_pipeline(Pipeline& p, float eb) {
     rze->setLevels(4);
     p.connect(rze, bshuf);
 
+    if (warmup_mode == WarmupMode::AUTO) {
+        p.setWarmupOnFinalize(true);
+    }
     p.finalize();
+    if (warmup_mode == WarmupMode::MANUAL) {
+        std::cout << "  Running explicit warmup()...\n";
+        const auto tw0 = std::chrono::high_resolution_clock::now();
+        p.warmup(/*stream=*/0);
+        cudaDeviceSynchronize();
+        const auto tw1 = std::chrono::high_resolution_clock::now();
+        std::cout << "  Warmup done in "
+                  << std::fixed << std::setprecision(1)
+                  << std::chrono::duration<double, std::milli>(tw1 - tw0).count()
+                  << " ms\n\n";
+    }
 }
 
 // ── Timing helpers ────────────────────────────────────────────────────────────
@@ -219,10 +245,11 @@ static void print_quality(const float* d_orig, const float* d_recon,
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
 static void print_usage(const char* argv0) {
-    std::cerr << "Usage: " << argv0 << " [strategy] [runs] [eb]\n"
+    std::cerr << "Usage: " << argv0 << " [strategy] [runs] [eb] [warmup]\n"
               << "  strategy : preallocate | minimal  (default: preallocate)\n"
               << "  runs     : integer > 0             (default: " << DEFAULT_RUNS << ")\n"
-              << "  eb       : positive float           (default: " << DEFAULT_EB << ")\n";
+              << "  eb       : positive float           (default: " << DEFAULT_EB << ")\n"
+              << "  warmup   : none | auto | manual    (default: none)\n";
 }
 
 // =============================================================================
@@ -230,10 +257,12 @@ static void print_usage(const char* argv0) {
 // =============================================================================
 
 int main(int argc, char* argv[]) {
-    MemoryStrategy strategy  = MemoryStrategy::PREALLOCATE;
-    std::string    strat_str = "preallocate";
-    int            runs      = DEFAULT_RUNS;
-    float          eb        = DEFAULT_EB;
+    MemoryStrategy strategy    = MemoryStrategy::PREALLOCATE;
+    std::string    strat_str   = "preallocate";
+    int            runs        = DEFAULT_RUNS;
+    float          eb          = DEFAULT_EB;
+    WarmupMode     warmup_mode = WarmupMode::NONE;
+    std::string    warmup_str  = "none";
 
     if (argc > 1) {
         strat_str = argv[1];
@@ -249,6 +278,13 @@ int main(int argc, char* argv[]) {
         eb = std::stof(argv[3]);
         if (eb <= 0.0f) { std::cerr << "eb must be positive\n"; return 1; }
     }
+    if (argc > 4) {
+        warmup_str = argv[4];
+        if      (warmup_str == "none")   warmup_mode = WarmupMode::NONE;
+        else if (warmup_str == "auto")   warmup_mode = WarmupMode::AUTO;
+        else if (warmup_str == "manual") warmup_mode = WarmupMode::MANUAL;
+        else { print_usage(argv[0]); return 1; }
+    }
 
     const size_t data_bytes = N_ELEMS * sizeof(float);
 
@@ -257,10 +293,11 @@ int main(int argc, char* argv[]) {
     std::cout << "  Dataset  : CESM ATM CLDHGH " << DIM_X << "x" << DIM_Y
               << "  (" << std::fixed << std::setprecision(2)
               << data_bytes / (1024.0 * 1024.0) << " MB)\n"
-              << "  Pipeline : Quantizer(ABS) → Diff → Bitshuffle → RZE\n"
+              << "  Pipeline : Quantizer(ABS) -> Diff -> Bitshuffle -> RZE\n"
               << "  Strategy : " << strat_str << "\n"
               << "  EB       : " << std::scientific << std::setprecision(1) << eb << " (ABS)\n"
-              << "  Runs     : " << runs << " (post-warmup)\n"
+              << "  Runs     : " << runs << " (post-cold-call)\n"
+              << "  Warmup   : " << warmup_str << "\n"
               << "  Chunk    : " << CHUNK << " bytes\n\n";
 
     // ── Load data ────────────────────────────────────────────────────────────
@@ -273,7 +310,7 @@ int main(int argc, char* argv[]) {
     Pipeline p(data_bytes, strategy, POOL_MULT);
     p.setDims(DIM_X, DIM_Y, 1);
     p.enableProfiling(true);
-    build_pipeline(p, eb);
+    build_pipeline(p, eb, warmup_mode);
 
     std::cout << "  Pool threshold after finalize: "
               << std::setprecision(2) << p.getPoolThreshold() / (1024.0 * 1024.0) << " MB\n\n";
@@ -290,8 +327,12 @@ int main(int argc, char* argv[]) {
     // =========================================================================
     print_header("COMPRESS");
 
-    // ── Cold call ─────────────────────────────────────────────────────────
-    std::cout << "  Cold call (first compress — includes kernel JIT):\n";
+    // ── Cold call (or first call after warmup) ────────────────────────────
+    std::cout << "  First call ("
+              << (warmup_mode == WarmupMode::NONE
+                      ? "cold — includes kernel JIT"
+                      : "warm — kernels already JIT-compiled by warmup()")
+              << "):\n";
     {
 #ifdef FZ_PROFILING_ENABLED
         nvtx3::scoped_range r{"compress::cold"};
@@ -305,7 +346,7 @@ int main(int argc, char* argv[]) {
         const float  dms = p.getLastPerfResult().dag_elapsed_ms;
         print_call_row(0, "cold", hms, dms, data_bytes);
 
-        std::cout << "\n  Stage breakdown (cold):\n";
+        std::cout << "\n  Stage breakdown (first call):\n";
         p.getLastPerfResult().print(std::cout);
     }
 
@@ -356,8 +397,8 @@ int main(int argc, char* argv[]) {
     // =========================================================================
     print_header("DECOMPRESS");
 
-    // ── Cold decompression ────────────────────────────────────────────────
-    std::cout << "  Cold call (first decompress — includes inv-DAG build):\n";
+    // ── First decompress call ─────────────────────────────────────────────
+    std::cout << "  First call (inv-DAG build always happens on first decompress):\n";
     void* d_recon_check = nullptr;
     size_t recon_sz     = 0;
     {
@@ -373,7 +414,7 @@ int main(int argc, char* argv[]) {
         const float  dms = p.getLastPerfResult().dag_elapsed_ms;
         print_call_row(0, "cold", hms, dms, recon_sz);
 
-        std::cout << "\n  Stage breakdown (cold decompress):\n";
+        std::cout << "\n  Stage breakdown (first decompress):\n";
         p.getLastPerfResult().print(std::cout);
     }
     std::cout << "\n";

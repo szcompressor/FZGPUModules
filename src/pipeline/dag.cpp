@@ -401,7 +401,15 @@ void CompressionDAG::finalize() {
     if (!streams_.empty()) {
         assignStreams();
     }
-    
+
+    // Pre-size per-node execution scratch vectors (§5).
+    // Sized once here; reused on every execute() call with no heap allocation.
+    for (auto* node : nodes_) {
+        node->exec_inputs.resize(node->input_buffer_ids.size());
+        node->exec_outputs.resize(node->output_buffer_ids.size());
+        node->exec_sizes.resize(node->input_buffer_ids.size());
+    }
+
     is_finalized_ = true;
 }
 
@@ -430,18 +438,18 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 }
             }
             
-            // Execute stage
-            // Build input/output pointer arrays from buffer IDs
-            std::vector<void*> inputs, outputs;
-            std::vector<size_t> sizes;
-            
-            for (int buf_id : node->input_buffer_ids) {
-                inputs.push_back(buffers_[buf_id].d_ptr);
-                sizes.push_back(buffers_[buf_id].size);
+            // Execute stage — fill pre-sized scratch vectors (no heap alloc, §5)
+            auto& inputs  = node->exec_inputs;
+            auto& outputs = node->exec_outputs;
+            auto& sizes   = node->exec_sizes;
+
+            for (size_t j = 0; j < node->input_buffer_ids.size(); j++) {
+                const auto& buf = buffers_[node->input_buffer_ids[j]];
+                inputs[j] = buf.d_ptr;
+                sizes[j]  = buf.size;
             }
-            
-            for (int buf_id : node->output_buffer_ids) {
-                outputs.push_back(buffers_[buf_id].d_ptr);
+            for (size_t j = 0; j < node->output_buffer_ids.size(); j++) {
+                outputs[j] = buffers_[node->output_buffer_ids[j]].d_ptr;
             }
             
             // Record stage start for profiling (before kernel launch)
@@ -459,17 +467,10 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 // This is critical for variable-size encoders (e.g. RLEStage
                 // inverse mode returns 2× the compressed size as an upper bound,
                 // which would cause Lorenzo inverse to over-allocate its memset).
-                {
-                    auto actual_by_name = node->stage->getActualOutputSizesByName();
-                    auto out_names      = node->stage->getOutputNames();
-                    for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
-                        std::string name = (k < out_names.size())
-                            ? out_names[k] : std::to_string(k);
-                        auto it = actual_by_name.find(name);
-                        if (it != actual_by_name.end() && it->second > 0) {
-                            buffers_[node->output_buffer_ids[k]].size = it->second;
-                        }
-                    }
+                // §6: use index-based accessor — no unordered_map allocation.
+                for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
+                    size_t sz = node->stage->getActualOutputSize(static_cast<int>(k));
+                    if (sz > 0) buffers_[node->output_buffer_ids[k]].size = sz;
                 }
 
                 // Buffer overwrite bounds check.
@@ -477,19 +478,18 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 // invoked depending on build type and runtime flag.
                 auto do_bounds_check = [&]() {
                     auto out_names = node->stage->getOutputNames();
-                    auto actual    = node->stage->getActualOutputSizesByName();
                     for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
-                        int    bid = node->output_buffer_ids[k];
-                        size_t cap = buffers_[bid].allocated_size;
+                        int    bid  = node->output_buffer_ids[k];
+                        size_t cap  = buffers_[bid].allocated_size;
                         if (cap == 0) continue;  // not yet allocated (MINIMAL, first run)
+                        size_t sz   = node->stage->getActualOutputSize(static_cast<int>(k));
                         std::string name = (k < out_names.size())
                             ? out_names[k] : std::to_string(k);
-                        auto sz_it = actual.find(name);
-                        if (sz_it != actual.end() && sz_it->second > cap) {
+                        if (sz > cap) {
                             throw std::runtime_error(
                                 "Buffer overwrite detected: stage '" + node->name +
                                 "' output '" + name + "' wrote " +
-                                std::to_string(sz_it->second) + " bytes into a " +
+                                std::to_string(sz) + " bytes into a " +
                                 std::to_string(cap) + "-byte buffer");
                         }
                     }

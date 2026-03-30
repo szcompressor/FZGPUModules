@@ -145,6 +145,7 @@ public:
 
     std::unordered_map<std::string, size_t>
     getActualOutputSizesByName() const override;
+    size_t getActualOutputSize(int index) const override;
 
     /**
      * Forward pass allocates four persistent pool arrays proportional to
