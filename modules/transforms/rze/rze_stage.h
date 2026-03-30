@@ -146,6 +146,26 @@ public:
     std::unordered_map<std::string, size_t>
     getActualOutputSizesByName() const override;
 
+    /**
+     * Forward pass allocates four persistent pool arrays proportional to
+     * n_chunks = ceil(input_bytes / chunk_size_):
+     *   d_scratch_    : n_chunks * chunk_size_   (per-chunk worst-case output)
+     *   d_sizes_dev_  : n_chunks * 4             (raw compressed sizes)
+     *   d_clean_dev_  : n_chunks * 4             (flag-stripped sizes)
+     *   d_dst_off_dev_: n_chunks * 4             (exclusive prefix-sum offsets)
+     *
+     * Inverse path scratch is transient (allocated and freed within execute),
+     * so it is not reported here.
+     */
+    size_t estimateScratchBytes(
+        const std::vector<size_t>& input_sizes
+    ) const override {
+        if (is_inverse_ || input_sizes.empty()) return 0;
+        const size_t in_bytes = input_sizes[0];
+        const size_t n_chunks = (in_bytes + chunk_size_ - 1) / chunk_size_;
+        return n_chunks * (static_cast<size_t>(chunk_size_) + 3 * sizeof(uint32_t));
+    }
+
     uint16_t getStageTypeId() const override {
         return static_cast<uint16_t>(StageType::RZE);
     }

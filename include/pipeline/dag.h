@@ -218,6 +218,23 @@ public:
     // ========== Query & Debug ==========
     
     size_t getTotalBufferSize() const;
+
+    /**
+     * Compute a topology-aware pool size from the current buffer size estimates.
+     *
+     * PREALLOCATE: returns the sum of all non-external buffer sizes, since all
+     *   buffers are live simultaneously for the lifetime of the pipeline.
+     *
+     * MINIMAL / PIPELINE: simulates level-by-level allocation and deallocation
+     *   to find the peak concurrent live bytes.  A buffer becomes live when its
+     *   producer executes and is freed after its last consumer finishes.
+     *
+     * Must be called after finalize() and propagateBufferSizes() so that both
+     * the level structure and buffer sizes are populated.
+     *
+     * @return Peak bytes that must be held in the pool at any one time.
+     */
+    size_t computeTopoPoolSize() const;
     size_t getPeakMemoryUsage() const { return peak_memory_usage_; }
     size_t getCurrentMemoryUsage() const { return current_memory_usage_; }
     size_t getBufferSize(int buffer_id) const;

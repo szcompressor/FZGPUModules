@@ -332,7 +332,7 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         s->setInverse(true);
     }
 
-    // ── Assemble forward-topology description ────────────────────────────────
+    // ── Build pipeline-output map (fwd_buf_id → {ptr, size}) ─────────────────
     PipelineOutputMap po_map;
     for (const auto& meta : buffer_metadata_) {
         auto it   = compressed_ptrs.find(meta.buffer_id);
@@ -340,18 +340,6 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
             ? it->second
             : dag_->getBuffer(meta.buffer_id);  // safety fallback
         po_map[meta.buffer_id] = {ptr, meta.actual_size};
-    }
-
-    std::vector<FwdStageDesc> fwd_topology;
-    fwd_topology.reserve(stages_.size());
-    for (const auto& level_nodes : dag_->getLevels()) {
-        for (auto* fwd_node : level_nodes) {
-            FwdStageDesc d;
-            d.stage          = fwd_node->stage;
-            d.output_buf_ids = fwd_node->output_buffer_ids;
-            d.input_buf_ids  = fwd_node->input_buffer_ids;
-            fwd_topology.push_back(std::move(d));
-        }
     }
 
     // ── Build per-source uncompressed sizes from what compress() recorded ────
@@ -363,14 +351,88 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         source_sizes[input_nodes_[i]->stage] = sz;
     }
 
-    // ── Build and finalize the inverse DAG ───────────────────────────────────
-    auto [inv_dag, inv_result_map] = buildInverseDAG(
-        fwd_topology, po_map, mem_pool_.get(), strategy_,
-        source_sizes, profiling_enabled_);
+    // ── Inverse DAG: reuse cached instance or build and cache ─────────────────
+    // The topology is fixed after finalize() so we only need to rebuild when
+    // the source sizes change (i.e. a different-sized input was compressed).
+    bool cache_valid = (inv_cache_ != nullptr);
+    if (cache_valid) {
+        for (const auto& [stage, sz] : source_sizes) {
+            auto it = inv_cache_->source_sizes.find(stage);
+            if (it == inv_cache_->source_sizes.end() || it->second != sz) {
+                cache_valid = false;
+                FZ_LOG(DEBUG, "decompressMulti: inv DAG cache invalidated (source size changed)");
+                break;
+            }
+        }
+    }
+
+    if (!cache_valid) {
+        // ── Build forward topology description ─────────────────────────────
+        std::vector<FwdStageDesc> fwd_topology;
+        fwd_topology.reserve(stages_.size());
+        for (const auto& level_nodes : dag_->getLevels()) {
+            for (auto* fwd_node : level_nodes) {
+                FwdStageDesc d;
+                d.stage          = fwd_node->stage;
+                d.output_buf_ids = fwd_node->output_buffer_ids;
+                d.input_buf_ids  = fwd_node->input_buffer_ids;
+                fwd_topology.push_back(std::move(d));
+            }
+        }
+
+        auto [inv_dag_up, inv_result_map_new] = buildInverseDAG(
+            fwd_topology, po_map, mem_pool_.get(), strategy_,
+            source_sizes, profiling_enabled_);
+
+        // ── Build fwd_buf_id → inv external buffer id map ──────────────────
+        // Stored so future calls can update the external pointers directly
+        // without iterating all nodes.  The tag format is "inv_ext_<fwd_buf_id>"
+        // (set by buildInverseDAG) which lets us reconstruct the mapping here.
+        std::unordered_map<int, int> fwd_to_inv_ext_buf;
+        for (auto* node : inv_dag_up->getNodes()) {
+            for (int buf_id : node->input_buffer_ids) {
+                const auto& info = inv_dag_up->getBufferInfo(buf_id);
+                if (info.is_external && info.tag.size() > 8 &&
+                    info.tag.compare(0, 8, "inv_ext_") == 0) {
+                    try {
+                        int fwd_buf_id = std::stoi(info.tag.substr(8));
+                        fwd_to_inv_ext_buf[fwd_buf_id] = buf_id;
+                    } catch (...) {}
+                }
+            }
+        }
+
+        inv_cache_ = std::make_unique<InvDAGCache>();
+        inv_cache_->inv_dag            = std::move(inv_dag_up);
+        inv_cache_->inv_result_map     = std::move(inv_result_map_new);
+        inv_cache_->fwd_to_inv_ext_buf = std::move(fwd_to_inv_ext_buf);
+        inv_cache_->source_sizes       = source_sizes;
+
+        FZ_LOG(DEBUG, "decompressMulti: built and cached inverse DAG (%zu ext buffers mapped)",
+               inv_cache_->fwd_to_inv_ext_buf.size());
+    } else {
+        // ── Cache hit: update compressed-data pointers and reset ───────────
+        for (const auto& [fwd_buf_id, inv_buf_id] : inv_cache_->fwd_to_inv_ext_buf) {
+            auto it = po_map.find(fwd_buf_id);
+            if (it != po_map.end()) {
+                inv_cache_->inv_dag->setExternalPointer(inv_buf_id, it->second.first);
+                inv_cache_->inv_dag->updateBufferSize(inv_buf_id, it->second.second);
+            }
+        }
+        // Restore ref-counts and reset non-persistent intermediate buffers.
+        // Persistent result buffers and PREALLOCATE intermediates are kept.
+        inv_cache_->inv_dag->reset(stream);
+        inv_cache_->inv_dag->enableProfiling(profiling_enabled_);
+
+        FZ_LOG(DEBUG, "decompressMulti: reusing cached inverse DAG");
+    }
+
+    CompressionDAG& inv_dag        = *inv_cache_->inv_dag;
+    const auto&     inv_result_map = inv_cache_->inv_result_map;
 
     // ── Execute ───────────────────────────────────────────────────────────────
     auto t_dag_start = std::chrono::steady_clock::now();
-    inv_dag->execute(stream);
+    inv_dag.execute(stream);
     auto t_dag_end = std::chrono::steady_clock::now();
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -379,12 +441,12 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     }
 
     auto stage_timings = profiling_enabled_
-        ? inv_dag->collectTimings()
+        ? inv_dag.collectTimings()
         : std::vector<StageTimingResult>{};
 
     // ── Extract results in source-discovery order (matches input_nodes_) ─────
     // For each source stage, refine the buffer size from postStreamSync output,
-    // then cudaMalloc a persistent copy.
+    // then cudaMalloc a persistent copy for the caller.
     std::vector<std::pair<void*, size_t>> results;
     results.reserve(input_nodes_.size());
 
@@ -392,14 +454,13 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         Stage* src_stage = input_nodes_[i]->stage;
         auto   buf_it    = inv_result_map.find(src_stage);
         if (buf_it == inv_result_map.end()) {
-            // Shouldn't happen — guard against missing entries
             throw std::runtime_error(
                 "decompressMulti: no inverse result buffer for source stage '" +
                 src_stage->getName() + "'");
         }
         int    res_buf_id  = buf_it->second;
-        void*  d_inv_ptr   = inv_dag->getBuffer(res_buf_id);
-        size_t actual_size = inv_dag->getBufferSize(res_buf_id);
+        void*  d_inv_ptr   = inv_dag.getBuffer(res_buf_id);
+        size_t actual_size = inv_dag.getBufferSize(res_buf_id);
 
         // Prefer the stage's post-execution reported size (e.g. Lorenzo trimming).
         auto post_sizes = src_stage->getActualOutputSizesByName();
@@ -411,12 +472,8 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         void* d_final = nullptr;
         cudaError_t err = cudaMalloc(&d_final, actual_size);
         if (err != cudaSuccess) {
-            // Free any already-allocated outputs before unwinding
             for (auto& r : results) cudaFree(r.first);
-            inv_dag->reset(stream);
-            for (size_t j = 0; j < input_nodes_.size(); j++)
-                mem_pool_->free(inv_dag->getBuffer(
-                    inv_result_map.at(input_nodes_[j]->stage)), stream);
+            inv_dag.reset(stream);
             for (auto& s : stages_) {
                 s->setInverse(false);
                 s->restoreState();
@@ -430,11 +487,11 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
-    // Free each result buffer in the pool before resetting the DAG.
-    for (const auto& [src_stage, res_buf_id] : inv_result_map) {
-        mem_pool_->free(inv_dag->getBuffer(res_buf_id), stream);
-    }
-    inv_dag->reset(stream);
+    // Result buffers in the cached inv DAG are persistent — do NOT free them.
+    // Intermediate (non-persistent) buffers are freed by reset() in MINIMAL mode.
+    // In PREALLOCATE mode reset() is a no-op for all allocations.
+    inv_dag.reset(stream);
+
     for (auto& s : stages_) {
         s->setInverse(false);
         s->restoreState();

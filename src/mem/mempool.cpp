@@ -214,6 +214,23 @@ void MemoryPool::trim() {
     cudaMemPoolTrimTo(mem_pool_, 0);
 }
 
+void MemoryPool::setReleaseThreshold(size_t bytes) {
+    uint64_t threshold = static_cast<uint64_t>(bytes);
+    cudaError_t err = cudaMemPoolSetAttribute(
+        mem_pool_, cudaMemPoolAttrReleaseThreshold, &threshold);
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        FZ_LOG(WARN, "MemoryPool: failed to update release threshold to %.2f MB",
+               bytes / (1024.0 * 1024.0));
+        return;
+    }
+    // Keep config in sync so getConfiguredSize() and overflow warnings
+    // use the new threshold value rather than the stale construction-time one.
+    config_.input_data_size      = bytes;
+    config_.pool_size_multiplier = 1.0f;
+    overflow_warned_ = false;  // allow warning to fire again if new threshold is exceeded
+}
+
 void MemoryPool::synchronize(cudaStream_t stream) {
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 }

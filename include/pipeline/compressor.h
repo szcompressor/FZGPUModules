@@ -405,6 +405,15 @@ public:
     CompressionDAG* getDAG() { return dag_.get(); }
 
     /**
+     * Return the pool release threshold currently configured, in bytes.
+     *
+     * After finalize() this reflects the topology-aware value set by
+     * Pipeline::finalize() (topo base × safety margin).  Before finalize()
+     * it reflects the initial estimate (input_size × pool_multiplier).
+     */
+    size_t getPoolThreshold() const;
+
+    /**
      * Enable runtime buffer-overwrite detection.
      *
      * After each stage executes, the DAG checks that the stage's reported
@@ -758,6 +767,10 @@ private:
     // Applied to all sources that lack a per_source_hints_ entry.
     size_t input_size_hint_;
 
+    // Pool size multiplier from constructor, stored so finalize() can apply it
+    // as a headroom factor on top of the topology-derived base pool size.
+    float pool_multiplier_;
+
     // Per-source size hints set via setInputSizeHint().  Overrides
     // input_size_hint_ for the matching source stage during propagateBufferSizes().
     std::unordered_map<Stage*, size_t> per_source_hints_;
@@ -767,8 +780,30 @@ private:
     // Default {0,1,1} means "1-D, infer x from input size".
     std::array<size_t, 3> dims_;
     
+    // ===== Inverse DAG Cache =====
+
+    /**
+     * Cached inverse DAG for repeated decompress() calls.
+     *
+     * Built lazily on the first decompressMulti() call and reused on every
+     * subsequent call.  On reuse only the external compressed-data pointers are
+     * updated; the topology, CUDA events, and (in PREALLOCATE mode) all buffer
+     * allocations are preserved, eliminating the per-call rebuild overhead.
+     *
+     * Invalidated when source sizes change between compress() calls (different
+     * input sizes).  Since finalize() cannot be called twice, the DAG topology
+     * itself never changes after the first build.
+     */
+    struct InvDAGCache {
+        std::unique_ptr<CompressionDAG>    inv_dag;
+        std::unordered_map<Stage*, int>    inv_result_map;       ///< source Stage* → result buf id
+        std::unordered_map<int, int>       fwd_to_inv_ext_buf;   ///< fwd_buf_id → inv external buf id
+        std::unordered_map<Stage*, size_t> source_sizes;         ///< source sizes at build time (for invalidation)
+    };
+    std::unique_ptr<InvDAGCache> inv_cache_;
+
     // ===== File Serialization State =====
-    
+
     /**
      * Metadata for each output buffer (populated during compress)
      */

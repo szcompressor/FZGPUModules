@@ -112,6 +112,18 @@ public:
      * Trim pool - release memory back to OS if exceeds threshold
      */
     void trim();
+
+    /**
+     * Update the CUDA pool's release threshold and keep the internal config
+     * in sync so that overflow warnings fire at the new value.
+     *
+     * Called by Pipeline::finalize() after topology-aware pool sizing to
+     * replace the blunt input_size*multiplier estimate with a tighter bound
+     * derived from the actual DAG buffer layout.
+     *
+     * @param bytes  New release threshold in bytes.
+     */
+    void setReleaseThreshold(size_t bytes);
     
     /**
      * Synchronize with stream to ensure all operations complete

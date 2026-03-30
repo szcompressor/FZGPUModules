@@ -246,6 +246,12 @@ if(BUILD_EXAMPLES)
     target_link_libraries(simple_api_lorenzo_dual_branch PRIVATE fzgmod)
     set_target_properties(simple_api_lorenzo_dual_branch PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+    # ── Manual stages vs Pipeline DAG throughput comparison ───────────────────
+    add_executable(pfpl_manual_vs_dag examples/manual_pipeline.cpp)
+    target_link_libraries(pfpl_manual_vs_dag PRIVATE fzgmod)
+    set_target_properties(pfpl_manual_vs_dag PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
 ######################

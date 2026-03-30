@@ -250,13 +250,40 @@ public:
 
     /**
      * Estimate maximum header size for buffer allocation
-     * 
+     *
      * @param output_index Which output to estimate for
      * @return Maximum bytes needed for this stage's header
      */
     virtual size_t getMaxHeaderSize(size_t output_index) const {
         (void)output_index;
         return 0;  // Default: no header
+    }
+
+    /**
+     * Estimate internal scratch memory this stage will allocate from the pool.
+     *
+     * Stages that keep persistent device-side scratch (e.g. RZEStage's
+     * per-chunk work arrays) should override this so that
+     * CompressionDAG::computeTopoPoolSize() can account for those bytes when
+     * sizing the release threshold.
+     *
+     * Only report allocations that are:
+     *   - Drawn from the MemoryPool (not bare cudaMalloc)
+     *   - Persistent across calls (not freed within execute())
+     *
+     * Transient scratch that is allocated and freed inside a single execute()
+     * call is already accounted for by the pool's own high-water mark and
+     * should NOT be included here.
+     *
+     * @param input_sizes  Sizes of the stage's input buffers (same order as
+     *                     the input_buffer_ids vector for this node in the DAG)
+     * @return             Peak bytes held simultaneously in persistent scratch
+     */
+    virtual size_t estimateScratchBytes(
+        const std::vector<size_t>& input_sizes
+    ) const {
+        (void)input_sizes;
+        return 0;
     }
 };
 

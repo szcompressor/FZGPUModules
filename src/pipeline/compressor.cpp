@@ -29,6 +29,7 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       d_pad_buf_size_(0),
       original_input_size_(0),
       input_size_hint_(input_data_size),
+      pool_multiplier_(pool_multiplier),
       dims_({0, 1, 1}) {
     
     // Create memory pool with configuration
@@ -217,6 +218,40 @@ void Pipeline::finalize() {
 
     propagateBufferSizes();
 
+    // ── Topology-aware pool sizing ────────────────────────────────────────────
+    // Replace the blunt input_size*multiplier estimate from construction time
+    // with one derived from the actual DAG buffer layout:
+    //   PREALLOCATE → sum of all non-external buffers (all live simultaneously)
+    //   MINIMAL/PIPELINE → peak concurrent live bytes across execution levels
+    // pool_multiplier_ is applied on top as headroom for stage-internal scratch
+    // (CUB temp storage, RZE per-chunk scratch, etc.).
+    // Skip when there is no input size hint — buffer sizes will be 1-byte
+    // placeholders and the topology-derived value would be meaningless.
+    if (input_size_hint_ > 0 || !per_source_hints_.empty()) {
+        // computeTopoPoolSize() already accounts for all intermediate buffers
+        // and persistent stage scratch, so it is the accurate peak requirement.
+        // Apply a small safety margin (10%) for transient CUB allocations that
+        // happen inside execute() calls but are too short-lived to appear in the
+        // topo simulation.  The old pool_multiplier_ (typically 3x) is kept for
+        // the initial pool construction at Pipeline() time only, where we have
+        // no topology yet and must size conservatively from input_size alone.
+        constexpr float kTopoSafetyMargin = 1.1f;
+        const size_t topo_base  = dag_->computeTopoPoolSize();
+        // d_pad_buf_ is allocated from the pool at the first compress() call
+        // (size = input_size_hint_, already rounded to alignment boundary).
+        // It is persistent and live throughout every execution, so it must be
+        // added to the topo estimate even though it never appears in buffers_.
+        // Only add it when chunked stages require alignment (otherwise no pad
+        // buffer is ever created).
+        const size_t pad_bytes  = (input_alignment_bytes_ > 1) ? input_size_hint_ : 0;
+        const size_t topo_sized = static_cast<size_t>((topo_base + pad_bytes) * kTopoSafetyMargin);
+        mem_pool_->setReleaseThreshold(topo_sized);
+        FZ_LOG(INFO, "Pool threshold: %.2f MB (topo %.2f MB + pad %.2f MB, ×1.1 margin)",
+               topo_sized / (1024.0 * 1024.0),
+               topo_base  / (1024.0 * 1024.0),
+               pad_bytes  / (1024.0 * 1024.0));
+    }
+
     if (strategy_ == MemoryStrategy::PREALLOCATE) {
         dag_->preallocateBuffers();
     }
@@ -268,6 +303,10 @@ size_t Pipeline::getPeakMemoryUsage() const {
     const size_t dag_peak  = dag_ ? dag_->getPeakMemoryUsage() : 0;
     const size_t pool_peak = mem_pool_ ? mem_pool_->getPeakUsage() : 0;
     return std::max(dag_peak, pool_peak);
+}
+
+size_t Pipeline::getPoolThreshold() const {
+    return mem_pool_ ? mem_pool_->getConfiguredSize() : 0;
 }
 
 size_t Pipeline::getCurrentMemoryUsage() const {

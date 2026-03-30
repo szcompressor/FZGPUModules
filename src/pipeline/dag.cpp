@@ -177,7 +177,7 @@ void CompressionDAG::setInputBuffer(DAGNode* node, size_t size, const std::strin
     if (is_finalized_) {
         throw std::runtime_error("Cannot modify DAG after finalization");
     }
-    
+
     int buffer_id = next_buffer_id_++;
     BufferInfo& buffer = buffers_[buffer_id];
     buffer.size = size;
@@ -185,7 +185,11 @@ void CompressionDAG::setInputBuffer(DAGNode* node, size_t size, const std::strin
     buffer.tag = tag;
     buffer.is_persistent = true;  // Input is persistent
     buffer.producer_stage_id = -1;  // External input
-    
+    // Mark external immediately: the pointer is owned by the caller and must
+    // not be freed or counted in pool-sizing calculations.  setExternalPointer()
+    // will supply the actual device pointer before execution.
+    buffer.is_external = true;
+
     node->input_buffer_ids.push_back(buffer_id);
     buffer.consumer_stage_ids.push_back(node->id);
 }
@@ -835,6 +839,93 @@ size_t CompressionDAG::getTotalBufferSize() const {
         total += buffer.size;
     }
     return total;
+}
+
+size_t CompressionDAG::computeTopoPoolSize() const {
+    // Helper: build input_sizes vector for a node from the buffer table.
+    auto getInputSizes = [&](const DAGNode* node) {
+        std::vector<size_t> sizes;
+        sizes.reserve(node->input_buffer_ids.size());
+        for (int bid : node->input_buffer_ids) {
+            auto it = buffers_.find(bid);
+            sizes.push_back(it != buffers_.end() ? it->second.size : 0);
+        }
+        return sizes;
+    };
+
+    if (strategy_ == MemoryStrategy::PREALLOCATE) {
+        // All buffers remain live simultaneously until reset().
+        // Pool must be large enough to hold every non-external buffer at once,
+        // plus all stages' persistent scratch (also live simultaneously).
+        size_t total = 0;
+        for (const auto& [buf_id, buf_info] : buffers_) {
+            if (!buf_info.is_external)
+                total += buf_info.size;
+        }
+        for (const auto* node : nodes_) {
+            if (node->stage)
+                total += node->stage->estimateScratchBytes(getInputSizes(node));
+        }
+        return total;
+    }
+
+    // MINIMAL / PIPELINE: simulate level-by-level allocation and deallocation
+    // to find the peak concurrent live bytes.
+
+    // Build node_id -> level map for consumer lookup.
+    std::unordered_map<int, int> node_level;
+    node_level.reserve(nodes_.size());
+    for (const auto* node : nodes_)
+        node_level[node->id] = node->level;
+
+    // For each non-external buffer, compute the level after which it is freed.
+    // A buffer is freed when all its consumers have executed, i.e. after the
+    // highest-level consumer.  Pipeline-output buffers (no consumers) survive
+    // until the last level.
+    std::unordered_map<int, int> free_after_level;
+    for (const auto& [buf_id, buf_info] : buffers_) {
+        if (buf_info.is_external) continue;
+        if (buf_info.consumer_stage_ids.empty()) {
+            free_after_level[buf_id] = max_level_;
+        } else {
+            int max_lvl = 0;
+            for (int cid : buf_info.consumer_stage_ids) {
+                auto it = node_level.find(cid);
+                if (it != node_level.end())
+                    max_lvl = std::max(max_lvl, it->second);
+            }
+            free_after_level[buf_id] = max_lvl;
+        }
+    }
+
+    // Walk levels, tracking the running total of live bytes.
+    // Persistent stage scratch is added when the stage executes and is never
+    // subtracted (it lives until DAG destruction, not until consumers finish).
+    size_t running = 0, peak = 0;
+    for (int lvl = 0; lvl <= max_level_; ++lvl) {
+        // Allocate: output buffers + persistent scratch of all stages at this level.
+        if (lvl < static_cast<int>(levels_.size())) {
+            for (const auto* node : levels_[lvl]) {
+                for (int buf_id : node->output_buffer_ids) {
+                    auto it = buffers_.find(buf_id);
+                    if (it != buffers_.end() && !it->second.is_external)
+                        running += it->second.size;
+                }
+                if (node->stage)
+                    running += node->stage->estimateScratchBytes(getInputSizes(node));
+            }
+        }
+        peak = std::max(peak, running);
+        // Free: buffers whose last consumer executed at this level.
+        for (const auto& [buf_id, free_lvl] : free_after_level) {
+            if (free_lvl == lvl) {
+                auto it = buffers_.find(buf_id);
+                if (it != buffers_.end())
+                    running -= it->second.size;
+            }
+        }
+    }
+    return peak;
 }
 
 int CompressionDAG::getMaxParallelism() const {
