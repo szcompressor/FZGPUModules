@@ -510,6 +510,15 @@ rzeDecodeKernel(
         bm4[threadIdx.x] = in[bm4_start + threadIdx.x];
     __syncthreads();
 
+    // Bitmap sizes derived from the actual original chunk size.
+    // For full chunks (orig_size == RZE_CS) these equal RZE_BM1/BM2/BM3.
+    // For partial chunks (input < chunk_size) the bitmaps are proportionally
+    // smaller; using hardcoded RZE_CS/RZE_BM1 constants here caused the
+    // decoder to read too many bytes and reconstruct wrong data.
+    const int bm1_bytes = ((int)orig_size + 7) / 8;
+    const int bm2_bytes = (bm1_bytes + 7) / 8;
+    const int bm3_bytes = (bm2_bytes + 7) / 8;
+
     // Count set bits in bm4 → number of non-repeated bm3 bytes stored
     const int bm4_nr = rze_block_popcount(bm4, RZE_BM4, ps_work);
 
@@ -517,8 +526,6 @@ rzeDecodeKernel(
     const int bm3_nr_start = bm4_start - bm4_nr;
 
     // ── RE decode bm3 (bm4_nr bytes → bm3_bytes decoded into smem) -------
-    const int bm2_bytes = (RZE_BM1 + 7) / 8;           // = RZE_BM2 = 256
-    const int bm3_bytes = (bm2_bytes + 7) / 8;          // = RZE_BM3 = 32
     rze_re_decode_seq(bm3_bytes, in + bm3_nr_start, bm4, bm3);
     // (rze_re_decode_seq ends with __syncthreads)
 
@@ -536,7 +543,6 @@ rzeDecodeKernel(
     const int bm1_nr_start = bm2_nr_start - bm2_nr;
 
     // ── RE decode bm1 (bm2_nr bytes → bm1_bytes decoded into smem) -------
-    const int bm1_bytes = (RZE_CS + 7) / 8;  // = RZE_BM1 = 2048
     rze_re_decode_seq(bm1_bytes, in + bm1_nr_start, bm2, bm1);
 
     // ── ZE decode data (data_nz bytes → orig_size bytes) -----------------

@@ -236,6 +236,12 @@ if(BUILD_EXAMPLES)
     set_target_properties(pfpl_example PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+    # ── PFPL + CUDA Graph capture comparison (MINIMAL | PREALLOCATE | GRAPH) ────
+    add_executable(pfpl_graph_capture examples/pfpl_graph_capture.cpp)
+    target_link_libraries(pfpl_graph_capture PRIVATE fzgmod)
+    set_target_properties(pfpl_graph_capture PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
     # ── Stage isolation diagnostic ─────────────────────────────────────────────
     add_executable(test_quant_only examples/test_quant_only.cpp)
     target_link_libraries(test_quant_only PRIVATE fzgmod)
@@ -345,6 +351,9 @@ if(BUILD_PROFILING)
     #         nsys-ui pfpl_profile.nsys-rep
     if(NVTX3_INCLUDE_DIR)
         target_include_directories(pfpl_example PRIVATE ${NVTX3_INCLUDE_DIR})
+    endif()
+    if(NVTX3_INCLUDE_DIR)
+        target_include_directories(pfpl_graph_capture PRIVATE ${NVTX3_INCLUDE_DIR})
     endif()
 endif()
 

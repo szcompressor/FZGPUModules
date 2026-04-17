@@ -654,17 +654,31 @@ void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
     uint32_t h_count = 0;
     FZ_CUDA_CHECK(cudaMemcpy(&h_count, d_outlier_count_ptr_,
                               sizeof(uint32_t), cudaMemcpyDeviceToHost));
+
+    // Cap at the allocated capacity: atomicAdd always increments the device
+    // counter even when the buffer is full, so h_count may exceed max_outliers.
+    // Only min(h_count, max_outliers) entries were actually written.  Write the
+    // capped value back to the device so the inverse scatter_assign_kernel reads
+    // the correct count (if h_count > cap, the uncapped value would cause OOB).
+    uint32_t cap = static_cast<uint32_t>(getMaxOutlierCount(num_elements_));
+    actual_outlier_count_ = (h_count > cap) ? cap : h_count;
+    if (h_count > cap) {
+        FZ_CUDA_CHECK(cudaMemcpy(
+            const_cast<void*>(d_outlier_count_ptr_),
+            &actual_outlier_count_, sizeof(uint32_t),
+            cudaMemcpyHostToDevice));
+    }
     d_outlier_count_ptr_ = nullptr;
 
-    actual_outlier_count_   = h_count;
-    actual_output_sizes_[1] = h_count * sizeof(TInput);
-    actual_output_sizes_[2] = h_count * sizeof(uint32_t);
+    actual_output_sizes_[1] = actual_outlier_count_ * sizeof(TInput);
+    actual_output_sizes_[2] = actual_outlier_count_ * sizeof(uint32_t);
 
-    FZ_LOG(DEBUG, "QuantizerStage: %u / %zu outliers (%.1f%%)",
-           h_count, num_elements_,
+    FZ_LOG(DEBUG, "QuantizerStage: %u / %zu outliers (%.1f%%)%s",
+           actual_outlier_count_, num_elements_,
            num_elements_ > 0
-               ? static_cast<double>(h_count) * 100.0 / static_cast<double>(num_elements_)
-               : 0.0);
+               ? static_cast<double>(actual_outlier_count_) * 100.0 / static_cast<double>(num_elements_)
+               : 0.0,
+           h_count > cap ? " [outlier buffer full — excess dropped]" : "");
 }
 
 template<typename TInput, typename TCode>

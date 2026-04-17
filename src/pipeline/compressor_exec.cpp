@@ -10,6 +10,9 @@
 
 namespace fz {
 
+// Must match the helper in compressor.cpp — rounds up to next multiple of 16.
+static inline size_t align16(size_t x) { return (x + 15u) & ~15u; }
+
 // ── Helper: build per-level timing summary from per-stage CUDA event timings ──
 static std::vector<LevelTimingResult> buildLevelTimings(
     const std::vector<StageTimingResult>& stages
@@ -52,7 +55,7 @@ void Pipeline::compress(
         was_compressed_ = false;
     }
 
-    // Wire each source's external input pointer and record per-source sizes.
+    // Wire inputs (normal mode) or copy to the fixed graph input slot (graph mode).
     input_size_ = 0;
     source_input_sizes_.assign(input_nodes_.size(), 0);
     for (const auto& spec : inputs) {
@@ -98,17 +101,29 @@ void Pipeline::compress(
             }
         }
 
-        dag_->setExternalPointer(input_buffer_ids_[idx], const_cast<void*>(spec.d_data));
-        dag_->updateBufferSize(input_buffer_ids_[idx], spec.size);
+        if (graph_captured_) {
+            // Graph mode: the DAG's input buffer already has a stable pointer
+            // (d_graph_input_, baked into the graph at captureGraph() time).
+            // Copy user data into that slot; zero any tail padding so stages
+            // that process aligned chunks see clean data past the real payload.
+            FZ_CUDA_CHECK(cudaMemcpyAsync(d_graph_input_, spec.d_data, spec.size,
+                                          cudaMemcpyDeviceToDevice, stream));
+            if (spec.size < d_graph_input_size_) {
+                FZ_CUDA_CHECK(cudaMemsetAsync(
+                    static_cast<uint8_t*>(d_graph_input_) + spec.size,
+                    0, d_graph_input_size_ - spec.size, stream));
+            }
+        } else {
+            dag_->setExternalPointer(input_buffer_ids_[idx], const_cast<void*>(spec.d_data));
+            dag_->updateBufferSize(input_buffer_ids_[idx], spec.size);
+        }
         source_input_sizes_[idx] = spec.size;
         input_size_ += spec.size;
     }
 
-    // If the pipeline was finalized without constructor/per-source size hints
-    // (input_data_size == 0 and no setInputSizeHint()), outputs may still be
-    // placeholder-sized. Re-estimate from the actual runtime input sizes that
-    // were just written into the DAG to avoid undersized output allocations.
-    if (input_size_hint_ == 0 && per_source_hints_.empty()) {
+    // Re-estimate buffer sizes from runtime inputs when no static hint was
+    // given at finalize() time.  Skipped in graph mode (hint is required).
+    if (!graph_captured_ && input_size_hint_ == 0 && per_source_hints_.empty()) {
         propagateBufferSizes(true);
     }
 
@@ -125,8 +140,16 @@ void Pipeline::compress(
     auto t_dag_start = std::chrono::steady_clock::now();
     auto t_dag_end   = t_dag_start;  // updated inside try block on success
     try {
-        // Execute DAG — time this portion separately for dag_elapsed_ms
-        dag_->execute(stream);
+        // Execute DAG (or replay the instantiated graph).
+        // The graph path eliminates per-call CPU dispatch overhead: all kernel
+        // launches and D2D copies recorded at captureGraph() time are replayed
+        // in one driver call.  Post-graph work (sync, postStreamSync, output
+        // collection) runs identically to the normal path.
+        if (graph_captured_) {
+            FZ_CUDA_CHECK(cudaGraphLaunch(graph_exec_, stream));
+        } else {
+            dag_->execute(stream);
+        }
         t_dag_end = std::chrono::steady_clock::now();
 
         // required for postStreamSync() and cuda events
@@ -246,6 +269,19 @@ void Pipeline::compress(
             " source stages; use compress(const std::vector<InputSpec>&) for multi-source pipelines");
     }
 
+    // Graph mode: d_graph_input_ is already sized at the padded capacity
+    // (allocated in finalize()).  Pass the user's raw pointer directly to the
+    // InputSpec overload; it will D2D-copy into d_graph_input_ and zero any
+    // tail bytes before calling cudaGraphLaunch().  No d_pad_buf_ needed.
+    if (graph_captured_) {
+        original_input_size_ = (input_alignment_bytes_ > 1 &&
+                                 input_size % input_alignment_bytes_ != 0)
+                               ? input_size : 0;
+        compress({InputSpec{input_nodes_[0]->stage, d_input, input_size}},
+                 d_output, output_size, stream);
+        return;
+    }
+
     // Transparently pad the input to the required chunk boundary.
     const void* d_source  = d_input;
     size_t      source_sz = input_size;
@@ -312,12 +348,16 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
                     const_cast<void*>(d_input);
             }
         } else {
-            size_t byte_offset = sizeof(uint32_t);
+            // Layout written by writeConcatBuffer():
+            //   [u32 n][u64 s0]..[u64 sN-1][padding→16B][data0 slot (padded)][data1 slot]...
+            // Walk past the padded header, then advance by each padded slot size.
+            const size_t n          = buffer_metadata_.size();
+            const size_t hdr_padded = align16(sizeof(uint32_t) + n * sizeof(uint64_t));
+            size_t byte_offset      = hdr_padded;
             for (const auto& meta : buffer_metadata_) {
-                byte_offset += sizeof(uint64_t);
                 compressed_ptrs[meta.buffer_id] =
                     static_cast<uint8_t*>(const_cast<void*>(d_input)) + byte_offset;
-                byte_offset += meta.actual_size;
+                byte_offset += align16(meta.actual_size);
             }
         }
     } else {
@@ -436,13 +476,25 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     // setExternalPointer() handles pool→external transparently: it frees any
     // prior pool/persistent allocation and marks the slot external so
     // allocateBuffer() skips it during execute().
+    // ── Release previous pool-managed outputs (if any) ───────────────────────
+    if (pool_managed_decomp_) {
+        for (void* p : d_decomp_outputs_) {
+            if (p && mem_pool_) mem_pool_->free(p, stream);
+        }
+        d_decomp_outputs_.clear();
+    }
+
     std::vector<std::pair<void*, size_t>> results;
     results.reserve(input_nodes_.size());
     for (size_t i = 0; i < input_nodes_.size(); i++) {
         Stage* src_stage  = input_nodes_[i]->stage;
         auto   buf_it     = inv_result_map.find(src_stage);
         if (buf_it == inv_result_map.end()) {
-            for (auto& r : results) cudaFree(r.first);
+            if (pool_managed_decomp_) {
+                for (auto& r : results) mem_pool_->free(r.first, stream);
+            } else {
+                for (auto& r : results) cudaFree(r.first);
+            }
             for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
             throw std::runtime_error(
                 "decompressMulti: no inverse result buffer for source stage '" +
@@ -451,12 +503,24 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         int    res_buf_id  = buf_it->second;
         size_t actual_size = inv_dag.getBufferSize(res_buf_id);
 
-        void*       d_final = nullptr;
-        cudaError_t err     = cudaMalloc(&d_final, actual_size);
-        if (err != cudaSuccess) {
-            for (auto& r : results) cudaFree(r.first);
-            for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
-            throw std::runtime_error("cudaMalloc for decompress output failed");
+        void* d_final = nullptr;
+        if (pool_managed_decomp_) {
+            // Allocate from pool (persistent) — zero-copy, inv DAG writes directly here.
+            // Caller must NOT cudaFree(); pointer is valid until the next decompress() call.
+            d_final = mem_pool_->allocate(actual_size, stream, "decomp_output", /*persistent=*/true);
+            if (!d_final) {
+                for (auto& r : results) mem_pool_->free(r.first, stream);
+                for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
+                throw std::runtime_error("pool allocation for decompress output failed");
+            }
+            d_decomp_outputs_.push_back(d_final);
+        } else {
+            cudaError_t err = cudaMalloc(&d_final, actual_size);
+            if (err != cudaSuccess) {
+                for (auto& r : results) cudaFree(r.first);
+                for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
+                throw std::runtime_error("cudaMalloc for decompress output failed");
+            }
         }
         inv_dag.setExternalPointer(res_buf_id, d_final);
         results.push_back({d_final, actual_size});
@@ -577,7 +641,12 @@ void Pipeline::decompress(
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         // Individual buffers have been copied into the concat buffer; free them.
-        for (auto& r : results) cudaFree(r.first);
+        if (pool_managed_decomp_) {
+            for (void* p : d_decomp_outputs_) { if (p && mem_pool_) mem_pool_->free(p, stream); }
+            d_decomp_outputs_.clear();
+        } else {
+            for (auto& r : results) cudaFree(r.first);
+        }
 
         *d_output    = d_final;
         *output_size = total;

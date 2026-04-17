@@ -21,14 +21,24 @@
  *   7.  Output is larger than input for incompressible (random) data OR
  *       within expected bounds.
  *   8.  Header serialization round-trips chunk_size and levels.
- *   9.  round-trip on a single chunk with a checkerboard byte pattern.
- *   10. round-trip on data with long runs of repeated bytes (good for RE).
+ *   9.  Round-trip on a single chunk with a checkerboard byte pattern.
+ *   10. Round-trip on data with long runs of repeated bytes (good for RE).
+ *   11. Unsupported chunk_size throws at execute() time.
+ *   12. Unsupported levels value throws at execute() time.
+ *   13. isGraphCompatible() returns true for forward, false for inverse.
+ *   14. saveState()/restoreState() preserves config across compress+decompress.
+ *   15. Repeated compress+decompress on the same stage objects is stable.
+ *   16. Input smaller than one chunk (partial chunk) round-trips correctly.
+ *   17. Four-chunk input (4 × 16 KB) round-trips correctly.
+ *   18. Mixed-density multi-chunk: half sparse, half dense; round-trip correct.
  */
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "transforms/rze/rze_stage.h"
+#include "fzgpumodules.h"
 
+#include <cmath>
 #include <cstdint>
 #include <numeric>
 #include <vector>
@@ -230,4 +240,352 @@ TEST(RZEStage, LongRunsRoundTrip) {
                   data.begin() + (block + 1) * 128,
                   static_cast<uint8_t>(block + 1));
     round_trip(data);
+}
+
+// 11. Unsupported chunk_size throws at execute()
+//
+// Only chunk_size == 16384 is implemented.  Any other value must throw a
+// std::runtime_error so the caller gets a clear message rather than silent
+// data corruption.
+TEST(RZEStage, UnsupportedChunkSizeThrows) {
+    std::vector<uint8_t> data(16384, 0xAB);
+    CudaStream cs;
+    auto pool = make_test_pool(data.size());
+
+    // Forward
+    {
+        RZEStage enc;
+        enc.setChunkSize(8192);  // unsupported
+        enc.setLevels(4);
+
+        CudaBuffer<uint8_t> d_in(data.size()), d_out(data.size() * 2);
+        cudaMemcpy(d_in.get(), data.data(), data.size(), cudaMemcpyHostToDevice);
+        std::vector<void*> ins  = {d_in.void_ptr()};
+        std::vector<void*> outs = {d_out.void_ptr()};
+        std::vector<size_t> szs = {data.size()};
+
+        EXPECT_THROW(enc.execute(cs.stream, pool.get(), ins, outs, szs),
+                     std::runtime_error)
+            << "chunk_size=8192 (forward) must throw";
+    }
+
+    // Inverse
+    {
+        RZEStage dec;
+        dec.setChunkSize(8192);
+        dec.setLevels(4);
+        dec.setInverse(true);
+
+        CudaBuffer<uint8_t> d_in(data.size()), d_out(data.size() * 2);
+        cudaMemcpy(d_in.get(), data.data(), data.size(), cudaMemcpyHostToDevice);
+        std::vector<void*> ins  = {d_in.void_ptr()};
+        std::vector<void*> outs = {d_out.void_ptr()};
+        std::vector<size_t> szs = {data.size()};
+
+        EXPECT_THROW(dec.execute(cs.stream, pool.get(), ins, outs, szs),
+                     std::runtime_error)
+            << "chunk_size=8192 (inverse) must throw";
+    }
+}
+
+// 12. Unsupported levels value throws at execute()
+//
+// Levels 1, 2, 3 are not yet implemented; only levels == 4 is supported.
+// Each unsupported value must throw a std::runtime_error.
+TEST(RZEStage, UnsupportedLevelsThrows) {
+    std::vector<uint8_t> data(16384, 0x55);
+    CudaStream cs;
+    auto pool = make_test_pool(data.size());
+
+    CudaBuffer<uint8_t> d_in(data.size()), d_out(data.size() * 2);
+    cudaMemcpy(d_in.get(), data.data(), data.size(), cudaMemcpyHostToDevice);
+
+    for (int bad_levels : {1, 2, 3}) {
+        RZEStage enc;
+        enc.setChunkSize(16384);
+        enc.setLevels(bad_levels);
+
+        std::vector<void*> ins  = {d_in.void_ptr()};
+        std::vector<void*> outs = {d_out.void_ptr()};
+        std::vector<size_t> szs = {data.size()};
+
+        EXPECT_THROW(enc.execute(cs.stream, pool.get(), ins, outs, szs),
+                     std::runtime_error)
+            << "levels=" << bad_levels << " must throw";
+    }
+}
+
+// 13. isGraphCompatible(): true for forward, false for inverse
+//
+// RZE inverse contains a blocking D2H cudaMemcpy (to read per-chunk sizes
+// from the stream header) and a stream sync between scatter and decode
+// kernels — neither is capturable.  The forward path has no such calls.
+TEST(RZEStage, IsGraphCompatible) {
+    RZEStage fwd;
+    fwd.setChunkSize(16384);
+    fwd.setLevels(4);
+    EXPECT_TRUE(fwd.isGraphCompatible())
+        << "RZE forward must be graph-compatible";
+
+    RZEStage inv;
+    inv.setChunkSize(16384);
+    inv.setLevels(4);
+    inv.setInverse(true);
+    EXPECT_FALSE(inv.isGraphCompatible())
+        << "RZE inverse must NOT be graph-compatible (blocking D2H in execute)";
+}
+
+// 14. saveState()/restoreState() preserves config across compress+decompress
+//
+// decompressMulti() wraps each stage's execute() with saveState()/restoreState()
+// so that header deserialization in the inverse pass does not permanently
+// overwrite the forward configuration.
+// Specifically: cached_orig_bytes_ is set by the forward pass and also written
+// into the serialized header; after a decompress the saved forward value must
+// be intact so a subsequent compress sees the correct config.
+TEST(RZEStage, SaveRestoreStatePreservesConfig) {
+    std::vector<uint8_t> data(16384, 0x33);
+    CudaStream cs;
+    auto pool = make_test_pool(data.size() * 4);
+
+    RZEStage stage;
+    stage.setChunkSize(16384);
+    stage.setLevels(4);
+
+    // Forward compress
+    const auto compressed = run_rze(stage, data, cs.stream, *pool);
+    const uint32_t cached_after_compress = stage.getCachedOrigBytes();
+    EXPECT_EQ(cached_after_compress, data.size())
+        << "cached_orig_bytes_ must equal input size after compress";
+
+    // Simulate what decompressMulti() does: saveState, switch to inverse,
+    // execute, restoreState.
+    stage.saveState();
+    stage.setInverse(true);
+
+    CudaBuffer<uint8_t> d_comp(compressed.size()), d_decomp(data.size() + 4096);
+    cudaMemcpy(d_comp.get(), compressed.data(), compressed.size(), cudaMemcpyHostToDevice);
+    {
+        std::vector<void*> ins  = {d_comp.void_ptr()};
+        std::vector<void*> outs = {d_decomp.void_ptr()};
+        std::vector<size_t> szs = {compressed.size()};
+        stage.execute(cs.stream, pool.get(), ins, outs, szs);
+    }
+
+    stage.setInverse(false);
+    stage.restoreState();
+
+    // Config must be restored to the forward values
+    EXPECT_EQ(stage.getChunkSize(),       16384u);
+    EXPECT_EQ(stage.getLevels(),          4);
+    EXPECT_EQ(stage.getCachedOrigBytes(), cached_after_compress)
+        << "cached_orig_bytes_ must survive saveState/restoreState";
+    EXPECT_FALSE(stage.isInverse())
+        << "stage must be in forward mode after restoreState";
+}
+
+// 15. Repeated compress+decompress on the same stage objects is stable
+//
+// Verifies that persistent scratch buffers are correctly reused (not
+// double-freed or left dirty) across multiple round-trips on the same
+// pair of RZEStage objects.
+TEST(RZEStage, RepeatedRoundTripStable) {
+    std::mt19937 rng(2024);
+    std::uniform_int_distribution<int> dist(0, 255);
+
+    CudaStream cs;
+    auto pool = make_test_pool(16384 * 4);
+
+    RZEStage enc, dec;
+    enc.setChunkSize(16384); enc.setLevels(4);
+    dec.setChunkSize(16384); dec.setLevels(4); dec.setInverse(true);
+
+    for (int iter = 0; iter < 5; iter++) {
+        std::vector<uint8_t> data(16384);
+        for (auto& b : data) b = static_cast<uint8_t>(dist(rng));
+
+        // Compress
+        const auto compressed = run_rze(enc, data, cs.stream, *pool);
+        ASSERT_GT(compressed.size(), 0u) << "iter " << iter << ": empty compressed output";
+
+        // Decompress
+        CudaBuffer<uint8_t> d_in(compressed.size()), d_out(data.size() + 4096);
+        cudaMemcpy(d_in.get(), compressed.data(), compressed.size(), cudaMemcpyHostToDevice);
+        {
+            std::vector<void*> ins  = {d_in.void_ptr()};
+            std::vector<void*> outs = {d_out.void_ptr()};
+            std::vector<size_t> szs = {compressed.size()};
+            dec.execute(cs.stream, pool.get(), ins, outs, szs);
+        }
+        const size_t actual = dec.getActualOutputSizesByName().at("output");
+        ASSERT_EQ(actual, data.size()) << "iter " << iter << ": wrong decompressed size";
+
+        std::vector<uint8_t> restored(actual);
+        cudaMemcpy(restored.data(), d_out.get(), actual, cudaMemcpyDeviceToHost);
+        EXPECT_EQ(restored, data) << "iter " << iter << ": decompressed data mismatch";
+    }
+}
+
+// 16. Partial chunk (input smaller than one chunk) round-trips correctly
+//
+// Exercises the single-chunk path where the input does not fill the
+// full 16 KB chunk size.  The encoder must not read past the end of
+// the input; the decoder must reproduce exactly the bytes passed in.
+TEST(RZEStage, PartialChunkRoundTrip) {
+    // Use a size that is not a power of 2 and well below 16384
+    std::vector<uint8_t> data(3000, 0);
+    std::mt19937 rng(555);
+    std::uniform_int_distribution<int> dist(0, 255);
+    for (int i = 0; i < 30; i++)
+        data[rng() % 3000] = static_cast<uint8_t>(dist(rng));
+    round_trip(data);
+}
+
+// 17. Four-chunk input (4 × 16 KB = 64 KB) round-trips correctly
+//
+// Tests that the prefix-sum offset computation in the packing kernel
+// and the inverse scatter are correct beyond 2 chunks.
+TEST(RZEStage, FourChunksRoundTrip) {
+    std::mt19937 rng(777);
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::vector<uint8_t> data(65536);
+    for (auto& b : data) b = static_cast<uint8_t>(dist(rng));
+    round_trip(data);
+}
+
+// 18. Mixed-density multi-chunk: first half sparse, second half dense
+//
+// Exercises per-chunk divergence in the encode kernel — some chunks
+// will take the uncompressed-verbatim path (high-bit flag set) while
+// others will be compressed.  The decoder must handle both cases in
+// the same stream.
+TEST(RZEStage, MixedDensityMultiChunkRoundTrip) {
+    constexpr size_t N = 32768;  // 2 × 16 KB chunks
+
+    std::vector<uint8_t> data(N, 0);
+
+    // First chunk: very sparse (only 10 non-zero bytes)
+    std::mt19937 rng(888);
+    std::uniform_int_distribution<int> pos_dist(0, 16383);
+    std::uniform_int_distribution<int> val_dist(1, 255);
+    for (int i = 0; i < 10; i++)
+        data[pos_dist(rng)] = static_cast<uint8_t>(val_dist(rng));
+
+    // Second chunk: fully random (incompressible → verbatim path)
+    std::uniform_int_distribution<int> byte_dist(0, 255);
+    for (size_t i = 16384; i < N; i++)
+        data[i] = static_cast<uint8_t>(byte_dist(rng));
+
+    round_trip(data);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 19. Pipeline integration: Lorenzo → RZEStage full round-trip
+//
+// Exercises RZEStage as a downstream consumer of Lorenzo's "codes" output
+// through the full Pipeline API (compress → decompress).  Smooth sinusoidal
+// input data produces highly compressible Lorenzo quantization codes
+// (many zeros after prediction), which RZE encodes well.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(RZEStage, PipelineIntegration) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 13;  // 8 K floats
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
+                   + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    // LorenzoStage<float, uint16_t> → RZEStage: codes output feeds RZE.
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+
+    auto* rze = pipeline.addStage<RZEStage>();
+    rze->setChunkSize(16384);
+    rze->setLevels(4);
+    pipeline.connect(rze, lrz, "codes");
+
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream)
+    ) << "Lorenzo→RZE compress must not throw";
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u) << "Compressed output is empty";
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream)
+    ) << "Lorenzo→RZE decompress must not throw";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Lorenzo→RZE pipeline round-trip max_err=" << max_err;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 20. RZE pipeline: compressed output smaller than raw for smooth data
+//
+// Uses the same Lorenzo→RZE pipeline as test 19 but verifies the compression
+// ratio.  Smooth sinusoidal data produces mostly-zero Lorenzo codes; RZE's
+// zero-elimination should give a meaningfully compressed output.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(RZEStage, PipelineCompressionRatio) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;  // 16 K floats — enough for RZE to shine
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
+                   + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+
+    auto* rze = pipeline.addStage<RZEStage>();
+    rze->setChunkSize(16384);
+    rze->setLevels(4);
+    pipeline.connect(rze, lrz, "codes");
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    // The compressed stream + outlier buffers should be well under raw input.
+    EXPECT_LT(comp_sz, in_bytes)
+        << "Lorenzo→RZE on smooth data should compress below raw input size ("
+        << in_bytes << " B); got " << comp_sz << " B";
 }

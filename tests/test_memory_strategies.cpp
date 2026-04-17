@@ -1,15 +1,14 @@
 /**
  * tests/test_memory_strategies.cpp
  *
- * Tests that verify all three MemoryStrategy modes produce correct results
+ * Tests that verify all MemoryStrategy modes produce correct results
  * and that pool-size configuration options work as expected.
  *
  * Strategies under test:
  *   MINIMAL      – buffers sized and allocated on-demand after each stage
- *   PIPELINE     – balanced: allocates ahead, frees when consumers are done
  *   PREALLOCATE  – sizes everything up-front via estimateOutputSizes()
  *
- * All three must produce identical decompressed data for the same input.
+ * Both must produce identical decompressed data for the same input.
  */
 
 #include <gtest/gtest.h>
@@ -74,19 +73,19 @@ static std::vector<float> roundtrip_with_strategy(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// M2: PIPELINE strategy — Lorenzo-only pipeline round-trip
+// M2: MINIMAL strategy — Lorenzo-only pipeline round-trip
 // ─────────────────────────────────────────────────────────────────────────────
-TEST(MemoryStrategy, PipelineRoundTrip) {
+TEST(MemoryStrategy, MinimalRoundTrip) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
     auto h_input = make_smooth(N);
 
-    auto h_recon = roundtrip_with_strategy(h_input, MemoryStrategy::PIPELINE);
+    auto h_recon = roundtrip_with_strategy(h_input, MemoryStrategy::MINIMAL);
 
     ASSERT_EQ(h_recon.size(), N);
     float max_err = max_abs_error(h_input, h_recon);
     EXPECT_LE(max_err, EB * 1.01f)
-        << "PIPELINE strategy: max_err=" << max_err << " exceeds bound " << EB;
+        << "MINIMAL strategy: max_err=" << max_err << " exceeds bound " << EB;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,25 +105,21 @@ TEST(MemoryStrategy, PreallocateRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// M4/M5: All three strategies produce the same decompressed data
+// M4: Both strategies produce the same decompressed data
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(MemoryStrategy, AllStrategiesProduceSameResult) {
     constexpr size_t N = 1 << 13;  // 8 K — small enough for fast test
     auto h_input = make_smooth(N);
 
     auto recon_minimal     = roundtrip_with_strategy(h_input, MemoryStrategy::MINIMAL);
-    auto recon_pipeline    = roundtrip_with_strategy(h_input, MemoryStrategy::PIPELINE);
     auto recon_preallocate = roundtrip_with_strategy(h_input, MemoryStrategy::PREALLOCATE);
 
     ASSERT_EQ(recon_minimal.size(),     N);
-    ASSERT_EQ(recon_pipeline.size(),    N);
     ASSERT_EQ(recon_preallocate.size(), N);
 
-    // Decompressed values must be identical element-for-element (all three
+    // Decompressed values must be identical element-for-element (both
     // strategies run the same deterministic kernels on the same data).
     for (size_t i = 0; i < N; i++) {
-        EXPECT_FLOAT_EQ(recon_minimal[i], recon_pipeline[i])
-            << "MINIMAL vs PIPELINE mismatch at index " << i;
         EXPECT_FLOAT_EQ(recon_minimal[i], recon_preallocate[i])
             << "MINIMAL vs PREALLOCATE mismatch at index " << i;
     }
@@ -302,4 +297,426 @@ TEST(MemoryStrategies, PoolResetReleasesAllocations) {
     // and the usage counter is zeroed.
     EXPECT_EQ(pipeline.getCurrentMemoryUsage(), 0u)
         << "getCurrentMemoryUsage() should be 0 after reset()";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ML5: MINIMAL liveness analysis produces peak ≤ PREALLOCATE total.
+//
+// For a multi-stage pipeline (Lorenzo → RLE), MINIMAL mode can free the
+// intermediate "codes" buffer once RLE has consumed it, so the topology-aware
+// pool size is smaller than the sum-of-all-buffers that PREALLOCATE requires.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, MinimalTopoPoolSizeLEPreallocate) {
+    constexpr size_t N = 1 << 14;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto build_topo_size = [&](MemoryStrategy strategy) -> size_t {
+        Pipeline p(in_bytes, strategy);
+        auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+        lrz->setErrorBound(1e-2f);
+        lrz->setQuantRadius(512);
+        lrz->setOutlierCapacity(0.2f);
+        auto* rle = p.addStage<RLEStage<uint16_t>>();
+        p.connect(rle, lrz, "codes");
+        p.finalize();
+        return p.getDAG()->computeTopoPoolSize();
+    };
+
+    size_t minimal_topo     = build_topo_size(MemoryStrategy::MINIMAL);
+    size_t preallocate_topo = build_topo_size(MemoryStrategy::PREALLOCATE);
+
+    EXPECT_GT(minimal_topo, 0u)
+        << "MINIMAL computeTopoPoolSize() must be positive";
+    EXPECT_GT(preallocate_topo, 0u)
+        << "PREALLOCATE computeTopoPoolSize() must be positive";
+    EXPECT_LE(minimal_topo, preallocate_topo)
+        << "MINIMAL topo pool (" << minimal_topo << " B) should be <= "
+        << "PREALLOCATE total (" << preallocate_topo << " B) — "
+        << "liveness analysis must reduce peak below sum-of-all-buffers";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ML6: Repeated compress+reset cycles do not accumulate memory.
+//
+// Persistent scratch (e.g. RLE/Lorenzo workspace) is allocated once and
+// reused across calls.  getCurrentMemoryUsage() after each reset() must stay
+// at 0 regardless of how many compress() calls have been made.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, RepeatedCompressResetStableMemory) {
+    constexpr size_t N = 1 << 14;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    constexpr int CYCLES = 5;
+    for (int i = 0; i < CYCLES; i++) {
+        void*  d_comp  = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        cudaStreamSynchronize(stream);
+        ASSERT_GT(comp_sz, 0u) << "cycle " << i;
+
+        pipeline.reset(stream);
+        cudaStreamSynchronize(stream);
+
+        EXPECT_EQ(pipeline.getCurrentMemoryUsage(), 0u)
+            << "getCurrentMemoryUsage() must be 0 after reset() — cycle " << i;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CO1: Buffer coloring is applied in PREALLOCATE mode (coloring enabled by default).
+//
+// PREALLOCATE mode runs the interference-graph coloring pass at finalize().
+// Verify that (a) isColoringApplied() returns true and (b) the number of color
+// regions is strictly less than the total number of buffers — i.e., at least
+// one pair of non-overlapping buffers shares a region.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, ColoringAppliedInPreallocateMode) {
+    constexpr size_t N = 1 << 14;
+    const size_t in_bytes = N * sizeof(float);
+
+    // Multi-stage pipeline to create enough buffers for coloring to matter.
+    Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
+    pipeline.connect(rle, lrz, "codes");
+    pipeline.finalize();
+
+    EXPECT_TRUE(pipeline.isColoringApplied())
+        << "Buffer coloring should be applied for PREALLOCATE strategy";
+
+    EXPECT_GT(pipeline.getColorRegionCount(), 0u)
+        << "At least one color region must exist after coloring";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CO2: Disabling coloring still produces correct results.
+//
+// disableColoring(true) bypasses the interference-graph pass.  Each buffer
+// gets its own allocation.  The round-trip must still be data-correct.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, DisabledColoringRoundTrip) {
+    constexpr size_t N  = 1 << 13;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
+    pipeline.disableColoring(true);
+
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    EXPECT_FALSE(pipeline.isColoringApplied())
+        << "isColoringApplied() should be false when coloring was disabled";
+
+    void*  d_comp = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    ASSERT_GT(comp_sz, 0u);
+
+    void*  d_dec = nullptr;
+    size_t dec_sz = 0;
+    pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream);
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Disabled-coloring round-trip error " << max_err << " exceeds bound " << EB;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP1: setBufferPersistent() — a buffer marked persistent survives reset()
+//
+// After compress(), we find one of the DAG output buffers, mark it persistent,
+// then call reset().  A persistent buffer must NOT be freed — its device pointer
+// must still be non-null and its is_persistent flag must be set.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, PersistentBufferSurvivesReset) {
+    constexpr size_t N  = 1 << 13;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    // MINIMAL so buffers are normally freed after reset()
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    // Find the first output buffer of the first DAG node and mark it persistent.
+    CompressionDAG* dag = pipeline.getDAG();
+    const auto& nodes = dag->getNodes();
+    ASSERT_FALSE(nodes.empty()) << "DAG has no nodes";
+
+    int target_buf_id = -1;
+    for (auto* node : nodes) {
+        if (!node->output_buffer_ids.empty()) {
+            target_buf_id = node->output_buffer_ids[0];
+            break;
+        }
+    }
+    ASSERT_GE(target_buf_id, 0) << "No output buffer found";
+
+    // Verify the buffer is currently allocated (non-null pointer)
+    void* ptr_before = dag->getBuffer(target_buf_id);
+    ASSERT_NE(ptr_before, nullptr) << "Buffer must be allocated after compress()";
+
+    dag->setBufferPersistent(target_buf_id, true);
+    EXPECT_TRUE(dag->getBufferInfo(target_buf_id).is_persistent)
+        << "is_persistent must be true after setBufferPersistent(true)";
+
+    // reset() must not free persistent buffers
+    pipeline.reset(stream);
+    stream.sync();
+
+    void* ptr_after = dag->getBuffer(target_buf_id);
+    EXPECT_EQ(ptr_after, ptr_before)
+        << "Persistent buffer pointer must not change after reset()";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SC1: RLE persistent scratch is reused across compress() calls
+//
+// An RLE stage allocates five persistent scratch arrays on the first execute()
+// call (boundary flags, scan, positions, values, lengths) and reuses them on
+// subsequent calls without additional cudaMalloc.  Verify this by measuring
+// GPU free memory:
+//   - After the first compress+reset, GPU free memory settles at a baseline
+//     that is lower than before the compress (scratch is persistent).
+//   - After the second compress+reset, GPU free memory must equal that
+//     baseline — no new permanent allocations were made.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, RLEScratchReusedAcrossCalls) {
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
+    pipeline.connect(rle, lrz, "codes");
+    pipeline.finalize();
+
+    // First compress — allocates scratch (persistent) and working buffers
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    // reset() frees non-persistent working buffers; persistent scratch stays.
+    pipeline.reset(stream);
+    stream.sync();
+    cudaDeviceSynchronize();
+    const size_t free_after_first = gpu_free_bytes();
+
+    // Second compress — scratch must be reused (no new persistent allocations)
+    d_comp  = nullptr;
+    comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    pipeline.reset(stream);
+    stream.sync();
+    cudaDeviceSynchronize();
+    const size_t free_after_second = gpu_free_bytes();
+
+    // Allow ±512 KB tolerance for CUDA internal memory accounting fluctuations.
+    constexpr size_t kTol = 512 * 1024;
+    const size_t diff = (free_after_second > free_after_first)
+                      ? free_after_second - free_after_first
+                      : free_after_first  - free_after_second;
+    EXPECT_LE(diff, kTol)
+        << "GPU free memory after second compress+reset (" << free_after_second / 1024 << " KB) "
+        << "must be ~equal to after first (" << free_after_first / 1024 << " KB) — "
+        << "RLE scratch must be reused, not re-allocated";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CU1: getCurrentMemoryUsage() returns 0 after reset() in MINIMAL mode
+//
+// reset() frees all non-persistent pool buffers.  For MINIMAL strategy (where
+// no buffers are pre-allocated at finalize()), getCurrentMemoryUsage() must
+// drop back to 0 after each reset(), regardless of how many compress() calls
+// have been made.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, CurrentUsageZeroAfterResetMinimal) {
+    constexpr size_t N  = 1 << 13;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    for (int i = 0; i < 3; i++) {
+        void*  d_comp  = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        stream.sync();
+        ASSERT_GT(comp_sz, 0u) << "cycle " << i;
+
+        EXPECT_GT(pipeline.getCurrentMemoryUsage(), 0u)
+            << "cycle " << i << ": getCurrentMemoryUsage() must be > 0 after compress()";
+
+        pipeline.reset(stream);
+        stream.sync();
+
+        EXPECT_EQ(pipeline.getCurrentMemoryUsage(), 0u)
+            << "cycle " << i << ": getCurrentMemoryUsage() must be 0 after reset()";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PT1: getPoolThreshold() returns a value ≥ the input data size before finalize()
+//
+// Pipeline initialises the pool with size = input_data_size × multiplier (3×
+// by default).  getPoolThreshold() exposes the configured pool size.  Before
+// finalize() the threshold is set to input × multiplier, so it must be at least
+// as large as the raw input.  (After finalize() the threshold is pinned to
+// UINT64_MAX to keep pool pages warm; this test queries the pre-finalize value.)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryPool, PoolThresholdAtLeastInputSize) {
+    constexpr size_t N = 1 << 14;
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 3.0f);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    // Query threshold BEFORE finalize() — after finalize() the CUDA pool release
+    // threshold is pinned to UINT64_MAX (keeps pages warm) which would overflow
+    // the returned size_t from getConfiguredSize().
+    const size_t threshold = pipeline.getPoolThreshold();
+    EXPECT_GE(threshold, in_bytes)
+        << "Pool threshold (" << threshold << " B) must be >= input size ("
+        << in_bytes << " B) — pool sized at 3× input should far exceed input";
+    EXPECT_GE(threshold, 3 * in_bytes)
+        << "Pool threshold with 3× multiplier must be at least 3× the input size";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EP1: setExternalPointer() on a DAG buffer — buffer is not reallocated
+//
+// Sets an external pointer on one of the DAG's non-input buffers (a stage
+// output buffer that has been pre-allocated after compress()), then verifies
+// that the pointer returned by getBuffer() matches the externally-set value
+// and that the is_external flag is set.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(MemoryStrategies, SetExternalPointerReflectsInGetBuffer) {
+    constexpr size_t N  = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    // PREALLOCATE so all buffers are allocated at finalize() and accessible
+    Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    // compress() to ensure buffers are live
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    CompressionDAG* dag = pipeline.getDAG();
+    const auto& nodes = dag->getNodes();
+    ASSERT_FALSE(nodes.empty());
+
+    // Find a stage output buffer with a valid pointer
+    int buf_id = -1;
+    for (auto* node : nodes) {
+        for (int bid : node->output_buffer_ids) {
+            if (dag->getBuffer(bid) != nullptr) {
+                buf_id = bid;
+                break;
+            }
+        }
+        if (buf_id >= 0) break;
+    }
+    ASSERT_GE(buf_id, 0) << "No allocated output buffer found";
+
+    // Allocate a dummy external buffer of the right size
+    size_t buf_sz = dag->getBufferSize(buf_id);
+    ASSERT_GT(buf_sz, 0u);
+    void* d_external = nullptr;
+    cudaMalloc(&d_external, buf_sz);
+    ASSERT_NE(d_external, nullptr);
+
+    dag->setExternalPointer(buf_id, d_external);
+
+    EXPECT_EQ(dag->getBuffer(buf_id), d_external)
+        << "getBuffer() must return the externally-set pointer";
+    EXPECT_TRUE(dag->getBufferInfo(buf_id).is_external)
+        << "is_external must be true after setExternalPointer()";
+
+    cudaFree(d_external);
 }

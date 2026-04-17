@@ -98,6 +98,17 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
+    /**
+     * RZE inverse execute() contains a blocking cudaMemcpy D2H (to read
+     * per-chunk sizes from the stream header) and a cudaStreamSynchronize
+     * (to wait for the scatter kernel before launching the decode kernel).
+     * These prevent the inverse path from being recorded into a CUDA Graph.
+     * The forward path has no such calls and would be compatible, but since
+     * the same class handles both directions we conservatively report
+     * incompatibility whenever is_inverse_ is set.
+     */
+    bool isGraphCompatible() const override { return !is_inverse_; }
+
     void setChunkSize(size_t bytes) { chunk_size_ = static_cast<uint32_t>(bytes); }
     void setLevels(int n)           { levels_     = static_cast<uint8_t>(n);      }
 

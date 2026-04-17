@@ -174,6 +174,13 @@ public:
             ? actual_output_sizes_[index] : 0;
     }
 
+    // Preserve the forward-mode actual_output_sizes_ across decompression passes.
+    // decompressMulti() calls saveState()/restoreState() around each inverse
+    // execute() to prevent the inverse pass from permanently corrupting the
+    // 4-element forward output-size vector (inverse sets it to a 1-element vector).
+    void saveState()    override { saved_output_sizes_ = actual_output_sizes_; }
+    void restoreState() override { actual_output_sizes_ = saved_output_sizes_; }
+
     // Configuration accessors
     void setErrorBound(TInput error_bound) { config_.error_bound = error_bound; }
     void setQuantRadius(TCode radius) { config_.quant_radius = radius; }
@@ -318,6 +325,7 @@ public:
 private:
     Config config_;
     std::vector<size_t> actual_output_sizes_;
+    std::vector<size_t> saved_output_sizes_;  // saved by saveState(), restored by restoreState()
     size_t num_elements_ = 0;              // Track for header
     uint32_t actual_outlier_count_ = 0;    // Track for header
     bool is_inverse_ = false;              // false = compress, true = decompress

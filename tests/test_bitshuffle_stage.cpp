@@ -26,7 +26,9 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
+#include "fzgpumodules.h"
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 #include <numeric>
@@ -384,4 +386,189 @@ TEST(BitshuffleStage, HeaderSerializationRoundTrip) {
     EXPECT_EQ(restored.getElementWidth(), 2u);
     EXPECT_EQ(restored.getStageTypeId(),
               static_cast<uint16_t>(StageType::BITSHUFFLE));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Block size 4 KB with element_width=4 round-trip
+//
+// 4096 bytes = 1024 uint32 elements — the minimum valid chunk for width=4
+// (must be a multiple of 1024 × element_width = 4096).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(BitshuffleStage, SmallBlockSize4KB_EW4) {
+    CudaStream stream;
+    const size_t CHUNK = 4096;
+    auto pool = make_test_pool(CHUNK * 2);
+
+    auto h_in = make_ramp_bytes(CHUNK);
+
+    BitshuffleStage enc;
+    enc.setBlockSize(CHUNK);
+    enc.setElementWidth(4);
+
+    auto h_encoded = run_bitshuffle(enc, h_in, stream, *pool);
+    ASSERT_EQ(h_encoded.size(), CHUNK);
+
+    BitshuffleStage dec;
+    dec.setBlockSize(CHUNK);
+    dec.setElementWidth(4);
+    dec.setInverse(true);
+
+    auto h_decoded = run_bitshuffle(dec, h_encoded, stream, *pool);
+    EXPECT_EQ(h_in, h_decoded);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. Block size 8 KB with element_width=2 round-trip
+//
+// 8192 bytes = 4096 uint16 elements.  Minimum for width=2 is
+// 1024 × 2 = 2048 bytes; 8192 is a valid multiple.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(BitshuffleStage, BlockSize8KB_EW2) {
+    CudaStream stream;
+    const size_t CHUNK = 8192;
+    auto pool = make_test_pool(CHUNK * 2);
+
+    auto h_in = make_ramp_bytes(CHUNK);
+
+    BitshuffleStage enc;
+    enc.setBlockSize(CHUNK);
+    enc.setElementWidth(2);
+
+    auto h_encoded = run_bitshuffle(enc, h_in, stream, *pool);
+    ASSERT_EQ(h_encoded.size(), CHUNK);
+
+    BitshuffleStage dec;
+    dec.setBlockSize(CHUNK);
+    dec.setElementWidth(2);
+    dec.setInverse(true);
+
+    auto h_decoded = run_bitshuffle(dec, h_encoded, stream, *pool);
+    EXPECT_EQ(h_in, h_decoded);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 14. Block size 32 KB with element_width=8 round-trip
+//
+// 32768 bytes = 4096 uint64 elements.  Minimum for width=8 is
+// 1024 × 8 = 8192 bytes; 32768 is a valid multiple.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(BitshuffleStage, LargeBlockSize32KB_EW8) {
+    CudaStream stream;
+    const size_t CHUNK = 32768;
+    auto pool = make_test_pool(CHUNK * 2);
+
+    auto h_in = make_ramp_bytes(CHUNK);
+
+    BitshuffleStage enc;
+    enc.setBlockSize(CHUNK);
+    enc.setElementWidth(8);
+
+    auto h_encoded = run_bitshuffle(enc, h_in, stream, *pool);
+    ASSERT_EQ(h_encoded.size(), CHUNK);
+
+    BitshuffleStage dec;
+    dec.setBlockSize(CHUNK);
+    dec.setElementWidth(8);
+    dec.setInverse(true);
+
+    auto h_decoded = run_bitshuffle(dec, h_encoded, stream, *pool);
+    EXPECT_EQ(h_in, h_decoded);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 15. Invalid configuration throws
+//
+// block_size must be a positive multiple of 1024 × element_width.
+// An invalid block_size (e.g. 7000 bytes, not divisible by 4096 for EW=4)
+// must throw std::invalid_argument at execute() time.
+// Also verifies that an unsupported element_width (e.g. 3) throws.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(BitshuffleStage, InvalidConfigThrows) {
+    CudaStream stream;
+    const size_t N = 16384;
+    auto pool = make_test_pool(N * 2);
+    auto h_in = make_ramp_bytes(N);
+
+    // Bad block_size: 7000 is not a multiple of 1024 * 4 = 4096
+    {
+        BitshuffleStage stage;
+        stage.setBlockSize(7000);
+        stage.setElementWidth(4);
+        EXPECT_THROW(run_bitshuffle(stage, h_in, stream, *pool),
+                     std::invalid_argument)
+            << "block_size=7000 with element_width=4 must throw";
+    }
+
+    // Unsupported element_width: 3 is not 1, 2, 4, or 8
+    {
+        BitshuffleStage stage;
+        stage.setBlockSize(N);
+        stage.setElementWidth(3);
+        EXPECT_THROW(run_bitshuffle(stage, h_in, stream, *pool),
+                     std::invalid_argument)
+            << "element_width=3 must throw";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 16. Pipeline integration: Lorenzo → Bitshuffle full round-trip
+//
+// Exercises BitshuffleStage as a downstream consumer of Lorenzo's "codes"
+// output through the full Pipeline API (compress → decompress).  Verifies
+// that the pipeline-level data flow is correct and the round-trip is within
+// the configured error bound.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(BitshuffleStage, PipelineIntegration) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 13;  // 8 K floats
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f;
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+
+    auto* bs = pipeline.addStage<BitshuffleStage>();
+    bs->setBlockSize(16384);
+    bs->setElementWidth(2);  // uint16_t codes
+    pipeline.connect(bs, lrz, "codes");
+
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream)
+    ) << "Lorenzo→Bitshuffle compress must not throw";
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u) << "Compressed output is empty";
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream)
+    ) << "Lorenzo→Bitshuffle decompress must not throw";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Lorenzo→Bitshuffle pipeline round-trip max_err=" << max_err;
 }

@@ -69,7 +69,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_quantizer
     SOURCES test_quantizer.cpp
-    LIBS    fzgmod_predictors fzgmod_mem
+    LIBS    fzgmod_predictors fzgmod_mem fzgmod
 )
 
 # ─── Full pipeline (compress + decompress) ────────────────────────────────────
@@ -139,11 +139,39 @@ fz_add_test(
 fz_add_test(
     NAME    test_bitshuffle_stage
     SOURCES test_bitshuffle_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
+    LIBS    fzgmod_encoders fzgmod_mem fzgmod
 )
 # ─── RZEStage GPU round-trip ─────────────────────────────────────────────────
 fz_add_test(
     NAME    test_rze_stage
     SOURCES test_rze_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
+    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+)
+
+# ─── Buffer coloring (PREALLOCATE memory reduction) ───────────────────────────
+fz_add_test(
+    NAME    test_buffer_coloring
+    SOURCES test_buffer_coloring.cpp
+    LIBS    fzgmod
+)
+
+# ─── Pointer ownership and lifetime semantics ─────────────────────────────────
+fz_add_test(
+    NAME    test_ownership
+    SOURCES test_ownership.cpp
+    LIBS    fzgmod
+)
+
+# ─── CUDA Graph capture correctness and replay ────────────────────────────────
+fz_add_test(
+    NAME    test_graph_capture
+    SOURCES test_graph_capture.cpp
+    LIBS    fzgmod
+)
+
+# ─── Buffer liveness analysis and level structure ─────────────────────────────
+fz_add_test(
+    NAME    test_liveness
+    SOURCES test_liveness.cpp
+    LIBS    fzgmod
 )

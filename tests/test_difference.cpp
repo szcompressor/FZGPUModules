@@ -586,6 +586,47 @@ TEST(DifferenceStage, HeaderSerializationPreservesChunkSize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DifferenceStage<double> round-trip
+//
+// Verifies that the double-precision specialisation is instantiated and correct:
+//   - forward(double input) produces exact differences
+//   - inverse(double diffs) reconstructs the original without any precision loss
+//     (DifferenceStage is a lossless transform; no approximation tolerance needed)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, DoubleRoundTrip) {
+    CudaStream stream;
+    constexpr size_t N = 1024;
+    auto pool = make_test_pool(N * sizeof(double) * 4);
+
+    // Use integer-valued doubles: the GPU parallel prefix scan accumulates
+    // additions exactly for integer arguments, so EXPECT_DOUBLE_EQ holds.
+    // h_input[i] = i*3 keeps values well within the exact integer range of
+    // double (< 2^53), and forward differences h_diff[i!=0] = 3.0 (exact).
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = static_cast<double>(i) * 3.0;
+
+    DifferenceStage<double> fwd;
+    auto h_diff = run_diff_stage(fwd, h_input, stream, *pool);
+    ASSERT_EQ(h_diff.size(), N);
+
+    // Spot-check forward: first element unchanged, rest are exact differences
+    EXPECT_DOUBLE_EQ(h_diff[0], h_input[0]);
+    for (size_t i = 1; i < N; ++i)
+        EXPECT_DOUBLE_EQ(h_diff[i], h_input[i] - h_input[i - 1])
+            << "Forward mismatch at index " << i;
+
+    DifferenceStage<double> inv;
+    inv.setInverse(true);
+    auto h_recon = run_diff_stage(inv, h_diff, stream, *pool);
+    ASSERT_EQ(h_recon.size(), N);
+
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_DOUBLE_EQ(h_recon[i], h_input[i])
+            << "Reconstruction mismatch at index " << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Header serialization: vanilla DifferenceStage<float> (TOut = T) still produces
 // a valid 6-byte header with chunk_size 0.
 // ─────────────────────────────────────────────────────────────────────────────

@@ -109,7 +109,7 @@ public:
     
     /**
      * Get actual output sizes after execution (by name)
-     * Used for dynamic buffer sizing in MINIMAL/PIPELINE modes
+     * Used for dynamic buffer sizing in MINIMAL mode
      *
      * @return Map of output_name -> actual size written
      */
@@ -277,6 +277,24 @@ public:
         (void)output_index;
         return 0;  // Default: no header
     }
+
+    /**
+     * Declare whether this stage is safe to use inside a CUDA Graph capture.
+     *
+     * A stage is graph-compatible if its execute() method enqueues only
+     * device-side work (kernel launches, cudaMemcpyAsync D2D/H2D) and makes
+     * no host-synchronous calls (no cudaMemcpy D2H, no cudaStreamSynchronize,
+     * no dynamic allocation decisions based on device data).  Such a stage can
+     * be recorded into a CUDA Graph and replayed without CPU intervention.
+     *
+     * Override and return false if your stage's execute() contains any
+     * host-synchronous CUDA calls.  The DAG will throw at setCaptureMode(true)
+     * time rather than silently producing a broken or incomplete graph.
+     *
+     * Default: true (most forward-path stages are graph-compatible).
+     * Stages known to be incompatible (e.g. RZE inverse) should return false.
+     */
+    virtual bool isGraphCompatible() const { return true; }
 
     /**
      * Estimate internal scratch memory this stage will allocate from the pool.

@@ -19,6 +19,7 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       is_finalized_(false),
       soft_run_enabled_(false),
       warmup_on_finalize_(false),
+      pool_managed_decomp_(false),
       is_compressed_(false),
       was_compressed_(false),
       profiling_enabled_(false),
@@ -37,7 +38,13 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       original_input_size_(0),
       input_size_hint_(input_data_size),
       pool_multiplier_(pool_multiplier),
-      dims_({0, 1, 1}) {
+      dims_({0, 1, 1}),
+      graph_mode_enabled_(false),
+      graph_captured_(false),
+      d_graph_input_(nullptr),
+      d_graph_input_size_(0),
+      captured_graph_(nullptr),
+      graph_exec_(nullptr) {
     
     // Create memory pool with configuration
     MemoryPoolConfig pool_config(input_data_size, pool_multiplier);
@@ -48,11 +55,23 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
 }
 
 Pipeline::~Pipeline() {
-    // Free concat buffer before pool is destroyed
+    // Destroy CUDA Graph handles before the pool is torn down.
+    if (graph_exec_)     { cudaGraphExecDestroy(graph_exec_);  graph_exec_     = nullptr; }
+    if (captured_graph_) { cudaGraphDestroy(captured_graph_);  captured_graph_ = nullptr; }
+    if (d_graph_input_ && mem_pool_) {
+        mem_pool_->free(d_graph_input_, 0);
+        d_graph_input_ = nullptr;
+    }
+
+    // Free pool-managed buffers before pool is destroyed
     if (d_concat_buffer_ && mem_pool_) {
         mem_pool_->free(d_concat_buffer_, 0);
         d_concat_buffer_ = nullptr;
     }
+    for (void* p : d_decomp_outputs_) {
+        if (p && mem_pool_) mem_pool_->free(p, 0);
+    }
+    d_decomp_outputs_.clear();
     if (d_pad_buf_ && mem_pool_) {
         mem_pool_->free(d_pad_buf_, 0);
         d_pad_buf_ = nullptr;
@@ -92,6 +111,13 @@ void Pipeline::setNumStreams(int num_streams) {
 void Pipeline::enableProfiling(bool enable) {
     profiling_enabled_ = enable;
     dag_->enableProfiling(enable);
+}
+
+void Pipeline::enableGraphMode(bool enable) {
+    if (is_finalized_) {
+        throw std::runtime_error("Cannot change graph mode after finalization");
+    }
+    graph_mode_enabled_ = enable;
 }
 
 // ========== Builder API ===========
@@ -241,7 +267,7 @@ void Pipeline::finalize() {
     // Replace the blunt input_size*multiplier estimate from construction time
     // with one derived from the actual DAG buffer layout:
     //   PREALLOCATE → sum of all non-external buffers (all live simultaneously)
-    //   MINIMAL/PIPELINE → peak concurrent live bytes across execution levels
+    //   MINIMAL → peak concurrent live bytes across execution levels
     // pool_multiplier_ is applied on top as headroom for stage-internal scratch
     // (CUB temp storage, RZE per-chunk scratch, etc.).
     // Skip when there is no input size hint — buffer sizes will be 1-byte
@@ -283,6 +309,42 @@ void Pipeline::finalize() {
 
     if (strategy_ == MemoryStrategy::PREALLOCATE) {
         dag_->preallocateBuffers();
+    }
+
+    // ── Graph mode: validate requirements and allocate fixed input slot ───────
+    if (graph_mode_enabled_) {
+        if (strategy_ != MemoryStrategy::PREALLOCATE) {
+            throw std::runtime_error(
+                "Graph mode requires PREALLOCATE memory strategy. "
+                "Call setMemoryStrategy(MemoryStrategy::PREALLOCATE) before finalize().");
+        }
+        if (input_size_hint_ == 0 && per_source_hints_.empty()) {
+            throw std::runtime_error(
+                "Graph mode requires a non-zero input size hint. "
+                "Pass input_data_size to the Pipeline constructor.");
+        }
+        if (input_nodes_.size() != 1) {
+            throw std::runtime_error(
+                "Graph mode currently supports single-source pipelines only "
+                "(" + std::to_string(input_nodes_.size()) + " source(s) detected).");
+        }
+
+        // The graph's input pointer must be stable across launches, so allocate
+        // a fixed device buffer at the padded hint size.  compress() will D2D-copy
+        // the user's input here before calling cudaGraphLaunch().
+        const size_t padded = (input_alignment_bytes_ > 1)
+            ? ((input_size_hint_ + input_alignment_bytes_ - 1) / input_alignment_bytes_)
+              * input_alignment_bytes_
+            : input_size_hint_;
+
+        if (d_graph_input_) { mem_pool_->free(d_graph_input_, 0); d_graph_input_ = nullptr; }
+        d_graph_input_ = mem_pool_->allocate(padded, 0, "graph_input_slot", /*persistent=*/true);
+        if (!d_graph_input_) {
+            throw std::runtime_error("Failed to allocate graph input slot");
+        }
+        d_graph_input_size_ = padded;
+        FZ_LOG(INFO, "Graph mode: fixed input slot allocated (%.2f MB)",
+               padded / (1024.0 * 1024.0));
     }
 
     // Pre-allocate input padding scratch from the memory pool so the first
@@ -339,8 +401,7 @@ void Pipeline::finalize() {
 
     FZ_LOG(INFO, "Finalized with %zu stages, strategy=%s",
            stages_.size(),
-           strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" :
-           strategy_ == MemoryStrategy::PIPELINE ? "PIPELINE" : "PREALLOCATE");
+           strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" : "PREALLOCATE");
 
     if (warmup_on_finalize_ && input_size_hint_ > 0) {
         FZ_LOG(INFO, "Auto-warmup triggered by setWarmupOnFinalize(true)");
@@ -372,6 +433,31 @@ void Pipeline::warmup(cudaStream_t stream) {
     compress(d_dummy, input_size_hint_, &d_out, &out_sz, stream);
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
+    // Also warm up the decompression path so inverse kernels are JIT-compiled.
+    // Must be called before dag_->reset(): d_out is pool-owned and only valid
+    // until the forward DAG is reset.
+    {
+        void*  d_decomp  = nullptr;
+        size_t decomp_sz = 0;
+        try {
+            decompress(d_out, out_sz, &d_decomp, &decomp_sz, stream);
+            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        } catch (const std::exception& e) {
+            FZ_LOG(INFO, "Warmup: decompress pass skipped (%s) — "
+                         "inverse kernels will JIT on first decompress()", e.what());
+        }
+        if (!pool_managed_decomp_ && d_decomp) {
+            cudaFree(d_decomp);
+        }
+        // Discard warmup-specific inverse DAG state.  The real first decompress()
+        // call will rebuild both from scratch with the correct input data.
+        for (void* p : d_decomp_outputs_) {
+            if (p && mem_pool_) mem_pool_->free(p, 0);
+        }
+        d_decomp_outputs_.clear();
+        inv_cache_.reset();
+    }
+
     // Restore pipeline to a clean state — identical to just after finalize().
     dag_->reset(stream);
     was_compressed_ = false;
@@ -381,8 +467,70 @@ void Pipeline::warmup(cudaStream_t stream) {
     enableProfiling(saved_profiling);
     cudaFree(d_dummy);
 
-    FZ_LOG(INFO, "Warmup complete — all kernels JIT-compiled (input %.2f MB)",
+    FZ_LOG(INFO, "Warmup complete — compress and decompress kernels JIT-compiled (input %.2f MB)",
            input_size_hint_ / (1024.0 * 1024.0));
+}
+
+void Pipeline::captureGraph(cudaStream_t stream) {
+    if (!is_finalized_) {
+        throw std::runtime_error("Pipeline must be finalized before captureGraph()");
+    }
+    if (!graph_mode_enabled_) {
+        throw std::runtime_error(
+            "Call enableGraphMode(true) before finalize() to use captureGraph()");
+    }
+    if (was_compressed_) {
+        throw std::runtime_error(
+            "captureGraph() must be called before the first compress(). "
+            "Reconstruct the pipeline or call reset() first.");
+    }
+
+    // Destroy any previously captured graph so we start clean.
+    if (graph_exec_)     { cudaGraphExecDestroy(graph_exec_);  graph_exec_     = nullptr; }
+    if (captured_graph_) { cudaGraphDestroy(captured_graph_);  captured_graph_ = nullptr; }
+    graph_captured_ = false;
+
+    // Wire the fixed input slot as the DAG's stable source pointer.
+    // This pointer is baked into the graph; compress() will D2D-copy user
+    // data here before each cudaGraphLaunch().
+    dag_->setExternalPointer(input_buffer_ids_[0], d_graph_input_);
+    dag_->updateBufferSize(input_buffer_ids_[0], d_graph_input_size_);
+
+    // setCaptureMode(true) validates that every stage in the DAG is
+    // graph-compatible; throws with a descriptive message if not.
+    dag_->setCaptureMode(true);
+
+    // Record: BeginCapture → execute (all work forced onto `stream` by
+    // capture_mode_ flag) → EndCapture → Instantiate.
+    //
+    // NOTE: The legacy default stream (stream 0 / cudaStreamLegacy) is NOT
+    // capturable.  Callers must pass a non-default stream created with
+    // cudaStreamCreate().  Passing stream 0 will cause cudaStreamBeginCapture
+    // to return cudaErrorStreamCaptureUnsupported.
+    //
+    // Exception safety: if dag_->execute() throws, EndCapture is still called
+    // so the stream is never left stranded in capture mode.
+    FZ_CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    try {
+        dag_->execute(stream);
+    } catch (...) {
+        // Attempt to end the (now-invalidated) capture so the stream reverts
+        // to normal mode.  Errors here are suppressed — the original exception
+        // is the one the caller needs to see.
+        cudaGraph_t tmp = nullptr;
+        cudaStreamEndCapture(stream, &tmp);
+        if (tmp) cudaGraphDestroy(tmp);
+        dag_->setCaptureMode(false);
+        throw;
+    }
+    FZ_CUDA_CHECK(cudaStreamEndCapture(stream, &captured_graph_));
+    FZ_CUDA_CHECK(cudaGraphInstantiate(&graph_exec_, captured_graph_,
+                                       nullptr, nullptr, 0));
+
+    dag_->setCaptureMode(false);
+    graph_captured_ = true;
+
+    FZ_LOG(INFO, "CUDA Graph captured and instantiated successfully");
 }
 
 void Pipeline::reset(cudaStream_t stream) {
@@ -417,9 +565,8 @@ void Pipeline::printPipeline() const {
     std::cout << "Stages: " << stages_.size() << "\n";
     std::cout << "Strategy: ";
     switch (strategy_) {
-        case MemoryStrategy::MINIMAL: std::cout << "MINIMAL\n"; break;
-        case MemoryStrategy::PIPELINE: std::cout << "PIPELINE\n"; break;
-        case MemoryStrategy::PREALLOCATE: std::cout << "PREALLOCATE\n"; break;
+        case MemoryStrategy::MINIMAL:      std::cout << "MINIMAL\n";      break;
+        case MemoryStrategy::PREALLOCATE:  std::cout << "PREALLOCATE\n";  break;
     }
     std::cout << "Parallel streams: " << num_streams_ << "\n";
     std::cout << "Soft-run enabled: " << (soft_run_enabled_ ? "yes" : "no") << "\n";
@@ -705,11 +852,20 @@ std::vector<Pipeline::OutputBufferInfo> Pipeline::collectOutputBuffers() const {
     return outputs;
 }
 
+// Round up to the next multiple of 16 for concat slot alignment.
+static inline size_t align16(size_t x) { return (x + 15u) & ~15u; }
+
 size_t Pipeline::calculateConcatSize(const std::vector<OutputBufferInfo>& outputs) const {
-    size_t total_size = sizeof(uint32_t);  // num_buffers header
+    const size_t n = outputs.size();
+    // Header: [num_buffers: u32][size_0..N-1: u64], padded to 16-byte boundary
+    // so the first data segment's dst pointer is 16-byte aligned.
+    const size_t hdr_raw     = sizeof(uint32_t) + n * sizeof(uint64_t);
+    const size_t hdr_padded  = align16(hdr_raw);
+    size_t total_size = hdr_padded;
     for (const auto& output : outputs) {
-        total_size += sizeof(uint64_t);  // size header per buffer
-        total_size += output.actual_size; // actual data
+        // Each segment's slot is padded to 16 bytes so subsequent dst pointers
+        // stay aligned.  The header stores the actual (unpadded) size.
+        total_size += align16(output.actual_size);
     }
     return total_size;
 }
@@ -734,17 +890,17 @@ size_t Pipeline::writeConcatBuffer(
     }
 
     // ── Build gather descriptors on the CPU (no API calls) ──────────────────
-    // Compute destination offsets with a simple prefix sum; all sizes are
-    // already known from postStreamSync() before writeConcatBuffer is called.
+    // Offsets use padded slot sizes so each dst pointer is 16-byte aligned;
+    // the bytes field carries the actual (unpadded) size for the kernel.
     CopyDesc* h_descs = static_cast<CopyDesc*>(h_copy_descs_);
-    size_t offset = hdr_bytes;
+    size_t offset = align16(hdr_bytes);  // first segment starts after padded header
     for (size_t i = 0; i < n; i++) {
         h_descs[i].src   = static_cast<const uint8_t*>(outputs[i].d_ptr);
         h_descs[i].dst   = d_concat_bytes + offset;
         h_descs[i].bytes = outputs[i].actual_size;
         FZ_LOG(TRACE, "Concat desc[%zu]: %s  %.1f KB -> offset %zu",
                i, outputs[i].stage_name.c_str(), outputs[i].actual_size / 1024.0, offset);
-        offset += outputs[i].actual_size;
+        offset += align16(outputs[i].actual_size);  // advance by padded slot size
     }
 
     // ── Two H2D copies + one kernel launch (replaces 1 H2D + N D2D) ─────────

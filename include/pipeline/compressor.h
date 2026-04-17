@@ -125,7 +125,7 @@ public:
      * Creates a dependency: dependent waits for producer to complete
      * Buffer size will be determined based on:
      * - PREALLOCATE: producer->estimateOutputSizes()
-     * - MINIMAL/PIPELINE: producer->getActualOutputSizes() or soft-run
+     * - MINIMAL: producer->getActualOutputSizes() (sized at runtime)
      * 
      * @param dependent Stage that consumes output
      * @param producer Stage that produces output
@@ -146,21 +146,6 @@ public:
      *   pipeline.connect(bitpack, {rle1, rle2, rle3});
      */
     int connect(Stage* dependent, const std::vector<Stage*>& producers);
-    
-    /**
-     * Mark a stage output as a sink (include in final buffer)
-     * 
-     * Use this to include outputs in the final concatenated buffer without
-     * needing to create PassThrough stages for outputs that don't need processing.
-     * 
-     * @param stage Stage whose output should be included
-     * @param output_name Name of the output to include (default: "output")
-     * 
-     * Example:
-     *   pipeline.addSink(lorenzo, "outlier_errors");  // Include outliers directly
-     *   pipeline.addSink(lorenzo, "outlier_indices"); // Include indices directly
-     */
-    void addSink(Stage* stage, const std::string& output_name = "output");
     
     /**
      * Finalize the pipeline for execution
@@ -207,6 +192,21 @@ public:
      */
     void setWarmupOnFinalize(bool enable) { warmup_on_finalize_ = enable; }
     bool isWarmupOnFinalizeEnabled() const { return warmup_on_finalize_; }
+
+    /**
+     * Control whether decompress() allocates output from the internal pool.
+     *
+     * When false (default), *d_output is a freshly cudaMalloc'd buffer and
+     * the caller is responsible for calling cudaFree() on it.
+     *
+     * When true, *d_output points into the Pipeline's memory pool.  The pointer
+     * is valid until the next decompress() call or Pipeline destruction.  The
+     * caller must NOT call cudaFree() on it.  This eliminates one cudaMalloc /
+     * cudaFree round trip per decompress call, which is useful when decompress
+     * is called in a tight loop or alongside other memory-intensive GPU work.
+     */
+    void setPoolManagedDecompOutput(bool enable) { pool_managed_decomp_ = enable; }
+    bool isPoolManagedDecompOutput() const { return pool_managed_decomp_; }
 
     // ========== Convenience Stage Builders ==========
 
@@ -354,8 +354,11 @@ public:
      *                   in the format produced by compress() with multiple sinks
      *                   ([num_bufs:u32][size:u64][data]...).
      * @param input_size  Size of d_input in bytes (ignored when d_input is nullptr).
-     * @param d_output    [out] Newly cudaMalloc'd device pointer; caller must
-     *                    cudaFree() the result.
+     * @param d_output    [out] Device pointer to decompressed output.
+     *                    Ownership depends on setPoolManagedDecompOutput():
+     *                    - false (default): freshly cudaMalloc'd; caller must cudaFree().
+     *                    - true: pool-managed; do NOT cudaFree(). Valid until the next
+     *                      decompress() call or Pipeline destruction.
      * @param output_size [out] Bytes in *d_output.
      * @param stream      CUDA stream to use (default: 0).
      *
@@ -465,7 +468,68 @@ public:
      */
     void enableBoundsCheck(bool enable) { dag_->enableBoundsCheck(enable); }
     bool isBoundsCheckEnabled() const   { return dag_->isBoundsCheckEnabled(); }
-    
+
+    /**
+     * Disable buffer coloring for PREALLOCATE mode (default: enabled).
+     *
+     * Coloring reduces peak pool size by reusing memory regions across buffers
+     * whose live ranges do not overlap.  Disable for debugging when you need
+     * each buffer to occupy a distinct, non-aliased memory region (e.g. when
+     * using cuda-memcheck or the bounds-check system).
+     *
+     * Must be called before finalize().
+     */
+    void disableColoring(bool disable) { dag_->disableColoring(disable); }
+    bool isColoringApplied() const     { return dag_->isColoringApplied(); }
+    size_t getColorRegionCount() const { return dag_->getColorRegionCount(); }
+
+    // ========== CUDA Graph Capture (compression-only) ==========
+
+    /**
+     * Enable CUDA Graph capture mode.
+     *
+     * When enabled, captureGraph() records the entire forward compression pass
+     * (all kernel launches and D2D copies inside dag_->execute()) as a CUDA
+     * Graph.  Subsequent compress() calls use cudaGraphLaunch() instead of
+     * dag_->execute(), eliminating per-call CPU dispatch overhead.
+     *
+     * Requirements enforced at finalize() / captureGraph() time:
+     *   - Strategy must be PREALLOCATE (buffers must be stable across launches).
+     *   - A non-zero input_size_hint must be provided to the constructor.
+     *   - All stages must return true from Stage::isGraphCompatible()
+     *     (checked by DAG::setCaptureMode(), which is called inside captureGraph()).
+     *   - Single-source pipelines only (multi-source not yet supported).
+     *
+     * Must be called before finalize().
+     */
+    void enableGraphMode(bool enable);
+    bool isGraphModeEnabled() const { return graph_mode_enabled_; }
+
+    /**
+     * Record the forward compression pass as a CUDA Graph.
+     *
+     * Internally:
+     *   1. Points the DAG's input buffer at a fixed device slot (d_graph_input_)
+     *      so the captured graph has a stable, reusable input pointer.
+     *   2. Calls DAG::setCaptureMode(true), which validates all stages are
+     *      graph-compatible (throws if any are not).
+     *   3. cudaStreamBeginCapture → dag_->execute() → cudaStreamEndCapture
+     *   4. cudaGraphInstantiate — produces the replayable executable graph.
+     *   5. Restores capture_mode_ = false.
+     *
+     * After this call, compress() copies the user's input into d_graph_input_
+     * then calls cudaGraphLaunch() instead of dag_->execute().  All post-graph
+     * work (postStreamSync, output collection, concat) runs as normal on the CPU.
+     *
+     * Can be called again to re-capture (destroys the previous graph first).
+     * Must be called after finalize() and before the first compress().
+     *
+     * @param stream  CUDA stream for capture.  Must not already be in a capture
+     *                bracket.  All recorded work will be on this stream.
+     */
+    void captureGraph(cudaStream_t stream = 0);
+    bool isGraphCaptured() const { return graph_captured_; }
+
     /**
      * Get memory usage statistics
      */
@@ -758,8 +822,9 @@ private:
     // Configuration
     int num_streams_;
     bool is_finalized_;
-    bool soft_run_enabled_;   ///< Future: enable soft-run buffer sizing pass
-    bool warmup_on_finalize_; ///< If true, finalize() auto-calls warmup()
+    bool soft_run_enabled_;     ///< Future: enable soft-run buffer sizing pass
+    bool warmup_on_finalize_;   ///< If true, finalize() auto-calls warmup()
+    bool pool_managed_decomp_;  ///< If true, decompress() returns a pool-owned pointer
 
     // Track whether compress() has been called at least once so that
     // writeToFile() can give a clear error if called before compressing, and so
@@ -779,6 +844,11 @@ private:
     void* d_concat_buffer_;                      // Concatenated output buffer (if multi-sink)
     size_t concat_buffer_capacity_;              // Allocated size of concat buffer
     bool needs_concat_;                          // True if multiple sinks detected
+
+    // Pool-managed decompress output buffers (used when pool_managed_decomp_ == true).
+    // Freed and reallocated on each decompressMulti() call; persistent in the pool.
+    // One entry per source stage (vector of size 1 for single-source pipelines).
+    std::vector<void*> d_decomp_outputs_;  ///< Pool-persistent decompressed output(s)
 
     // Pinned host buffer for concat header (num_buffers + per-buffer sizes).
     // Allocated once at finalize() time; avoids N+1 tiny H2D cudaMemcpyAsync
@@ -867,6 +937,20 @@ private:
         int output_index;        // Which output of producer
     };
     std::vector<BufferMetadata> buffer_metadata_;
+
+    // ===== CUDA Graph State =====
+
+    bool graph_mode_enabled_;  ///< Set by enableGraphMode() before finalize()
+    bool graph_captured_;      ///< True after a successful captureGraph()
+
+    /// Fixed device input buffer whose pointer is baked into the captured graph.
+    /// compress() copies the user's input here before cudaGraphLaunch().
+    /// Allocated from the pool at finalize() time when graph_mode_enabled_.
+    void*  d_graph_input_;
+    size_t d_graph_input_size_;
+
+    cudaGraph_t     captured_graph_;  ///< Raw graph (kept for introspection / re-capture)
+    cudaGraphExec_t graph_exec_;      ///< Instantiated executable graph
 };
 
 // ========== Template Implementation ==========

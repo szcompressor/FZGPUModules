@@ -149,7 +149,7 @@ void test_output_sizes_by_name() {
     size_t n = 256 * 1024;
     size_t data_size = n * sizeof(float);
 
-    Pipeline pipeline(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline pipeline(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(1.0f);
     lorenzo->setQuantRadius(16);
@@ -278,7 +278,7 @@ void test_file_roundtrip() {
     size_t data_size = n * sizeof(float);
 
     // Build pipeline: Lorenzo -> Diff(codes)
-    Pipeline pipeline(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline pipeline(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(1.0f);
     lorenzo->setQuantRadius(16);
@@ -470,7 +470,7 @@ void test_lorenzo_inverse() {
     size_t data_size = n * sizeof(float);
 
     // ---- Forward (compression) ----
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(1.0f);
     lorenzo->setQuantRadius(32);
@@ -553,7 +553,7 @@ void test_memory_tracking() {
     size_t n = 512 * 1024;
     size_t data_size = n * sizeof(float);
 
-    Pipeline pipeline(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline pipeline(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* diff = pipeline.addStage<DifferenceStage<float>>();
     auto* scale = pipeline.addStage<ScaleStage>();
     pipeline.connect(scale, diff);
@@ -585,7 +585,7 @@ void test_decompression_roundtrip() {
     size_t data_size = n * sizeof(float);
 
     // ---- Step 1: Compress ----
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(1.0f);
     lorenzo->setQuantRadius(32);
@@ -667,7 +667,7 @@ void test_lorenzo_outliers() {
 
     // Compress with tight error bound and small quant_radius
     // so outlier spikes (magnitude 20-50) exceed quantization range
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
     lorenzo->setQuantRadius(8);  // Range = [-8, 8] * 2 * 1.0 = [-16, 16]; spikes 20-50 exceed this
@@ -743,7 +743,7 @@ void test_memory_strategies() {
 
     StrategyResult results[] = {
         {"MINIMAL",     MemoryStrategy::MINIMAL,     0, 0, 0.0},
-        {"PIPELINE",    MemoryStrategy::PIPELINE,    0, 0, 0.0},
+        
         {"PREALLOCATE", MemoryStrategy::PREALLOCATE, 0, 0, 0.0},
     };
 
@@ -795,7 +795,7 @@ void test_memory_strategies() {
     }
 
     CHECK(results[0].compressed_size == results[1].compressed_size,
-          "MINIMAL and PIPELINE produce same compressed size");
+          "MINIMAL produces valid compressed output");
 
     cudaFree(d_input);
     std::cout << "\n";
@@ -814,7 +814,7 @@ void test_multi_stream() {
 
     // Build pipeline with enough parallelism for multi-stream
     // Lorenzo produces 4 outputs, then Diff on codes creates parallelism
-    Pipeline pipeline(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline pipeline(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(1.0f);
     lorenzo->setQuantRadius(32);
@@ -871,7 +871,7 @@ void test_large_scale() {
     cudaMemcpy(d_input, h_data.data(), data_size, cudaMemcpyHostToDevice);
 
     float eb = 0.5f;
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
     lorenzo->setQuantRadius(32768);
@@ -938,7 +938,7 @@ void test_decompress_inplace() {
     cudaMemcpy(h_original.data(), d_input, data_size, cudaMemcpyDeviceToHost);
 
     // Compress
-    Pipeline pipeline(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline pipeline(data_size, MemoryStrategy::MINIMAL, 3.0f);
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(1.0f);
     lorenzo->setQuantRadius(32);
@@ -1169,7 +1169,7 @@ void test_dag_aware_decompression() {
     cudaMemcpy(h_original.data(), d_input, data_size, cudaMemcpyDeviceToHost);
 
     // ---- Build forward pipeline ----
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
 
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
@@ -1315,7 +1315,7 @@ void test_dag_native_inverse_complex() {
     cudaMemcpy(h_original.data(), d_input, data_size, cudaMemcpyDeviceToHost);
 
     // ── Build forward pipeline ───────────────────────────────────────────────
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 4.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 4.0f);
 
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
@@ -1692,7 +1692,7 @@ void test_lorenzo_zigzag_codes() {
         cudaMalloc(&d_input, data_size);
         cudaMemcpy(d_input, h_data.data(), data_size, cudaMemcpyHostToDevice);
 
-        Pipeline comp(data_size, MemoryStrategy::PIPELINE, 3.0f);
+        Pipeline comp(data_size, MemoryStrategy::MINIMAL, 3.0f);
         auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
         lorenzo->setErrorBound(eb);
         lorenzo->setQuantRadius(512);
@@ -1794,7 +1794,7 @@ void test_lorenzo_diff_zigzag_pipeline() {
     cudaMemcpy(d_input, h_data.data(), data_size, cudaMemcpyHostToDevice);
 
     // ── Build 3-stage forward pipeline ─────────────────────────────────────
-    Pipeline comp(data_size, MemoryStrategy::PIPELINE, 4.0f);
+    Pipeline comp(data_size, MemoryStrategy::MINIMAL, 4.0f);
 
     auto* lorenzo = comp.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);

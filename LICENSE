@@ -2,7 +2,7 @@ Copyright (c) 2026, UChicago Argonne, LLC, and Indiana University
 
 All Rights Reserved
 
-Software Name: FZGPUModules: A GPU-accelerated Module Library for Prediction-based Error-bounded Lossy Compression
+Software Name: FZGPUModules: A GPU-accelerated Module Library for Graph Based Compressor Composition
 
 OPEN SOURCE LICENSE
 
@@ -25,4 +25,4 @@ TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF TH
 ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************************************
 
-Contact: SZ Team (szlossycompressor@gmail.com)
+Contact: Skyler Ruiter (sruiter@iu.edu), Fengguang Song (fgsong@iu.edu)

@@ -157,8 +157,7 @@ Pipeline::buildInverseDAG(
            inv_dag->getLevels().size(),
            inv_dag->getMaxParallelism(),
            inv_result_map.size(),
-           strategy == MemoryStrategy::MINIMAL   ? "MINIMAL"   :
-           strategy == MemoryStrategy::PIPELINE  ? "PIPELINE"  : "PREALLOCATE");
+           strategy == MemoryStrategy::MINIMAL ? "MINIMAL" : "PREALLOCATE");
 
     return {std::move(inv_dag), std::move(inv_result_map)};
 }

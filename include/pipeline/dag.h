@@ -20,8 +20,7 @@ class MemoryPool;
  */
 enum class MemoryStrategy {
     MINIMAL,      // Allocate on-demand, free ASAP (lowest peak memory)
-    PIPELINE,     // Allocate critical paths, free when all consumers done (balanced)
-    PREALLOCATE   // Allocate everything upfront (fastest, like graph mode)
+    PREALLOCATE   // Allocate everything upfront at finalize() (fastest, required for graph mode)
 };
 
 /**
@@ -97,7 +96,7 @@ struct DAGNode {
  */
 class CompressionDAG {
 public:
-    CompressionDAG(MemoryPool* mem_pool, MemoryStrategy strategy = MemoryStrategy::PIPELINE);
+    CompressionDAG(MemoryPool* mem_pool, MemoryStrategy strategy = MemoryStrategy::MINIMAL);
     ~CompressionDAG();
     
     // ========== DAG Construction ==========
@@ -231,7 +230,7 @@ public:
      * PREALLOCATE: returns the sum of all non-external buffer sizes, since all
      *   buffers are live simultaneously for the lifetime of the pipeline.
      *
-     * MINIMAL / PIPELINE: simulates level-by-level allocation and deallocation
+     * MINIMAL: simulates level-by-level allocation and deallocation
      *   to find the peak concurrent live bytes.  A buffer becomes live when its
      *   producer executes and is freed after its last consumer finishes.
      *
@@ -265,6 +264,37 @@ public:
      */
     void enableBoundsCheck(bool enable) { bounds_check_enabled_ = enable; }
     bool isBoundsCheckEnabled() const   { return bounds_check_enabled_; }
+
+    /**
+     * Disable buffer coloring for PREALLOCATE mode (default: enabled).
+     *
+     * Useful when inspecting individual buffer contents with cuda-memcheck or
+     * the bounds-check system — aliased pointers make per-buffer inspection
+     * ambiguous.  Must be called before finalize().
+     */
+    void disableColoring(bool disable) { coloring_disabled_ = disable; }
+    bool isColoringApplied() const     { return coloring_applied_; }
+    size_t getColorRegionCount() const { return color_region_sizes_.size(); }
+
+    /**
+     * Enable or disable CUDA Graph capture mode.
+     *
+     * When true, DAG::execute() suppresses any host-synchronous operations
+     * (getActualOutputSize() readbacks, bounds checks) so that the call can
+     * occur inside a cudaStreamBeginCapture / cudaStreamEndCapture bracket
+     * without breaking the capture.  All device work is still enqueued; only
+     * the CPU-side bookkeeping that would require a D2H sync is skipped.
+     *
+     * Throws std::runtime_error if capture=true and any stage in the DAG
+     * returns false from Stage::isGraphCompatible().  This catches incompatible
+     * stages (e.g. inverse-mode RZE) at setup time rather than producing a
+     * silently broken graph.
+     *
+     * The Compressor sets this automatically around its capture call; do not
+     * set it manually unless you are managing graph capture yourself.
+     */
+    void setCaptureMode(bool capture);
+    bool isCaptureMode() const { return capture_mode_; }
 
     // ========== Profiling ==========
 
@@ -324,23 +354,41 @@ private:
 
     // Runtime buffer overwrite detection (always on in debug builds)
     bool bounds_check_enabled_;
-    
+
+    // CUDA Graph capture mode: suppresses D2H-triggering CPU-side bookkeeping
+    // during execute() so the call is safe inside a stream-capture bracket.
+    bool capture_mode_;
+
+    // Buffer coloring (PREALLOCATE mode only).
+    // Non-overlapping buffers are assigned the same color and share one pool
+    // region, reducing peak pool size.  color_region_ptrs_ owns the allocations;
+    // BufferInfo::d_ptr points into one of these regions (aliased, not owned).
+    bool coloring_disabled_;
+    bool coloring_applied_;
+    std::unordered_map<int, int> buffer_color_;       // buffer_id  -> color index
+    std::vector<size_t>          color_region_sizes_; // color index -> region byte size
+    std::vector<void*>           color_region_ptrs_;  // color index -> allocated ptr (owned)
+
     // ========== Internal Helpers ==========
-    
+
     // Assign execution levels based on dependencies
     void assignLevels();
-    
+
     // Assign streams to nodes for parallel execution
     void assignStreams();
-    
+
     // Allocate buffer
     void allocateBuffer(int buffer_id, cudaStream_t stream);
-    
+
     // Free buffer based on reference counting
     void freeBuffer(int buffer_id, cudaStream_t stream);
-    
+
     // Strategy-specific allocation planning
     void planPreallocation();
+
+    // Compute buffer live ranges, build interference graph, and assign colors.
+    // Called from finalize() when strategy == PREALLOCATE and coloring is not disabled.
+    void colorBuffers();
 };
 
 } // namespace fz

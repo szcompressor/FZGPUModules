@@ -23,6 +23,7 @@
 #include "helpers/fz_test_utils.h"
 #include "predictors/quantizer/quantizer.h"
 #include "predictors/lorenzo/lorenzo.h"   // for ErrorBoundMode
+#include "fzgpumodules.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1267,4 +1268,118 @@ TEST(QuantizerThreshold, SerializeDeserialize) {
         << "outlier_threshold not recovered after serialization";
     // inplace_outliers was not set, so it should default to false
     EXPECT_FALSE(dst.getInplaceOutliers());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  QuantizerTypeMatrix — double-precision variants
+//
+//  QuantizerStage<double, uint16_t> and <double, uint32_t> are instantiated in
+//  quantizer.cu.  These tests verify the double-precision kernel path runs
+//  correctly end-to-end using the full Pipeline API.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// QD1: QuantizerStage<double, uint16_t> ABS round-trip via Pipeline
+TEST(QuantizerTypeMatrix, DoubleUint16_PipelineRoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;   // 4 K doubles
+    constexpr double EB = 1e-2;
+    const size_t in_bytes = N * sizeof(double);
+
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<double>(i) * 0.01) * 50.0
+                   + std::cos(static_cast<double>(i) * 0.003) * 20.0;
+
+    CudaBuffer<double> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* q = pipeline.addStage<QuantizerStage<double, uint16_t>>();
+    q->setErrorBound(static_cast<float>(EB));
+    q->setErrorBoundMode(ErrorBoundMode::ABS);
+    // quant_radius=8192: max |q| = round(70/0.02)=3500 < 8192, so no outliers
+    // for this smooth sinusoidal data (avoids scatter-buffer overflow).
+    q->setQuantRadius(8192);
+    q->setOutlierCapacity(0.1f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream)
+    ) << "QuantizerStage<double,uint16_t> compress must not throw";
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream)
+    ) << "QuantizerStage<double,uint16_t> decompress must not throw";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<double> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    double max_err = 0.0;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01)
+        << "QuantizerStage<double,uint16_t> round-trip max_err=" << max_err;
+}
+
+// QD2: QuantizerStage<double, uint32_t> ABS round-trip via Pipeline
+TEST(QuantizerTypeMatrix, DoubleUint32_PipelineRoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;   // 4 K doubles
+    constexpr double EB = 1e-3;
+    const size_t in_bytes = N * sizeof(double);
+
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = std::sin(static_cast<double>(i) * 0.01) * 50.0
+                   + std::cos(static_cast<double>(i) * 0.003) * 20.0;
+
+    CudaBuffer<double> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* q = pipeline.addStage<QuantizerStage<double, uint32_t>>();
+    q->setErrorBound(static_cast<float>(EB));
+    q->setErrorBoundMode(ErrorBoundMode::ABS);
+    q->setQuantRadius(1 << 20);  // wide range for uint32 codes
+    q->setOutlierCapacity(0.05f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream)
+    ) << "QuantizerStage<double,uint32_t> compress must not throw";
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream)
+    ) << "QuantizerStage<double,uint32_t> decompress must not throw";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<double> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    double max_err = 0.0;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+    EXPECT_LE(max_err, EB * 1.01)
+        << "QuantizerStage<double,uint32_t> round-trip max_err=" << max_err;
 }

@@ -373,6 +373,97 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
     std::remove(tmp.c_str());
 }
 // ─────────────────────────────────────────────────────────────────────────────
+// FMS1: Multi-source pipeline: compress → writeToFile → decompressFromFile
+//
+// Two independent Lorenzo sources are compressed and written to one file.
+// The test verifies:
+//   (a) The FZM file header correctly records num_sources == 2 and
+//       the per-source uncompressed sizes.
+//   (b) decompressFromFile() succeeds and returns data within error bound.
+//       Both sources use identical data so correctness holds regardless of
+//       the order in which sources appear in the output.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, MultiSourceRoundTripThroughFile) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;   // 4 K floats per source
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in1(N), d_in2(N);
+    d_in1.upload(h_input, stream);
+    d_in2.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_multi_source.fzm";
+
+    // ── Build multi-source pipeline ──────────────────────────────────────────
+    Pipeline pipeline(2 * in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz1->setErrorBound(EB);
+    lrz1->setQuantRadius(512);
+    lrz1->setOutlierCapacity(0.2f);
+
+    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz2->setErrorBound(EB);
+    lrz2->setQuantRadius(512);
+    lrz2->setOutlierCapacity(0.2f);
+
+    pipeline.setInputSizeHint(lrz1, in_bytes);
+    pipeline.setInputSizeHint(lrz2, in_bytes);
+    pipeline.finalize();
+
+    // ── Compress and write ───────────────────────────────────────────────────
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(
+        {{lrz1, d_in1.void_ptr(), in_bytes},
+         {lrz2, d_in2.void_ptr(), in_bytes}},
+        &d_comp, &comp_sz, stream
+    );
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u) << "Multi-source compressed output is empty";
+    pipeline.writeToFile(tmp, stream);
+
+    // ── (a) Verify file header encodes num_sources == 2 ─────────────────────
+    auto hdr = Pipeline::readHeader(tmp);
+    EXPECT_EQ(hdr.core.num_sources, 2u)
+        << "FZM header must record 2 source stages";
+    EXPECT_EQ(hdr.core.source_uncompressed_sizes[0], in_bytes)
+        << "source_uncompressed_sizes[0] must equal in_bytes";
+    EXPECT_EQ(hdr.core.source_uncompressed_sizes[1], in_bytes)
+        << "source_uncompressed_sizes[1] must equal in_bytes";
+
+    // ── (b) Decompress from file and verify correctness ──────────────────────
+    void*  d_out  = nullptr;
+    size_t out_sz = 0;
+    ASSERT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_out, &out_sz, stream))
+        << "Multi-source decompressFromFile must not throw";
+    stream.sync();
+    ASSERT_NE(d_out, nullptr) << "decompressFromFile returned null";
+    ASSERT_GE(out_sz, in_bytes)
+        << "Output must be at least one source's worth of data (" << in_bytes << " B)";
+
+    // Copy up to 2 sources of raw float data to host.
+    // Both sources use identical data so we can verify any prefix of in_bytes.
+    const size_t check_bytes = std::min(out_sz, in_bytes);
+    const size_t check_n     = check_bytes / sizeof(float);
+    std::vector<float> h_recon(check_n);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_out, check_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_out);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < check_n; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Decompressed first source: max_err=" << max_err
+        << " exceeds bound " << EB;
+
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(FileIO, DecompressNonexistentPathThrows) {
     void*  d_out  = nullptr;
     size_t out_sz = 0;
@@ -386,6 +477,288 @@ TEST(FileIO, DecompressNonexistentPathThrows) {
     );
 
     if (d_out) cudaFree(d_out);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FC1: writeToFile() before compress() throws
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, WriteToFileBeforeCompressThrows) {
+    constexpr size_t N = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    // No compress() called — must throw
+    EXPECT_THROW(
+        pipeline.writeToFile("/tmp/fzgmod_should_not_exist.fzm"),
+        std::runtime_error
+    ) << "writeToFile() before compress() must throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FC2: buildHeader() before compress() throws
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, BuildHeaderBeforeCompressThrows) {
+    constexpr size_t N = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    EXPECT_THROW(
+        pipeline.buildHeader(),
+        std::runtime_error
+    ) << "buildHeader() before compress() must throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FC3: Stage config preserved through writeToFile / readHeader
+//
+// After compress() + writeToFile(), readHeader() returns FZMStageInfo entries
+// whose stage_config bytes can be deserialized back into stages with the same
+// parameters (quant_radius, block_size, element_width, etc.).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, StageConfigPreservedThroughFile) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;
+    constexpr float  EB = 2e-3f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_stage_config.fzm";
+
+    // Build: Lorenzo → Bitshuffle (two stages; Bitshuffle has serializable block+width)
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(256);
+    lrz->setOutlierCapacity(0.15f);
+
+    auto* bs = pipeline.addStage<BitshuffleStage>();
+    bs->setBlockSize(8192);   // non-default block size
+    bs->setElementWidth(2);   // non-default element width
+    pipeline.connect(bs, lrz, "codes");
+
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    pipeline.writeToFile(tmp, stream);
+
+    auto hdr = Pipeline::readHeader(tmp);
+
+    // Find the Bitshuffle stage entry by type
+    bool found_bs = false;
+    for (const auto& si : hdr.stages) {
+        if (si.stage_type == StageType::BITSHUFFLE && si.config_size >= 5) {
+            uint32_t block_size_read = 0;
+            uint8_t  elem_width_read = 0;
+            std::memcpy(&block_size_read, si.stage_config, sizeof(uint32_t));
+            elem_width_read = si.stage_config[4];
+
+            EXPECT_EQ(block_size_read, 8192u)
+                << "Bitshuffle block_size must survive writeToFile/readHeader";
+            EXPECT_EQ(elem_width_read, 2u)
+                << "Bitshuffle element_width must survive writeToFile/readHeader";
+            found_bs = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_bs) << "Bitshuffle stage not found in file header";
+
+    // Find the Lorenzo buffer entry and verify quant_radius
+    bool found_lrz = false;
+    for (const auto& be : hdr.buffers) {
+        if (be.stage_type == StageType::LORENZO_1D && be.config_size >= sizeof(LorenzoConfig)) {
+            LorenzoConfig lc;
+            std::memcpy(&lc, be.stage_config, sizeof(LorenzoConfig));
+            EXPECT_EQ(lc.quant_radius, 256u)
+                << "Lorenzo quant_radius must survive writeToFile/readHeader";
+            found_lrz = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_lrz) << "Lorenzo buffer entry not found in file header";
+
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FC4: createStage() reconstructs stages with correct config from file header
+//
+// Reads the file header, calls createStage() for each stage entry, and
+// verifies the reconstructed stage has the same parameters as the original.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, CreateStageReconstructsCorrectConfig) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;
+    constexpr float  EB = 5e-3f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_create_stage.fzm";
+
+    // Build a Lorenzo pipeline with non-default settings
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(1024);
+    lrz->setOutlierCapacity(0.1f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    pipeline.writeToFile(tmp, stream);
+
+    auto hdr = Pipeline::readHeader(tmp);
+    ASSERT_GE(hdr.stages.size(), 1u) << "Header must have at least one stage";
+
+    // Reconstruct the Lorenzo stage via createStage()
+    const auto& si = hdr.stages[0];
+    ASSERT_EQ(si.stage_type, StageType::LORENZO_1D)
+        << "First stage must be Lorenzo";
+
+    std::unique_ptr<Stage> reconstructed(
+        createStage(si.stage_type, si.stage_config, si.config_size)
+    );
+    ASSERT_NE(reconstructed.get(), nullptr)
+        << "createStage() must return a valid stage";
+
+    // Cast to access Lorenzo-specific config
+    auto* recon_lrz = dynamic_cast<LorenzoStage<float, uint16_t>*>(reconstructed.get());
+    ASSERT_NE(recon_lrz, nullptr)
+        << "createStage() for LORENZO_1D must return LorenzoStage<float,uint16_t>";
+
+    EXPECT_EQ(recon_lrz->getQuantRadius(), static_cast<uint16_t>(1024))
+        << "Reconstructed Lorenzo quant_radius mismatch";
+
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FC5: Lorenzo → RLE pipeline file round-trip
+//
+// Tests a different multi-stage topology (Lorenzo → RLE) through writeToFile /
+// decompressFromFile to verify that RLE's cached_num_elements_ is correctly
+// serialized and restored for correct inverse sizing.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, LorenzoRLERoundTripThroughFile) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 13;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_lorenzorle.fzm";
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
+    pipeline.connect(rle, lrz, "codes");
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+    pipeline.writeToFile(tmp, stream);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_dec, &dec_sz, stream));
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_dec);
+
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Lorenzo+RLE file round-trip max_err=" << max_err;
+
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FC6: decompressFromFile() with perf_out populates valid timing data
+//
+// When a non-null PipelinePerfResult* is passed, the struct is populated.
+// We only verify that the fields are structurally valid (positive times, correct
+// direction flag, non-zero byte counts) — exact timing values are hardware-dependent.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, DecompressFromFilePerfOutPopulated) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_perf.fzm";
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    pipeline.writeToFile(tmp, stream);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    PipelinePerfResult perf;
+    ASSERT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_dec, &dec_sz, stream, &perf));
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    cudaFree(d_dec);
+
+    EXPECT_FALSE(perf.is_compress)
+        << "perf.is_compress must be false for a decompress call";
+    EXPECT_GT(perf.host_elapsed_ms, 0.0f)
+        << "perf.host_elapsed_ms must be positive";
+    EXPECT_GT(perf.output_bytes, 0u)
+        << "perf.output_bytes must be positive (decompressed size)";
+
+    std::remove(tmp.c_str());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
