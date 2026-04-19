@@ -1,10 +1,9 @@
 #include <algorithm>
 #include <cstring>
 #include <iomanip>
-#include <iostream>
 #include <stdexcept>
 
-#include "mempool.h"
+#include "mem/mempool.h"
 #include "log.h"
 #include "cuda_check.h"
 
@@ -236,57 +235,46 @@ void MemoryPool::synchronize(cudaStream_t stream) {
 }
 
 void MemoryPool::printStats() const {
-    std::cout << "\n========== Memory Pool Statistics ==========\n";
-    std::cout << "Device ID: " << config_.device_id << "\n";
-    
-    // Query CUDA memory pool attributes
-    uint64_t reserved_mem_current = 0;
-    uint64_t reserved_mem_high = 0;
-    uint64_t used_mem_current = 0;
-    uint64_t used_mem_high = 0;
+    uint64_t reserved_mem_current = 0, reserved_mem_high = 0;
+    uint64_t used_mem_current = 0,     used_mem_high = 0;
     uint64_t release_threshold = 0;
-    
     cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemCurrent, &reserved_mem_current);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemHigh, &reserved_mem_high);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent, &used_mem_current);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &used_mem_high);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReleaseThreshold, &release_threshold);
-    
-    // Pool-level statistics from CUDA
-    std::cout << "\nMemory Pool Status:\n";
-    std::cout << "  Reserved memory (current): " << formatBytes(reserved_mem_current) << "\n";
-    std::cout << "  Reserved memory (peak):    " << formatBytes(reserved_mem_high) << "\n";
-    std::cout << "  Used memory (current):     " << formatBytes(used_mem_current) << "\n";
-    std::cout << "  Used memory (peak):        " << formatBytes(used_mem_high) << "\n";
-    std::cout << "  Release threshold:         " << (release_threshold == UINT64_MAX ? "UNLIMITED" : formatBytes(release_threshold)) << "\n";
-    
+    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemHigh,    &reserved_mem_high);
+    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent,     &used_mem_current);
+    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh,        &used_mem_high);
+    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReleaseThreshold,   &release_threshold);
+
+    FZ_PRINT("========== Memory Pool Statistics ==========");
+    FZ_PRINT("Device ID: %d", config_.device_id);
+    FZ_PRINT("  Reserved  current=%-10s  peak=%s",
+             formatBytes(reserved_mem_current).c_str(),
+             formatBytes(reserved_mem_high).c_str());
+    FZ_PRINT("  Used      current=%-10s  peak=%s",
+             formatBytes(used_mem_current).c_str(),
+             formatBytes(used_mem_high).c_str());
+    FZ_PRINT("  Release threshold: %s",
+             release_threshold == UINT64_MAX ? "UNLIMITED"
+                                             : formatBytes(release_threshold).c_str());
+
 #ifndef NDEBUG
-    std::cout << "\nAllocation Tracking:\n";
-    std::cout << "  Active allocations:        " << allocations_.size() << "\n";
-    std::cout << "  Graph allocations:         " << graph_allocations_.size() << "\n";
-    std::cout << "  Total allocations:         " << total_allocations_ << "\n";
-    std::cout << "  Total frees:               " << total_frees_ << "\n";
-    std::cout << "\nActive Allocations:\n";
-    
+    FZ_PRINT("  Active allocs: %zu  Graph allocs: %zu  Total: %zu allocs / %zu frees",
+             allocations_.size(), graph_allocations_.size(),
+             total_allocations_, total_frees_);
     for (const auto& pair : allocations_) {
         const auto& info = pair.second;
-        std::cout << "  [" << info.tag << "] "
-                  << formatBytes(info.size) << " at " 
-                  << info.ptr << "\n";
+        FZ_PRINT("  [%s] %s at %p", info.tag.c_str(),
+                 formatBytes(info.size).c_str(), info.ptr);
     }
-    
     if (!graph_allocations_.empty()) {
-        std::cout << "\nGraph-Persistent Allocations:\n";
+        FZ_PRINT("  Graph-persistent:");
         for (const auto& pair : graph_allocations_) {
             const auto& info = pair.second;
-            std::cout << "  [" << info.tag << "] "
-                      << formatBytes(info.size) << " at " 
-                      << info.ptr << "\n";
+            FZ_PRINT("  [%s] %s at %p", info.tag.c_str(),
+                     formatBytes(info.size).c_str(), info.ptr);
         }
     }
 #endif
-    
-    std::cout << "==========================================\n" << std::endl;
+    FZ_PRINT("==========================================");
 }
 
 } // namespace fz

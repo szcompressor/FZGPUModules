@@ -1,4 +1,5 @@
 #include "pipeline/compressor.h"
+#include "pipeline/concat_kernel.h"
 #include "fzm_format.h"
 #include "log.h"
 #include "cuda_check.h"
@@ -17,7 +18,6 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
     : strategy_(strategy),
       num_streams_(1),
       is_finalized_(false),
-      soft_run_enabled_(false),
       warmup_on_finalize_(false),
       pool_managed_decomp_(false),
       is_compressed_(false),
@@ -46,11 +46,9 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       captured_graph_(nullptr),
       graph_exec_(nullptr) {
     
-    // Create memory pool with configuration
     MemoryPoolConfig pool_config(input_data_size, pool_multiplier);
     mem_pool_ = std::make_unique<MemoryPool>(pool_config);
     
-    // Create DAG with the memory pool
     dag_ = std::make_unique<CompressionDAG>(mem_pool_.get(), strategy);
 }
 
@@ -90,14 +88,11 @@ Pipeline::~Pipeline() {
     }
 }
 
-// ========== Configuration ==========
-
 void Pipeline::setMemoryStrategy(MemoryStrategy strategy) {
     if (is_finalized_) {
         throw std::runtime_error("Cannot change strategy after finalization");
     }
     strategy_ = strategy;
-    // Recreate DAG with new strategy
     dag_ = std::make_unique<CompressionDAG>(mem_pool_.get(), strategy);
 }
 
@@ -120,14 +115,11 @@ void Pipeline::enableGraphMode(bool enable) {
     graph_mode_enabled_ = enable;
 }
 
-// ========== Builder API ===========
-
 int Pipeline::connect(Stage* dependent, Stage* producer, const std::string& output_name) {
     if (is_finalized_) {
         throw std::runtime_error("Cannot connect stages after finalization");
     }
     
-    // Get DAG nodes for stages
     auto dep_it = stage_to_node_.find(dependent);
     auto prod_it = stage_to_node_.find(producer);
     
@@ -138,14 +130,12 @@ int Pipeline::connect(Stage* dependent, Stage* producer, const std::string& outp
     DAGNode* dep_node = dep_it->second;
     DAGNode* prod_node = prod_it->second;
     
-    // Validate output name and get output index
     int output_index = producer->getOutputIndex(output_name);
     if (output_index < 0) {
         throw std::runtime_error(
             "Stage '" + producer->getName() + "' does not have output '" + output_name + "'");
     }
     
-    // Store connection for potential reversal
     ConnectionInfo conn_info;
     conn_info.dependent = dependent;
     conn_info.producer = producer;
@@ -153,11 +143,9 @@ int Pipeline::connect(Stage* dependent, Stage* producer, const std::string& outp
     conn_info.output_index = output_index;
     connections_.push_back(conn_info);
     
-    // Try to reuse existing pre-allocated buffer (created in addStage)
     bool connected = dag_->connectExistingOutput(prod_node, dep_node, output_index);
     
     if (!connected) {
-        // Shouldn't happen since addStage pre-allocates all outputs
         int buffer_id = dag_->addDependency(dep_node, prod_node, 1, output_index);
         (void)buffer_id;
         FZ_LOG(WARN, "Had to create new buffer for %s.%s (should have been pre-allocated)",
@@ -167,7 +155,6 @@ int Pipeline::connect(Stage* dependent, Stage* producer, const std::string& outp
     FZ_LOG(DEBUG, "Connected %s.%s -> %s",
            producer->getName().c_str(), output_name.c_str(), dependent->getName().c_str());
     
-    // Return the buffer ID (look it up from the nodes mapping)
     auto it = prod_node->output_index_to_buffer_id.find(output_index);
     return (it != prod_node->output_index_to_buffer_id.end()) ? it->second : -1;
 }
@@ -185,13 +172,10 @@ Stage* Pipeline::addRawStage(Stage* stage) {
         throw std::runtime_error("Cannot add stages after finalization");
     }
     
-    // Wrap in unique_ptr for ownership
     auto stage_ptr = std::unique_ptr<Stage>(stage);
     
-    // Add to internal DAG
     DAGNode* node = dag_->addStage(stage, stage->getName());
     
-    // Pre-allocate all output buffers as unconnected
     size_t num_outputs = stage->getNumOutputs();
     auto output_names = stage->getOutputNames();
     
@@ -212,7 +196,6 @@ void Pipeline::finalize() {
         throw std::runtime_error("Pipeline already finalized");
     }
     
-    // Push current dims to all stages so late setDims() calls are honoured
     for (const auto& stage_ptr : stages_) {
         stage_ptr->setDims(dims_);
         auto it = stage_to_node_.find(stage_ptr.get());
@@ -222,11 +205,54 @@ void Pipeline::finalize() {
     }
 
     validate();
-    
+
+    // ── Connection type-checking ──────────────────────────────────────────────
+    // Verify that each connection's producer output type is compatible with the
+    // consumer input type.  Byte-transparent stages (Bitshuffle, RZE) return
+    // DataType::UNKNOWN and are silently skipped.
+    //
+    // Compatibility rule:
+    //   • Exact match → always OK.
+    //   • Same element size + both integral → OK.  DifferenceStage accepts
+    //     signed-reinterpreted unsigned input (uint16 ↔ int16, uint32 ↔ int32)
+    //     which is safe because the kernel just reinterprets the bit pattern.
+    //   • Float ↔ integer of any size → error (semantically wrong).
+    //   • Different sizes → error (reads wrong number of elements).
+    {
+        auto typesCompatible = [](uint8_t a, uint8_t b) -> bool {
+            if (a == b) return true;
+            const auto da = static_cast<DataType>(a);
+            const auto db = static_cast<DataType>(b);
+            const bool a_float = (da == DataType::FLOAT32 || da == DataType::FLOAT64);
+            const bool b_float = (db == DataType::FLOAT32 || db == DataType::FLOAT64);
+            if (a_float || b_float) return false;  // float↔int is always wrong
+            return getDataTypeSize(da) == getDataTypeSize(db);
+        };
+
+        constexpr uint8_t kUnknown = static_cast<uint8_t>(DataType::UNKNOWN);
+        for (const auto& conn : connections_) {
+            const uint8_t prod_type = conn.producer->getOutputDataType(
+                static_cast<size_t>(conn.output_index));
+            // Single-input stages use port 0; multi-input merge stages return
+            // UNKNOWN and are skipped automatically.
+            const uint8_t cons_type = conn.dependent->getInputDataType(0);
+
+            if (prod_type == kUnknown || cons_type == kUnknown) continue;
+
+            if (!typesCompatible(prod_type, cons_type)) {
+                throw std::runtime_error(
+                    "Type mismatch: '" + conn.producer->getName() +
+                    "' output '" + conn.output_name + "' has type " +
+                    dataTypeToString(static_cast<DataType>(prod_type)) +
+                    " but '" + conn.dependent->getName() + "' expects " +
+                    dataTypeToString(static_cast<DataType>(cons_type)));
+            }
+        }
+    }
+
     auto [sources, sinks] = identifyTopology();
     setupInputBuffers(sources);
     
-    // Unified output detection: ALL unconnected outputs become pipeline outputs
     int pipeline_outputs = autoDetectUnconnectedOutputs();
     detectMultiOutputScenario(pipeline_outputs);
     
@@ -340,7 +366,9 @@ void Pipeline::finalize() {
         if (d_graph_input_) { mem_pool_->free(d_graph_input_, 0); d_graph_input_ = nullptr; }
         d_graph_input_ = mem_pool_->allocate(padded, 0, "graph_input_slot", /*persistent=*/true);
         if (!d_graph_input_) {
-            throw std::runtime_error("Failed to allocate graph input slot");
+            throw std::runtime_error(
+                "Failed to allocate graph input slot (" + std::to_string(padded) +
+                " bytes); pool may be exhausted — increase pool_size_multiplier or input_data_size");
         }
         d_graph_input_size_ = padded;
         FZ_LOG(INFO, "Graph mode: fixed input slot allocated (%.2f MB)",
@@ -361,7 +389,9 @@ void Pipeline::finalize() {
             d_pad_buf_ = mem_pool_->allocate(padded, /*stream=*/0,
                                              "pipeline_input_pad", /*persistent=*/true);
             if (!d_pad_buf_) {
-                throw std::runtime_error("Failed to preallocate pipeline input pad buffer");
+                throw std::runtime_error(
+                    "Failed to preallocate pipeline input pad buffer (" +
+                    std::to_string(padded) + " bytes); pool may be exhausted");
             }
             d_pad_buf_size_ = padded;
             mem_pool_->synchronize(/*stream=*/0);
@@ -544,8 +574,6 @@ void Pipeline::reset(cudaStream_t stream) {
     FZ_LOG(DEBUG, "Reset complete");
 }
 
-// ========== Query & Debug ==========
-
 size_t Pipeline::getPeakMemoryUsage() const {
     const size_t dag_peak  = dag_ ? dag_->getPeakMemoryUsage() : 0;
     const size_t pool_peak = mem_pool_ ? mem_pool_->getPeakUsage() : 0;
@@ -561,34 +589,23 @@ size_t Pipeline::getCurrentMemoryUsage() const {
 }
 
 void Pipeline::printPipeline() const {
-    std::cout << "\n========== Pipeline Configuration ==========\n";
-    std::cout << "Stages: " << stages_.size() << "\n";
-    std::cout << "Strategy: ";
-    switch (strategy_) {
-        case MemoryStrategy::MINIMAL:      std::cout << "MINIMAL\n";      break;
-        case MemoryStrategy::PREALLOCATE:  std::cout << "PREALLOCATE\n";  break;
-    }
-    std::cout << "Parallel streams: " << num_streams_ << "\n";
-    std::cout << "Soft-run enabled: " << (soft_run_enabled_ ? "yes" : "no") << "\n";
-    std::cout << "Finalized: " << (is_finalized_ ? "yes" : "no") << "\n";
-    
-    std::cout << "\nStages:\n";
+    FZ_PRINT("========== Pipeline Configuration ==========");
+    FZ_PRINT("Stages: %zu  Strategy: %s  Streams: %d  Finalized: %s",
+             stages_.size(),
+             strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" : "PREALLOCATE",
+             num_streams_,
+             is_finalized_ ? "yes" : "no");
+    FZ_PRINT("Stages:");
     for (const auto& stage : stages_) {
-        std::cout << "  - " << stage->getName() 
-                  << " (inputs=" << stage->getNumInputs()
-                  << ", outputs=" << stage->getNumOutputs() << ")\n";
+        FZ_PRINT("  - %s (inputs=%zu, outputs=%zu)",
+                 stage->getName().c_str(),
+                 stage->getNumInputs(), stage->getNumOutputs());
     }
-    
-    std::cout << "\n";
     if (is_finalized_) {
         dag_->printDAG();
     }
-    std::cout << "============================================\n\n";
+    FZ_PRINT("============================================");
 }
-
-// ========== Internal Implementation ==========
-
-// ===== Finalize Helpers =====
 
 std::pair<std::vector<Stage*>, std::vector<Stage*>> Pipeline::identifyTopology() {
     auto sources = getSourceStages();
@@ -618,7 +635,6 @@ void Pipeline::setupInputBuffers(const std::vector<Stage*>& sources) {
 int Pipeline::autoDetectUnconnectedOutputs() {
     int pipeline_outputs_added = 0;
     
-    // Iterate ALL stages and convert unconnected outputs to pipeline outputs
     for (const auto& [stage, node] : stage_to_node_) {
         size_t num_outputs = stage->getNumOutputs();
         auto output_names = stage->getOutputNames();
@@ -627,7 +643,9 @@ int Pipeline::autoDetectUnconnectedOutputs() {
             // Find the pre-allocated buffer for this output
             auto it = node->output_index_to_buffer_id.find(static_cast<int>(i));
             if (it == node->output_index_to_buffer_id.end()) {
-                throw std::runtime_error("Missing pre-allocated buffer for output " + std::to_string(i));
+                throw std::runtime_error(
+                    "Missing pre-allocated buffer for output " + std::to_string(i) +
+                    " of stage '" + node->name + "' — this is an internal pipeline bug");
             }
             
             int buffer_id = it->second;
@@ -700,7 +718,6 @@ void Pipeline::configureStreamsIfNeeded() {
 }
 
 void Pipeline::propagateBufferSizes(bool force_from_current_inputs) {
-    // Check whether any static hint is available
     bool has_hint = (input_size_hint_ > 0) || !per_source_hints_.empty();
     if (!has_hint && !force_from_current_inputs) {
         FZ_LOG(DEBUG, "No input size hint, using placeholder buffer sizes");
@@ -804,15 +821,12 @@ std::vector<Stage*> Pipeline::getSinkStages() const {
     return sinks;
 }
 
-// ===== Output Concatenation Helpers =====
-
 std::vector<Pipeline::OutputBufferInfo> Pipeline::collectOutputBuffers() const {
     std::vector<OutputBufferInfo> outputs;
     
     for (int buffer_id : output_buffer_ids_) {
         const auto& buffer_info = dag_->getBufferInfo(buffer_id);
         
-        // Find producer node
         DAGNode* producer_node = nullptr;
         for (const auto& node : dag_->getNodes()) {
             if (node->id == buffer_info.producer_stage_id) {
@@ -822,17 +836,17 @@ std::vector<Pipeline::OutputBufferInfo> Pipeline::collectOutputBuffers() const {
         }
         
         if (!producer_node) {
-            throw std::runtime_error("Producer stage not found for buffer " + std::to_string(buffer_id));
+            throw std::runtime_error(
+                "Producer stage not found for buffer " + std::to_string(buffer_id) +
+                " — this is an internal pipeline bug");
         }
         
-        // Get output name from index
         auto stage_output_names = producer_node->stage->getOutputNames();
         int output_idx = buffer_info.producer_output_index;
         std::string output_name = (output_idx >= 0 && output_idx < static_cast<int>(stage_output_names.size())) 
                                   ? stage_output_names[output_idx] 
                                   : "output";
         
-        // Look up actual size by name
         auto sizes_by_name = producer_node->stage->getActualOutputSizesByName();
         size_t actual_size = 0;
         auto it = sizes_by_name.find(output_name);
@@ -905,12 +919,12 @@ size_t Pipeline::writeConcatBuffer(
 
     // ── Two H2D copies + one kernel launch (replaces 1 H2D + N D2D) ─────────
     // 1. Header (num_buffers + per-segment sizes)
-    cudaMemcpyAsync(d_concat_bytes, h_concat_header_, hdr_bytes,
-                    cudaMemcpyHostToDevice, stream);
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_concat_bytes, h_concat_header_, hdr_bytes,
+                                  cudaMemcpyHostToDevice, stream));
     // 2. Gather descriptors
     const size_t desc_bytes = n * sizeof(CopyDesc);
-    cudaMemcpyAsync(d_copy_descs_, h_copy_descs_, desc_bytes,
-                    cudaMemcpyHostToDevice, stream);
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_copy_descs_, h_copy_descs_, desc_bytes,
+                                  cudaMemcpyHostToDevice, stream));
     // 3. Gather kernel: one block per segment, 256 threads each
     launch_gather_kernel(static_cast<const CopyDesc*>(d_copy_descs_),
                          static_cast<int>(n), 256, stream);
@@ -919,13 +933,10 @@ size_t Pipeline::writeConcatBuffer(
 }
 
 void Pipeline::concatOutputs(void** d_output, size_t* output_size, cudaStream_t stream) {
-    // Collect all output information
     auto outputs = collectOutputBuffers();
     
-    // Calculate total size needed
     size_t total_size = calculateConcatSize(outputs);
     
-    // Allocate or reuse concat buffer
     if (d_concat_buffer_ == nullptr || concat_buffer_capacity_ < total_size) {
         if (d_concat_buffer_) {
             mem_pool_->free(d_concat_buffer_, stream);
@@ -933,7 +944,10 @@ void Pipeline::concatOutputs(void** d_output, size_t* output_size, cudaStream_t 
         
         d_concat_buffer_ = mem_pool_->allocate(total_size, stream, "concat_output", true);
         if (!d_concat_buffer_) {
-            throw std::runtime_error("Failed to allocate concat buffer");
+            throw std::runtime_error(
+                "Failed to allocate concat output buffer (" + std::to_string(total_size) +
+                " bytes for " + std::to_string(outputs.size()) +
+                " outputs); pool may be exhausted");
         }
         concat_buffer_capacity_ = total_size;
         
@@ -941,7 +955,6 @@ void Pipeline::concatOutputs(void** d_output, size_t* output_size, cudaStream_t 
                total_size / 1024.0, outputs.size());
     }
     
-    // Write concatenated data
     *d_output = d_concat_buffer_;
     *output_size = writeConcatBuffer(outputs, static_cast<uint8_t*>(d_concat_buffer_), stream);
     

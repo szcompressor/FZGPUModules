@@ -68,6 +68,25 @@ if(BUILD_TESTING)
     add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
     enable_testing()
     add_subdirectory(tests)
+
+    # ── generate_golden_files target ─────────────────────────────────────────
+    # Builds and runs the golden-file generator so that tests/golden/ contains
+    # fresh reference files matching the current FZM format version.
+    # Usage: cmake --build <build-dir> --target generate_golden_files
+    add_executable(generate_golden_files
+        tests/golden/regenerate.cpp
+    )
+    target_link_libraries(generate_golden_files PRIVATE fzgmod)
+    target_include_directories(generate_golden_files PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+    # After the binary is built, immediately run it to write the reference files.
+    add_custom_command(TARGET generate_golden_files POST_BUILD
+        COMMAND generate_golden_files
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
+        COMMENT "Generating golden reference FZM files in tests/golden/"
+        VERBATIM
+    )
 endif()
 
 option(BUILD_EXAMPLES "Build example executables" OFF)
@@ -124,6 +143,24 @@ target_compile_options(
 target_compile_features(fzgmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
 target_link_libraries(fzgmod_compile_settings INTERFACE CUDA::cudart)
 
+# ── Logging level ─────────────────────────────────────────────────────────────
+# Controls which FZ_LOG() call sites are compiled into the binary.
+# Calls below the threshold are compiled out entirely — arguments are never
+# evaluated, giving zero overhead even for expensive log expressions.
+#
+#   0 = TRACE  — everything (use for deep debugging)
+#   1 = DEBUG  — construction, allocation, data stats
+#   2 = INFO   — high-level milestones only  ← default
+#   3 = WARN   — warnings only
+#  255 = SILENT — all logging compiled out (embedded / production)
+#
+# Override: cmake -DFZ_LOG_MIN_LEVEL=0 ..
+set(FZ_LOG_MIN_LEVEL "2" CACHE STRING
+    "Minimum log level compiled in: 0=TRACE 1=DEBUG 2=INFO 3=WARN 255=SILENT")
+set_property(CACHE FZ_LOG_MIN_LEVEL PROPERTY STRINGS "0" "1" "2" "3" "255")
+target_compile_definitions(fzgmod_compile_settings INTERFACE
+    FZ_LOG_MIN_LEVEL=${FZ_LOG_MIN_LEVEL})
+
 ###########################
 ### INCLUDE DIRECTORIES ###
 ###########################
@@ -168,6 +205,7 @@ add_library(FZGMOD::encoders ALIAS fzgmod_encoders)
 #### Predictors Module
 add_library(fzgmod_predictors
   modules/predictors/lorenzo/lorenzo.cu
+  modules/predictors/lorenzo/lorenzo_nd.cu
   modules/predictors/quantizer/quantizer.cu
 )
 target_link_libraries(fzgmod_predictors
@@ -184,9 +222,10 @@ add_library(fzgmod_pipeline
   src/pipeline/compressor_io.cpp
   src/pipeline/concat_kernel.cu
   src/pipeline/dag.cpp
+  src/pipeline/dag_coloring.cpp
+  src/pipeline/dag_query.cpp
   src/pipeline/perf.cpp
   src/pipeline/stat.cpp
-  src/stage/mock_stages.cu
 )
 target_link_libraries(fzgmod_pipeline
   PUBLIC
@@ -217,48 +256,13 @@ add_library(FZGMOD::fzgmod ALIAS fzgmod)
 ### EXECUTABLES ###
 ###################
 
-if(BUILD_EXAMPLES)
-    add_executable(fzgmod-bin examples/main.cpp)
-    target_link_libraries(fzgmod-bin PRIVATE fzgmod)
-    set_target_properties(fzgmod-bin PROPERTIES
-        OUTPUT_NAME fzgmod
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+option(BUILD_CLI "Build command-line executable" ON)
 
-    # ── Standalone Lorenzo code-distribution analyser ─────────────────────────────
-    add_executable(analyze_lorenzo examples/analyze_lorenzo.cpp)
-    target_link_libraries(analyze_lorenzo PRIVATE fzgmod)
-    set_target_properties(analyze_lorenzo PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-    # ── Full PFPL pipeline demonstration ──────────────────────────────────────────
-    add_executable(pfpl_example examples/pfpl_pipeline.cpp)
-    target_link_libraries(pfpl_example PRIVATE fzgmod)
-    set_target_properties(pfpl_example PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-    # ── PFPL + CUDA Graph capture comparison (MINIMAL | PREALLOCATE | GRAPH) ────
-    add_executable(pfpl_graph_capture examples/pfpl_graph_capture.cpp)
-    target_link_libraries(pfpl_graph_capture PRIVATE fzgmod)
-    set_target_properties(pfpl_graph_capture PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-    # ── Stage isolation diagnostic ─────────────────────────────────────────────
-    add_executable(test_quant_only examples/test_quant_only.cpp)
-    target_link_libraries(test_quant_only PRIVATE fzgmod)
-    set_target_properties(test_quant_only PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-    # ── Simple API example: Lorenzo + dual encoded branches ───────────────────
-    add_executable(simple_api_lorenzo_dual_branch examples/simple_api_lorenzo_dual_branch.cpp)
-    target_link_libraries(simple_api_lorenzo_dual_branch PRIVATE fzgmod)
-    set_target_properties(simple_api_lorenzo_dual_branch PROPERTIES
-      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-    # ── Manual stages vs Pipeline DAG throughput comparison ───────────────────
-    add_executable(pfpl_manual_vs_dag examples/manual_pipeline.cpp)
-    target_link_libraries(pfpl_manual_vs_dag PRIVATE fzgmod)
-    set_target_properties(pfpl_manual_vs_dag PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(BUILD_CLI)
+  add_executable(fzgmod-cli utils/cli/main.cpp)
+  target_link_libraries(fzgmod-cli PRIVATE fzgmod)
+  set_target_properties(fzgmod-cli PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
 ######################
@@ -314,48 +318,9 @@ if(BUILD_PROFILING)
                         "Override with: -DNVTX3_INCLUDE_DIR=/path/to/nvtx/include")
     endif()
 
-    # ── Profiling executable ──────────────────────────────────────────────────
-    # Build:  cmake --build build --target fzgmod-profile
-    # Run:    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
-    #              -o cldhgh_profile ./build/bin/fzgmod-profile
-    #         nsys-ui cldhgh_profile.nsys-rep
-    add_executable(fzgmod-profile examples/basic_profiling_example.cpp)
-    target_link_libraries(fzgmod-profile PRIVATE fzgmod)
-    set_target_properties(fzgmod-profile PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-    if(NVTX3_INCLUDE_DIR)
-        target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
-    endif()
-
-    # ── Repeated-compression benchmark ───────────────────────────────────────
-    # Measures the throughput benefit of reusing a PREALLOCATE pipeline vs.
-    # constructing a fresh MINIMAL pipeline for every compress() call.
-    #
-    # Build:  cmake --build build --target fzgmod-profile-repeat
-    # Run:    ./build/bin/fzgmod-profile-repeat
-    #   or:   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
-    #              -o repeat_profile ./build/bin/fzgmod-profile-repeat
-    #         nsys-ui repeat_profile.nsys-rep
-    add_executable(fzgmod-profile-repeat examples/profile_repeat.cpp)
-    target_link_libraries(fzgmod-profile-repeat PRIVATE fzgmod)
-    set_target_properties(fzgmod-profile-repeat PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-    if(NVTX3_INCLUDE_DIR)
-        target_include_directories(fzgmod-profile-repeat PRIVATE ${NVTX3_INCLUDE_DIR})
-    endif()
-
-    # ── PFPL pipeline profiling example ──────────────────────────────────────
-    # Build:  cmake --build build --target pfpl_example  (with -DBUILD_PROFILING=ON)
-    # Run:    nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
-    #              -o pfpl_profile ./build/bin/pfpl_example 1e-3
-    #         nsys-ui pfpl_profile.nsys-rep
-    if(NVTX3_INCLUDE_DIR)
-        target_include_directories(pfpl_example PRIVATE ${NVTX3_INCLUDE_DIR})
-    endif()
-    if(NVTX3_INCLUDE_DIR)
-        target_include_directories(pfpl_graph_capture PRIVATE ${NVTX3_INCLUDE_DIR})
-    endif()
 endif()
+
+add_subdirectory(examples)
 
 ####################
 ### INSTALLATION ###
@@ -375,8 +340,9 @@ install(TARGETS
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-if(BUILD_EXAMPLES)
-  install(TARGETS fzgmod-bin
+
+if(BUILD_CLI)
+  install(TARGETS fzgmod-cli
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
 endif()
@@ -435,6 +401,27 @@ install(DIRECTORY
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzgmod
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
+
+#---------------------------------------------------------------------------
+# Documentation (Doxygen)  — build with: cmake --build <builddir> --target docs
+#---------------------------------------------------------------------------
+find_package(Doxygen OPTIONAL_COMPONENTS dot)
+if(DOXYGEN_FOUND)
+    add_custom_target(docs
+        COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Doxyfile
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Generating API documentation with Doxygen ${DOXYGEN_VERSION}"
+        VERBATIM
+    )
+    message(STATUS "Doxygen ${DOXYGEN_VERSION} found — 'docs' target available")
+    if(Doxygen_dot_FOUND)
+        message(STATUS "  Graphviz dot found — class diagrams enabled")
+    else()
+        message(STATUS "  Graphviz dot NOT found — set HAVE_DOT=NO in Doxyfile or install graphviz")
+    endif()
+else()
+    message(STATUS "Doxygen not found — 'docs' target not available (install doxygen to enable)")
+endif()
 
 message(STATUS "FZGPUModules configuration complete")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")

@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
+#include "pipeline/convenience.h"
 
 #include <cmath>
 #include <cstdio>
@@ -597,7 +598,7 @@ TEST(Pipeline, AddLorenzoForwardsDims) {
     // 1D: default (no setDims call)
     {
         Pipeline p1(256 * sizeof(float), MemoryStrategy::MINIMAL);
-        auto* lrz1 = p1.addLorenzo<float, uint16_t>(1e-2f);
+        auto* lrz1 = addLorenzo<float, uint16_t>(p1, 1e-2f);
         EXPECT_EQ(lrz1->ndim(), 1) << "Default should be 1D";
     }
 
@@ -606,7 +607,7 @@ TEST(Pipeline, AddLorenzoForwardsDims) {
         constexpr size_t NX = 32, NY = 32;
         Pipeline p2(NX * NY * sizeof(float), MemoryStrategy::MINIMAL);
         p2.setDims(NX, NY);
-        auto* lrz2 = p2.addLorenzo<float, uint16_t>(1e-2f);
+        auto* lrz2 = addLorenzo<float, uint16_t>(p2, 1e-2f);
         EXPECT_EQ(lrz2->ndim(), 2) << "setDims(nx,ny) should give 2D via addLorenzo()";
         auto dims2 = lrz2->getDims();
         EXPECT_EQ(dims2[0], NX);
@@ -619,7 +620,7 @@ TEST(Pipeline, AddLorenzoForwardsDims) {
         constexpr size_t NX = 16, NY = 16, NZ = 16;
         Pipeline p3(NX * NY * NZ * sizeof(float), MemoryStrategy::MINIMAL);
         p3.setDims(NX, NY, NZ);
-        auto* lrz3 = p3.addLorenzo<float, uint16_t>(1e-2f);
+        auto* lrz3 = addLorenzo<float, uint16_t>(p3, 1e-2f);
         EXPECT_EQ(lrz3->ndim(), 3) << "setDims(nx,ny,nz) should give 3D via addLorenzo()";
     }
 }

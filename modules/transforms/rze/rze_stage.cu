@@ -617,8 +617,24 @@ void RZEStage::postStreamSync(cudaStream_t /*stream*/) {
     const size_t total_out = static_cast<size_t>(tail_off)
                            + static_cast<size_t>(tail_sz);
     actual_output_size_ = (total_out + 3) & ~size_t(3);
+    // Zero trailing alignment padding (0–3 bytes) so the full [0, actual_output_size_)
+    // range is initialized.  Stream is already fully synchronized at this point, so
+    // a synchronous cudaMemset is safe.
+    if (tail_output_ptr_ && actual_output_size_ > total_out)
+        cudaMemset(tail_output_ptr_ + total_out, 0, actual_output_size_ - total_out);
+    tail_output_ptr_  = nullptr;
     tail_readback_pending_ = false;
     tail_readback_stream_ = nullptr;
+
+    const float ratio = cached_orig_bytes_ > 0
+        ? static_cast<float>(cached_orig_bytes_) / static_cast<float>(actual_output_size_)
+        : 0.0f;
+    FZ_LOG(DEBUG, "RZE encode done: %.1f KB -> %.1f KB  ratio %.2fx",
+           cached_orig_bytes_ / 1024.0f, actual_output_size_ / 1024.0f, ratio);
+    if (actual_output_size_ >= cached_orig_bytes_) {
+        FZ_LOG(WARN, "RZE encode: output (%.1f KB) >= input (%.1f KB) — incompressible data",
+               actual_output_size_ / 1024.0f, cached_orig_bytes_ / 1024.0f);
+    }
 }
 
 std::unordered_map<std::string, size_t>
@@ -634,6 +650,10 @@ RZEStage::getActualOutputSizesByName() const {
         const size_t total_out = static_cast<size_t>(tail_off)
                                + static_cast<size_t>(tail_sz);
         const_cast<RZEStage*>(this)->actual_output_size_ = (total_out + 3) & ~size_t(3);
+        // Zero trailing alignment padding (0–3 bytes).
+        if (tail_output_ptr_ && actual_output_size_ > total_out)
+            cudaMemset(tail_output_ptr_ + total_out, 0, actual_output_size_ - total_out);
+        const_cast<RZEStage*>(this)->tail_output_ptr_  = nullptr;
         tail_readback_pending_ = false;
         tail_readback_stream_ = nullptr;
     }
@@ -739,6 +759,10 @@ void RZEStage::execute(
         scratch_capacity_ = n_chunks;
     }
 
+    FZ_LOG(TRACE, "RZE %s: %.1f KB in, %u chunks, %d levels",
+           is_inverse_ ? "decode" : "encode",
+           sizes[0] / 1024.0, n_chunks_u, static_cast<int>(levels_));
+
     // ── Forward (compress) ───────────────────────────────────────────────
     if (!is_inverse_) {
         cached_orig_bytes_ = in_bytes_u;
@@ -797,7 +821,8 @@ void RZEStage::execute(
 
         // ── (6) Mark that output size should be finalized after stream sync.
         //    total = d_dst_off_dev_[last] + d_clean_dev_[last]
-        tail_last_index_ = n_chunks_u - 1;
+        tail_last_index_  = n_chunks_u - 1;
+        tail_output_ptr_  = static_cast<uint8_t*>(outputs[0]);
         tail_readback_pending_ = true;
         tail_readback_stream_ = stream;
 
@@ -948,6 +973,8 @@ void RZEStage::execute(
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         actual_output_size_ = static_cast<size_t>(orig_total);
+        FZ_LOG(DEBUG, "RZE decode done: %.1f KB -> %.1f KB",
+               sizes[0] / 1024.0, actual_output_size_ / 1024.0);
     }
 }
 

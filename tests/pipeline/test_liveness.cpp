@@ -21,6 +21,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
+#include "helpers/test_stages.h"
 #include "fzgpumodules.h"
 
 #include <cmath>
@@ -306,4 +307,31 @@ TEST(Liveness, LivenessApiConsistentUnderGraphMode) {
         << "LV7: computeTopoPoolSize() must be unchanged after captureGraph()";
     EXPECT_GT(topo_after, 0u)
         << "LV7: computeTopoPoolSize() must remain positive after captureGraph()";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LV8: printDAG() does not throw on linear and diamond pipelines, both before
+//      and after compress().
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Liveness, PrintDAGNoCrash) {
+    constexpr size_t N = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    // Linear 3-stage pipeline — before compress.
+    auto p = build_linear3(in_bytes, MemoryStrategy::MINIMAL);
+    ASSERT_NO_THROW(p->getDAG()->printDAG())
+        << "LV8: printDAG() must not throw on a linear pipeline before compress()";
+
+    CudaStream stream;
+    auto h_in = make_smooth(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_in, stream);
+    stream.sync();
+
+    void* d_comp = nullptr; size_t comp_sz = 0;
+    p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+
+    ASSERT_NO_THROW(p->getDAG()->printDAG())
+        << "LV8: printDAG() must not throw on a linear pipeline after compress()";
 }

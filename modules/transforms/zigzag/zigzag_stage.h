@@ -1,26 +1,12 @@
 #pragma once
 
 /**
- * modules/transforms/zigzag/zigzag_stage.h
+ * @file zigzag_stage.h
+ * @brief Element-wise zigzag encode/decode stage (`TIn[]` ↔ `TOut[]`).
  *
- * ZigzagStage<TIn, TOut> — element-wise zigzag encode/decode stage.
- *
- * Forward (compression):  applies Zigzag<TIn>::encode element-wise
- *                          TIn[]  →  TOut[]
- * Inverse (decompression): applies Zigzag<TIn>::decode element-wise
- *                          TOut[] →  TIn[]
- *
- * Template constraints (enforced by static_assert):
- *   - TIn must be a signed integer type
- *   - TOut must be the corresponding unsigned type (same byte width)
- *
- * Common instantiations:
- *   ZigzagStage<int16_t, uint16_t>
- *   ZigzagStage<int32_t, uint32_t>
- *   ZigzagStage<int64_t, uint64_t>
- *
- * The stage is size-preserving: output byte count equals input byte count.
- * Serialized config: 2 bytes (TIn DataType, TOut DataType).
+ * Size-preserving. `TIn` must be a signed integer; `TOut` its unsigned
+ * counterpart of the same width.
+ * Serialized header: 2 bytes — `[0]` TIn DataType, `[1]` TOut DataType.
  */
 
 #include "stage/stage.h"
@@ -34,6 +20,12 @@
 
 namespace fz {
 
+/**
+ * Element-wise zigzag encode/decode stage.
+ * Forward: `TIn[] → TOut[]`; inverse: `TOut[] → TIn[]`.
+ * @tparam TIn   Signed integer type.
+ * @tparam TOut  Corresponding unsigned type (same width as `TIn`).
+ */
 template<typename TIn, typename TOut = typename std::make_unsigned<TIn>::type>
 class ZigzagStage : public Stage {
     static_assert(std::is_integral<TIn>::value && std::is_signed<TIn>::value,
@@ -68,7 +60,6 @@ public:
     std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const override {
-        // Size-preserving transform
         return {input_sizes[0]};
     }
 
@@ -90,6 +81,13 @@ public:
         return is_inverse_
             ? static_cast<uint8_t>(dataTypeOf<TIn>())
             : static_cast<uint8_t>(dataTypeOf<TOut>());
+    }
+
+    uint8_t getInputDataType(size_t /*input_index*/) const override {
+        // Forward input is TIn (signed); inverse input is TOut (unsigned).
+        return is_inverse_
+            ? static_cast<uint8_t>(dataTypeOf<TOut>())
+            : static_cast<uint8_t>(dataTypeOf<TIn>());
     }
 
     // ── Serialization ──────────────────────────────────────────────────────
@@ -129,7 +127,6 @@ private:
     }
 };
 
-// Explicit instantiation declarations (definitions are in zigzag_stage.cu)
 extern template class ZigzagStage<int8_t,  uint8_t>;
 extern template class ZigzagStage<int16_t, uint16_t>;
 extern template class ZigzagStage<int32_t, uint32_t>;

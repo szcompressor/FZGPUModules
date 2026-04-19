@@ -13,6 +13,54 @@
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OverreportingStage — local test-only stage used by E11.
+//
+// estimateOutputSizes() returns N/2 so PREALLOCATE allocates a small buffer.
+// execute() only writes N/2 bytes (safe), but getActualOutputSizesByName()
+// lies and reports N bytes written.  This triggers the bounds-check throw
+// without actually corrupting GPU memory.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+class OverreportingStage : public fz::Stage {
+public:
+    OverreportingStage() : reported_size_(0) {}
+
+    void execute(
+        cudaStream_t stream, fz::MemoryPool*,
+        const std::vector<void*>& inputs,
+        const std::vector<void*>& outputs,
+        const std::vector<size_t>& sizes
+    ) override {
+        cudaMemcpyAsync(outputs[0], inputs[0], sizes[0] / 2,
+                        cudaMemcpyDeviceToDevice, stream);
+        reported_size_ = sizes[0];  // lie: claim full input size was written
+    }
+
+    std::string getName()     const override { return "OverreportingStage"; }
+    size_t getNumInputs()     const override { return 1; }
+    size_t getNumOutputs()    const override { return 1; }
+
+    std::vector<size_t> estimateOutputSizes(
+        const std::vector<size_t>& in) const override { return {in[0] / 2}; }
+
+    std::unordered_map<std::string, size_t>
+    getActualOutputSizesByName() const override {
+        return {{"output", reported_size_}};
+    }
+
+    uint16_t getStageTypeId() const override {
+        return static_cast<uint16_t>(fz::StageType::PASSTHROUGH);
+    }
+    uint8_t getOutputDataType(size_t) const override {
+        return static_cast<uint8_t>(fz::DataType::UINT8);
+    }
+
+private:
+    size_t reported_size_;
+};
+} // namespace
+
 #include <stdexcept>
 
 using namespace fz;
@@ -674,4 +722,53 @@ TEST(PipelineErrors, NoLeakAfterMultipleConsecutiveCompressThrows) {
         << "GPU memory decreased by more than 1 MB after 3 consecutive failed "
            "compress() calls. Before: " << free_before
         << " B, After: " << free_after << " B";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E15: Type-mismatch connection is caught at finalize() time
+//
+// Lorenzo<float,uint16_t> produces uint16 codes.
+// RLEStage<float> expects float input.
+// Connecting Lorenzo→RLE with mismatched types must throw std::runtime_error
+// at finalize() — before any kernel is ever launched.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PipelineErrors, TypeMismatchAtFinalize) {
+    Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
+
+    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.1f);
+
+    // RLEStage<uint32_t> expects uint32 input; Lorenzo outputs uint16 codes.
+    auto* rle = p.addStage<RLEStage<uint32_t>>();
+    p.connect(rle, lrz, "codes");  // uint16 → uint32: type mismatch
+
+    EXPECT_THROW(p.finalize(), std::runtime_error)
+        << "E15: finalize() must throw on a uint16→uint32 type mismatch";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// E16: Matching types pass finalize() without error
+//
+// Lorenzo<float,uint16_t> → DifferenceStage<uint16_t> → RLEStage<uint16_t>
+// All connections are uint16→uint16; finalize() must succeed.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PipelineErrors, TypeMatchAtFinalizeSucceeds) {
+    Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
+
+    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.1f);
+
+    auto* diff = p.addStage<DifferenceStage<uint16_t>>();
+    diff->setChunkSize(4096);
+    p.connect(diff, lrz, "codes");  // uint16 → uint16: ok
+
+    auto* rle = p.addStage<RLEStage<uint16_t>>();
+    p.connect(rle, diff);           // uint16 → uint16: ok
+
+    EXPECT_NO_THROW(p.finalize())
+        << "E16: finalize() must not throw when all connection types match";
 }

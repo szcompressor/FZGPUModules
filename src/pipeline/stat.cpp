@@ -59,10 +59,7 @@ ReconstructionStats calculateStatistics(const T* d_original, const T* d_decompre
     return stats;
 }
 
-// Explicit instantiations for common types
 template ReconstructionStats calculateStatistics<float>(const float*, const float*, size_t);
 template ReconstructionStats calculateStatistics<double>(const double*, const double*, size_t);
-template ReconstructionStats calculateStatistics<int>(const int*, const int*, size_t);
-template ReconstructionStats calculateStatistics<long long>(const long long*, const long long*, size_t);
 
 } // namespace fz

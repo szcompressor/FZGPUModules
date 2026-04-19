@@ -1,60 +1,25 @@
 #pragma once
 
 /**
- * modules/transforms/rze/rze_stage.h
+ * @file rze_stage.h
+ * @brief Recursive Zero-byte Elimination stage — lossless byte-stream compressor.
  *
- * RZEStage — Recursive Zero-byte Elimination stage.
+ * Operates on raw byte streams (e.g. BitshuffleStage output). Each chunk is
+ * processed with up to 4 recursive levels:
+ * - Level 1 (ZE): compact non-zero bytes; emit N/8-byte bitmap.
+ * - Levels 2–4 (RE): compact non-repeated bytes of the previous bitmap.
  *
- * Operates on a raw byte stream (e.g. the output of BitshuffleStage).
- * The forward pass compresses the stream by eliminating zero bytes and
- * recursively compressing the resulting bitmaps.  The inverse pass
- * decompresses back to the original byte stream.
+ * Output stream layout:
+ * @code
+ *   [uint32_t: original byte count]
+ *   [uint32_t: num_chunks]
+ *   [uint32_t × n_chunks: per-chunk compressed sizes (high bit → stored raw)]
+ *   [compressed chunk data...]
+ * @endcode
  *
- * Algorithm (T=uint8_t, one pass per chunk):
- *   Level 1 (ZE):  compact non-zero bytes from the input N-byte chunk;
- *                  produce a bitmap of N/8 bytes (bm1).
- *   Level 2 (RE):  compact non-repeated bytes of bm1 (N/8 bytes);
- *                  produce a bitmap of N/64 bytes (bm2).
- *   Level 3 (RE):  compact non-repeated bytes of bm2;
- *                  produce a bitmap of N/512 bytes (bm3).
- *   Level 4 (RE):  compact non-repeated bytes of bm3;
- *                  produce a bitmap of N/4096 bytes (bm4, stored raw).
- *
- * Compressed chunk layout (written smallest-address first):
- *
- *   [non-zero data bytes from level-1 ZE]
- *   [non-repeated bytes from level-2 RE on bm1]
- *   [non-repeated bytes from level-3 RE on bm2]
- *   [non-repeated bytes from level-4 RE on bm3]  (if levels >= 4)
- *   [raw bm4  (N/4096 bytes, 4 bytes for N=16384)] (if levels >= 4)
- *   [original chunk size, 2 bytes, little-endian]
- *
- * For the "all-zeros" case the chunk is stored as just the 2-byte size tag
- * with no data or bitmaps.  For incompressible chunks the original data is
- * stored and the high bit of the per-chunk header field is set.
- *
- * Stream layout (output buffer):
- *
- *   [uint32_t: original total byte count]
- *   [uint32_t: number of chunks]
- *   [uint32_t × n_chunks: per-chunk compressed sizes (high bit set → uncompressed)]
- *   [compressed chunk 0 bytes]
- *   [compressed chunk 1 bytes]
- *   ...
- *
- * Configuration:
- *   setChunkSize(bytes)  — chunk size in bytes, must be a power of 8 ≥ 64 and
- *                          a multiple of 4096 × blockDim (default 16384).
- *                          Currently only 16384 is tested / supported.
- *   setLevels(n)         — recursion depth 1–4 (default 4)
- *   setInverse(bool)     — decompress instead of compress
- *
- * Serialized header: 9 bytes
- *   [0..3] chunk_size         (uint32_t LE)
- *   [4]    levels             (uint8_t)
- *   [5..8] cached_orig_bytes  (uint32_t LE) — original uncompressed size
- *
- * Stage type ID: StageType::RZE (18)
+ * Serialized header (9 bytes):
+ *   `[0..3]` chunk_size (uint32_t LE), `[4]` levels (uint8_t),
+ *   `[5..8]` cached_orig_bytes (uint32_t LE).
  */
 
 #include "stage/stage.h"
@@ -69,6 +34,16 @@
 
 namespace fz {
 
+/**
+ * Recursive Zero-byte Elimination stage.
+ *
+ * `setChunkSize(bytes)` — chunk size (default 16384; must be a multiple of 4096).
+ * `setLevels(n)` — recursion depth 1–4 (default 4).
+ *
+ * @note CUDA Graph capture is supported for compression only. The inverse path
+ *       requires two blocking D2H copies to read the stream header before the
+ *       decode kernel can be launched.
+ */
 class RZEStage : public Stage {
 public:
     RZEStage()
@@ -99,13 +74,17 @@ public:
     bool isInverse() const override    { return is_inverse_; }
 
     /**
-     * RZE inverse execute() contains a blocking cudaMemcpy D2H (to read
-     * per-chunk sizes from the stream header) and a cudaStreamSynchronize
-     * (to wait for the scatter kernel before launching the decode kernel).
-     * These prevent the inverse path from being recorded into a CUDA Graph.
-     * The forward path has no such calls and would be compatible, but since
-     * the same class handles both directions we conservatively report
-     * incompatibility whenever is_inverse_ is set.
+     * CUDA Graph capture is supported for compression (forward pass) only.
+     *
+     * The inverse path reads the stream header (orig_bytes, per-chunk sizes)
+     * with two blocking D2H cudaMemcpy calls before it can compute per-chunk
+     * decode offsets and launch the decode kernel.  These calls prevent the
+     * inverse path from being recorded into a CUDA Graph.
+     *
+     * This is intentional by design, not a fixable limitation: graph-compatible
+     * decompression would only help a "repeatedly decompress the same compressed
+     * buffer" workflow, which has no practical use case.  The compression path
+     * (new data every iteration) is where graph capture provides real value.
      */
     bool isGraphCompatible() const override { return !is_inverse_; }
 
@@ -258,6 +237,9 @@ private:
     mutable bool         tail_readback_pending_ = false;
     mutable cudaStream_t tail_readback_stream_ = nullptr;
     mutable uint32_t     tail_last_index_ = 0;
+    // Output pointer saved by forward execute() so postStreamSync() can zero
+    // the trailing alignment padding (0–3 bytes at actual_output_size_ - total_out).
+    mutable uint8_t*     tail_output_ptr_ = nullptr;
     size_t    scratch_capacity_;  // # chunks forward scratch can hold
     size_t    inv_capacity_;      // # chunks inverse tables can hold
     MemoryPool* scratch_pool_owner_ = nullptr;

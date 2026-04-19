@@ -8,7 +8,7 @@
  *
  *   BC1  Coloring fires by default for PREALLOCATE on a linear pipeline
  *   BC2  Coloring does NOT fire for MINIMAL mode
- *   BC3  disableColoring() prevents coloring even in PREALLOCATE mode
+ *   BC3  setColoringEnabled(false) prevents coloring even in PREALLOCATE mode
  *   BC4  A colored pipeline produces the same decompressed output as an
  *        uncolored pipeline (correctness of aliased pointer assignment)
  *   BC5  Region count is strictly less than buffer count for a multi-stage
@@ -50,7 +50,7 @@ static std::vector<float> make_test_data() {
 // Sets coloring_disabled according to the argument before finalize().
 static std::unique_ptr<Pipeline> make_lorenzo_pipeline(bool disable_coloring) {
     auto p = std::make_unique<Pipeline>(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    if (disable_coloring) p->disableColoring(true);
+    if (disable_coloring) p->setColoringEnabled(false);
     auto* lrz = p->addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
@@ -83,7 +83,7 @@ static std::vector<float> roundtrip(Pipeline& p, const CudaBuffer<float>& d_in,
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, AppliedByDefaultForPreallocate) {
     auto p = make_lorenzo_pipeline(/*disable_coloring=*/false);
-    EXPECT_TRUE(p->isColoringApplied())
+    EXPECT_TRUE(p->isColoringEnabled())
         << "Coloring should be applied by default in PREALLOCATE mode";
 }
 
@@ -98,17 +98,17 @@ TEST(BufferColoring, NotAppliedForMinimal) {
     lrz->setOutlierCapacity(0.2f);
     p.finalize();
 
-    EXPECT_FALSE(p.isColoringApplied())
+    EXPECT_FALSE(p.isColoringEnabled())
         << "Coloring must not run in MINIMAL mode";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BC3: disableColoring() prevents coloring even in PREALLOCATE mode
+// BC3: setColoringEnabled(false) prevents coloring even in PREALLOCATE mode
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, DisabledWhenRequested) {
     auto p = make_lorenzo_pipeline(/*disable_coloring=*/true);
-    EXPECT_FALSE(p->isColoringApplied())
-        << "Coloring should be suppressed when disableColoring(true) is called";
+    EXPECT_FALSE(p->isColoringEnabled())
+        << "Coloring should be suppressed when setColoringEnabled(false) is called";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,13 +149,13 @@ TEST(BufferColoring, RegionCountPositiveAndBounded) {
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
 
-    auto* diff = p.addStage<DifferenceStage<int32_t, uint32_t>>();
+    auto* diff = p.addStage<DifferenceStage<int16_t, uint16_t>>();
     diff->setChunkSize(4096);
     p.connect(diff, lrz, "codes");
 
     p.finalize();
 
-    ASSERT_TRUE(p.isColoringApplied());
+    ASSERT_TRUE(p.isColoringEnabled());
 
     const size_t regions = p.getColorRegionCount();
     // At least one region must exist (something was allocated)
@@ -183,7 +183,7 @@ TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
         lrz->setErrorBound(kEB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
-        auto* diff = p_col.addStage<DifferenceStage<int32_t, uint32_t>>();
+        auto* diff = p_col.addStage<DifferenceStage<int16_t, uint16_t>>();
         diff->setChunkSize(4096);
         p_col.connect(diff, lrz, "codes");
         p_col.finalize();
@@ -191,30 +191,30 @@ TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
 
     // Uncolored pipeline (identical topology)
     Pipeline p_uncol(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    p_uncol.disableColoring(true);
+    p_uncol.setColoringEnabled(false);
     {
         auto* lrz = p_uncol.addStage<LorenzoStage<float, uint16_t>>();
         lrz->setErrorBound(kEB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
-        auto* diff = p_uncol.addStage<DifferenceStage<int32_t, uint32_t>>();
+        auto* diff = p_uncol.addStage<DifferenceStage<int16_t, uint16_t>>();
         diff->setChunkSize(4096);
         p_uncol.connect(diff, lrz, "codes");
         p_uncol.finalize();
     }
 
-    // Run both to establish peak usage
+    // Run both to establish peak usage.
+    // d_comp is pool-owned — must NOT be cudaFree'd; the pipeline destructor
+    // returns it to the pool.
     void* d_comp = nullptr; size_t comp_sz = 0;
     p_col.compress(d_in.void_ptr(), kNBytes, &d_comp, &comp_sz, 0);
     cudaDeviceSynchronize();
     const size_t peak_colored = p_col.getPeakMemoryUsage();
-    if (d_comp) cudaFree(d_comp);
 
     d_comp = nullptr; comp_sz = 0;
     p_uncol.compress(d_in.void_ptr(), kNBytes, &d_comp, &comp_sz, 0);
     cudaDeviceSynchronize();
     const size_t peak_uncolored = p_uncol.getPeakMemoryUsage();
-    if (d_comp) cudaFree(d_comp);
 
     EXPECT_LE(peak_colored, peak_uncolored)
         << "Colored peak (" << peak_colored / 1024 << " KB) should be <= "
@@ -241,7 +241,7 @@ TEST(BufferColoring, RepeatedCompressStaysCorrect) {
     cudaDeviceSynchronize();
 
     auto p = make_lorenzo_pipeline(/*disable_coloring=*/false);
-    ASSERT_TRUE(p->isColoringApplied());
+    ASSERT_TRUE(p->isColoringEnabled());
 
     // Run 5 compress→decompress cycles and verify each one
     for (int run = 0; run < 5; run++) {
@@ -276,7 +276,7 @@ TEST(BufferColoring, ColoredBuffersStableAcrossGraphReplays) {
     p.enableGraphMode(true);
     p.finalize();
 
-    ASSERT_TRUE(p.isColoringApplied())
+    ASSERT_TRUE(p.isColoringEnabled())
         << "BC10: coloring must be applied in PREALLOCATE mode";
 
     p.captureGraph(stream);
@@ -333,7 +333,7 @@ TEST(BufferColoring, MultiStageLinearPipelineRoundTrip) {
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
 
-    auto* diff = p.addStage<DifferenceStage<int32_t, uint32_t>>();
+    auto* diff = p.addStage<DifferenceStage<int16_t, uint16_t>>();
     diff->setChunkSize(4096);
     p.connect(diff, lrz, "codes");
 
@@ -344,7 +344,7 @@ TEST(BufferColoring, MultiStageLinearPipelineRoundTrip) {
 
     p.finalize();
 
-    ASSERT_TRUE(p.isColoringApplied())
+    ASSERT_TRUE(p.isColoringEnabled())
         << "Coloring should apply to a 3-stage linear pipeline";
     EXPECT_GT(p.getColorRegionCount(), 0u);
 

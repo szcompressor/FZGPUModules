@@ -1,32 +1,16 @@
 #pragma once
 
 /**
- * modules/transforms/negabinary/negabinary_stage.h
+ * @file negabinary_stage.h
+ * @brief Element-wise negabinary encode/decode stage (`TIn[]` ↔ `TOut[]`).
  *
- * NegabinaryStage<TIn, TOut> — element-wise negabinary encode/decode stage.
+ * Size-preserving. `TIn` must be a signed integer; `TOut` its unsigned
+ * counterpart of the same width.
  *
- * Forward (compression):  applies Negabinary<TIn>::encode element-wise
- *                          TIn[]  →  TOut[]
- * Inverse (decompression): applies Negabinary<TIn>::decode element-wise
- *                          TOut[] →  TIn[]
+ * When fusing difference + negabinary, prefer `DifferenceStage<T, TOut>` which
+ * combines both transforms in a single kernel pass.
  *
- * Template constraints (enforced by static_assert):
- *   - TIn  must be a signed integer type
- *   - TOut must be the corresponding unsigned type (same byte width)
- *
- * Common instantiations:
- *   NegabinaryStage<int16_t, uint16_t>
- *   NegabinaryStage<int32_t, uint32_t>
- *   NegabinaryStage<int64_t, uint64_t>
- *
- * The stage is size-preserving: output byte count equals input byte count.
- * Serialized config: 2 bytes (TIn DataType, TOut DataType).
- *
- * Note on use in pipelines:
- *   As a standalone stage, NegabinaryStage is suitable when the previous stage
- *   already produces signed difference output (e.g. DifferenceStage<T,T>).
- *   When fusing with DifferenceStage, prefer DifferenceStage<T, TOut> which
- *   encodes in a single kernel pass.
+ * Serialized header: 2 bytes — `[0]` TIn DataType, `[1]` TOut DataType.
  */
 
 #include "stage/stage.h"
@@ -40,6 +24,12 @@
 
 namespace fz {
 
+/**
+ * Element-wise negabinary encode/decode stage.
+ * Forward: `TIn[] → TOut[]`; inverse: `TOut[] → TIn[]`.
+ * @tparam TIn   Signed integer type.
+ * @tparam TOut  Corresponding unsigned type (same width as `TIn`).
+ */
 template<typename TIn, typename TOut = typename std::make_unsigned<TIn>::type>
 class NegabinaryStage : public Stage {
     static_assert(std::is_integral<TIn>::value && std::is_signed<TIn>::value,
@@ -81,6 +71,13 @@ public:
 
     uint8_t getOutputDataType(size_t) const override {
         return static_cast<uint8_t>(getTOutDataTypeEnum());
+    }
+
+    uint8_t getInputDataType(size_t /*input_index*/) const override {
+        // Forward input is TIn (signed); inverse input is TOut (unsigned).
+        return is_inverse_
+            ? static_cast<uint8_t>(getTOutDataTypeEnum())
+            : static_cast<uint8_t>(getTInDataTypeEnum());
     }
 
     // ── Serialization ──────────────────────────────────────────────────────
@@ -128,7 +125,6 @@ private:
     }
 };
 
-// Explicit instantiation declarations
 extern template class NegabinaryStage<int8_t,  uint8_t>;
 extern template class NegabinaryStage<int16_t, uint16_t>;
 extern template class NegabinaryStage<int32_t, uint32_t>;

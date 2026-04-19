@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file diff.h
+ * @brief First-order difference coding stage with optional negabinary fusion.
+ */
+
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include <cuda_runtime.h>
@@ -75,6 +80,7 @@ public:
         const std::vector<size_t>& sizes
     ) override;
 
+
     std::string getName() const override { return "Difference"; }
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
@@ -99,6 +105,10 @@ public:
     uint8_t getOutputDataType(size_t output_index) const override {
         (void)output_index;
         return static_cast<uint8_t>(getOutDataTypeEnum());
+    }
+
+    uint8_t getInputDataType(size_t /*input_index*/) const override {
+        return static_cast<uint8_t>(getInDataTypeEnum());
     }
 
     size_t serializeHeader(size_t output_index, uint8_t* buf, size_t max_size) const override {
@@ -142,6 +152,7 @@ private:
     bool   is_inverse_;
     size_t chunk_size_;
     size_t saved_chunk_size_ = 0;
+
 
     DataType getInDataTypeEnum() const {
         if (std::is_same_v<T, uint8_t>)  return DataType::UINT8;

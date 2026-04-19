@@ -1,5 +1,6 @@
 #pragma once
 
+#include "fzm_format.h"
 #include <array>
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -14,23 +15,21 @@ namespace fz {
 class MemoryPool;
 
 /**
- * Base class for compression/decompression stages
- * 
- * Each stage represents a single transformation in the pipeline
- * (e.g. Lorenzo predictor, RLE encoder, bitpacking)
+ * Base class for all compression/decompression stages.
+ *
+ * A stage is a single transformation in the pipeline (e.g. Lorenzo predictor,
+ * RLE encoder, bitshuffle).  The pipeline interacts with stages exclusively
+ * through this interface — no downcasting or type-name branching anywhere in
+ * the pipeline or DAG code.
+ *
+ * @note Thread Safety: Stage instances are not thread-safe. Each pipeline
+ * (and its stages) must be used from a single host thread.
  */
 class Stage {
 public:
     virtual ~Stage() = default;
-    
-    /**
-     * Execute the stage
-     * 
-     * @param stream CUDA stream for execution
-     * @param inputs Array of input device pointers
-     * @param outputs Array of output device pointers
-     * @param sizes Array of buffer sizes (input/output)
-     */
+
+    /** Execute the stage. Inputs, outputs, and sizes are device pointers/bytes. */
     virtual void execute(
         cudaStream_t stream,
         MemoryPool* pool,
@@ -38,93 +37,55 @@ public:
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) = 0;
-    
-    /**
-     * Get stage name for debugging
-     */
+
+    /** Human-readable name used in error messages and debug output. */
     virtual std::string getName() const = 0;
-    
-    /**
-     * Get expected number of input buffers
-     */
-    virtual size_t getNumInputs() const = 0;
-    
-    /**
-     * Get expected number of output buffers
-     */
+
+    virtual size_t getNumInputs()  const = 0;
     virtual size_t getNumOutputs() const = 0;
 
     /**
-     * Minimum input size alignment in bytes required by this stage.
-     * Chunked stages return their chunk size; the Pipeline uses the LCM of all
+     * Minimum input size alignment in bytes.
+     * Chunked stages return their chunk size; the pipeline uses the LCM of all
      * stage alignments at finalize() to transparently zero-pad the input.
      * Default: 1 (no alignment requirement).
      */
     virtual size_t getRequiredInputAlignment() const { return 1; }
 
     /**
-     * Get names of all outputs (in order)
-     * 
-     * For stages with multiple outputs (e.g., Lorenzo predictor):
-     * - Output 0: "codes"
-     * - Output 1: "outliers"
-     * 
-     * Default: Single unnamed output
+     * Output port names in order. Default: single port named "output".
+     * Multi-output stages (e.g. Lorenzo: "codes", "outliers") override this.
      */
     virtual std::vector<std::string> getOutputNames() const {
-        return {"output"};  // Default single output
+        return {"output"};
     }
-    
-    /**
-     * Get index of named output
-     * 
-     * @param name Output name
-     * @return Output index, or -1 if not found
-     */
+
+    /** Returns the index of a named output port, or -1 if not found. */
     int getOutputIndex(const std::string& name) const {
         auto names = getOutputNames();
         for (size_t i = 0; i < names.size(); i++) {
-            if (names[i] == name) {
-                return static_cast<int>(i);
-            }
+            if (names[i] == name) return static_cast<int>(i);
         }
         return -1;
     }
-    
+
     /**
-     * Estimate output size given input size
-     * Used for buffer allocation planning in PREALLOCATE mode
-     * 
-     * @param input_sizes Sizes of input buffers
-     * @return Estimated sizes of output buffers
-     * 
-     * Examples:
-     * - Lorenzo: 120% of input (codes + ~20% outliers)
-     * - Difference: 100% of input (same size)
-     * - Bitpacking: Conservative estimate or soft-run needed
+     * Estimate output buffer sizes given input sizes.
+     * Used for buffer allocation planning in PREALLOCATE mode — must be
+     * a safe upper bound; under-estimation causes buffer overruns.
      */
     virtual std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const = 0;
-    
-    /**
-     * Get actual output sizes after execution (by name)
-     * Used for dynamic buffer sizing in MINIMAL mode
-     *
-     * @return Map of output_name -> actual size written
-     */
+
+    /** Actual output sizes after execute(), keyed by output port name. */
     virtual std::unordered_map<std::string, size_t> getActualOutputSizesByName() const = 0;
 
     /**
-     * Get actual size of a single output by index after execution (§6).
-     *
-     * Index-based accessor used by the DAG execute() inner loop to propagate
-     * actual output sizes downstream without constructing an unordered_map.
-     * Returns 0 if the index is out of range or the stage has not yet executed.
-     *
-     * Default implementation delegates to getActualOutputSizesByName() for
-     * backward compatibility.  Stages should override this to return directly
-     * from their internal size tracking (a single field lookup).
+     * Actual size of a single output by index after execute().
+     * Avoids constructing the map for the common single-output case.
+     * Default delegates to getActualOutputSizesByName(); override to return
+     * directly from an internal field.
      */
     virtual size_t getActualOutputSize(int index) const {
         auto names = getOutputNames();
@@ -133,192 +94,100 @@ public:
         auto it = m.find(names[index]);
         return (it != m.end()) ? it->second : 0;
     }
-    
-    // ===== Decompression Support =====
-    
+
     /**
-     * Set inverse mode for decompression
-     * 
-     * When true, the stage performs the inverse operation:
-     * - Lorenzo: Reconstruction instead of prediction
-     * - Difference: Cumulative sum instead of differencing
-     * - RLE: Expansion instead of encoding
-     * 
-     * This affects getNumInputs() and getNumOutputs() for stages
-     * with asymmetric input/output counts.
-     * 
-     * @param inverse True for decompression, false for compression
+     * Switch between forward (compression) and inverse (decompression) mode.
+     * Affects getNumInputs()/getNumOutputs() for stages with asymmetric port counts.
      */
-    virtual void setInverse(bool inverse) {
-        (void)inverse;
-        // Stages that support bidirectional operation should override this
-    }
-    
-    /**
-     * Check if stage is in inverse mode
-     * 
-     * @return True if stage is configured for decompression
-     */
-    virtual bool isInverse() const {
-        return false;  // Default: compression mode
-    }
-    
-    /**
-     * Get stage type ID for file format
-     * Used to identify which stage produced a buffer during decompression
-     * 
-     * @return Stage type enum from fzm_format.h
-     */
+    virtual void setInverse(bool inverse) { (void)inverse; }
+    virtual bool isInverse() const { return false; }
+
+    /** Stage type identifier written into the FZM file header. */
     virtual uint16_t getStageTypeId() const = 0;
-    
-    /**
-     * Get data type for a specific output
-     * 
-     * @param output_index Index of output buffer
-     * @return Data type enum from fzm_format.h
-     */
+
+    /** DataType enum of the given output port. */
     virtual uint8_t getOutputDataType(size_t output_index) const = 0;
-    
+
     /**
-     * Serialize stage-specific configuration for decompression
-     * 
-     * Each stage defines its own config structure (e.g., LorenzoConfig in lorenzo.h)
-     * and serializes it into the provided buffer. The DAG/Pipeline doesn't need to
-     * know the specific structure - it just passes the buffer to serializeHeader().
-     * 
-     * Architecture:
-     * - Stage defines XxxConfig struct in its own header file
-     * - Stage implements serializeHeader() to write config to buffer
-     * - Config written into FZMBufferEntry.stage_config[128] in the file header
-     * 
-     * Examples:
-     * - Lorenzo: Writes LorenzoConfig (error_bound, quant_radius, outlier_count)
-     * - Difference: Writes DifferenceConfig (element_type)
-     * 
-     * @param output_index Which output to write header for (stages may have different headers per output)
-     * @param header_buffer Host buffer to write config data to (size >= 128 bytes)
-     * @param max_size Maximum size available in header_buffer (typically 128)
-     * @return Number of bytes written (must be <= 128)
-     * 
-     * Note: Return 0 if stage has no additional config data (default)
+     * Expected DataType of the given input port.
+     *
+     * Used by Pipeline::finalize() to detect type mismatches between connected
+     * stages before any execution.  Return DataType::UNKNOWN to opt out of
+     * checking — byte-transparent stages (Bitshuffle, RZE) and mock stages
+     * must return UNKNOWN; finalize() skips any connection where either side
+     * is UNKNOWN.
+     */
+    virtual uint8_t getInputDataType(size_t /*input_index*/) const {
+        return static_cast<uint8_t>(DataType::UNKNOWN);
+    }
+
+    /**
+     * Serialize stage config into header_buffer (max 128 bytes) for the FZM file.
+     * Return the number of bytes written, or 0 if the stage has no config.
      */
     virtual size_t serializeHeader(size_t output_index, uint8_t* header_buffer, size_t max_size) const {
-        (void)output_index;
-        (void)header_buffer;
-        (void)max_size;
-        return 0;  // Default: no stage-specific header
+        (void)output_index; (void)header_buffer; (void)max_size;
+        return 0;
     }
-    
-    /**
-     * Deserialize stage-specific configuration from buffer
-     * 
-     * Called during decompression to restore stage configuration from file header.
-     * Each stage reads its own XxxConfig structure and updates internal state.
-     * 
-     * @param header_buffer Buffer containing serialized config (from FZMBufferEntry.stage_config)
-     * @param size Size of config data (from FZMBufferEntry.config_size)
-     * 
-     * Note: Default no-op if stage has no config to read
-     */
+
+    /** Restore stage config from header_buffer during decompression. */
     virtual void deserializeHeader(const uint8_t* header_buffer, size_t size) {
-        (void)header_buffer;
-        (void)size;
-        // Default: no config to deserialize
+        (void)header_buffer; (void)size;
     }
 
     /**
-     * Save the current configuration state of the stage.
-     * Called before a decompression pass so that any configuration overwritten by
-     * deserializeHeader() can be restored afterward.
+     * Save/restore config state around a decompression pass.
+     * deserializeHeader() overwrites the stage's forward-pass config; saveState()
+     * is called before and restoreState() after so the stage returns to its
+     * original configuration.
      */
-    virtual void saveState() {}
-
-    /**
-     * Restore the configuration state of the stage.
-     * Called after a decompression pass to reset the stage to its original
-     * forward-pass configuration.
-     */
+    virtual void saveState()    {}
     virtual void restoreState() {}
 
     /**
-     * Called once by Pipeline::finalize() after all stages are connected and
-     * before the first compress/decompress execution.  Gives stages a chance
-     * to update their internal dimensionality — useful when setDims() is
-     * called on the Pipeline after stages are already constructed.
-     *
-     * The default implementation is a no-op.  Stages that depend on spatial
-     * dimensions (e.g. LorenzoStage) should override this and update their
-     * internal config so the correct kernel variant is selected at execute().
-     *
-     * @param dims  {x, y, z} extents of the dataset (z==1 → 2-D; y==z==1 → 1-D)
+     * Called once by Pipeline::finalize() so stages can react to the dataset
+     * dimensions set via Pipeline::setDims() after construction.
+     * @param dims  {x, y, z} extents (z==1 → 2-D; y==z==1 → 1-D)
      */
     virtual void setDims(const std::array<size_t, 3>& dims) { (void)dims; }
 
     /**
-     * Called once by Pipeline::compress() after dag->execute() and the stream
-     * has been fully synchronized.
-     *
-     * Stages that need to transfer device-side results back to the host
-     * (e.g. Lorenzo's actual outlier count) should do so here rather than
-     * blocking mid-pipeline inside execute(). The stream is already idle when
-     * this is called, so a plain cudaMemcpy (no async) is safe and cheap.
-     *
-     * Default: no-op.
+     * Called after dag->execute() and stream sync, before compress() returns.
+     * Use for D2H transfers that must not block mid-pipeline (e.g. Lorenzo's
+     * outlier count readback).  The stream is already idle so a plain
+     * cudaMemcpy is safe here.
      */
     virtual void postStreamSync(cudaStream_t stream) { (void)stream; }
 
-    /**
-     * Estimate maximum header size for buffer allocation
-     *
-     * @param output_index Which output to estimate for
-     * @return Maximum bytes needed for this stage's header
-     */
+    /** Maximum bytes this stage writes into its per-output FZM header slot. */
     virtual size_t getMaxHeaderSize(size_t output_index) const {
         (void)output_index;
-        return 0;  // Default: no header
+        return 0;
     }
 
     /**
-     * Declare whether this stage is safe to use inside a CUDA Graph capture.
+     * Whether this stage is safe inside a CUDA Graph capture.
      *
-     * A stage is graph-compatible if its execute() method enqueues only
-     * device-side work (kernel launches, cudaMemcpyAsync D2D/H2D) and makes
-     * no host-synchronous calls (no cudaMemcpy D2H, no cudaStreamSynchronize,
-     * no dynamic allocation decisions based on device data).  Such a stage can
-     * be recorded into a CUDA Graph and replayed without CPU intervention.
+     * A stage is graph-compatible if execute() enqueues only device-side work
+     * (kernel launches, cudaMemcpyAsync D2D/H2D) and makes no host-synchronous
+     * calls.  Override and return false if execute() contains D2H copies or
+     * dynamic decisions based on device data — the DAG will throw at
+     * setCaptureMode(true) time rather than producing a broken graph.
      *
-     * Override and return false if your stage's execute() contains any
-     * host-synchronous CUDA calls.  The DAG will throw at setCaptureMode(true)
-     * time rather than silently producing a broken or incomplete graph.
-     *
-     * Default: true (most forward-path stages are graph-compatible).
-     * Stages known to be incompatible (e.g. RZE inverse) should return false.
+     * Default: true. Inverse-mode stages that do D2H reads (e.g. RZE inverse)
+     * must return false.
      */
     virtual bool isGraphCompatible() const { return true; }
 
     /**
-     * Estimate internal scratch memory this stage will allocate from the pool.
+     * Peak persistent scratch bytes this stage holds in the MemoryPool.
      *
-     * Stages that keep persistent device-side scratch (e.g. RZEStage's
-     * per-chunk work arrays) should override this so that
-     * CompressionDAG::computeTopoPoolSize() can account for those bytes when
-     * sizing the release threshold.
-     *
-     * Only report allocations that are:
-     *   - Drawn from the MemoryPool (not bare cudaMalloc)
-     *   - Persistent across calls (not freed within execute())
-     *
-     * Transient scratch that is allocated and freed inside a single execute()
-     * call is already accounted for by the pool's own high-water mark and
-     * should NOT be included here.
-     *
-     * @param input_sizes  Sizes of the stage's input buffers (same order as
-     *                     the input_buffer_ids vector for this node in the DAG)
-     * @return             Peak bytes held simultaneously in persistent scratch
+     * Only count allocations that are drawn from the pool and kept alive across
+     * execute() calls.  Transient scratch freed within execute() is already
+     * captured by the pool's high-water mark and must not be included.
+     * Used by CompressionDAG::computeTopoPoolSize() to size the release threshold.
      */
-    virtual size_t estimateScratchBytes(
-        const std::vector<size_t>& input_sizes
-    ) const {
+    virtual size_t estimateScratchBytes(const std::vector<size_t>& input_sizes) const {
         (void)input_sizes;
         return 0;
     }

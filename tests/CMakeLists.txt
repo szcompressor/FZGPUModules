@@ -1,23 +1,54 @@
 ###############################################################################
 # tests/CMakeLists.txt
 #
-# One executable per test file.  Each target:
-#   - links the relevant FZGPUModules library + GTest::gtest_main
-#   - is registered with CTest via add_test()
+# Test suite root.  Tests are grouped by scope into subdirectories:
 #
-# Run all tests:
-#   cmake --build build --target all
+#   stages/    — individual stage unit tests (encoders, predictors, transforms)
+#   pipeline/  — pipeline-level integration tests (DAG, memory, file I/O, etc.)
+#   test_cli.cpp — top-level CLI smoke test (no subdirectory; depends on full lib)
+#
+# Quick-start via CMake presets (see CMakePresets.json in repo root):
+#
+#   cmake --preset release && cmake --build --preset release
+#   ctest --preset default           # all tests, release build
+#   ctest --preset stages            # stage unit tests only
+#   ctest --preset pipeline          # pipeline integration tests only
+#   ctest --preset asan              # full suite, ASan + UBSan
+#   ctest --preset compute-san       # full suite, compute-sanitizer memcheck
+#
+# Without presets:
+#   cmake -B build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build build
 #   ctest --test-dir build --output-on-failure
+#   ctest --test-dir build -L stages --output-on-failure
+#   ctest --test-dir build -L pipeline --output-on-failure
 ###############################################################################
 
-# Shared include path for test helpers
-set(FZ_TEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+# Tests include "helpers/fz_test_utils.h" relative to this directory.
+# Set to CMAKE_CURRENT_SOURCE_DIR (tests/) so the "helpers/" prefix resolves.
+set(FZ_TEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
+set(FZ_TEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ─── Compute Sanitizer wrapper ────────────────────────────────────────────────
+# When ON, every test executable gets CROSSCOMPILING_EMULATOR set to
+# "compute-sanitizer --tool memcheck --error-exitcode 1" so that ctest
+# automatically wraps each test invocation.  Enabled by the compute-san
+# CMakePreset (cacheVariable FZGMOD_COMPUTE_SANITIZER_WRAPPER=ON).
+#
+# Requires compute-sanitizer to be on PATH at test time.
+option(FZGMOD_COMPUTE_SANITIZER_WRAPPER
+    "Wrap each test with 'compute-sanitizer --tool memcheck' via CROSSCOMPILING_EMULATOR"
+    OFF
+)
 
 # ─── helper function ──────────────────────────────────────────────────────────
-# fz_add_test(NAME <name> SOURCES <file...> LIBS <target...>)
+# fz_add_test(NAME <name> SOURCES <file...> LIBS <target...> LABELS <label...>)
 #   Creates an executable, links deps, registers with CTest.
+#   LABELS is optional; values are attached to the CTest test so -L / --preset
+#   filters work (e.g. LABELS stages gpu, LABELS pipeline gpu).
+#   Defined here so subdirectory CMakeLists files can use it.
 function(fz_add_test)
-    cmake_parse_arguments(ARG "" "NAME" "SOURCES;LIBS" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME" "SOURCES;LIBS;LABELS" ${ARGN})
 
     add_executable(${ARG_NAME} ${ARG_SOURCES})
 
@@ -30,148 +61,47 @@ function(fz_add_test)
             CUDA::cudart
     )
 
-    # Reuse the same compile settings (C++17, CUDA arch flags, etc.)
     target_link_libraries(${ARG_NAME} PRIVATE fzgmod_compile_settings)
+
+    # Wrap each test invocation with compute-sanitizer when requested.
+    # CTest reads CROSSCOMPILING_EMULATOR from the target and prepends it to the
+    # test command in CTestTestfile.cmake — no changes to individual test files needed.
+    if(FZGMOD_COMPUTE_SANITIZER_WRAPPER)
+        set_target_properties(${ARG_NAME} PROPERTIES
+            CROSSCOMPILING_EMULATOR
+                "compute-sanitizer;--tool;memcheck;--error-exitcode;1"
+        )
+    endif()
 
     add_test(NAME ${ARG_NAME} COMMAND ${ARG_NAME})
 
     set(FZ_TEST_ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
     list(APPEND FZ_TEST_ENVIRONMENT "CUDA_MODULE_LOADING=${FZGMOD_CUDA_MODULE_LOADING_VALUE}")
 
-    # Allow tests to find CUDA device at runtime
     set_tests_properties(${ARG_NAME} PROPERTIES
         ENVIRONMENT "${FZ_TEST_ENVIRONMENT}"
+        LABELS      "${ARG_LABELS}"
     )
 endfunction()
 
-# ─── Difference encoder ───────────────────────────────────────────────────────
-fz_add_test(
-    NAME    test_difference
-    SOURCES test_difference.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
-)
+# ─── Test scaffold stages (PassThrough, Scale, Split, Merge) ─────────────────
+# Header-only except for ScaleStage, which has a CUDA kernel.
+# Build as a small object library so any test or dev example can link it.
+add_library(fz_test_stages OBJECT helpers/test_stages.cu)
+target_include_directories(fz_test_stages PUBLIC ${FZ_TEST_INCLUDE_DIR})
+target_link_libraries(fz_test_stages PUBLIC fzgmod CUDA::cudart)
+target_link_libraries(fz_test_stages PRIVATE fzgmod_compile_settings)
 
-# ─── RLE encoder ──────────────────────────────────────────────────────────────
-fz_add_test(
-    NAME    test_rle
-    SOURCES test_rle.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
-)
+# ─── Stage unit tests ─────────────────────────────────────────────────────────
+add_subdirectory(stages)
 
-# ─── Lorenzo predictor ────────────────────────────────────────────────────────
-fz_add_test(
-    NAME    test_lorenzo
-    SOURCES test_lorenzo.cpp
-    LIBS    fzgmod_predictors fzgmod_mem fzgmod
-)
+# ─── Pipeline integration tests ───────────────────────────────────────────────
+add_subdirectory(pipeline)
 
-# ─── Quantizer predictor (ABS / NOA / REL error-bound modes) ─────────────────
+# ─── CLI smoke tests ──────────────────────────────────────────────────────────
 fz_add_test(
-    NAME    test_quantizer
-    SOURCES test_quantizer.cpp
-    LIBS    fzgmod_predictors fzgmod_mem fzgmod
-)
-
-# ─── Full pipeline (compress + decompress) ────────────────────────────────────
-fz_add_test(
-    NAME    test_pipeline
-    SOURCES test_pipeline.cpp
+    NAME    test_cli
+    SOURCES test_cli.cpp
     LIBS    fzgmod
-)
-
-# ─── Memory strategy comparison (MINIMAL / PIPELINE / PREALLOCATE) ────────────
-fz_add_test(
-    NAME    test_memory_strategies
-    SOURCES test_memory_strategies.cpp
-    LIBS    fzgmod
-)
-
-# ─── Pipeline error-handling / invalid-usage guards ───────────────────────────
-fz_add_test(
-    NAME    test_pipeline_errors
-    SOURCES test_pipeline_errors.cpp
-    LIBS    fzgmod
-)
-
-# ─── Data pattern correctness (corner-case inputs) ───────────────────────────
-fz_add_test(
-    NAME    test_data_patterns
-    SOURCES test_data_patterns.cpp
-    LIBS    fzgmod
-)
-
-# ─── File I/O + FZM header format ─────────────────────────────────────────────
-fz_add_test(
-    NAME    test_file_io
-    SOURCES test_file_io.cpp
-    LIBS    fzgmod
-)
-
-# ─── Zigzag / TCMS transform utilities (host-side) ───────────────────────────
-fz_add_test(
-    NAME    test_zigzag
-    SOURCES test_zigzag.cpp
-    LIBS    fzgmod_compile_settings
-)
-
-# ─── Negabinary transform utilities (host-side) ───────────────────────────────
-fz_add_test(
-    NAME    test_negabinary
-    SOURCES test_negabinary.cpp
-    LIBS    fzgmod_compile_settings
-)
-
-# ─── ZigzagStage GPU round-trip ───────────────────────────────────────────────
-fz_add_test(
-    NAME    test_zigzag_stage
-    SOURCES test_zigzag_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
-)
-
-# ─── NegabinaryStage GPU round-trip ──────────────────────────────────────────
-fz_add_test(
-    NAME    test_negabinary_stage
-    SOURCES test_negabinary_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
-)
-
-# ─── BitshuffleStage GPU round-trip ──────────────────────────────────────────
-fz_add_test(
-    NAME    test_bitshuffle_stage
-    SOURCES test_bitshuffle_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem fzgmod
-)
-# ─── RZEStage GPU round-trip ─────────────────────────────────────────────────
-fz_add_test(
-    NAME    test_rze_stage
-    SOURCES test_rze_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem fzgmod
-)
-
-# ─── Buffer coloring (PREALLOCATE memory reduction) ───────────────────────────
-fz_add_test(
-    NAME    test_buffer_coloring
-    SOURCES test_buffer_coloring.cpp
-    LIBS    fzgmod
-)
-
-# ─── Pointer ownership and lifetime semantics ─────────────────────────────────
-fz_add_test(
-    NAME    test_ownership
-    SOURCES test_ownership.cpp
-    LIBS    fzgmod
-)
-
-# ─── CUDA Graph capture correctness and replay ────────────────────────────────
-fz_add_test(
-    NAME    test_graph_capture
-    SOURCES test_graph_capture.cpp
-    LIBS    fzgmod
-)
-
-# ─── Buffer liveness analysis and level structure ─────────────────────────────
-fz_add_test(
-    NAME    test_liveness
-    SOURCES test_liveness.cpp
-    LIBS    fzgmod
+    LABELS  cli gpu
 )

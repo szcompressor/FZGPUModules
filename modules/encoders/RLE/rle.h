@@ -1,7 +1,13 @@
 #pragma once
 
+/**
+ * @file rle.h
+ * @brief Run-Length Encoding stage (lossless, stream-ordered).
+ */
+
 #include "stage/stage.h"
 #include "fzm_format.h"
+#include "log.h"
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstring>
@@ -10,22 +16,16 @@
 namespace fz {
 
 /**
- * Run-Length Encoding (RLE) stage
- * 
- * Forward (compression): Encodes consecutive identical values as (value, run_length) pairs
- *   Format: [num_runs (uint32_t)] [value1, count1, value2, count2, ...]
- *   Example: [1,1,1,2,2,3] → [3] [1,3, 2,2, 3,1]
- * 
- * Inverse (decompression): Expands (value, run_length) pairs back to original sequence
- *   Example: [3] [1,3, 2,2, 3,1] → [1,1,1,2,2,3]
- * 
- * This is a lossless encoding particularly effective for data with long runs
- * of identical values (e.g., quantized codes with many repeated values).
- * 
- * Template parameter T determines value data type (uint16_t, uint32_t, etc.)
- * Run counts are always stored as uint32_t.
- * 
- * Note: For data with no repetition, RLE can increase size (worst case: 2x + 4 bytes)
+ * Run-Length Encoding stage. Lossless; effective when data has long runs of
+ * identical values (e.g. quantized codes).
+ *
+ * Forward wire format: `[num_runs:u32][values:T×n (4B-aligned)][lengths:u32×n]`
+ *
+ * Worst-case output is 2× input + 4 bytes (no repeated values), so RLE should
+ * follow a predictor/quantizer stage that creates repetition.
+ *
+ * @tparam T  Element type (`uint8_t`, `uint16_t`, `uint32_t`, …). Run counts
+ *            are always `uint32_t`.
  */
 template<typename T = uint16_t>
 class RLEStage : public Stage {
@@ -33,10 +33,6 @@ public:
     RLEStage() : is_inverse_(false) {}
     ~RLEStage() override;
 
-    /**
-     * Set inverse mode for decompression
-     * When true, performs run expansion instead of run encoding
-     */
     void setInverse(bool inverse) override { is_inverse_ = inverse; }
     bool isInverse() const override { return is_inverse_; }
 
@@ -90,10 +86,15 @@ public:
                 return {static_cast<size_t>(cached_num_elements_) * sizeof(T)};
             return {input_sizes[0] * 2};
         } else {
-            // Compression: worst case is every element is unique
-            // Format: sizeof(uint32_t) + n * (sizeof(T) + sizeof(uint32_t))
+            // Compression: worst case is every element is unique.
+            // Wire format: [num_runs:u32][values:T×n, 4B-aligned][lengths:u32×n]
+            // The values section is padded to a 4-byte boundary (matching
+            // rle_pack_kernel), so the estimate must include that padding or
+            // the allocated buffer will be too small and the lengths write OOBs.
             size_t n = input_sizes[0] / sizeof(T);
-            return {sizeof(uint32_t) + n * (sizeof(T) + sizeof(uint32_t))};
+            size_t values_bytes   = n * sizeof(T);
+            size_t values_aligned = (values_bytes + 3u) & ~3u;
+            return {sizeof(uint32_t) + values_aligned + n * sizeof(uint32_t)};
         }
     }
     
@@ -112,6 +113,10 @@ public:
     
     uint8_t getOutputDataType(size_t output_index) const override {
         (void)output_index;
+        return static_cast<uint8_t>(getDataTypeEnum());
+    }
+
+    uint8_t getInputDataType(size_t /*input_index*/) const override {
         return static_cast<uint8_t>(getDataTypeEnum());
     }
     
@@ -138,32 +143,29 @@ public:
 private:
     bool is_inverse_;
 
-    // Cached original element count from the most recent forward pass.
-    // Set during forward execute(); persisted in the serialized header so that
-    // inverse estimateOutputSizes() returns an exact bound even for cold
-    // decompression reconstructed from a file.
+    /// Cached original element count from the most recent forward pass.
+    /// Persisted in the serialized header so inverse `estimateOutputSizes()`
+    /// returns an exact bound even for cold decompression from file.
     uint32_t cached_num_elements_ = 0;
 
     // ── Persistent forward-path scratch ──────────────────────────────────────
     // Allocated lazily on the first forward execute(); grown if n increases.
-    // All device arrays are allocated from the pool when one is available,
-    // otherwise via cudaMalloc (tracked by fwd_from_pool_).
-    uint8_t*  d_is_boundary_      = nullptr;
-    uint32_t* d_boundary_scan_    = nullptr;
-    uint32_t* d_boundary_positions_ = nullptr;  // worst-case n elements
-    T*        d_values_scratch_   = nullptr;
-    uint32_t* d_lengths_scratch_  = nullptr;
-    size_t    fwd_scratch_n_      = 0;           // current capacity (elements)
-    MemoryPool* fwd_scratch_pool_ = nullptr;
-    bool      fwd_from_pool_      = false;
+    uint8_t*    d_is_boundary_        = nullptr;
+    uint32_t*   d_boundary_scan_      = nullptr;
+    uint32_t*   d_boundary_positions_ = nullptr; ///< Worst-case n elements.
+    T*          d_values_scratch_     = nullptr;
+    uint32_t*   d_lengths_scratch_    = nullptr;
+    size_t      fwd_scratch_n_        = 0;        ///< Current scratch capacity (elements).
+    MemoryPool* fwd_scratch_pool_     = nullptr;
+    bool        fwd_from_pool_        = false;
 
     // Pinned host buffer for async D2H of num_runs.
     // mutable so getActualOutputSizesByName() can complete the pending
     // readback even when called on a const Stage reference.
-    mutable uint32_t*    h_num_runs_       = nullptr;
-    mutable bool         fwd_sync_pending_ = false;
-    mutable cudaStream_t fwd_last_stream_  = nullptr;
-    mutable std::vector<size_t> actual_output_sizes_;  // promoted to mutable
+    mutable uint32_t*           h_num_runs_          = nullptr;
+    mutable bool                fwd_sync_pending_    = false;
+    mutable cudaStream_t        fwd_last_stream_     = nullptr;
+    mutable std::vector<size_t> actual_output_sizes_;
 
     // Complete a pending forward-path readback (if any) by syncing the stream
     // that was used and computing actual_output_sizes_.  Safe to call from
@@ -178,6 +180,14 @@ private:
             sizeof(uint32_t) + values_aligned + num_runs * sizeof(uint32_t)
         };
         fwd_sync_pending_ = false;
+        // Log run count and effective compression ratio.
+        const size_t in_bytes  = static_cast<size_t>(cached_num_elements_) * sizeof(T);
+        const size_t out_bytes = actual_output_sizes_[0];
+        const float  ratio     = in_bytes > 0
+            ? static_cast<float>(in_bytes) / static_cast<float>(out_bytes) : 0.0f;
+        FZ_LOG(DEBUG, "RLE encode: %u runs / %u elems  %.1f KB -> %.1f KB  ratio %.2fx",
+               num_runs, cached_num_elements_,
+               in_bytes / 1024.0f, out_bytes / 1024.0f, ratio);
     }
 
     // Helper to map template type T to DataType enum
@@ -196,7 +206,6 @@ private:
     }
 };
 
-// Explicit instantiations for common types
 extern template class RLEStage<uint8_t>;
 extern template class RLEStage<uint16_t>;
 extern template class RLEStage<uint32_t>;

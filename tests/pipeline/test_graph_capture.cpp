@@ -47,7 +47,7 @@ static std::unique_ptr<Pipeline> make_graph_pipeline(size_t in_bytes, bool disab
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
-    if (disable_coloring) p->disableColoring(true);
+    if (disable_coloring) p->setColoringEnabled(false);
     p->enableGraphMode(true);
     p->finalize();
     return p;
@@ -388,7 +388,7 @@ TEST(GraphCapture, ColoringDisabledCorrectOutput) {
     stream.sync();
 
     auto p = make_graph_pipeline(in_bytes, /*disable_coloring=*/true);
-    EXPECT_FALSE(p->isColoringApplied())
+    EXPECT_FALSE(p->isColoringEnabled())
         << "GC10: coloring should be disabled";
 
     p->captureGraph(stream);

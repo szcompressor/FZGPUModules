@@ -45,10 +45,10 @@ TEST(FZMFormat, BufferEntrySize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// H3: sizeof(FZMHeaderCore) == 72
+// H3: sizeof(FZMHeaderCore) == 80 (grew from 72 in v3.1: +flags +data_checksum +header_checksum)
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(FZMFormat, HeaderCoreSize) {
-    EXPECT_EQ(sizeof(FZMHeaderCore), 72u);
+    EXPECT_EQ(sizeof(FZMHeaderCore), 80u);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,6 +64,12 @@ TEST(FZMFormat, HeaderCoreMagic) {
 // F2: Lorenzo → Difference pipeline: writeToFile → decompressFromFile
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(FileIO, LorenzoDiffRoundTrip) {
+    // Wrap in a nested scope so that stream/pipeline/pool destructors all fire
+    // before the final cudaDeviceSynchronize().  Under compute-sanitizer the
+    // CUB DeviceScan used by DifferenceStage inverse leaves deferred
+    // instrumentation work; syncing after all destructors ensures that work
+    // completes before the next test allocates from the device pool.
+    {
     CudaStream stream;
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
@@ -96,6 +102,7 @@ TEST(FileIO, LorenzoDiffRoundTrip) {
     void*  d_dec = nullptr;
     size_t dec_sz = 0;
     Pipeline::decompressFromFile(tmp, &d_dec, &dec_sz, stream);
+    stream.sync();
 
     ASSERT_NE(d_dec, nullptr);
     EXPECT_EQ(dec_sz, in_bytes);
@@ -109,6 +116,10 @@ TEST(FileIO, LorenzoDiffRoundTrip) {
         << "Lorenzo+Diff file round-trip max_err=" << max_err;
 
     std::remove(tmp.c_str());
+    }  // stream, pipeline, pool all destroyed here
+    // Flush any compute-sanitizer deferred work from the CUB-scan-based
+    // DifferenceStage inverse path before the next test starts.
+    cudaDeviceSynchronize();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,15 +359,20 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
         pipeline.writeToFile(tmp, stream);
     }
 
-    // Patch byte[4] (low byte of uint16_t version = minor) to a non-zero value.
-    // This gives minor=0x01 while major stays 0x03 → minor mismatch → warn only.
-    make_corrupt_file(tmp, 4, 0x01);
+    // Patch byte[4] (low byte of uint16_t version = minor) to a value that
+    // differs from FZM_VERSION_MINOR (currently 0x01).
+    // Using 0x02 gives minor=0x02, major=0x03 → minor mismatch → warn only.
+    // Note: corrupting the version byte also invalidates the header checksum,
+    // but readHeader() skips header-checksum verification on minor mismatches.
+    make_corrupt_file(tmp, 4, 0x02);
 
     void*  d_out  = nullptr;
     size_t out_sz = 0;
     ASSERT_NO_THROW(
         Pipeline::decompressFromFile(tmp, &d_out, &out_sz)
     ) << "Wrong minor version should NOT throw";
+    // Flush compute-sanitizer's stream post-processing before the next test.
+    cudaDeviceSynchronize();
 
     // Output should still be valid and correctly sized.
     ASSERT_NE(d_out, nullptr);
@@ -384,6 +400,7 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
 //       the order in which sources appear in the output.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(FileIO, MultiSourceRoundTripThroughFile) {
+    cudaDeviceSynchronize();  // Flush any stream-0 work from prior tests
     CudaStream stream;
     constexpr size_t N  = 1 << 12;   // 4 K floats per source
     constexpr float  EB = 1e-2f;
@@ -435,6 +452,10 @@ TEST(FileIO, MultiSourceRoundTripThroughFile) {
         << "source_uncompressed_sizes[1] must equal in_bytes";
 
     // ── (b) Decompress from file and verify correctness ──────────────────────
+    // Extra sync: under compute-sanitizer, pool-destroy shadow-memory writes
+    // from the preceding test may still be in flight; flush them here so they
+    // cannot corrupt the d_compressed buffer we are about to allocate.
+    cudaDeviceSynchronize();
     void*  d_out  = nullptr;
     size_t out_sz = 0;
     ASSERT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_out, &out_sz, stream))
@@ -779,5 +800,260 @@ TEST(FileIO, DecompressEmptyFileThrows) {
     );
 
     if (d_out) cudaFree(d_out);
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CK1: Written FZM file has both checksum flags set and non-zero checksums
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, WrittenFileHasChecksums) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_checksums.fzm";
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    void*  d_comp = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    pipeline.writeToFile(tmp, stream);
+
+    auto hdr = Pipeline::readHeader(tmp);
+
+    EXPECT_TRUE(hdr.core.flags & FZM_FLAG_HAS_DATA_CHECKSUM)
+        << "FZM_FLAG_HAS_DATA_CHECKSUM must be set in written file";
+    EXPECT_TRUE(hdr.core.flags & FZM_FLAG_HAS_HEADER_CHECKSUM)
+        << "FZM_FLAG_HAS_HEADER_CHECKSUM must be set in written file";
+    EXPECT_NE(hdr.core.data_checksum,   0u) << "data_checksum must be non-zero";
+    EXPECT_NE(hdr.core.header_checksum, 0u) << "header_checksum must be non-zero";
+
+    // Round-trip still works (checksums pass verification)
+    void*  d_dec = nullptr;
+    size_t dec_sz = 0;
+    EXPECT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_dec, &dec_sz, stream));
+    if (d_dec) cudaFree(d_dec);
+
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CK2: Corrupted compressed data payload → decompressFromFile throws with
+//      a checksum error (not a silent bad decompression result).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, CorruptedDataPayloadThrows) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 12;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_corrupt_data.fzm";
+
+    {
+        Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+        auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+        lrz->setErrorBound(EB);
+        lrz->setQuantRadius(512);
+        lrz->setOutlierCapacity(0.2f);
+        pipeline.finalize();
+
+        void*  d_comp = nullptr;
+        size_t comp_sz = 0;
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        pipeline.writeToFile(tmp, stream);
+    }
+
+    // Determine the data payload start (= header_size bytes into the file).
+    auto hdr = Pipeline::readHeader(tmp);
+    size_t payload_start = static_cast<size_t>(hdr.core.header_size);
+
+    // Corrupt the first byte of the compressed data payload.
+    {
+        std::fstream f(tmp, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(f.is_open());
+        f.seekp(static_cast<std::streamoff>(payload_start));
+        char c = 0;
+        f.read(&c, 1);
+        f.seekp(static_cast<std::streamoff>(payload_start));
+        c ^= 0xFF;
+        f.write(&c, 1);
+    }
+
+    void*  d_out  = nullptr;
+    size_t out_sz = 0;
+    EXPECT_THROW(
+        Pipeline::decompressFromFile(tmp, &d_out, &out_sz),
+        std::runtime_error
+    ) << "Corrupted data payload must throw (checksum mismatch)";
+
+    if (d_out) cudaFree(d_out);
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DI1: Lorenzo 2D dims survive writeToFile → decompressFromFile
+//
+// Compress a 64×64 float array with setDims(64, 64), write to file, and
+// decompress from file.  Verifies that:
+//   (a) dim_x / dim_y are embedded in the serialized LorenzoConfig in the header
+//   (b) decompressFromFile produces correct output (dims were restored via
+//       deserializeHeader — if they weren't, the 2D kernel uses wrong strides
+//       and produces garbage that fails the error-bound check).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, LorenzoDimsSerializedThroughFile) {
+    CudaStream stream;
+    constexpr size_t DIM_X = 64;
+    constexpr size_t DIM_Y = 64;
+    constexpr size_t N     = DIM_X * DIM_Y;
+    constexpr float  EB    = 1e-2f;
+    const size_t in_bytes  = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_dims_serial.fzm";
+
+    // Compress with explicit 2D dims
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    pipeline.setDims(DIM_X, DIM_Y);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+    pipeline.writeToFile(tmp, stream);
+
+    // (a) Verify dim_x / dim_y are in the serialized header.
+    //     When dims are 2D the stage type in the buffer entry is LORENZO_2D (not LORENZO_1D),
+    //     because LorenzoStage::getStageTypeId() reflects the actual dimensionality.
+    auto hdr = Pipeline::readHeader(tmp);
+    bool found_2d = false;
+    for (const auto& be : hdr.buffers) {
+        const bool is_lorenzo = (be.stage_type == StageType::LORENZO_1D ||
+                                 be.stage_type == StageType::LORENZO_2D ||
+                                 be.stage_type == StageType::LORENZO_3D);
+        if (is_lorenzo && be.config_size >= sizeof(LorenzoConfig)) {
+            LorenzoConfig lc;
+            std::memcpy(&lc, be.stage_config, sizeof(LorenzoConfig));
+            if (lc.dim_x == DIM_X && lc.dim_y == DIM_Y) {
+                found_2d = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(found_2d)
+        << "Lorenzo dim_x=" << DIM_X << " dim_y=" << DIM_Y
+        << " must be stored in the file header LorenzoConfig";
+
+    // (b) Decompress from file and verify correctness
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_dec, &dec_sz, stream))
+        << "decompressFromFile on 2D Lorenzo file must not throw";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_dec);
+
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Lorenzo 2D dims file round-trip max_err=" << max_err;
+
+    std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PS1: decompressFromFile() with pool_override_bytes uses caller-supplied size
+//
+// Compress → write, read the header to compute the pool size using the same
+// formula decompressFromFile uses internally (C + 2.5×max_U + 32 MiB), then
+// call decompressFromFile() with that value via pool_override_bytes.
+// This confirms the escape hatch is wired up correctly and the formula produces
+// a valid pool size for a standard single-source pipeline.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(FileIO, PoolOverrideBytesWorks) {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 13;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    const std::string tmp = "/tmp/fzgmod_test_pool_override.fzm";
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+    pipeline.writeToFile(tmp, stream);
+
+    // Compute pool size using the internal formula:
+    //   C + 2.5 * max_stage_uncompressed + 32 MiB
+    auto hdr = Pipeline::readHeader(tmp);
+    const size_t C = static_cast<size_t>(hdr.core.compressed_size);
+    size_t max_U   = static_cast<size_t>(hdr.core.uncompressed_size);
+    for (const auto& buf : hdr.buffers)
+        max_U = std::max(max_U, static_cast<size_t>(buf.uncompressed_size));
+    const size_t pool_bytes = C
+        + static_cast<size_t>(2.5 * static_cast<double>(max_U))
+        + 32ULL * 1024 * 1024;
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        Pipeline::decompressFromFile(tmp, &d_dec, &dec_sz, stream,
+                                     /*perf_out=*/nullptr, pool_bytes)
+    ) << "decompressFromFile with formula-derived pool_override_bytes must succeed";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_dec);
+
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Pool override round-trip max_err=" << max_err;
+
     std::remove(tmp.c_str());
 }

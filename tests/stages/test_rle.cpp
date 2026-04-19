@@ -56,8 +56,7 @@ static std::vector<uint8_t> run_rle_forward(RLEStage<T>&          stage,
     auto actual_map  = stage.getActualOutputSizesByName();
     size_t act_bytes = actual_map.count("output") ? actual_map.at("output") : out_bytes;
 
-    auto h_out = d_out.download(stream);
-    h_out.resize(act_bytes);
+    auto h_out = d_out.download_bytes(act_bytes, stream);
     return h_out;
 }
 
@@ -87,8 +86,7 @@ static std::vector<T> run_rle_inverse(RLEStage<T>&               stage,
     size_t act_bytes = actual_map.count("output") ? actual_map.at("output") : n_original * sizeof(T);
     size_t act_n     = act_bytes / sizeof(T);
 
-    auto h_out = d_out.download(stream);
-    h_out.resize(act_n);
+    auto h_out = d_out.download_bytes(act_bytes, stream);
     return h_out;
 }
 

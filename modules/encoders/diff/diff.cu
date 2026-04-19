@@ -1,5 +1,6 @@
 #include "encoders/diff/diff.h"
 #include "transforms/negabinary/negabinary.h"
+#include "log.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <cub/block/block_scan.cuh>
@@ -122,31 +123,6 @@ static void launchDiff(const T* in, TOut* out, size_t n,
     diffKernel<T, TOut><<<grid, kBlock, 0, stream>>>(in, out, n, chunk_elems);
 }
 
-// ─── Helper: CUB global inclusive sum (no chunking) ──────────────────────────
-template<typename T>
-static void launchGlobalCumsum(const T* in, T* out, size_t n,
-                                cudaStream_t stream, MemoryPool* pool)
-{
-    int    n_int      = static_cast<int>(n);
-    size_t temp_bytes = 0;
-    cub::DeviceScan::InclusiveSum(nullptr, temp_bytes, in, out, n_int, stream);
-
-    void* d_temp = nullptr;
-    if (pool) {
-        d_temp = pool->allocate(temp_bytes, stream, "diff_cub_temp");
-    } else {
-        FZ_CUDA_CHECK(cudaMallocAsync(&d_temp, temp_bytes, stream));
-    }
-
-    cub::DeviceScan::InclusiveSum(d_temp, temp_bytes, in, out, n_int, stream);
-
-    if (pool) {
-        pool->free(d_temp, stream);
-    } else {
-        FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_temp, stream));
-    }
-}
-
 // ─── Helper: block-scan chunked inclusive sum (in-place) ─────────────────────
 template<typename T>
 static void launchChunkedCumsum(T* data, size_t n,
@@ -156,6 +132,33 @@ static void launchChunkedCumsum(T* data, size_t n,
     size_t        num_chunks = (n + chunk_elems - 1) / chunk_elems;
     cumsumChunkedKernel<T, kBlock><<<static_cast<int>(num_chunks), kBlock,
                                      0, stream>>>(data, n, chunk_elems);
+}
+
+// ─── Helper: global inclusive sum (no chunking, no extra device allocation) ───
+//
+// For the global case (chunk_elems == 0) we use a two-step approach:
+//   1. Copy in → out (if in != out) so that cumsumChunkedKernel can work
+//      in-place.
+//   2. Run cumsumChunkedKernel with chunk_elems = n, which treats the whole
+//      array as a single chunk handled by one CUDA block.  This uses only
+//      shared memory (CUB BlockScan) — no extra device allocation.
+//
+// For small-to-medium arrays this is efficient.  For very large arrays the
+// single-block tiling degrades in performance but remains correct.  CUB
+// DeviceScan is preferred for large n, but CUB temp allocation causes
+// compute-sanitizer shadow-memory races when the enclosing pool is destroyed
+// immediately after (the decompressFromFile pattern), so we avoid it here.
+template<typename T>
+static void launchGlobalCumsum(const T* in, T* out, size_t n, cudaStream_t stream)
+{
+    if (n == 0) return;
+    // Copy input to output buffer so cumsumChunkedKernel can work in-place.
+    if (in != out) {
+        FZ_CUDA_CHECK(cudaMemcpyAsync(out, in, n * sizeof(T),
+                                     cudaMemcpyDeviceToDevice, stream));
+    }
+    // One block handles the whole array in tiles of kBlock elements.
+    launchChunkedCumsum<T>(out, n, n, stream);
 }
 
 // ─── execute() ───────────────────────────────────────────────────────────────
@@ -168,7 +171,8 @@ void DifferenceStage<T, TOut>::execute(
     const std::vector<size_t>& sizes
 ) {
     if (inputs.empty() || outputs.empty() || sizes.empty())
-        throw std::runtime_error("DifferenceStage: Invalid inputs/outputs");
+        throw std::runtime_error(
+            "DifferenceStage: inputs, outputs, and sizes vectors must all be non-empty");
 
     size_t byte_size   = sizes[0];
     size_t n           = byte_size / sizeof(T);
@@ -210,7 +214,7 @@ void DifferenceStage<T, TOut>::execute(
             // Step 2: cumsum on decoded values → output buffer.
             T* out_ptr = static_cast<T*>(outputs[0]);
             if (chunk_elems == 0) {
-                launchGlobalCumsum<T>(d_decoded, out_ptr, n, stream, pool);
+                launchGlobalCumsum<T>(d_decoded, out_ptr, n, stream);
             } else {
                 cudaMemcpyAsync(out_ptr, d_decoded, n * sizeof(T),
                                 cudaMemcpyDeviceToDevice, stream);
@@ -228,7 +232,7 @@ void DifferenceStage<T, TOut>::execute(
             T*       out_ptr = static_cast<T*>(outputs[0]);
 
             if (chunk_elems == 0) {
-                launchGlobalCumsum<T>(in_ptr, out_ptr, n, stream, pool);
+                launchGlobalCumsum<T>(in_ptr, out_ptr, n, stream);
             } else {
                 cudaMemcpyAsync(out_ptr, in_ptr, n * sizeof(T),
                                 cudaMemcpyDeviceToDevice, stream);
@@ -244,6 +248,10 @@ void DifferenceStage<T, TOut>::execute(
             + cudaGetErrorString(err));
 
     actual_output_size_ = byte_size;
+    FZ_LOG(TRACE, "Difference %s: %.1f KB, %zu elems, chunk=%zu",
+           is_inverse_ ? "cumsum" : "diff",
+           byte_size / 1024.0, n,
+           chunk_elems > 0 ? chunk_elems : n);
 }
 
 // ─── Explicit instantiations ──────────────────────────────────────────────────

@@ -7,9 +7,10 @@
 
 namespace fz {
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Per-stage timing result
-// ──────────────────────────────────────────────────────────────────────────────
+/**
+ * @file perf.h
+ * @brief Pipeline and per-stage profiling result types.
+ */
 
 /**
  * Timing and throughput for a single stage in the DAG.
@@ -31,10 +32,6 @@ struct StageTimingResult {
     float throughput_gbs() const noexcept;
 };
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Per-level timing result
-// ──────────────────────────────────────────────────────────────────────────────
-
 /**
  * Aggregate timing for all stages that run concurrently at one DAG level.
  * elapsed_ms is the critical-path duration — the longest stage at the level —
@@ -45,10 +42,6 @@ struct LevelTimingResult {
     int   parallelism = 0;  ///< Number of concurrent stages at this level
     float elapsed_ms  = 0.0f; ///< Critical-path duration: max(stage.elapsed_ms) over the level
 };
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Pipeline-level profiling result
-// ──────────────────────────────────────────────────────────────────────────────
 
 /**
  * Complete performance snapshot for one compress() or decompress() call.

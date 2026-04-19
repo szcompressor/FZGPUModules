@@ -5,32 +5,9 @@
 #include "cuda_check.h"
 
 #include <algorithm>
-#include <iostream>
 #include <queue>
+#include <string>
 #include <stdexcept>
-
-/**
- * DAG
- * 
- * Key Features:
- * - Dependencies automatically create buffers
- * - Stages assigned to levels based on dependencies
- * - Parallel execution of stages at same level (different streams)
- * - Reference-counted buffer lifetimes (automatic free when consumers done)
- * - Two memory strategies: MINIMAL, PREALLOCATE
- * 
- * Simplified API:
- *   auto* stage1 = dag.addStage(&stage);
- *   auto* stage2 = dag.addStage(&stage);
- *   dag.addDependency(stage2, stage1, buffer_size);  // Auto-creates buffer!
- * 
- * Execution Model:
- *   for each level (0 to max_level):
- *       for each node in level:
- *           execute node on assigned stream (parallel!)
- *           decrement input buffer ref counts
- *           free buffers when ref count reaches 0
- */
 
 namespace fz {
 
@@ -80,10 +57,8 @@ CompressionDAG::~CompressionDAG() {
             }
         }
     }
-    // Drain stream 0 so all cudaFreeAsync calls above complete before ~MemoryPool runs.
     cudaDeviceSynchronize();
 
-    // Clean up nodes
     for (auto* node : nodes_) {
         if (node->completion_event) {
             FZ_CUDA_CHECK_WARN(cudaEventDestroy(node->completion_event));
@@ -101,8 +76,6 @@ CompressionDAG::~CompressionDAG() {
     }
 }
 
-// ========== DAG Construction ==========
-
 DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
     if (is_finalized_) {
         throw std::runtime_error("Cannot modify DAG after finalization");
@@ -119,7 +92,6 @@ DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
     node->id = static_cast<int>(nodes_.size());
     node->name = name.empty() ? "stage_" + std::to_string(node->id) : name;
     
-    // Create completion event for synchronization
     cudaError_t err = cudaEventCreate(&node->completion_event);
     if (err != cudaSuccess) {
         delete node;
@@ -128,7 +100,6 @@ DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
             "': " + cudaGetErrorString(err));
     }
 
-    // Create start event for profiling if already enabled
     if (profiling_enabled_) {
         err = cudaEventCreate(&node->start_event);
         if (err != cudaSuccess) {
@@ -154,15 +125,12 @@ int CompressionDAG::addDependency(DAGNode* dependent, DAGNode* dependency,
         throw std::runtime_error("Cannot add null dependency");
     }
     
-    // Add dependency relationship
     dependent->dependencies.push_back(dependency);
     dependency->dependents.push_back(dependent);
     
-    // Auto-create intermediate buffer between stages
     int buffer_id = next_buffer_id_++;
     BufferInfo& buffer = buffers_[buffer_id];
     
-    // Estimate size if not provided
     if (buffer_size == 0 && dependency->stage) {
         // TODO: Could call dependency->stage->estimateOutputSizes() here
         // For now, caller must provide size or we throw
@@ -174,7 +142,6 @@ int CompressionDAG::addDependency(DAGNode* dependent, DAGNode* dependency,
     buffer.is_persistent = false;
     buffer.producer_output_index = output_index;  // Track which output
     
-    // Connect buffer to stages
     dependency->output_buffer_ids.push_back(buffer_id);
     dependency->output_index_to_buffer_id[output_index] = buffer_id;  // Track mapping
     buffer.producer_stage_id = dependency->id;
@@ -254,7 +221,6 @@ bool CompressionDAG::connectExistingOutput(DAGNode* producer, DAGNode* consumer,
         throw std::runtime_error("Cannot connect null nodes");
     }
     
-    // Find the buffer for this output index
     auto it = producer->output_index_to_buffer_id.find(output_index);
     if (it == producer->output_index_to_buffer_id.end()) {
         return false;  // Buffer doesn't exist
@@ -263,15 +229,12 @@ bool CompressionDAG::connectExistingOutput(DAGNode* producer, DAGNode* consumer,
     int buffer_id = it->second;
     BufferInfo& buffer = buffers_[buffer_id];
     
-    // Add consumer relationship
     consumer->input_buffer_ids.push_back(buffer_id);
     buffer.consumer_stage_ids.push_back(consumer->id);
     
-    // Add dependency relationship
     consumer->dependencies.push_back(producer);
     producer->dependents.push_back(consumer);
     
-    // Update buffer tag to reflect connection
     buffer.tag = producer->name + "_to_" + consumer->name;
     buffer.is_persistent = false;  // Now it's an intermediate buffer
     
@@ -297,7 +260,6 @@ void CompressionDAG::configureStreams(int num_streams) {
         throw std::runtime_error("Cannot configure streams after finalization");
     }
     
-    // Destroy old streams if we own them
     if (owns_streams_) {
         for (auto stream : streams_) {
             cudaStreamDestroy(stream);
@@ -305,7 +267,6 @@ void CompressionDAG::configureStreams(int num_streams) {
         streams_.clear();
     }
     
-    // Create new streams
     for (int i = 0; i < num_streams; i++) {
         cudaStream_t stream;
         cudaError_t err = cudaStreamCreate(&stream);
@@ -324,7 +285,6 @@ void CompressionDAG::configureStreams(int num_streams) {
 }
 
 void CompressionDAG::finalize() {
-    // Initialize consumer ref counts
     for (auto& [buffer_id, buffer] : buffers_) {
         buffer.remaining_consumers = buffer.consumer_stage_ids.size();
     }
@@ -332,7 +292,6 @@ void CompressionDAG::finalize() {
     // Kahn's algorithm cycle detection: verify this is a valid DAG.
     // Always enabled — a cycle is always a programming error.
     {
-        // Build in-degree map
         std::unordered_map<int, int> in_degree;
         for (auto* node : nodes_) {
             if (in_degree.find(node->id) == in_degree.end()) {
@@ -343,7 +302,6 @@ void CompressionDAG::finalize() {
             }
         }
         
-        // Seed queue with zero in-degree nodes (sources)
         std::queue<int> q;
         for (auto& [id, deg] : in_degree) {
             if (deg == 0) q.push(id);
@@ -353,7 +311,6 @@ void CompressionDAG::finalize() {
         while (!q.empty()) {
             int cur = q.front(); q.pop();
             visited++;
-            // Find the node
             for (auto* node : nodes_) {
                 if (node->id == cur) {
                     for (auto* dep : node->dependents) {
@@ -377,20 +334,16 @@ void CompressionDAG::finalize() {
         FZ_LOG(DEBUG, "DAG validation passed: %zu nodes, no cycles", nodes_.size());
     }
     
-    // Assign execution levels based on dependencies
     assignLevels();
 
-    // Auto-configure streams if not already set up
     if (streams_.empty()) {
         int max_parallelism = getMaxParallelism();
         if (max_parallelism > 1) {
-            // Create streams for parallel execution
             for (int i = 0; i < max_parallelism; i++) {
                 cudaStream_t stream;
                 cudaError_t err = cudaStreamCreate(&stream);
                 if (err != cudaSuccess) {
                     FZ_LOG(WARN, "Failed to create CUDA stream %d: %s", i, cudaGetErrorString(err));
-                    // Clean up already created streams
                     for (auto s : streams_) {
                         cudaStreamDestroy(s);
                     }
@@ -402,14 +355,11 @@ void CompressionDAG::finalize() {
             }
             owns_streams_ = true;
         } else {
-            // Even with no parallelism, track that we use default stream 0
-            // This makes reporting more consistent (stream count = 1)
             streams_.push_back(0);  // Default stream
             owns_streams_ = false;  // We don't own stream 0, don't destroy it
         }
     }
     
-    // Assign streams to nodes for parallel execution
     if (!streams_.empty()) {
         assignStreams();
     }
@@ -425,14 +375,11 @@ void CompressionDAG::finalize() {
     is_finalized_ = true;
 }
 
-// ========== Execution ==========
-
 void CompressionDAG::execute(cudaStream_t stream) {
     if (!is_finalized_) {
         throw std::runtime_error("DAG must be finalized before execution");
     }
     
-    // Execute level by level (enables parallelism within levels)
     for (int level = 0; level <= max_level_; level++) {
         for (auto* node : levels_[level]) {
             // Use node's assigned stream, or fallback to provided stream.
@@ -441,19 +388,16 @@ void CompressionDAG::execute(cudaStream_t stream) {
             // internal multi-stream assignments.
             cudaStream_t exec_stream = (capture_mode_ || !node->stream) ? stream : node->stream;
             
-            // Wait for all dependencies to complete
             for (auto* dep : node->dependencies) {
                 FZ_CUDA_CHECK(cudaStreamWaitEvent(exec_stream, dep->completion_event));
             }
             
-            // Allocate output buffers based on strategy
             if (strategy_ != MemoryStrategy::PREALLOCATE) {
                 for (int buffer_id : node->output_buffer_ids) {
                     allocateBuffer(buffer_id, exec_stream);
                 }
             }
             
-            // Execute stage — fill pre-sized scratch vectors (no heap alloc, §5)
             auto& inputs  = node->exec_inputs;
             auto& outputs = node->exec_outputs;
             auto& sizes   = node->exec_sizes;
@@ -467,12 +411,10 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 outputs[j] = buffers_[node->output_buffer_ids[j]].d_ptr;
             }
             
-            // Record stage start for profiling (before kernel launch)
             if (profiling_enabled_ && node->start_event) {
                 FZ_CUDA_CHECK(cudaEventRecord(node->start_event, exec_stream));
             }
 
-            // Call stage execute
             if (node->stage) {
                 node->stage->execute(exec_stream, mem_pool_, inputs, outputs, sizes);
 
@@ -517,20 +459,46 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 }
             }
             
-            // Record completion for dependent stages (and profiling end)
             FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, exec_stream));
             node->is_executed = true;
             
-            // Decrement ref count on input buffers and free if needed
             for (int buffer_id : node->input_buffer_ids) {
                 BufferInfo& buffer = buffers_[buffer_id];
                 buffer.remaining_consumers--;
-                
-                // Free when all consumers done (unless PREALLOCATE mode)
+
                 if (buffer.remaining_consumers == 0 && !buffer.is_persistent) {
                     if (strategy_ != MemoryStrategy::PREALLOCATE) {
                         freeBuffer(buffer_id, exec_stream);
                     }
+                }
+            }
+        }
+    }
+
+    // Synchronize all internal-stream work back to the provided stream.
+    //
+    // When the DAG has parallel nodes (max_parallelism > 1), each node runs on
+    // its own internally-created CUDA stream rather than the caller-provided one.
+    // Without this barrier, cudaStreamSynchronize(stream) in the caller returns
+    // as soon as the provided stream is empty — which may be *before* the internal
+    // streams have finished writing their result buffers.  This causes a race: any
+    // work the caller submits to `stream` after execute() (e.g. a D2D memcpy to
+    // copy out the result) can run concurrently with the DAG nodes still writing
+    // to those buffers.
+    //
+    // We fix this by making `stream` wait for every node's completion_event.
+    // completion_event was recorded on exec_stream immediately after the node's
+    // stage execute(), so the waitEvent inserts a happens-before edge from
+    // "node finishes" to "any subsequent work on stream".  This is a no-op for
+    // single-source pipelines (all nodes already use `stream`).
+    if (!capture_mode_) {
+        for (int level = 0; level <= max_level_; level++) {
+            for (auto* node : levels_[level]) {
+                if (!node->is_executed) continue;
+                cudaStream_t exec_stream =
+                    (capture_mode_ || !node->stream) ? stream : node->stream;
+                if (exec_stream != stream) {
+                    FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, node->completion_event));
                 }
             }
         }
@@ -604,8 +572,6 @@ void CompressionDAG::reset(cudaStream_t stream) {
     }
 }
 
-// ========== Buffer Management ==========
-
 void* CompressionDAG::getBuffer(int buffer_id) const {
     auto it = buffers_.find(buffer_id);
     if (it == buffers_.end()) {
@@ -639,9 +605,17 @@ void CompressionDAG::setExternalPointer(int buffer_id, void* external_ptr) {
     BufferInfo& buffer = it->second;
     
     if (buffer.is_allocated && !buffer.is_external) {
-        // Free previously allocated buffer before switching to external
-        mem_pool_->free(buffer.d_ptr, 0);
-        current_memory_usage_ -= buffer.size;
+        if (coloring_applied_ && buffer_color_.count(buffer_id)) {
+            // Buffer is part of a color group — its d_ptr is a shared color region
+            // that may be aliased to other buffers in the same group.  Do NOT free
+            // it here; the destructor releases each region once via color_region_ptrs_.
+            // current_memory_usage_ is NOT decremented because the region is still
+            // live and will be tracked until the DAG is destroyed.
+        } else {
+            // Individually-allocated buffer — safe to free now.
+            mem_pool_->free(buffer.d_ptr, 0);
+            current_memory_usage_ -= buffer.size;
+        }
     }
     
     buffer.d_ptr = external_ptr;
@@ -661,8 +635,6 @@ void CompressionDAG::updateBufferSize(int buffer_id, size_t new_size) {
     // When propagateBufferSizes sets a new size, it serves as the newly established baseline envelope
     it->second.initial_size = new_size;
 }
-
-// ========== Internal Implementation ==========
 
 void CompressionDAG::allocateBuffer(int buffer_id, cudaStream_t stream) {
     BufferInfo& buffer = buffers_[buffer_id];
@@ -745,186 +717,8 @@ void CompressionDAG::freeBuffer(int buffer_id, cudaStream_t stream) {
     }
 }
 
-void CompressionDAG::planPreallocation() {
-    // Allocate all buffers upfront (use default stream 0 or first available)
-    cudaStream_t alloc_stream = streams_.empty() ? 0 : streams_[0];
-    preallocateBuffers(alloc_stream);
-}
-
-void CompressionDAG::preallocateBuffers(cudaStream_t stream) {
-    // Color buffers now — sizes are guaranteed to be propagated by the time
-    // the caller (Pipeline::finalize) invokes preallocateBuffers(), which
-    // is always after propagateBufferSizes().  Running colorBuffers() here
-    // rather than in finalize() ensures we never color 1-byte placeholders.
-    if (strategy_ == MemoryStrategy::PREALLOCATE && !coloring_disabled_ && !coloring_applied_) {
-        colorBuffers();
-    }
-
-    if (coloring_applied_) {
-        // Allocate one region per color; assign d_ptr for each buffer from its region.
-        color_region_ptrs_.assign(color_region_sizes_.size(), nullptr);
-        for (size_t c = 0; c < color_region_sizes_.size(); c++) {
-            if (color_region_sizes_[c] > 0)
-                color_region_ptrs_[c] = mem_pool_->allocate(color_region_sizes_[c], stream);
-        }
-        for (auto& [buf_id, buf] : buffers_) {
-            if (buf.is_external) continue;
-            auto it = buffer_color_.find(buf_id);
-            if (it == buffer_color_.end()) continue;
-            int c = it->second;
-            buf.d_ptr = color_region_ptrs_[c];
-            buf.is_allocated = true;
-            buf.allocated_size = color_region_sizes_[c];
-        }
-        size_t colored_total = 0;
-        for (size_t sz : color_region_sizes_) colored_total += sz;
-        current_memory_usage_ += colored_total;
-        peak_memory_usage_ = std::max(peak_memory_usage_, current_memory_usage_);
-        FZ_LOG(DEBUG, "PREALLOCATE (colored): %zu regions, peak %.1f KB",
-               color_region_sizes_.size(), colored_total / 1024.0);
-    } else {
-        for (auto& [buffer_id, buffer] : buffers_) {
-            allocateBuffer(buffer_id, stream);
-        }
-    }
-}
-
-void CompressionDAG::colorBuffers() {
-    // Step 1: compute live ranges.
-    // A buffer is born at the level of its producer and dies at the level of
-    // its last consumer.  Pipeline-output buffers (no consumers) live until
-    // max_level_ so they are never aliased with anything that writes after them.
-    struct LiveRange { int born; int dies; };
-    std::unordered_map<int, LiveRange> ranges;
-    ranges.reserve(buffers_.size());
-
-    std::unordered_map<int, int> node_level;
-    node_level.reserve(nodes_.size());
-    for (const auto* node : nodes_)
-        node_level[node->id] = node->level;
-
-    for (const auto& [buf_id, buf] : buffers_) {
-        if (buf.is_external) continue;
-
-        int born = (buf.producer_stage_id < 0) ? 0 : node_level[buf.producer_stage_id];
-
-        int dies;
-        if (buf.consumer_stage_ids.empty()) {
-            dies = max_level_;
-        } else {
-            dies = 0;
-            for (int cid : buf.consumer_stage_ids) {
-                auto it = node_level.find(cid);
-                if (it != node_level.end())
-                    dies = std::max(dies, it->second);
-            }
-        }
-        ranges[buf_id] = {born, dies};
-    }
-
-    // Collect colorable buffer IDs.
-    std::vector<int> buf_ids;
-    buf_ids.reserve(ranges.size());
-    for (const auto& [buf_id, _] : ranges)
-        buf_ids.push_back(buf_id);
-
-    // Step 2: build interference graph.
-    // A and B interfere iff their live ranges overlap:  born(A) <= dies(B) && born(B) <= dies(A)
-    std::unordered_map<int, std::unordered_set<int>> interference;
-    for (size_t i = 0; i < buf_ids.size(); i++) {
-        for (size_t j = i + 1; j < buf_ids.size(); j++) {
-            int a = buf_ids[i], b = buf_ids[j];
-            const auto& ra = ranges[a];
-            const auto& rb = ranges[b];
-            if (ra.born <= rb.dies && rb.born <= ra.dies) {
-                interference[a].insert(b);
-                interference[b].insert(a);
-            }
-        }
-    }
-
-    // Step 3: greedy coloring — sort by live range length descending (longer
-    // ranges first tends to minimize wasted space within each region).
-    std::sort(buf_ids.begin(), buf_ids.end(), [&](int a, int b) {
-        const auto& ra = ranges[a]; const auto& rb = ranges[b];
-        return (ra.dies - ra.born) > (rb.dies - rb.born);
-    });
-
-    buffer_color_.clear();
-    color_region_sizes_.clear();
-
-    for (int buf_id : buf_ids) {
-        // Find the lowest color not used by any already-colored neighbor.
-        std::unordered_set<int> used;
-        auto it = interference.find(buf_id);
-        if (it != interference.end()) {
-            for (int nb : it->second) {
-                auto cit = buffer_color_.find(nb);
-                if (cit != buffer_color_.end())
-                    used.insert(cit->second);
-            }
-        }
-        int c = 0;
-        while (used.count(c)) c++;
-
-        buffer_color_[buf_id] = c;
-        if (c >= static_cast<int>(color_region_sizes_.size()))
-            color_region_sizes_.resize(c + 1, 0);
-        color_region_sizes_[c] = std::max(color_region_sizes_[c], buffers_[buf_id].size);
-    }
-
-    // Safety guard: multi-stream branching DAGs can create aliased buffers on
-    // different streams, introducing anti-dependencies that require synthetic
-    // stream wait events (not yet implemented).  If more than one stream is in
-    // use and any color group contains buffers whose producer/consumer nodes
-    // are on distinct streams, fall back to uncolored allocation.
-    if (streams_.size() > 1) {
-        bool cross_stream_alias = false;
-        for (size_t c = 0; c < color_region_sizes_.size() && !cross_stream_alias; c++) {
-            cudaStream_t first_stream = nullptr;
-            bool first_set = false;
-            for (const auto& [buf_id, color] : buffer_color_) {
-                if (color != static_cast<int>(c)) continue;
-                const BufferInfo& buf = buffers_[buf_id];
-                // Check producer stream
-                if (buf.producer_stage_id >= 0) {
-                    for (const auto* node : nodes_) {
-                        if (node->id == buf.producer_stage_id) {
-                            if (!first_set) { first_stream = node->stream; first_set = true; }
-                            else if (node->stream != first_stream) { cross_stream_alias = true; }
-                            break;
-                        }
-                    }
-                }
-                if (cross_stream_alias) break;
-            }
-        }
-        if (cross_stream_alias) {
-            FZ_LOG(DEBUG, "Buffer coloring disabled: cross-stream aliases detected (multi-stream DAG)");
-            buffer_color_.clear();
-            color_region_sizes_.clear();
-            return;  // coloring_applied_ stays false
-        }
-    }
-
-    coloring_applied_ = true;
-
-    size_t colored_total = 0;
-    for (size_t sz : color_region_sizes_) colored_total += sz;
-    size_t uncolored_total = 0;
-    for (const auto& [buf_id, buf] : buffers_)
-        if (!buf.is_external) uncolored_total += buf.size;
-
-    FZ_LOG(DEBUG, "Buffer coloring: %zu buffers -> %zu regions (%.1f KB -> %.1f KB, %.0f%% reduction)",
-           buf_ids.size(), color_region_sizes_.size(),
-           uncolored_total / 1024.0, colored_total / 1024.0,
-           uncolored_total > 0 ? (1.0 - (double)colored_total / uncolored_total) * 100.0 : 0.0);
-}
 
 void CompressionDAG::assignLevels() {
-    // Assign levels for parallel execution based on dependencies
-    // Level 0 = no dependencies, Level N = max(dep levels) + 1
-    
     levels_.clear();
     max_level_ = 0;
     
@@ -945,7 +739,6 @@ void CompressionDAG::assignLevels() {
         max_level_ = std::max(max_level_, node->level);
     }
     
-    // Group nodes by level
     levels_.resize(max_level_ + 1);
     for (auto* node : nodes_) {
         levels_[node->level].push_back(node);
@@ -955,291 +748,13 @@ void CompressionDAG::assignLevels() {
 void CompressionDAG::assignStreams() {
     if (streams_.empty()) return;
     
-    // Assign streams based on levels to maximize parallelism
-    // Nodes at the same level can run in parallel on different streams
-    
     std::unordered_map<int, int> level_stream_counter;
     
     for (auto* node : nodes_) {
-        // Round-robin assignment within each level
         int stream_idx = level_stream_counter[node->level] % streams_.size();
         node->stream = streams_[stream_idx];
         level_stream_counter[node->level]++;
     }
-}
-
-// ========== Profiling ==========
-
-void CompressionDAG::enableProfiling(bool enable) {
-    profiling_enabled_ = enable;
-
-    if (enable) {
-        // Create start_event for all nodes that were added before this call
-        for (auto* node : nodes_) {
-            if (!node->start_event) {
-                FZ_CUDA_CHECK_WARN(cudaEventCreate(&node->start_event));
-            }
-        }
-    } else {
-        // Destroy and null out all start events to reclaim resources
-        for (auto* node : nodes_) {
-            if (node->start_event) {
-                FZ_CUDA_CHECK_WARN(cudaEventDestroy(node->start_event));
-                node->start_event = nullptr;
-            }
-        }
-    }
-}
-
-std::vector<StageTimingResult> CompressionDAG::collectTimings() {
-    if (!profiling_enabled_) return {};
-
-    // Sync all owned streams so that CUDA event queries are valid.
-    // (node streams may differ from the fallback stream passed to execute())
-    for (auto s : streams_) {
-        if (s) FZ_CUDA_CHECK(cudaStreamSynchronize(s));
-    }
-
-    std::vector<StageTimingResult> results;
-    results.reserve(nodes_.size());
-
-    for (auto* node : nodes_) {
-        if (!node->start_event || !node->completion_event) continue;
-
-        StageTimingResult r;
-        r.name       = node->name;
-        r.level      = node->level;
-        r.elapsed_ms = 0.0f;
-
-        cudaError_t err = cudaEventElapsedTime(&r.elapsed_ms,
-                                               node->start_event,
-                                               node->completion_event);
-        if (err != cudaSuccess) {
-            FZ_LOG(WARN, "cudaEventElapsedTime failed for '%s': %s",
-                   node->name.c_str(), cudaGetErrorString(err));
-            r.elapsed_ms = -1.0f;
-        }
-
-        // Sum up buffer sizes for input/output byte counts
-        r.input_bytes = 0;
-        for (int buf_id : node->input_buffer_ids) {
-            auto it = buffers_.find(buf_id);
-            if (it != buffers_.end()) r.input_bytes += it->second.size;
-        }
-        r.output_bytes = 0;
-        for (int buf_id : node->output_buffer_ids) {
-            auto it = buffers_.find(buf_id);
-            if (it != buffers_.end()) r.output_bytes += it->second.size;
-        }
-
-        results.push_back(r);
-    }
-
-    return results;
-}
-
-// ========== Query & Debug ==========
-
-size_t CompressionDAG::getTotalBufferSize() const {
-    size_t total = 0;
-    for (const auto& [buffer_id, buffer] : buffers_) {
-        total += buffer.size;
-    }
-    return total;
-}
-
-size_t CompressionDAG::computeTopoPoolSize() const {
-    // Helper: build input_sizes vector for a node from the buffer table.
-    auto getInputSizes = [&](const DAGNode* node) {
-        std::vector<size_t> sizes;
-        sizes.reserve(node->input_buffer_ids.size());
-        for (int bid : node->input_buffer_ids) {
-            auto it = buffers_.find(bid);
-            sizes.push_back(it != buffers_.end() ? it->second.size : 0);
-        }
-        return sizes;
-    };
-
-    if (strategy_ == MemoryStrategy::PREALLOCATE) {
-        // Pool must be large enough to hold all live buffers simultaneously,
-        // plus all stages' persistent scratch.
-        // With coloring, the effective buffer footprint is the sum of color
-        // region sizes (not the sum of individual buffer sizes).
-        size_t total = 0;
-        if (coloring_applied_) {
-            for (size_t sz : color_region_sizes_) total += sz;
-        } else {
-            for (const auto& [buf_id, buf_info] : buffers_) {
-                if (!buf_info.is_external)
-                    total += buf_info.size;
-            }
-        }
-        for (const auto* node : nodes_) {
-            if (node->stage)
-                total += node->stage->estimateScratchBytes(getInputSizes(node));
-        }
-        return total;
-    }
-
-    // MINIMAL: simulate level-by-level allocation and deallocation
-    // to find the peak concurrent live bytes.
-
-    // Build node_id -> level map for consumer lookup.
-    std::unordered_map<int, int> node_level;
-    node_level.reserve(nodes_.size());
-    for (const auto* node : nodes_)
-        node_level[node->id] = node->level;
-
-    // For each non-external buffer, compute the level after which it is freed.
-    // A buffer is freed when all its consumers have executed, i.e. after the
-    // highest-level consumer.  Pipeline-output buffers (no consumers) survive
-    // until the last level.
-    std::unordered_map<int, int> free_after_level;
-    for (const auto& [buf_id, buf_info] : buffers_) {
-        if (buf_info.is_external) continue;
-        if (buf_info.consumer_stage_ids.empty()) {
-            free_after_level[buf_id] = max_level_;
-        } else {
-            int max_lvl = 0;
-            for (int cid : buf_info.consumer_stage_ids) {
-                auto it = node_level.find(cid);
-                if (it != node_level.end())
-                    max_lvl = std::max(max_lvl, it->second);
-            }
-            free_after_level[buf_id] = max_lvl;
-        }
-    }
-
-    // Walk levels, tracking the running total of live bytes.
-    // Persistent stage scratch is added when the stage executes and is never
-    // subtracted (it lives until DAG destruction, not until consumers finish).
-    size_t running = 0, peak = 0;
-    for (int lvl = 0; lvl <= max_level_; ++lvl) {
-        // Allocate: output buffers + persistent scratch of all stages at this level.
-        if (lvl < static_cast<int>(levels_.size())) {
-            for (const auto* node : levels_[lvl]) {
-                for (int buf_id : node->output_buffer_ids) {
-                    auto it = buffers_.find(buf_id);
-                    if (it != buffers_.end() && !it->second.is_external)
-                        running += it->second.size;
-                }
-                if (node->stage)
-                    running += node->stage->estimateScratchBytes(getInputSizes(node));
-            }
-        }
-        peak = std::max(peak, running);
-        // Free: buffers whose last consumer executed at this level.
-        for (const auto& [buf_id, free_lvl] : free_after_level) {
-            if (free_lvl == lvl) {
-                auto it = buffers_.find(buf_id);
-                if (it != buffers_.end())
-                    running -= it->second.size;
-            }
-        }
-    }
-    return peak;
-}
-
-int CompressionDAG::getMaxParallelism() const {
-    // Returns the maximum number of nodes at any single level
-    int max_width = 0;
-    for (const auto& level : levels_) {
-        max_width = std::max(max_width, static_cast<int>(level.size()));
-    }
-    return max_width;
-}
-
-void CompressionDAG::printDAG() const {
-    std::cout << "\n========== Compression DAG ==========\n";
-    std::cout << "Strategy: ";
-    switch (strategy_) {
-        case MemoryStrategy::MINIMAL:     std::cout << "MINIMAL\n";     break;
-        case MemoryStrategy::PREALLOCATE: std::cout << "PREALLOCATE\n"; break;
-    }
-    std::cout << "Parallel streams: " << streams_.size() << "\n";
-    std::cout << "Max level: " << max_level_ << "\n";
-    
-    std::cout << "\nStages (" << nodes_.size() << "):\n";
-    for (const auto* node : nodes_) {
-        std::cout << "  [" << node->id << "] " << node->name 
-                  << " (Level " << node->level << ", Stream " 
-                  << (node->stream ? "assigned" : "default") << ")";
-        if (!node->dependencies.empty()) {
-            std::cout << " <- deps: [";
-            for (size_t i = 0; i < node->dependencies.size(); i++) {
-                std::cout << node->dependencies[i]->id;
-                if (i < node->dependencies.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]";
-        }
-        if (!node->input_buffer_ids.empty()) {
-            std::cout << ", inputs: [";
-            for (size_t i = 0; i < node->input_buffer_ids.size(); i++) {
-                std::cout << node->input_buffer_ids[i];
-                if (i < node->input_buffer_ids.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]";
-        }
-        if (!node->output_buffer_ids.empty()) {
-            std::cout << " -> outputs: [";
-            for (size_t i = 0; i < node->output_buffer_ids.size(); i++) {
-                std::cout << node->output_buffer_ids[i];
-                if (i < node->output_buffer_ids.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]";
-        }
-        std::cout << "\n";
-    }
-    
-    std::cout << "\nBuffers (" << buffers_.size() << "):\n";
-    for (const auto& [buffer_id, buffer] : buffers_) {
-        std::cout << "  [" << buffer_id << "] " << buffer.tag 
-                  << " (" << (buffer.size / 1024.0) << " KB)";
-        if (buffer.is_persistent) std::cout << " [PERSISTENT]";
-        std::cout << "\n";
-        std::cout << "      producer: " << buffer.producer_stage_id 
-                  << ", consumers: [";
-        for (size_t i = 0; i < buffer.consumer_stage_ids.size(); i++) {
-            std::cout << buffer.consumer_stage_ids[i];
-            if (i < buffer.consumer_stage_ids.size() - 1) std::cout << ", ";
-        }
-        std::cout << "]\n";
-    }
-    
-    if (!levels_.empty()) {
-        std::cout << "\nExecution levels (parallel within level):\n";
-        for (int level = 0; level <= max_level_; level++) {
-            std::cout << "  Level " << level << ": [";
-            for (size_t i = 0; i < levels_[level].size(); i++) {
-                std::cout << levels_[level][i]->id;
-                if (i < levels_[level].size() - 1) std::cout << ", ";
-            }
-            std::cout << "]\n";
-        }
-    }
-    
-    std::cout << "\nMemory usage:\n";
-    std::cout << "  Total buffer capacity: " << (getTotalBufferSize() / (1024.0 * 1024.0)) << " MB\n";
-    std::cout << "=====================================\n\n";
-}
-
-void CompressionDAG::printBufferLifetimes() const {
-    std::cout << "\n========== Buffer Lifetimes ==========\n";
-    for (const auto& [buffer_id, buffer] : buffers_) {
-        std::cout << "[" << buffer_id << "] " << buffer.tag << ":\n";
-        std::cout << "  Size: " << (buffer.size / 1024.0) << " KB\n";
-        std::cout << "  Producer stage: " << buffer.producer_stage_id << "\n";
-        std::cout << "  Consumer stages: [";
-        for (size_t i = 0; i < buffer.consumer_stage_ids.size(); i++) {
-            std::cout << buffer.consumer_stage_ids[i];
-            if (i < buffer.consumer_stage_ids.size() - 1) std::cout << ", ";
-        }
-        std::cout << "]\n";
-        std::cout << "  Remaining consumers: " << buffer.remaining_consumers << "\n";
-        std::cout << "  Persistent: " << (buffer.is_persistent ? "yes" : "no") << "\n";
-        std::cout << "  Allocated: " << (buffer.is_allocated ? "yes" : "no") << "\n";
-    }
-    std::cout << "======================================\n\n";
 }
 
 } // namespace fz

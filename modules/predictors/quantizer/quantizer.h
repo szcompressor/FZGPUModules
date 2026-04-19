@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file quantizer.h
+ * @brief Direct-value quantizer stage with error-bounded coding and lossless outlier fallback.
+ */
+
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "predictors/lorenzo/lorenzo.h"  // for ErrorBoundMode
@@ -12,31 +17,25 @@
 
 namespace fz {
 
-// ===== QuantizerStage-Specific Config =====
-// Serialized into FZMBufferEntry.stage_config[128]
-
 /**
- * Quantizer predictor configuration for decompression.
- *
- * This structure is serialized by QuantizerStage::serializeHeader() and fits
- * into the generic 128-byte stage_config buffer in FZMBufferEntry.
+ * Serialized quantizer configuration stored in FZMBufferEntry.stage_config.
+ * Written by `serializeHeader()`; read back by `deserializeHeader()`.
+ * 36 bytes — fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
 struct QuantizerConfig {
-    float    abs_error_bound;   // Absolute EB used in the kernel (ABS/NOA), or 0 for REL (4B)
-    float    user_error_bound;  // Original user-specified EB (4B)
-    float    value_base;        // value_range (NOA) or 0 for ABS/REL (4B)
-    uint32_t quant_radius;      // Quantization radius (4B)
-    uint32_t num_elements;      // Number of elements (4B)
-    uint32_t outlier_count;     // Actual number of outliers (4B)
-    DataType input_type;        // Original input type (1B)
-    DataType code_type;         // Quantization code type (1B)
-    uint8_t  eb_mode;           // ErrorBoundMode (1B)
-    uint8_t  zigzag_codes;      // 1 if ABS/NOA codes are zigzag-encoded, else 0 (1B)
-    float    outlier_threshold; // ABS/NOA: |x| >= threshold → forced outlier (4B; inf = disabled)
-    uint8_t  inplace_outliers;  // 1 if ABS/NOA encodes outliers in-place (no scatter buffers) (1B)
-    uint8_t  _pad[3];           // padding to keep struct naturally aligned (3B)
-
-    // Total: 36 bytes (fits easily in 128B stage_config)
+    float    abs_error_bound;   ///< Absolute EB after mode conversion (0 for REL).
+    float    user_error_bound;  ///< Original user-specified EB.
+    float    value_base;        ///< value_range (NOA); 0 for ABS/REL.
+    uint32_t quant_radius;      ///< Quantization radius.
+    uint32_t num_elements;      ///< Total element count.
+    uint32_t outlier_count;     ///< Actual number of outliers.
+    DataType input_type;        ///< Original input type (1B).
+    DataType code_type;         ///< Quantization code type (1B).
+    uint8_t  eb_mode;           ///< ErrorBoundMode cast to uint8_t.
+    uint8_t  zigzag_codes;      ///< 1 if ABS/NOA codes are zigzag-encoded.
+    float    outlier_threshold; ///< ABS/NOA: |x| >= threshold → forced outlier (inf = disabled).
+    uint8_t  inplace_outliers;  ///< 1 if outliers are encoded in-place in the codes array.
+    uint8_t  _pad[3];           ///< Alignment padding — must be zero.
 
     QuantizerConfig()
         : abs_error_bound(0.0f), user_error_bound(0.0f), value_base(0.0f),
@@ -93,28 +92,23 @@ static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
 template<typename TInput = float, typename TCode = uint16_t>
 class QuantizerStage : public Stage {
 public:
+    /** Construction parameters. */
     struct Config {
-        float error_bound        = 1e-4f;
-        int   quant_radius       = 32768;
-        float outlier_capacity   = 0.05f;
-        ErrorBoundMode eb_mode   = ErrorBoundMode::ABS;
-        // Pre-computed value_base:  set to > 0 to skip the NOA data scan.
+        float  error_bound           = 1e-4f;   ///< Error bound (interpretation set by `eb_mode`).
+        int    quant_radius          = 32768;   ///< Quantization radius.
+        float  outlier_capacity      = 0.05f;   ///< Fraction of input size reserved for outliers.
+        ErrorBoundMode eb_mode       = ErrorBoundMode::ABS;
+        /// Pre-computed value_base > 0 to skip the NOA data scan; 0 = auto.
         float precomputed_value_base = 0.0f;
-        // When true, ABS/NOA quantization codes are zigzag-encoded before storage.
-        // Zigzag maps signed integers to unsigned: ..., -2→3, -1→1, 0→0, 1→2, 2→4, ...
-        // This improves compressibility when codes cluster near zero.
-        // Has no effect in REL mode (log-space codes are already unsigned).
-        bool zigzag_codes = false;
-        // ABS/NOA only: values with |x| >= outlier_threshold are always stored
-        // losslessly regardless of the bin check.  Matches the LC reference
-        // `threshold` parameter.  Default: infinity (disabled).
-        float outlier_threshold = std::numeric_limits<float>::infinity();
-        // ABS/NOA only: when true, outlier raw float bits are written in-place
-        // into the codes array (no separate outlier_vals/idxs/count buffers).
-        // The inverse reconstructs by checking (code >> 1) >= quant_radius.
-        // This matches the LC reference encoding and removes the scatter pass.
-        // Must NOT be used with REL mode.
-        bool inplace_outliers = false;
+        /// ABS/NOA: zigzag-encode codes before storage to improve compressibility.
+        /// No effect in REL mode (log-space codes are already unsigned).
+        bool  zigzag_codes           = false;
+        /// ABS/NOA: |x| >= threshold → lossless outlier (LC reference `threshold`). Default: ∞.
+        float outlier_threshold      = std::numeric_limits<float>::infinity();
+        /// ABS/NOA: write outlier raw float bits in-place in the codes array.
+        /// Removes the scatter buffers; inverse checks `(code >> 1) >= quant_radius`.
+        /// Must NOT be used with REL mode.
+        bool  inplace_outliers       = false;
 
         Config() = default;
         Config(TInput eb, ErrorBoundMode mode = ErrorBoundMode::ABS,
@@ -134,8 +128,6 @@ public:
     ) override;
 
     void postStreamSync(cudaStream_t stream) override;
-
-    // ===== Stage interface =====
 
     std::string getName() const override { return "Quantizer"; }
 
@@ -189,6 +181,10 @@ public:
         }
     }
 
+    uint8_t getInputDataType(size_t /*input_index*/) const override {
+        return static_cast<uint8_t>(getInputDataType());
+    }
+
     size_t serializeHeader(size_t output_index, uint8_t* buf, size_t max_size) const override;
     size_t getMaxHeaderSize(size_t) const override { return sizeof(QuantizerConfig); }
     void deserializeHeader(const uint8_t* buf, size_t size) override;
@@ -210,8 +206,6 @@ public:
         computed_value_base_ = saved_computed_value_base_;
         actual_output_sizes_ = saved_actual_output_sizes_;
     }
-
-    // ===== Configuration accessors =====
 
     void setErrorBound(TInput eb)            { config_.error_bound = static_cast<float>(eb); }
     void setQuantRadius(int r)               { config_.quant_radius = r; }
@@ -248,7 +242,6 @@ private:
     float    saved_computed_value_base_ = 0.0f;
     const void* d_outlier_count_ptr_ = nullptr;
 
-    // True when ABS/NOA in-place outlier encoding is active (no scatter buffers).
     bool isInplaceMode() const {
         return config_.inplace_outliers
             && config_.eb_mode != ErrorBoundMode::REL;
@@ -270,7 +263,6 @@ private:
     }
 };
 
-// Explicit instantiations
 extern template class QuantizerStage<float,  uint16_t>;
 extern template class QuantizerStage<float,  uint32_t>;
 extern template class QuantizerStage<double, uint16_t>;

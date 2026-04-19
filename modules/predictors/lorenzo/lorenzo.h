@@ -11,61 +11,47 @@
 namespace fz {
 
 
-// ===== Error Bound Mode =====
-
 /**
- * How the user-specified error bound is interpreted.
+ * Interpretation of the user-specified error bound.
  *
- * ABS  — absolute error bound.  The error for every element satisfies
- *         |x_orig - x_recon| <= eb.  This is the default.
- *
- * REL  — point-wise relative error bound (PFPL definition).
- *         e_rel = |x_orig - x_recon| / |x_orig| <= eb.
- *
- *         For LorenzoStage this is a GLOBAL approximation only:
- *           abs_eb = eb * max(|data|)
- *         Because Lorenzo quantises prediction *differences* with a fixed
- *         step size, a true per-element guarantee cannot be made.  Values
- *         much smaller than max(|data|) may exceed the per-element ratio.
- *
- *         For an exact per-element REL bound (PFPL log2-space algorithm),
- *         use QuantizerStage<TInput, uint32_t> with REL mode instead.
- *
- * NOA  — norm-of-absolute, a.k.a. value-range relative (PFPL definition).
- *         abs_eb = eb * (max(data) - min(data))
- *         Equivalent to what most other compressors call "relative".
+ * - **ABS** — `|x_orig - x_recon| <= eb` (default).
+ * - **REL** — point-wise relative (PFPL): `|error| / |x_orig| <= eb`.
+ *   For Lorenzo this is a *global* approximation: `abs_eb = eb × max(|data|)`.
+ *   Values much smaller than max(|data|) may exceed the per-element ratio.
+ *   For an exact per-element REL bound use `QuantizerStage` with REL mode.
+ * - **NOA** — norm-of-absolute / value-range relative (PFPL):
+ *   `abs_eb = eb × (max(data) - min(data))`.  Equivalent to what most other
+ *   compressors call "relative".
  */
 enum class ErrorBoundMode : uint8_t {
-    ABS = 0,
-    REL = 1,
-    NOA = 2,
+    ABS = 0, ///< Absolute error bound.
+    REL = 1, ///< Global-approximate point-wise relative bound.
+    NOA = 2, ///< Value-range relative bound (norm-of-absolute).
 };
 
-// ===== Lorenzo Stage-Specific Config =====
-// Serialized into FZMBufferEntry.stage_config[128]
-
 /**
- * Lorenzo predictor configuration for decompression
- * 
- * This structure is serialized by LorenzoStage::serializeHeader()
- * and fits into the generic 128-byte stage_config buffer in FZMBufferEntry.
+ * Serialized Lorenzo predictor configuration stored in FZMBufferEntry.stage_config.
+ *
+ * Written by `serializeHeader()` at compression time; read back by
+ * `deserializeHeader()` to reconstruct decompressor state. Fits within the
+ * 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
 struct LorenzoConfig {
-    float error_bound;        // Absolute error bound after mode conversion (4B)
-    uint32_t quant_radius;    // Quantization radius (4B)
-    uint32_t num_elements;    // Number of elements (4B)
-    uint32_t outlier_count;   // Actual number of outliers (4B)
-    DataType input_type;      // Original input type (1B)
-    DataType code_type;       // Quantization code type (1B)
-    uint8_t  ndim;            // Spatial dimensionality: 1, 2, or 3 (0 treated as 1) (1B)
-    uint8_t  eb_mode;         // ErrorBoundMode (was reserved0) (1B)
-    uint32_t dim_x;           // X dimension length (fastest, 0 = infer from num_elements) (4B)
-    uint32_t dim_y;           // Y dimension length (1 for 1D) (4B)
-    uint32_t dim_z;           // Z dimension length (1 for 1D/2D) (4B)
-    float    user_eb;         // Original user-specified error bound (4B)
-    float    value_base;      // value_range (NOA) or max(|data|) (REL) used in conversion (4B)
-    uint8_t  zigzag_codes;    // 1 if quantization codes are zigzag-encoded, else 0 (1B)
-    uint8_t  reserved[3];     // Reserved for future use, must be zero (3B)
+    float    error_bound;   ///< Absolute bound after mode conversion (used by decompressor).
+    uint32_t quant_radius;  ///< Quantization radius.
+    uint32_t num_elements;  ///< Total element count.
+    uint32_t outlier_count; ///< Actual number of outliers.
+    DataType input_type;    ///< Original input type (1B).
+    DataType code_type;     ///< Quantization code type (1B).
+    uint8_t  ndim;          ///< Spatial dimensionality 1/2/3 (0 treated as 1).
+    uint8_t  eb_mode;       ///< ErrorBoundMode cast to uint8_t.
+    uint32_t dim_x;         ///< X (fast) dimension; 0 = infer from num_elements.
+    uint32_t dim_y;         ///< Y dimension (1 for 1-D).
+    uint32_t dim_z;         ///< Z dimension (1 for 1-D/2-D).
+    float    user_eb;       ///< Original user-specified error bound value.
+    float    value_base;    ///< value_range (NOA) or max(|data|) (REL) used in conversion.
+    uint8_t  zigzag_codes;  ///< 1 if codes are zigzag-encoded, else 0.
+    uint8_t  reserved[3];   ///< Must be zero.
 
     // Total: 44 bytes (fits easily in 128B stage_config)
 
@@ -78,46 +64,38 @@ struct LorenzoConfig {
 static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
 /**
- * Lorenzo 1D predictor with quantization
- * 
- * Applies Lorenzo prediction (1D differences) with error-bounded quantization.
- * Produces quantization codes for predictable values and stores outliers separately.
- * 
- * Outputs:
- *   [0] codes: Quantization codes for all elements (TCode type)
- *   [1] outlier_errors: Prediction errors for outliers (TInput type)
- *   [2] outlier_indices: Indices of outlier elements (uint32_t)
- *   [3] outlier_count: Number of outliers (uint32_t)
- * 
- * Template parameters:
- *   TInput: Input data type (float, double)
- *   TCode: Quantization code type (uint8_t, uint16_t, uint32_t)
+ * Lorenzo predictor with error-bounded quantization (1-D, 2-D, 3-D).
+ *
+ * Forward outputs (compression):
+ * - [0] codes         — quantization codes for all elements (`TCode`)
+ * - [1] outlier_errors — prediction errors for outliers (`TInput`)
+ * - [2] outlier_indices — outlier element indices (`uint32_t`)
+ * - [3] outlier_count  — number of outliers (`uint32_t`, 4 bytes)
+ *
+ * Inverse (decompression): takes the four forward outputs, produces the
+ * reconstructed data as a single `TInput` array.
+ *
+ * @tparam TInput  Floating-point input type (`float` or `double`).
+ * @tparam TCode   Quantization code type (`uint8_t`, `uint16_t`, `uint32_t`).
  */
 template<typename TInput = float, typename TCode = uint16_t>
 class LorenzoStage : public Stage {
 public:
-    /**
-     * Configuration for Lorenzo predictor
-     */
+    /** Construction parameters. */
     struct Config {
-        float error_bound = 1e-3;           // Error bound value (interpretation depends on eb_mode)
-        int quant_radius = 32768;           // Quantization radius (2^15 for uint16_t)
-        float outlier_capacity = 0.2f;      // Fraction of input size to allocate for outliers (0-1)
-        // Spatial dimensions: dims[0]=x (fastest), dims[1]=y, dims[2]=z.
-        // dims[0]==0 means "infer from num_elements at runtime" (valid for 1-D use).
-        // dims[1]==1, dims[2]==1 → 1-D Lorenzo
-        // dims[2]==1             → 2-D Lorenzo
-        // otherwise             → 3-D Lorenzo
+        float  error_bound       = 1e-3;    ///< Error bound (interpretation depends on `eb_mode`).
+        int    quant_radius      = 32768;   ///< Quantization radius (2^15 for uint16_t).
+        float  outlier_capacity  = 0.2f;    ///< Fraction of input size reserved for outliers.
+        /// Spatial dimensions `{x, y, z}` where x is fastest.
+        /// `dims[0]==0` → infer x from num_elements at runtime (valid for 1-D).
+        /// `dims[1]==dims[2]==1` → 1-D; `dims[2]==1` → 2-D; otherwise 3-D.
         std::array<size_t, 3> dims = {0, 1, 1};
         ErrorBoundMode eb_mode = ErrorBoundMode::ABS;
-        // Pre-computed value_range (NOA) or max(|data|) (REL).
-        // When 0 (default), execute() auto-computes it via a device scan.
-        // Set to a positive value to skip the scan (e.g. when the caller
-        // already knows value_range from a prior compression pass).
-        float precomputed_value_base = 0.0f;        // When true, quantization codes are zigzag-encoded before storage.
-        // Zigzag maps signed integers to unsigned: ..., -2→3, -1→1, 0→0, 1→2, 2→4, ...
-        // This improves compressibility when codes cluster near zero.
-        // Supported for 1-D/2-D/3-D Lorenzo.
+        /// Pre-computed value_range (NOA) or max(|data|) (REL) to skip the
+        /// device scan in execute(). Leave at 0 to auto-compute.
+        float precomputed_value_base = 0.0f;
+        /// Zigzag-encode codes before storage to improve compressibility
+        /// when codes cluster near zero (`−2→3, −1→1, 0→0, 1→2, …`).
         bool zigzag_codes = false;
         Config() = default;
         Config(TInput eb, TCode radius = 32768, float outlier_cap = 0.2f,
@@ -208,11 +186,10 @@ public:
         return 1;
     }
     
-    // Inverse mode: toggle between compression (false) and decompression (true)
     void setInverse(bool inverse) { is_inverse_ = inverse; }
     bool isInverse() const { return is_inverse_; }
-    
-    // ===== Decompression Support =====
+
+    // ── Serialization ─────────────────────────────────────────────────────────
     
     uint16_t getStageTypeId() const override {
         switch (ndim()) {
@@ -230,6 +207,10 @@ public:
             case 3: return static_cast<uint8_t>(DataType::UINT32);       // outlier_count
             default: return static_cast<uint8_t>(DataType::UINT8);
         }
+    }
+
+    uint8_t getInputDataType(size_t /*input_index*/) const override {
+        return static_cast<uint8_t>(getInputDataType());
     }
     
     size_t serializeHeader(size_t output_index, uint8_t* header_buffer, size_t max_size) const override {
@@ -340,7 +321,6 @@ private:
     /// execute() (compress mode) and consumed once by postStreamSync().
     const void* d_outlier_count_ptr_ = nullptr;
     
-    // Helper to get data type enums
     DataType getInputDataType() const {
         if (std::is_same<TInput, float>::value) return DataType::FLOAT32;
         if (std::is_same<TInput, double>::value) return DataType::FLOAT64;
@@ -354,23 +334,17 @@ private:
         return DataType::UINT16;
     }
     
-    // Helper to get max outlier count based on capacity
     size_t getMaxOutlierCount(size_t num_elements) const {
         return static_cast<size_t>(std::ceil(num_elements * config_.outlier_capacity));
     }
 };
 
-// Explicit instantiations for common type combinations
 extern template class LorenzoStage<float, uint16_t>;
 extern template class LorenzoStage<float, uint8_t>;
 extern template class LorenzoStage<double, uint16_t>;
 extern template class LorenzoStage<double, uint32_t>;
 
-// ========== Kernel Launcher Declarations ==========
-// Forward declarations for the kernel launchers defined in lorenzo.cu.
-// 1-D launchers already exist; 2-D and 3-D launchers are stubs until the
-// cuSZ kernels are wired in.
-// (All declarations are inside the already-open namespace fz.)
+// Kernel launcher declarations — defined in lorenzo.cu.
 
 template<typename TInput, typename TCode>
 void launchLorenzoKernel(
@@ -395,8 +369,7 @@ void launchLorenzoInverseKernel(
     cudaStream_t stream, MemoryPool* pool
 );
 
-/// 2-D forward Lorenzo kernel launcher.
-/// @param len3  {nx, ny, 1}  where nx is the fast (x) dimension.
+/// 2-D forward Lorenzo kernel launcher. `nx` is the fast (x) dimension.
 template<typename TInput, typename TCode>
 void launchLorenzoKernel2D(
     const TInput* d_input, size_t nx, size_t ny,
@@ -422,7 +395,6 @@ void launchLorenzoInverseKernel2D(
 );
 
 /// 3-D forward Lorenzo kernel launcher.
-/// @param len3  {nx, ny, nz}.
 template<typename TInput, typename TCode>
 void launchLorenzoKernel3D(
     const TInput* d_input, size_t nx, size_t ny, size_t nz,

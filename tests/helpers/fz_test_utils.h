@@ -81,13 +81,30 @@ public:
                                      cudaGetErrorString(e));
     }
 
-    // Download to a host vector
+    // Download the full buffer to a host vector.
     std::vector<T> download(cudaStream_t s = 0) const {
         std::vector<T> h(n_);
         cudaError_t e = cudaMemcpyAsync(h.data(), ptr_, bytes(),
                                          cudaMemcpyDeviceToHost, s);
         if (e != cudaSuccess)
             throw std::runtime_error(std::string("CudaBuffer download failed: ") +
+                                     cudaGetErrorString(e));
+        cudaStreamSynchronize(s);
+        return h;
+    }
+
+    // Download only the first byte_count bytes.  Returns a vector<T> of
+    // byte_count/sizeof(T) elements.  Use this when the stage only wrote
+    // byte_count bytes into a larger allocated buffer so that initcheck does
+    // not flag reads of the unwritten trailing bytes.
+    std::vector<T> download_bytes(size_t byte_count, cudaStream_t s = 0) const {
+        size_t elem_count = byte_count / sizeof(T);
+        std::vector<T> h(elem_count);
+        if (elem_count == 0) return h;
+        cudaError_t e = cudaMemcpyAsync(h.data(), ptr_, byte_count,
+                                         cudaMemcpyDeviceToHost, s);
+        if (e != cudaSuccess)
+            throw std::runtime_error(std::string("CudaBuffer download_bytes failed: ") +
                                      cudaGetErrorString(e));
         cudaStreamSynchronize(s);
         return h;
@@ -155,6 +172,26 @@ inline std::vector<float> make_sine_floats(size_t n,
     std::vector<float> v(n);
     for (size_t i = 0; i < n; i++)
         v[i] = amplitude * std::sin(static_cast<float>(i) * freq);
+    return v;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Generic smooth data generator for type-parametric tests.
+// Produces a two-component sinusoid scaled to amp1 and amp2, suitable as
+// input to lossy predictors (Lorenzo, Quantizer) for any floating-point T.
+// ─────────────────────────────────────────────────────────────────────────────
+template <typename T>
+inline std::vector<T> make_smooth_data(size_t n,
+                                        double freq1 = 0.01,
+                                        double freq2 = 0.003,
+                                        double amp1  = 50.0,
+                                        double amp2  = 20.0) {
+    std::vector<T> v(n);
+    for (size_t i = 0; i < n; i++) {
+        double x = amp1 * std::sin(static_cast<double>(i) * freq1)
+                 + amp2 * std::cos(static_cast<double>(i) * freq2);
+        v[i] = static_cast<T>(x);
+    }
     return v;
 }
 

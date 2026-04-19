@@ -1,5 +1,6 @@
 .notes/
 *build/
+build-*/
 build-compute/
 .vscode/
 data/
@@ -9,10 +10,12 @@ temp/
 *.fzm
 *.tmp
 *.fzmodules
-docs/
+docs/doxygen/
 *.nsys-rep
 load-env
 a.out
 memory/
 .claude/
 Testing/
+docs/*
+.github/agents/

@@ -1,40 +1,29 @@
 #pragma once
 
-// FZGPUModules - Main API Header
+/**
+ * @file fzgpumodules.h
+ * @brief FZGPUModules main API header — include this to access the full library.
+ */
 
-// Standard library
-#include <iostream>
-#include <vector>
-#include <chrono>
-#include <cmath>
-#include <cstring>
-#include <iomanip>
-
-// CUDA
 #include <cuda_runtime.h>
+#include <vector>
 
-// Format definitions
 #include "fzm_format.h"
 
-// Pipeline components
 #include "pipeline/compressor.h"
 #include "pipeline/dag.h"
 #include "pipeline/stat.h"
 
-// Stage API
 #include "stage/stage.h"
-#include "stage/mock_stages.h"  // Mock stages for testing
 
-// Logging
 #include "log.h"
 
-// Real stages
-#include "encoders/diff/diff.h"               // Difference coding
-#include "encoders/RLE/rle.h"                 // Run-length encoding
-#include "predictors/lorenzo/lorenzo.h"       // Lorenzo predictor
-#include "predictors/quantizer/quantizer.h"   // Direct-value quantizer
-#include "transforms/zigzag/zigzag_stage.h"      // Zigzag encode/decode stage
-#include "transforms/negabinary/negabinary.h"     // Negabinary utilities
-#include "transforms/negabinary/negabinary_stage.h" // NegabinaryStage
-#include "transforms/bitshuffle/bitshuffle_stage.h"   // BitshuffleStage
-#include "transforms/rze/rze_stage.h"                   // RZEStage
+#include "encoders/diff/diff.h"
+#include "encoders/RLE/rle.h"
+#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/quantizer/quantizer.h"
+#include "transforms/zigzag/zigzag_stage.h"
+#include "transforms/negabinary/negabinary.h"
+#include "transforms/negabinary/negabinary_stage.h"
+#include "transforms/bitshuffle/bitshuffle_stage.h"
+#include "transforms/rze/rze_stage.h"

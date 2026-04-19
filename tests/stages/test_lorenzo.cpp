@@ -79,10 +79,10 @@ static LorenzoForwardResult run_lorenzo_forward(
     r.indices_bytes = actual.count("outlier_indices") ? actual.at("outlier_indices"): est[2];
     r.count_bytes   = actual.count("outlier_count")   ? actual.at("outlier_count")  : est[3];
 
-    r.codes_raw   = d_codes.download(stream);   r.codes_raw.resize(r.codes_bytes);
-    r.errors_raw  = d_errors.download(stream);  r.errors_raw.resize(r.errors_bytes);
-    r.indices_raw = d_indices.download(stream); r.indices_raw.resize(r.indices_bytes);
-    r.count_raw   = d_count.download(stream);   r.count_raw.resize(r.count_bytes);
+    r.codes_raw   = d_codes.download_bytes(r.codes_bytes,   stream);
+    r.errors_raw  = d_errors.download_bytes(r.errors_bytes, stream);
+    r.indices_raw = d_indices.download_bytes(r.indices_bytes, stream);
+    r.count_raw   = d_count.download_bytes(r.count_bytes,  stream);
 
     return r;
 }

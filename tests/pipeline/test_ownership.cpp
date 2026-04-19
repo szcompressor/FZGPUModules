@@ -101,7 +101,7 @@ TEST(Ownership, CompressOutputPoolOwnedDataCorrect) {
     ASSERT_NE(d_dec, nullptr);
     ASSERT_EQ(dec_sz, in_bytes);
 
-    auto h_recon = CudaBuffer<float>(N).download(stream);
+    std::vector<float> h_recon(N);
     FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
     cudaFree(d_dec);
 

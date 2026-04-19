@@ -1,11 +1,15 @@
 #pragma once
 
+/**
+ * @file stage_factory.h
+ * @brief Factory function for reconstructing pipeline stages from serialized FZM headers.
+ */
+
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "encoders/diff/diff.h"
 #include "encoders/RLE/rle.h"
 #include "predictors/lorenzo/lorenzo.h"
-#include "stage/mock_stages.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
@@ -18,15 +22,13 @@
 namespace fz {
 
 /**
- * Create a stage from its StageType and serialized config
+ * Reconstruct a Stage from a serialized FZM header. Used by the decompressor
+ * to rebuild the inverse pipeline from the file.
  *
- * Used during decompression to reconstruct the pipeline from the FZM header.
- * The returned stage is heap-allocated; the caller owns the pointer.
- *
- * @param type Stage type from FZMStageInfo
- * @param config Serialized config data (from FZMStageInfo.stage_config or FZMBufferEntry.stage_config)
- * @param config_size Number of valid bytes in config
- * @return Newly created stage (caller owns)
+ * @param type         Stage type read from `FZMStageInfo`.
+ * @param config       Serialized config bytes.
+ * @param config_size  Number of valid bytes in `config`.
+ * @return Heap-allocated Stage; caller takes ownership.
  */
 inline Stage* createStage(StageType type, const uint8_t* config, size_t config_size) {
     Stage* stage = nullptr;
@@ -35,13 +37,10 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
         case StageType::LORENZO_1D:
         case StageType::LORENZO_2D:
         case StageType::LORENZO_3D: {
-            // Lorenzo 1-D/2-D/3-D — same template types; dims are restored by deserializeHeader()
+            // Dims are restored by deserializeHeader(); template types come from stored fields.
             if (config_size >= sizeof(LorenzoConfig)) {
                 LorenzoConfig lc;
                 std::memcpy(&lc, config, sizeof(LorenzoConfig));
-
-                // Select template instantiation from stored types
-                // Currently only <float, uint16_t> is used in practice
                 if (lc.input_type == DataType::FLOAT32 && lc.code_type == DataType::UINT16) {
                     auto* s = new LorenzoStage<float, uint16_t>();
                     s->deserializeHeader(config, config_size);
@@ -111,7 +110,6 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
         }
 
         case StageType::RLE: {
-            // RLE needs element type from config
             if (config_size >= 1) {
                 DataType dt;
                 std::memcpy(&dt, config, sizeof(DataType));
@@ -129,11 +127,6 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
                 // No config — default to uint16_t
                 stage = new RLEStage<uint16_t>();
             }
-            break;
-        }
-
-        case StageType::PASSTHROUGH: {
-            stage = new PassThroughStage();
             break;
         }
 

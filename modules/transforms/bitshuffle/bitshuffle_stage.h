@@ -1,34 +1,19 @@
 #pragma once
 
 /**
- * modules/transforms/bitshuffle/bitshuffle_stage.h
- *
- * BitshuffleStage — GPU bit-matrix transpose stage.
+ * @file bitshuffle_stage.h
+ * @brief GPU bit-matrix transpose stage (W × N bit shuffle over fixed-size chunks).
  *
  * Given a chunk of N elements each W bits wide, the forward pass produces W
  * groups each containing the k-th bit of all N elements (a W × N bit-matrix
- * transpose).  The output is the same byte size as the input.
+ * transpose). Output is the same byte size as input.
  *
- * Processing model:
- *   - Data is processed in fixed-size chunks (default 16 KB).
- *   - Within each chunk, a CUDA block executes the transpose using
- *     __ballot_sync to gather column bits across a warp of 32 threads.
- *   - Output layout: bit-plane W-1 of all elements, then W-2, ..., then 0.
+ * Output layout: MSB-first — bit-plane W-1 at plane index 0, bit-plane 0 at W-1.
+ * Plane p occupies words `p*(N_chunk/32)..(p+1)*(N_chunk/32)-1`
+ * where `N_chunk = block_size / element_width`.
  *
- * Configuration:
- *   setBlockSize(bytes)   — chunk size in bytes (default 16384, must be a
- *                           multiple of 1024 * element_width)
- *   setElementWidth(bytes)— element width: 1, 2, 4, or 8 (default 4)
- *   setInverse(bool)      — transpose in the reverse direction
- *
- * Output layout: MSB-first — bit-plane W-1 (MSBit) is at plane index 0;
- *   bit-plane 0 (LSBit) is at index W-1.
- *   Plane p occupies words p*(N_chunk/32) .. (p+1)*(N_chunk/32)-1
- *   where N_chunk = block_size_bytes / element_width.
- *
- * Serialized config: 5 bytes
- *   [0..3] block_size   (uint32_t, little-endian)
- *   [4]    element_width (uint8_t)
+ * Serialized header (5 bytes):
+ *   `[0..3]` block_size (uint32_t LE), `[4]` element_width (uint8_t).
  */
 
 #include "stage/stage.h"
@@ -43,6 +28,13 @@
 
 namespace fz {
 
+/**
+ * GPU bit-matrix transpose stage.
+ *
+ * `setBlockSize(bytes)` — chunk size in bytes (default 16384; must be a
+ * multiple of `1024 × element_width`).
+ * `setElementWidth(bytes)` — element width: 1, 2, 4, or 8 (default 4).
+ */
 class BitshuffleStage : public Stage {
 public:
     BitshuffleStage()
@@ -134,9 +126,9 @@ public:
 
 private:
     bool     is_inverse_;
-    uint32_t block_size_;    // bytes per chunk
+    uint32_t block_size_;              ///< Bytes per chunk.
     uint32_t saved_block_size_ = 0;
-    uint8_t  element_width_; // bytes per element (1, 2, 4, or 8)
+    uint8_t  element_width_;           ///< Bytes per element (1, 2, 4, or 8).
     uint8_t  saved_element_width_ = 0;
     size_t   actual_output_size_ = 0;
     size_t   saved_actual_output_size_ = 0;

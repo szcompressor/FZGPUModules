@@ -1,0 +1,112 @@
+# Doxyfile for FZGPUModules
+# Doxygen 1.9.8+
+# Run: doxygen Doxyfile   (or: cmake --build build --target docs)
+
+#---------------------------------------------------------------------------
+# Project identity
+#---------------------------------------------------------------------------
+PROJECT_NAME           = "FZGPUModules"
+PROJECT_NUMBER         = "1.0"
+PROJECT_BRIEF          = "GPU-accelerated modular compression pipeline"
+OUTPUT_DIRECTORY       = docs/doxygen
+
+#---------------------------------------------------------------------------
+# Input
+#---------------------------------------------------------------------------
+INPUT                  = include/ \
+                         modules/ \
+                         docs/mainpage.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h
+USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
+
+# Strip the repo root from displayed paths so paths look like include/pipeline/dag.h
+STRIP_FROM_PATH        = .
+
+#---------------------------------------------------------------------------
+# What to extract
+#---------------------------------------------------------------------------
+# Only show symbols that have a /** */ doc block.
+# This keeps the output clean — undocumented internals stay hidden.
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+EXTRACT_ANON_NSPACES   = NO
+HIDE_UNDOC_MEMBERS     = YES
+HIDE_UNDOC_CLASSES     = YES
+
+# Show @internal-marked items in output (they're in public headers;
+# developers may still want to read them). Set to YES to hide them.
+INTERNAL_DOCS          = YES
+
+#---------------------------------------------------------------------------
+# Output formats
+#---------------------------------------------------------------------------
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+
+HTML_OUTPUT            = html
+HTML_DYNAMIC_SECTIONS  = YES
+GENERATE_TREEVIEW      = YES      # Left-hand navigation panel
+DISABLE_INDEX          = NO
+FULL_SIDEBAR           = NO
+
+#---------------------------------------------------------------------------
+# Source browsing
+#---------------------------------------------------------------------------
+SOURCE_BROWSER         = NO       # Don't embed raw source — keep docs focused
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = NO
+REFERENCES_RELATION    = NO
+
+#---------------------------------------------------------------------------
+# Diagrams (requires Graphviz / dot)
+#---------------------------------------------------------------------------
+HAVE_DOT               = YES
+DOT_NUM_THREADS        = 4
+CLASS_GRAPH            = YES      # Inheritance diagrams
+COLLABORATION_GRAPH    = NO       # Too noisy for this codebase
+INCLUDE_GRAPH          = NO
+INCLUDED_BY_GRAPH      = NO
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+DOT_IMAGE_FORMAT       = svg      # SVG scales cleanly on retina displays
+INTERACTIVE_SVG        = YES
+MAX_DOT_GRAPH_DEPTH    = 3
+
+#---------------------------------------------------------------------------
+# Preprocessing
+#---------------------------------------------------------------------------
+# Doxygen doesn't understand CUDA, so suppress CUDA-specific keywords
+# so they don't appear in the rendered output.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = __host__= \
+                         __device__= \
+                         __global__= \
+                         __forceinline__=inline \
+                         CUDA_CALLABLE= \
+                         "static_assert(x,y)="
+
+#---------------------------------------------------------------------------
+# Warnings
+#---------------------------------------------------------------------------
+QUIET                  = NO
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO       # Don't warn for intentionally undocumented items
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+
+#---------------------------------------------------------------------------
+# Miscellaneous
+#---------------------------------------------------------------------------
+SORT_MEMBER_DOCS       = NO       # Keep declaration order — it's intentional
+SORT_BRIEF_DOCS        = NO
+ALPHABETICAL_INDEX     = YES
+SHOW_USED_FILES        = NO
+SHOW_FILES             = YES
+SHOW_NAMESPACES        = YES
+TYPEDEF_HIDES_STRUCT   = NO

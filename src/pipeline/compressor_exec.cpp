@@ -55,7 +55,6 @@ void Pipeline::compress(
         was_compressed_ = false;
     }
 
-    // Wire inputs (normal mode) or copy to the fixed graph input slot (graph mode).
     input_size_ = 0;
     source_input_sizes_.assign(input_nodes_.size(), 0);
     for (const auto& spec : inputs) {
@@ -75,7 +74,6 @@ void Pipeline::compress(
         }
         size_t idx = static_cast<size_t>(std::distance(input_nodes_.begin(), idx_it));
 
-        // Guard: null device pointer is always a programming error.
         if (spec.d_data == nullptr) {
             throw std::runtime_error(
                 "compress(): InputSpec for source stage '" + spec.source->getName() +
@@ -127,20 +125,14 @@ void Pipeline::compress(
         propagateBufferSizes(true);
     }
 
-    // Host-side wall-clock start (covers everything including output gathering)
     auto t_host_start = std::chrono::steady_clock::now();
 
-    // Clear any stale metadata upfront; repopulated only on success so a
-    // failed compress() never leaves buffer_metadata_ in a partially-written state.
     buffer_metadata_.clear();
 
-    // Execute DAG + post-processing.
-    // On any failure: reset pool allocations and clear half-written state.
     std::vector<StageTimingResult> stage_timings;
     auto t_dag_start = std::chrono::steady_clock::now();
     auto t_dag_end   = t_dag_start;  // updated inside try block on success
     try {
-        // Execute DAG (or replay the instantiated graph).
         // The graph path eliminates per-call CPU dispatch overhead: all kernel
         // launches and D2D copies recorded at captureGraph() time are replayed
         // in one driver call.  Post-graph work (sync, postStreamSync, output
@@ -152,19 +144,14 @@ void Pipeline::compress(
         }
         t_dag_end = std::chrono::steady_clock::now();
 
-        // required for postStreamSync() and cuda events
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-        // Allow stages to finalize host-side state from GPU results
-        // (e.g. Lorenzo reads back actual outlier count and trims output sizes).
         for (auto& stage_ptr : stages_) {
             stage_ptr->postStreamSync(stream);
         }
 
-        // If profiling: collect CUDA event timings (stream already synced above)
         stage_timings = profiling_enabled_ ? dag_->collectTimings() : std::vector<StageTimingResult>{};
 
-        // Capture buffer metadata for file serialization
         for (size_t i = 0; i < output_buffer_ids_.size(); i++) {
             int buffer_id = output_buffer_ids_[i];
             const auto& buffer_info = dag_->getBufferInfo(buffer_id);
@@ -176,14 +163,12 @@ void Pipeline::compress(
             meta.producer = producer;
             meta.output_index = buffer_info.producer_output_index;
 
-            // Get output name
             auto output_names = producer->stage->getOutputNames();
             int output_idx = buffer_info.producer_output_index;
             meta.name = (output_idx >= 0 && output_idx < static_cast<int>(output_names.size()))
                         ? output_names[output_idx]
                         : "output";
 
-            // Get actual size from stage
             auto sizes_by_name = producer->stage->getActualOutputSizesByName();
             auto it = sizes_by_name.find(meta.name);
             meta.actual_size = (it != sizes_by_name.end()) ? it->second : buffer_info.size;
@@ -213,7 +198,6 @@ void Pipeline::compress(
             }
         }
     } catch (...) {
-        // Restore clean state so subsequent calls don't observe partial output
         dag_->reset(stream);
         buffer_metadata_.clear();
         input_size_ = 0;
@@ -221,17 +205,14 @@ void Pipeline::compress(
         throw;
     }
 
-    // Mark that a successful compress() has been completed.
     is_compressed_  = true;
     was_compressed_ = true;
 
-    // Host-side wall-clock end
     auto t_host_end = std::chrono::steady_clock::now();
 
     float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
     float dag_ms  = std::chrono::duration<float, std::milli>(t_dag_end  - t_dag_start ).count();
 
-    // Build profiling result
     if (profiling_enabled_) {
         PipelinePerfResult r;
         r.is_compress     = true;
@@ -241,7 +222,6 @@ void Pipeline::compress(
         r.output_bytes    = *output_size;
         r.stages          = std::move(stage_timings);
 
-        // Build per-level aggregates
         r.levels = buildLevelTimings(r.stages);
 
         last_perf_result_ = std::move(r);
@@ -297,7 +277,9 @@ void Pipeline::compress(
             d_pad_buf_ = mem_pool_->allocate(padded, stream,
                                              "pipeline_input_pad", /*persistent=*/true);
             if (!d_pad_buf_) {
-                throw std::runtime_error("Failed to allocate pipeline input pad buffer");
+                throw std::runtime_error(
+                    "Failed to allocate pipeline input pad buffer (" +
+                    std::to_string(padded) + " bytes); pool may be exhausted");
             }
             d_pad_buf_size_ = padded;
         }
@@ -320,8 +302,6 @@ void Pipeline::compress(
     // The caller-visible size is trimmed back in decompress() using original_input_size_.
 }
 
-// ========== In-Memory Decompression ==========
-
 std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     const void* d_input,
     size_t      input_size,
@@ -337,7 +317,6 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     auto t_host_start = std::chrono::steady_clock::now();
     FZ_LOG(INFO, "Decompressing (%zu source(s))", input_nodes_.size());
 
-    // ── Build compressed-data pointer map ────────────────────────────────────
     // Determines which device pointer feeds each compressed buffer in the
     // inverse DAG.  Three cases are handled: see decompress() header doc.
     std::unordered_map<int, void*> compressed_ptrs;
@@ -366,13 +345,11 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         }
     }
 
-    // ── Switch all stages to inverse mode ────────────────────────────────────
     for (auto& s : stages_) {
         s->saveState();
         s->setInverse(true);
     }
 
-    // ── Build pipeline-output map (fwd_buf_id → {ptr, size}) ─────────────────
     PipelineOutputMap po_map;
     for (const auto& meta : buffer_metadata_) {
         auto it   = compressed_ptrs.find(meta.buffer_id);
@@ -382,7 +359,6 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         po_map[meta.buffer_id] = {ptr, meta.actual_size};
     }
 
-    // ── Build per-source uncompressed sizes from what compress() recorded ────
     std::unordered_map<Stage*, size_t> source_sizes;
     for (size_t i = 0; i < input_nodes_.size(); i++) {
         size_t sz = (i < source_input_sizes_.size() && source_input_sizes_[i] > 0)
@@ -511,7 +487,11 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
             if (!d_final) {
                 for (auto& r : results) mem_pool_->free(r.first, stream);
                 for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
-                throw std::runtime_error("pool allocation for decompress output failed");
+                throw std::runtime_error(
+                    "Pool allocation for decompress output failed (" +
+                    std::to_string(actual_size) + " bytes); pool may be exhausted — "
+                    "pass a larger pool_override_bytes to decompressFromFile() or "
+                    "increase pool_size_multiplier");
             }
             d_decomp_outputs_.push_back(d_final);
         } else {
@@ -519,14 +499,16 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
             if (err != cudaSuccess) {
                 for (auto& r : results) cudaFree(r.first);
                 for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
-                throw std::runtime_error("cudaMalloc for decompress output failed");
+                throw std::runtime_error(
+                    "cudaMalloc for decompress output failed (" +
+                    std::to_string(actual_size) + " bytes): " +
+                    cudaGetErrorString(err));
             }
         }
         inv_dag.setExternalPointer(res_buf_id, d_final);
         results.push_back({d_final, actual_size});
     }
 
-    // ── Execute ───────────────────────────────────────────────────────────────
     auto t_dag_start = std::chrono::steady_clock::now();
     inv_dag.execute(stream);
     auto t_dag_end = std::chrono::steady_clock::now();
@@ -552,7 +534,6 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         }
     }
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
     // Result buffers are now external (caller-owned via cudaMalloc) — reset()
     // skips external buffers so they are not freed here.
     // Intermediate non-external buffers are freed by reset() in MINIMAL mode.
@@ -564,7 +545,6 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
         s->restoreState();
     }
 
-    // ── Profiling ─────────────────────────────────────────────────────────────
     auto t_host_end = std::chrono::steady_clock::now();
     float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
     float dag_ms  = std::chrono::duration<float, std::milli>(t_dag_end  - t_dag_start ).count();
@@ -622,7 +602,9 @@ void Pipeline::decompress(
         cudaError_t err = cudaMalloc(&d_final, total);
         if (err != cudaSuccess) {
             for (auto& r : results) cudaFree(r.first);
-            throw std::runtime_error("cudaMalloc for multi-source decompress output failed");
+            throw std::runtime_error(
+                "cudaMalloc for multi-source decompress output failed (" +
+                std::to_string(total) + " bytes): " + cudaGetErrorString(err));
         }
 
         uint8_t* dst = static_cast<uint8_t*>(d_final);

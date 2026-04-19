@@ -1,0 +1,143 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release",
+      "description": "Optimized build, no sanitizers.  Default for running tests.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug",
+      "description": "Debug build with -Wall, no optimizations.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+
+    {
+      "name": "asan",
+      "inherits": "base",
+      "displayName": "ASan + UBSan",
+      "description": "Debug build with AddressSanitizer and UndefinedBehaviorSanitizer compiled in.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":  "Debug",
+        "USE_SANITIZER":     "ASanUbsan"
+      }
+    },
+
+    {
+      "name": "compute-san",
+      "inherits": "base",
+      "displayName": "Compute Sanitizer",
+      "description": "Release build with -lineinfo; ctest wraps every test executable with compute-sanitizer --tool memcheck.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":                  "Release",
+        "USE_SANITIZER":                     "Compute",
+        "FZGMOD_COMPUTE_SANITIZER_WRAPPER":  "ON"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "displayName": "Build Release"
+    },
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "displayName": "Build Debug"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "displayName": "Build ASan + UBSan"
+    },
+    {
+      "name": "compute-san",
+      "configurePreset": "compute-san",
+      "displayName": "Build Compute Sanitizer"
+    }
+  ],
+
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "release",
+      "displayName": "All tests (Release)",
+      "description": "Run the full test suite against the Release build.",
+      "output": { "outputOnFailure": true }
+    },
+
+    {
+      "name": "stages",
+      "configurePreset": "release",
+      "displayName": "Stage unit tests",
+      "description": "Run only tests labelled 'stages'.",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "stages" } }
+    },
+
+    {
+      "name": "pipeline",
+      "configurePreset": "release",
+      "displayName": "Pipeline integration tests",
+      "description": "Run only tests labelled 'pipeline'.",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "pipeline" } }
+    },
+
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "displayName": "All tests (ASan + UBSan)",
+      "description": "Run the full test suite against the ASan+UBSan build.  ASan is baked into the binaries — no extra wrapper needed.",
+      "output": { "outputOnFailure": true }
+    },
+
+    {
+      "name": "compute-san",
+      "configurePreset": "compute-san",
+      "displayName": "All tests (Compute Sanitizer)",
+      "description": "Run the full test suite under 'compute-sanitizer --tool memcheck'.  Requires compute-sanitizer on PATH.  Each test executable is prefixed via CROSSCOMPILING_EMULATOR.",
+      "output": { "outputOnFailure": true }
+    },
+
+    {
+      "name": "compute-san-stages",
+      "configurePreset": "compute-san",
+      "displayName": "Stage tests (Compute Sanitizer)",
+      "description": "Stage unit tests only, under compute-sanitizer memcheck.",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "stages" } }
+    },
+
+    {
+      "name": "compute-san-pipeline",
+      "configurePreset": "compute-san",
+      "displayName": "Pipeline tests (Compute Sanitizer)",
+      "description": "Pipeline integration tests only, under compute-sanitizer memcheck.",
+      "output": { "outputOnFailure": true },
+      "filter": { "include": { "label": "pipeline" } }
+    }
+  ]
+}

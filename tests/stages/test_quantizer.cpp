@@ -88,10 +88,10 @@ static QuantizerForwardResult run_quantizer_forward(
     r.idxs_bytes  = actual.count("outlier_idxs")  ? actual.at("outlier_idxs")  : est[2];
     r.count_bytes = actual.count("outlier_count") ? actual.at("outlier_count") : est[3];
 
-    r.codes_raw = d_codes.download(stream); r.codes_raw.resize(r.codes_bytes);
-    r.vals_raw  = d_vals.download(stream);  r.vals_raw.resize(r.vals_bytes);
-    r.idxs_raw  = d_idxs.download(stream);  r.idxs_raw.resize(r.idxs_bytes);
-    r.count_raw = d_count.download(stream); r.count_raw.resize(r.count_bytes);
+    r.codes_raw = d_codes.download_bytes(r.codes_bytes, stream);
+    r.vals_raw  = d_vals.download_bytes(r.vals_bytes,  stream);
+    r.idxs_raw  = d_idxs.download_bytes(r.idxs_bytes,  stream);
+    r.count_raw = d_count.download_bytes(r.count_bytes, stream);
 
     return r;
 }
@@ -825,8 +825,7 @@ static InplaceFwdResult run_quantizer_forward_inplace(
     auto actual = stage.getActualOutputSizesByName();
     InplaceFwdResult r;
     r.codes_bytes = actual.count("codes") ? actual.at("codes") : est[0];
-    r.codes_raw   = d_codes.download(stream);
-    r.codes_raw.resize(r.codes_bytes);
+    r.codes_raw   = d_codes.download_bytes(r.codes_bytes, stream);
     return r;
 }
 

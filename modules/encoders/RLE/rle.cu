@@ -1,4 +1,5 @@
 #include "encoders/RLE/rle.h"
+#include "log.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include "mem/mempool.h"
@@ -130,6 +131,14 @@ __global__ void rle_pack_kernel(
 
     if (i == 0) {
         *reinterpret_cast<uint32_t*>(output_base) = num_runs;
+        // Zero the alignment padding between the values section and the lengths
+        // section.  values_aligned may be up to 3 bytes larger than values_bytes
+        // (4-byte alignment).  Those pad bytes are never written by the per-run
+        // threads below, leaving them uninitialized.  Zero them here so the full
+        // [0, actual_output_size_) range is always initialized.
+        uint8_t* pad_base = output_base + sizeof(uint32_t) + values_bytes;
+        for (uint32_t b = 0; b < values_aligned - values_bytes; b++)
+            pad_base[b] = 0;
     }
     if (i < num_runs) {
         reinterpret_cast<T*>(output_base + sizeof(uint32_t))[i] = values_scratch[i];
@@ -193,6 +202,7 @@ void RLEStage<T>::execute(
         FZ_CUDA_CHECK(cudaMemcpyAsync(&num_runs, inputs[0], sizeof(uint32_t),
                        cudaMemcpyDeviceToHost, stream));
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        FZ_LOG(TRACE, "RLE decode: %u runs -> %u elems", num_runs, cached_num_elements_);
 
         if (num_runs == 0) {
             actual_output_sizes_ = {0};

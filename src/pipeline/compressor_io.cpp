@@ -4,6 +4,7 @@
 #include "fzm_format.h"
 #include "log.h"
 #include "cuda_check.h"
+#include <array>
 #include <chrono>
 #include <fstream>
 #include <stdexcept>
@@ -13,6 +14,59 @@
 #include <unordered_set>
 
 namespace fz {
+
+// ─── CRC32 (IEEE 802.3 / zlib polynomial) ─────────────────────────────────
+// Used to detect silent data corruption in FZM files.
+
+namespace {
+
+// Lazy-initialized CRC32 lookup table (computed once on first call).
+static const std::array<uint32_t, 256>& crc32Table() {
+    static const auto t = []() {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; k++)
+                c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            t[i] = c;
+        }
+        return t;
+    }();
+    return t;
+}
+
+// Feed bytes into a running CRC register (pass the previous register value as
+// `crc`; initialize with 0xFFFFFFFF and XOR result with 0xFFFFFFFF to finalize).
+static uint32_t crc32Feed(uint32_t crc, const void* data, size_t len) {
+    const auto& table = crc32Table();
+    const auto* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < len; i++)
+        crc = table[(crc ^ p[i]) & 0xFFu] ^ (crc >> 8);
+    return crc;
+}
+
+// Compute CRC32 of a single contiguous region.
+static uint32_t crc32(const void* data, size_t len) {
+    return crc32Feed(0xFFFFFFFFu, data, len) ^ 0xFFFFFFFFu;
+}
+
+// Compute CRC32 over the entire FZM header (core + stage array + buffer array),
+// with header_checksum zeroed so the field doesn't contribute to its own hash.
+static uint32_t computeHeaderChecksum(const Pipeline::FZMFileHeader& fh) {
+    FZMHeaderCore core_zero = fh.core;
+    core_zero.header_checksum = 0;
+    uint32_t crc = 0xFFFFFFFFu;
+    crc = crc32Feed(crc, &core_zero, sizeof(FZMHeaderCore));
+    if (!fh.stages.empty())
+        crc = crc32Feed(crc, fh.stages.data(),
+                        fh.stages.size() * sizeof(FZMStageInfo));
+    if (!fh.buffers.empty())
+        crc = crc32Feed(crc, fh.buffers.data(),
+                        fh.buffers.size() * sizeof(FZMBufferEntry));
+    return crc ^ 0xFFFFFFFFu;
+}
+
+} // anonymous namespace
 
 // ── Local helper: build per-level timing summary (mirrors compressor_exec.cpp) ──
 static std::vector<LevelTimingResult> buildLevelTimings(
@@ -154,7 +208,9 @@ void Pipeline::writeToFile(const std::string& filename, cudaStream_t stream) {
     size_t total_data_size = fh.core.compressed_size;
     void* h_data = malloc(total_data_size);
     if (!h_data) {
-        throw std::runtime_error("Failed to allocate host buffer for file write");
+        throw std::runtime_error(
+            "Failed to allocate host buffer for file write (" +
+            std::to_string(total_data_size) + " bytes)");
     }
 
     size_t offset = 0;
@@ -178,6 +234,18 @@ void Pipeline::writeToFile(const std::string& filename, cudaStream_t stream) {
         throw std::runtime_error("cudaStreamSynchronize failed: " + std::string(cudaGetErrorString(err)));
     }
 
+    // Compute data checksum over the compressed payload (host copy).
+    fh.core.data_checksum = crc32(h_data, total_data_size);
+
+    // Set all feature flags before computing the header checksum so the flags
+    // field has its final on-disk value when it is hashed.  header_checksum
+    // is still 0 at this point, which is what computeHeaderChecksum() expects.
+    fh.core.flags |= FZM_FLAG_HAS_DATA_CHECKSUM | FZM_FLAG_HAS_HEADER_CHECKSUM;
+
+    // Compute header checksum over FZMHeaderCore + stage array + buffer array
+    // (with header_checksum zeroed — see computeHeaderChecksum()).
+    fh.core.header_checksum = computeHeaderChecksum(fh);
+
     std::ofstream file(filename, std::ios::binary);
     if (!file) {
         free(h_data);
@@ -196,13 +264,13 @@ void Pipeline::writeToFile(const std::string& filename, cudaStream_t stream) {
     }
     if (!file) {
         free(h_data);
-        throw std::runtime_error("Failed to write header to file");
+        throw std::runtime_error("Failed to write header to file: " + filename);
     }
 
     file.write(reinterpret_cast<const char*>(h_data), total_data_size);
     if (!file) {
         free(h_data);
-        throw std::runtime_error("Failed to write data to file");
+        throw std::runtime_error("Failed to write compressed data to file: " + filename);
     }
 
     file.close();
@@ -221,21 +289,21 @@ Pipeline::FZMFileHeader Pipeline::readHeader(const std::string& filename) {
         throw std::runtime_error("Failed to open file for reading: " + filename);
     }
 
-    FZMFileHeader fh;
-    file.read(reinterpret_cast<char*>(&fh.core), sizeof(FZMHeaderCore));
+    // ── Step 1: probe magic + version before committing to a read size ────────
+    uint32_t probe_magic   = 0;
+    uint16_t probe_version = 0;
+    file.read(reinterpret_cast<char*>(&probe_magic),   sizeof(probe_magic));
+    file.read(reinterpret_cast<char*>(&probe_version), sizeof(probe_version));
     if (!file) {
         throw std::runtime_error("Failed to read header from file: " + filename);
     }
 
-    if (fh.core.magic != FZM_MAGIC) {
+    if (probe_magic != FZM_MAGIC) {
         throw std::runtime_error("Invalid FZM file format (bad magic number)");
     }
 
-    // Version check: extract major/minor from the file's version field.
-    // Files written before the major/minor split store a bare integer (e.g. 3)
-    // in the low byte; fzmVersionMajor/Minor() handle that transparently.
-    uint8_t file_major = fzmVersionMajor(fh.core.version);
-    uint8_t file_minor = fzmVersionMinor(fh.core.version);
+    uint8_t file_major = fzmVersionMajor(probe_version);
+    uint8_t file_minor = fzmVersionMinor(probe_version);
 
     if (file_major != FZM_VERSION_MAJOR) {
         throw std::runtime_error(
@@ -245,7 +313,8 @@ Pipeline::FZMFileHeader Pipeline::readHeader(const std::string& filename) {
             std::to_string(FZM_VERSION_MAJOR)
         );
     }
-    if (file_minor != FZM_VERSION_MINOR) {
+    const bool version_exact = (file_minor == FZM_VERSION_MINOR);
+    if (!version_exact) {
         FZ_LOG(WARN,
                "FZM minor version mismatch: file=%u.%u, reader=%u.%u — "
                "proceeding (forward/backward minor compat)",
@@ -253,37 +322,78 @@ Pipeline::FZMFileHeader Pipeline::readHeader(const std::string& filename) {
                FZM_VERSION_MAJOR, FZM_VERSION_MINOR);
     }
 
+    // ── Step 2: seek back and read the core header ────────────────────────────
+    // v3.0 files had a 72-byte core; v3.1+ is 80 bytes.  Reading exactly the
+    // right number of bytes keeps the file cursor aligned for the stage array.
+    file.seekg(0, std::ios::beg);
+    FZMFileHeader fh;
+    fh.core = FZMHeaderCore{};  // zero-init so new fields default to 0 for legacy files
+
+    const bool is_legacy = (file_minor == 0);  // v3.0 had no checksum fields
+    const size_t core_read_size = is_legacy ? FZM_LEGACY_HEADER_CORE_SIZE
+                                            : sizeof(FZMHeaderCore);
+    file.read(reinterpret_cast<char*>(&fh.core), core_read_size);
+    if (!file) {
+        throw std::runtime_error("Failed to read header from file: " + filename);
+    }
+
     if (fh.core.num_stages > FZM_MAX_BUFFERS || fh.core.num_buffers > FZM_MAX_BUFFERS) {
         throw std::runtime_error("FZM header has too many stages/buffers");
     }
 
-    // Read stage array
+    // ── Step 3: read stage and buffer arrays ──────────────────────────────────
     fh.stages.resize(fh.core.num_stages);
     if (fh.core.num_stages > 0) {
         file.read(reinterpret_cast<char*>(fh.stages.data()),
                   fh.core.num_stages * sizeof(FZMStageInfo));
         if (!file) {
-            throw std::runtime_error("Failed to read stage data from file");
+            throw std::runtime_error(
+                "Failed to read stage data from file: " + filename +
+                " (" + std::to_string(fh.core.num_stages) + " stages × " +
+                std::to_string(sizeof(FZMStageInfo)) + " bytes each)");
         }
     }
 
-    // Read buffer array
     fh.buffers.resize(fh.core.num_buffers);
     if (fh.core.num_buffers > 0) {
         file.read(reinterpret_cast<char*>(fh.buffers.data()),
                   fh.core.num_buffers * sizeof(FZMBufferEntry));
         if (!file) {
-            throw std::runtime_error("Failed to read buffer data from file");
+            throw std::runtime_error(
+                "Failed to read buffer data from file: " + filename +
+                " (" + std::to_string(fh.core.num_buffers) + " buffers × " +
+                std::to_string(sizeof(FZMBufferEntry)) + " bytes each)");
         }
     }
+    file.close();
 
-    FZ_LOG(INFO, "Read FZM header from %s (v%u, %.2f MB uncompressed, %.2f MB compressed, %u stages, %u buffers, %u source(s))",
-           filename.c_str(), fh.core.version,
+    // ── Step 4: verify header checksum (v3.1+ exact-version match only) ───────
+    // Skip verification for legacy files and minor-version-mismatched files:
+    // the checksum semantics may differ if the reader and writer don't agree
+    // on the exact header layout.
+    if (!is_legacy && version_exact &&
+        (fh.core.flags & FZM_FLAG_HAS_HEADER_CHECKSUM)) {
+        uint32_t expected = fh.core.header_checksum;
+        uint32_t computed = computeHeaderChecksum(fh);
+        if (computed != expected) {
+            throw std::runtime_error(
+                "FZM header checksum mismatch in '" + filename +
+                "': expected 0x" + [](uint32_t v) {
+                    char buf[9]; snprintf(buf, sizeof(buf), "%08X", v); return std::string(buf);
+                }(expected) + ", computed 0x" + [](uint32_t v) {
+                    char buf[9]; snprintf(buf, sizeof(buf), "%08X", v); return std::string(buf);
+                }(computed) + " — file may be corrupted"
+            );
+        }
+        FZ_LOG(DEBUG, "FZM header checksum OK (0x%08X)", computed);
+    }
+
+    FZ_LOG(INFO, "Read FZM header from %s (v%u.%u, %.2f MB uncompressed, %.2f MB compressed, %u stages, %u buffers, %u source(s))",
+           filename.c_str(), file_major, file_minor,
            fh.core.uncompressed_size / (1024.0 * 1024.0),
            fh.core.compressed_size / (1024.0 * 1024.0),
            fh.core.num_stages, fh.core.num_buffers, fh.core.num_sources);
 
-    file.close();
     return fh;
 }
 
@@ -301,21 +411,45 @@ void* Pipeline::loadCompressedData(
     // Seek past the variable-length header using header_size
     file.seekg(fh.core.header_size, std::ios::beg);
     if (!file) {
-        throw std::runtime_error("Failed to seek past header in file");
+        throw std::runtime_error(
+            "Failed to seek past header in file: " + filename +
+            " (header_size=" + std::to_string(fh.core.header_size) + ")");
     }
 
     size_t data_size = fh.core.compressed_size;
     void* h_data = malloc(data_size);
     if (!h_data) {
-        throw std::runtime_error("Failed to allocate host buffer for compressed data");
+        throw std::runtime_error(
+            "Failed to allocate host buffer for compressed data (" +
+            std::to_string(data_size) + " bytes) from file: " + filename);
     }
 
     file.read(reinterpret_cast<char*>(h_data), data_size);
     if (!file) {
         free(h_data);
-        throw std::runtime_error("Failed to read compressed data from file");
+        throw std::runtime_error(
+            "Failed to read compressed data from file: " + filename +
+            " (expected " + std::to_string(data_size) + " bytes)");
     }
     file.close();
+
+    // Verify data checksum while the payload is still in h_data (host memory).
+    if (fh.core.flags & FZM_FLAG_HAS_DATA_CHECKSUM) {
+        uint32_t computed = crc32(h_data, data_size);
+        if (computed != fh.core.data_checksum) {
+            free(h_data);
+            throw std::runtime_error(
+                "FZM data checksum mismatch in '" + filename +
+                "': expected 0x" + [](uint32_t v) {
+                    char buf[9]; snprintf(buf, sizeof(buf), "%08X", v); return std::string(buf);
+                }(fh.core.data_checksum) + ", computed 0x" + [](uint32_t v) {
+                    char buf[9]; snprintf(buf, sizeof(buf), "%08X", v); return std::string(buf);
+                }(computed) + " — compressed data may be corrupted"
+            );
+        }
+        FZ_LOG(DEBUG, "FZM data checksum OK (0x%08X, %.2f MB)",
+               computed, data_size / (1024.0 * 1024.0));
+    }
 
     void* d_data = nullptr;
     cudaError_t err;
@@ -323,7 +457,10 @@ void* Pipeline::loadCompressedData(
         d_data = pool->allocate(data_size, stream, "compressed_data_load");
         if (!d_data) {
             free(h_data);
-            throw std::runtime_error("MemoryPool::allocate failed for compressed data load");
+            throw std::runtime_error(
+                "Pool allocation failed for compressed data load (" +
+                std::to_string(data_size) + " bytes); pool may be exhausted — "
+                "pass a larger pool_override_bytes to decompressFromFile()");
         }
     } else {
         err = cudaMalloc(&d_data, data_size);
@@ -549,7 +686,10 @@ void Pipeline::decompressFromFile(
         if (err != cudaSuccess) {
             inv_dag->reset(stream);
             local_pool.free(d_inv_result, stream);
-            throw std::runtime_error("cudaMalloc for decompressed output failed");
+            throw std::runtime_error(
+                "cudaMalloc for decompressed output failed (" +
+                std::to_string(actual_size) + " bytes): " +
+                cudaGetErrorString(err));
         }
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_final, d_inv_result, actual_size,
                                       cudaMemcpyDeviceToDevice, stream));
@@ -560,9 +700,9 @@ void Pipeline::decompressFromFile(
             t_compute_end - t_compute_start).count();
 
         // ── Cleanup ───────────────────────────────────────────────────────────
-        inv_dag->reset(stream);
-        local_pool.free(d_inv_result, stream);
-        local_pool.free(d_compressed, stream);
+        inv_dag->reset(/*stream=*/0);
+        local_pool.free(d_inv_result, /*stream=*/0);
+        local_pool.free(d_compressed, /*stream=*/0);
 
         *d_output    = d_final;
         *output_size = actual_size;
@@ -593,9 +733,9 @@ void Pipeline::decompressFromFile(
                compute_ms, dag_tput, pipe_tput);
 
     } catch (...) {
-        // Ensure all in-flight GPU ops complete before the local pool is destroyed.
+        // Ensure all in-flight GPU ops complete before freeing pool memory.
         cudaStreamSynchronize(stream);
-        local_pool.free(d_compressed, stream);
+        local_pool.free(d_compressed, /*stream=*/0);
         throw;
     }
 }

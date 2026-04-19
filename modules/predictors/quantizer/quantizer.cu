@@ -686,7 +686,10 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
     size_t /*output_index*/, uint8_t* buf, size_t max_size
 ) const {
     if (max_size < sizeof(QuantizerConfig))
-        throw std::runtime_error("Insufficient buffer for QuantizerConfig");
+        throw std::runtime_error(
+            "Insufficient buffer for QuantizerConfig: need " +
+            std::to_string(sizeof(QuantizerConfig)) + " bytes, got " +
+            std::to_string(max_size));
 
     QuantizerConfig cfg;
     cfg.abs_error_bound  = static_cast<float>(computed_abs_eb_);
@@ -713,7 +716,10 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
     // Accept both old (28-byte) and new (36-byte) header formats.
     constexpr size_t kMinSize = 28;  // size before outlier_threshold/inplace_outliers fields
     if (size < kMinSize)
-        throw std::runtime_error("Invalid QuantizerConfig size");
+        throw std::runtime_error(
+            "QuantizerConfig header too small: got " + std::to_string(size) +
+            " bytes, minimum is " + std::to_string(kMinSize) +
+            " — file may be from an incompatible older version");
 
     QuantizerConfig cfg;
     std::memcpy(&cfg, buf, std::min(size, sizeof(QuantizerConfig)));

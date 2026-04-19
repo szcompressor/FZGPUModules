@@ -44,6 +44,7 @@
 #include "transforms/bitshuffle/bitshuffle_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
+#include "log.h"
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -468,6 +469,9 @@ void BitshuffleStage::execute(
     }
 
     actual_output_size_ = in_bytes;
+    FZ_LOG(TRACE, "Bitshuffle %s: %.1f KB, block=%zu ew=%d",
+           is_inverse_ ? "decode" : "encode",
+           in_bytes / 1024.0, block_size_, static_cast<int>(element_width_));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
