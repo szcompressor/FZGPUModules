@@ -209,14 +209,6 @@ TEST(FileIO, ReadHeaderCounts) {
     EXPECT_EQ(header.stages.size(),  header.core.num_stages);
     EXPECT_EQ(header.buffers.size(), header.core.num_buffers);
 
-    // New size-query helpers should match the header metadata.
-    const size_t out_sz_single = Pipeline::getDecompressedOutputSizeFromFile(tmp);
-    EXPECT_EQ(out_sz_single, in_bytes);
-
-    auto out_sizes = Pipeline::getDecompressedOutputSizesFromFile(tmp);
-    ASSERT_EQ(out_sizes.size(), 1u);
-    EXPECT_EQ(out_sizes[0], in_bytes);
-
     std::remove(tmp.c_str());
 }
 

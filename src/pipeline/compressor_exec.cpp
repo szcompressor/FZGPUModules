@@ -302,102 +302,11 @@ void Pipeline::compress(
     // The caller-visible size is trimmed back in decompress() using original_input_size_.
 }
 
-void Pipeline::compressInto(
-    const void* d_input,
-    size_t      input_size,
-    void*       d_output,
-    size_t      output_capacity,
-    size_t*     output_size,
-    cudaStream_t stream
-) {
-    if (d_output == nullptr) {
-        throw std::runtime_error("compressInto(): d_output must not be null");
-    }
-    if (output_size == nullptr) {
-        throw std::runtime_error("compressInto(): output_size must not be null");
-    }
-
-    void*  d_internal   = nullptr;
-    size_t internal_size = 0;
-    compress(d_input, input_size, &d_internal, &internal_size, stream);
-
-    if (output_capacity < internal_size) {
-        throw std::runtime_error(
-            "compressInto(): output buffer too small (capacity=" +
-            std::to_string(output_capacity) + " bytes, required=" +
-            std::to_string(internal_size) + " bytes)");
-    }
-
-    if (d_output != d_internal && internal_size > 0) {
-        FZ_CUDA_CHECK(cudaMemcpyAsync(
-            d_output, d_internal, internal_size, cudaMemcpyDeviceToDevice, stream));
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-    }
-
-    *output_size = internal_size;
-}
-
-void Pipeline::compressInto(
-    const std::vector<InputSpec>& inputs,
-    void*       d_output,
-    size_t      output_capacity,
-    size_t*     output_size,
-    cudaStream_t stream
-) {
-    if (d_output == nullptr) {
-        throw std::runtime_error("compressInto(): d_output must not be null");
-    }
-    if (output_size == nullptr) {
-        throw std::runtime_error("compressInto(): output_size must not be null");
-    }
-
-    void*  d_internal    = nullptr;
-    size_t internal_size = 0;
-    compress(inputs, &d_internal, &internal_size, stream);
-
-    if (output_capacity < internal_size) {
-        throw std::runtime_error(
-            "compressInto(): output buffer too small (capacity=" +
-            std::to_string(output_capacity) + " bytes, required=" +
-            std::to_string(internal_size) + " bytes)");
-    }
-
-    if (d_output != d_internal && internal_size > 0) {
-        FZ_CUDA_CHECK(cudaMemcpyAsync(
-            d_output, d_internal, internal_size, cudaMemcpyDeviceToDevice, stream));
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-    }
-
-    *output_size = internal_size;
-}
-
 std::vector<std::pair<void*, size_t>> Pipeline::decompressMulti(
     const void* d_input,
     size_t      input_size,
     cudaStream_t stream
 ) {
-    return decompressMultiImpl(d_input, input_size, stream, nullptr, nullptr);
-}
-
-std::vector<std::pair<void*, size_t>> Pipeline::decompressMultiImpl(
-    const void*                d_input,
-    size_t                     input_size,
-    cudaStream_t               stream,
-    const std::vector<void*>*  caller_outputs,
-    const std::vector<size_t>* caller_capacities
-) {
-    if ((caller_outputs == nullptr) != (caller_capacities == nullptr)) {
-        throw std::runtime_error(
-            "decompressMultiImpl(): caller_outputs and caller_capacities must both be null or both be provided");
-    }
-    const bool use_caller_outputs = (caller_outputs != nullptr);
-    if (use_caller_outputs &&
-        (caller_outputs->size() != input_nodes_.size() ||
-         caller_capacities->size() != input_nodes_.size())) {
-        throw std::runtime_error(
-            "decompressMultiImpl(): caller output array size does not match pipeline source count");
-    }
-
     if (!is_finalized_) {
         throw std::runtime_error("Pipeline not finalized");
     }
@@ -559,7 +468,7 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMultiImpl(
         if (buf_it == inv_result_map.end()) {
             if (pool_managed_decomp_) {
                 for (auto& r : results) mem_pool_->free(r.first, stream);
-            } else if (!use_caller_outputs) {
+            } else {
                 for (auto& r : results) cudaFree(r.first);
             }
             for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
@@ -571,24 +480,7 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMultiImpl(
         size_t actual_size = inv_dag.getBufferSize(res_buf_id);
 
         void* d_final = nullptr;
-        if (use_caller_outputs) {
-            d_final = (*caller_outputs)[i];
-            if (!d_final) {
-                for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
-                throw std::runtime_error(
-                    "decompressInto(): caller output pointer is null for source index " +
-                    std::to_string(i));
-            }
-            const size_t capacity = (*caller_capacities)[i];
-            if (capacity < actual_size) {
-                for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
-                throw std::runtime_error(
-                    "decompressInto(): output buffer too small for source index " +
-                    std::to_string(i) + " (capacity=" +
-                    std::to_string(capacity) + " bytes, required=" +
-                    std::to_string(actual_size) + " bytes)");
-            }
-        } else if (pool_managed_decomp_) {
+        if (pool_managed_decomp_) {
             // Allocate from pool (persistent) — zero-copy, inv DAG writes directly here.
             // Caller must NOT cudaFree(); pointer is valid until the next decompress() call.
             d_final = mem_pool_->allocate(actual_size, stream, "decomp_output", /*persistent=*/true);
@@ -605,9 +497,7 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMultiImpl(
         } else {
             cudaError_t err = cudaMalloc(&d_final, actual_size);
             if (err != cudaSuccess) {
-                if (!use_caller_outputs) {
-                    for (auto& r : results) cudaFree(r.first);
-                }
+                for (auto& r : results) cudaFree(r.first);
                 for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
                 throw std::runtime_error(
                     "cudaMalloc for decompress output failed (" +
@@ -681,60 +571,6 @@ std::vector<std::pair<void*, size_t>> Pipeline::decompressMultiImpl(
            profiling_enabled_ ? last_perf_result_.pipeline_throughput_gbs() : 0.0f);
 
     return results;
-}
-
-void Pipeline::decompressInto(
-    const void* d_input,
-    size_t      input_size,
-    void*       d_output,
-    size_t      output_capacity,
-    size_t*     output_size,
-    cudaStream_t stream
-) {
-    if (d_output == nullptr) {
-        throw std::runtime_error("decompressInto(): d_output must not be null");
-    }
-    if (output_size == nullptr) {
-        throw std::runtime_error("decompressInto(): output_size must not be null");
-    }
-    if (input_nodes_.size() != 1) {
-        throw std::runtime_error(
-            "decompressInto(): Phase 1 supports single-source pipelines only (" +
-            std::to_string(input_nodes_.size()) + " source(s) detected)");
-    }
-
-    const std::vector<void*> caller_outputs{d_output};
-    const std::vector<size_t> caller_capacities{output_capacity};
-    auto results = decompressMultiImpl(
-        d_input, input_size, stream, &caller_outputs, &caller_capacities);
-
-    if (results.size() != 1) {
-        throw std::runtime_error("decompressInto(): internal error, expected one output buffer");
-    }
-
-    *output_size = results[0].second;
-    if (original_input_size_ > 0 && *output_size > original_input_size_) {
-        *output_size = original_input_size_;
-    }
-}
-
-std::vector<size_t> Pipeline::decompressMultiInto(
-    const void*                d_input,
-    size_t                     input_size,
-    const std::vector<void*>&  d_outputs,
-    const std::vector<size_t>& output_capacities,
-    cudaStream_t               stream
-) {
-    auto results = decompressMultiImpl(
-        d_input, input_size, stream, &d_outputs, &output_capacities);
-
-    std::vector<size_t> output_sizes;
-    output_sizes.reserve(results.size());
-    for (const auto& [ptr, sz] : results) {
-        (void)ptr;
-        output_sizes.push_back(sz);
-    }
-    return output_sizes;
 }
 
 void Pipeline::decompress(

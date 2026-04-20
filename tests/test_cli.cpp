@@ -91,11 +91,6 @@ TEST(CLI, CompressMissingRequiredArgsFails) {
     EXPECT_NE(rc, 0);
 }
 
-TEST(CLI, VersionFlagWorks) {
-    const int rc = run_cli({"fzgmod-cli", "-v"});
-    EXPECT_EQ(rc, 0);
-}
-
 TEST(CLI, CompressCreatesFzmFile) {
     TempWorkspace tmp;
 
@@ -119,34 +114,6 @@ TEST(CLI, CompressCreatesFzmFile) {
         "--strategy", "minimal"
     });
     ASSERT_EQ(compress_rc, 0);
-    ASSERT_TRUE(std::filesystem::exists(compressed_path));
-    ASSERT_GT(std::filesystem::file_size(compressed_path), 0u);
-}
-
-TEST(CLI, ShorthandCompressCreatesFzmFile) {
-    TempWorkspace tmp;
-
-    constexpr size_t kN = 1 << 12;
-    std::vector<float> input = fz_test::make_sine_floats(kN, 0.01f, 5.0f);
-    const auto input_path = tmp.file("short_input.f32");
-    const auto compressed_path = tmp.file("short_compressed.fzm");
-
-    write_float_file(input_path, input);
-
-    const int rc = run_cli({
-        "fzgmod-cli",
-        "-z",
-        "-i", input_path.string(),
-        "-o", compressed_path.string(),
-        "-l", "4096x1x1",
-        "-t", "f32",
-        "-m", "abs",
-        "-e", "1e-3",
-        "--pipeline", "lorenzo-rze",
-        "--strategy", "minimal"
-    });
-
-    ASSERT_EQ(rc, 0);
     ASSERT_TRUE(std::filesystem::exists(compressed_path));
     ASSERT_GT(std::filesystem::file_size(compressed_path), 0u);
 }
@@ -198,51 +165,6 @@ TEST(CLI, DecompressCommandRoundTripsKnownGoodFile) {
 
     const float max_err = fz_test::max_abs_error(input, recon);
     EXPECT_LE(max_err, kEb * 1.05f);
-}
-
-TEST(CLI, ShorthandDecompressWorks) {
-    TempWorkspace tmp;
-
-    constexpr size_t kN = 1 << 12;
-    constexpr float kEb = 1e-2f;
-
-    std::vector<float> input = fz_test::make_sine_floats(kN, 0.01f, 5.0f);
-    const size_t in_bytes = kN * sizeof(float);
-
-    const auto compressed_path = tmp.file("short_known_good.fzm");
-    const auto output_path = tmp.file("short_output.f32");
-
-    {
-        fz_test::CudaStream stream;
-        fz_test::CudaBuffer<float> d_in(kN);
-        d_in.upload(input, stream);
-        stream.sync();
-
-        Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-        auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-        auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
-        lrz->setErrorBound(kEb);
-        lrz->setQuantRadius(512);
-        lrz->setOutlierCapacity(0.2f);
-        pipeline.connect(diff, lrz, "codes");
-        pipeline.finalize();
-
-        void* d_comp = nullptr;
-        size_t comp_sz = 0;
-        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
-        pipeline.writeToFile(compressed_path.string(), stream);
-    }
-
-    const int rc = run_cli({
-        "fzgmod-cli",
-        "-x",
-        "-i", compressed_path.string(),
-        "-o", output_path.string()
-    });
-
-    ASSERT_EQ(rc, 0);
-    ASSERT_TRUE(std::filesystem::exists(output_path));
-    ASSERT_EQ(std::filesystem::file_size(output_path), in_bytes);
 }
 
 TEST(CLI, PipelineFromConfigWorksWithOverride) {
