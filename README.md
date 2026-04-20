@@ -103,6 +103,8 @@ See `examples/caller_allocated_output.cpp` for a minimal end-to-end example.
 ## Building from Source
 
 ```bash
+git clone https://github.com/szcompressor/FZGPUModules.git
+git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```

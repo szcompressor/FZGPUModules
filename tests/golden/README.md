@@ -34,6 +34,10 @@ cmake --preset release
 cmake --build --preset release --target generate_golden_files
 ```
 
+`generate_golden_files` is intentionally excluded from the default `all` build.
+This keeps head/login-node builds on clusters GPU-free while still allowing
+explicit regeneration on GPU-capable nodes or GPU CI jobs.
+
 This runs `tests/golden/regenerate` which writes fresh reference files to this
 directory.  Commit the new files alongside the version bump.
 

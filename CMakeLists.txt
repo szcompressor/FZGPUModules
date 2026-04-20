@@ -97,8 +97,9 @@ if(BUILD_TESTING)
     # ── generate_golden_files target ─────────────────────────────────────────
     # Builds and runs the golden-file generator so that tests/golden/ contains
     # fresh reference files matching the current FZM format version.
+    # EXCLUDE_FROM_ALL keeps cluster/head-node default builds GPU-free.
     # Usage: cmake --build <build-dir> --target generate_golden_files
-    add_executable(generate_golden_files
+    add_executable(generate_golden_files EXCLUDE_FROM_ALL
         tests/golden/regenerate.cpp
     )
     target_link_libraries(generate_golden_files PRIVATE fzgmod)
@@ -107,7 +108,7 @@ if(BUILD_TESTING)
     )
     # After the binary is built, immediately run it to write the reference files.
     add_custom_command(TARGET generate_golden_files POST_BUILD
-        COMMAND generate_golden_files
+      COMMAND $<TARGET_FILE:generate_golden_files>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
         COMMENT "Generating golden reference FZM files in tests/golden/"
         VERBATIM
