@@ -30,12 +30,6 @@ target_link_libraries(simple_api_lorenzo_dual_branch PRIVATE fzgmod)
 set_target_properties(simple_api_lorenzo_dual_branch PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
-# ── Caller-allocated output API example ──────────────────────────────────────
-add_executable(caller_allocated_output caller_allocated_output.cpp)
-target_link_libraries(caller_allocated_output PRIVATE fzgmod)
-set_target_properties(caller_allocated_output PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
 # ── Manual stage execution vs Pipeline DAG throughput comparison ──────────────
 add_executable(pfpl_manual_vs_dag manual_pipeline.cpp)
 target_link_libraries(pfpl_manual_vs_dag PRIVATE fzgmod)
