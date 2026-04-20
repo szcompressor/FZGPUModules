@@ -1,0 +1,243 @@
+# FZGPUModules
+
+GPU-accelerated modular lossy compression pipeline for scientific floating-point data.
+
+## Overview
+
+FZGPUModules is a CUDA library for building composable, high-throughput compression
+pipelines. Each pipeline is a directed acyclic graph (DAG) of stages — predictors,
+quantizers, encoders, and transforms — connected and executed entirely on the GPU
+with stream-ordered memory management.
+
+**Key properties:**
+- **Modular** — mix and match stages (Lorenzo, Quantizer, RLE, RZE, Bitshuffle, …)
+- **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
+- **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
+
+---
+
+## Requirements
+
+| Requirement | Minimum |
+|---|---|
+| CUDA Toolkit | 11.2+ (stream-ordered allocator) |
+| C++ Standard | C++17 |
+| CMake | 3.24+ |
+| Host byte order | Little-endian |
+
+---
+
+## Quick Start
+
+```cpp
+#include "fzgpumodules.h"
+
+// 1. Build a pipeline
+fz::Pipeline pipeline(fz::MemoryPoolConfig(input_bytes));
+
+auto* lrz = pipeline.addStage<fz::LorenzoStage<float, uint16_t>>(
+    fz::LorenzoStage<float, uint16_t>::Config{1e-4f});
+auto* rle = pipeline.addStage<fz::RLEStage<uint16_t>>();
+
+pipeline.connect(lrz, "codes", rle);
+pipeline.finalize();
+
+// 2. Compress
+void* d_compressed = nullptr;
+size_t compressed_size = 0;
+pipeline.compress(d_input, n * sizeof(float), &d_compressed, &compressed_size, stream);
+
+// 3. Decompress
+void* d_output = nullptr;
+size_t output_size = 0;
+pipeline.decompress(d_compressed, compressed_size, &d_output, &output_size, stream);
+cudaStreamSynchronize(stream);
+// d_output is caller-owned — call cudaFree() when done.
+cudaFree(d_output);
+```
+
+See `examples/` for more usage patterns including multi-branch pipelines, CUDA Graph
+capture, and the low-level DAG API.
+
+---
+
+## Caller-Allocated Output (With Size Query)
+
+If you want full memory control, use the `Into` APIs and ask the pipeline for
+max output sizes before allocating:
+
+```cpp
+// After finalize()
+size_t comp_capacity   = pipeline.getMaxCompressedOutputSize();
+size_t decomp_capacity = pipeline.getMaxDecompressedOutputSize();
+
+void* d_comp_user = nullptr;
+void* d_decomp_user = nullptr;
+cudaMalloc(&d_comp_user, comp_capacity);
+cudaMalloc(&d_decomp_user, decomp_capacity);
+
+size_t comp_size = 0;
+pipeline.compressInto(d_input, input_bytes,
+                      d_comp_user, comp_capacity,
+                      &comp_size, stream);
+
+size_t decomp_size = 0;
+pipeline.decompressInto(d_comp_user, comp_size,
+                        d_decomp_user, decomp_capacity,
+                        &decomp_size, stream);
+```
+
+For multi-source pipelines:
+- Use `compressInto(const std::vector<InputSpec>&, ...)`
+- Use `getMaxDecompressedOutputSizes()` to size one output buffer per source
+- Use `decompressMultiInto(...)` to decode directly into those buffers
+
+For `.fzm` files, you can query exact decompressed size(s) from header metadata:
+- `Pipeline::getDecompressedOutputSizeFromFile(path)`
+- `Pipeline::getDecompressedOutputSizesFromFile(path)`
+
+See `examples/caller_allocated_output.cpp` for a minimal end-to-end example.
+
+---
+
+## Building from Source
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+**CMake options:**
+
+| Option | Default | Description |
+|---|---|---|
+| `BUILD_SHARED_LIBS` | `ON` | Build shared libraries |
+| `BUILD_EXAMPLES` | `OFF` | Build example programs |
+| `BUILD_PROFILING` | `OFF` | Build profiling programs |
+| `BUILD_TESTING` | `OFF` | Build test suite |
+| `FZ_LOG_MIN_LEVEL` | `2` (INFO) | 0=TRACE 1=DEBUG 2=INFO 3=WARN 255=SILENT |
+
+---
+
+## Installing
+
+```bash
+cmake --install build --prefix /your/install/prefix
+```
+
+This installs headers, shared libraries with versioned symlinks
+(`libfzgmod.so → libfzgmod.so.2 → libfzgmod.so.2.0.0`), and CMake
+package config files.
+
+### Downstream CMake usage
+
+```cmake
+find_package(FZGPUModules REQUIRED)
+target_link_libraries(my_target PRIVATE FZGMOD::fzgmod)
+```
+
+All targets: `FZGMOD::fzgmod`, `FZGMOD::fzgmod_mem`, `FZGMOD::fzgmod_encoders`,
+`FZGMOD::fzgmod_predictors`, `FZGMOD::fzgmod_pipeline`.
+
+---
+
+## Available Stages
+
+| Stage | Description |
+|---|---|
+| `LorenzoStage<TInput, TCode>` | 1-D/2-D/3-D Lorenzo predictor |
+| `QuantizerStage<TInput, TCode>` | Direct-value quantizer (ABS/REL/NOA error modes) |
+| `RLEStage<T>` | Run-length encoding |
+| `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |
+| `BitshuffleStage` | GPU bit-matrix transpose |
+| `RZEStage` | Recursive zero-byte elimination |
+| `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
+| `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
+
+---
+
+## Memory Strategies
+
+| Strategy | Description |
+|---|---|
+| `MINIMAL` | Allocate on demand, free at last consumer. Lowest peak GPU memory. |
+| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring. |
+
+---
+
+## File I/O
+
+```cpp
+// Write to file after compressing
+pipeline.writeToFile("output.fzm", stream);
+
+// Decompress directly from file (no pipeline setup needed)
+void* d_out = nullptr;
+size_t out_size = 0;
+fz::Pipeline::decompressFromFile("output.fzm", &d_out, &out_size, stream);
+cudaStreamSynchronize(stream);
+cudaFree(d_out);
+```
+
+FZM files embed the full stage configuration and compressed payload with CRC32
+checksums. See `include/fzm_format.h` for the format specification.
+
+---
+
+## CUDA Graph Support
+
+For throughput-critical workloads, enable CUDA Graph capture to eliminate
+CPU-side kernel launch overhead on repeated compress calls:
+
+```cpp
+pipeline.setCaptureMode(true);           // requires PREALLOCATE strategy
+pipeline.finalize();
+pipeline.warmup(stream);                 // JIT-compiles all kernels once
+// subsequent compress() calls replay the captured graph
+```
+
+---
+
+## Key API Reference
+
+| Class | Header | Description |
+|---|---|---|
+| `fz::Pipeline` | `pipeline/compressor.h` | High-level builder and executor |
+| `fz::Stage` | `stage/stage.h` | Base class for all compression stages |
+| `fz::CompressionDAG` | `pipeline/dag.h` | Low-level DAG wiring and execution |
+| `fz::MemoryPool` | `mem/mempool.h` | Stream-ordered CUDA memory pool |
+| `fz::PipelinePerfResult` | `pipeline/perf.h` | Per-stage profiling results |
+
+Full API documentation is available on the [Doxygen site](https://szcompressor.github.io/FZGPUModules/).
+
+---
+
+## Citation
+
+If you reference this work, please cite the following publication.
+
+> Note: This citation corresponds to the v1.0.0 release of this codebase, not the current version.
+
+- **[DRBSD-11]** FZModules: A Heterogeneous Computing Framework for Customizable Scientific Data Compression Pipelines
+    ```bibtex
+    @inproceedings{ruiter2025fzmodules,
+        author = {Ruiter, Skyler and Tian, Jiannan and Song, Fengguang},
+        title = {FZModules: A Heterogeneous Computing Framework for Customizable Scientific Data Compression Pipelines},
+        year = {2025},
+        url = {https://doi.org/10.1145/3731599.3767376},
+        booktitle = {Proceedings of the SC '25 Workshops of the International Conference for High Performance Computing, Networking, Storage and Analysis},
+        pages = {332-338},
+        series = {SC Workshops '25}
+    }
+    ```
+
+---
+
+## Adding a Custom Stage
+
+See `memory/how_to_add_a_stage.md` for the step-by-step guide, or use the
+scaffold script:
+
+```bash
+scripts/new_stage.sh MyStageName transforms
+```
