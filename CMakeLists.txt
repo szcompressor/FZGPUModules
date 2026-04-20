@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
-project(FZGPUModules LANGUAGES CUDA CXX C VERSION 1.0)
+project(FZGPUModules LANGUAGES CUDA CXX VERSION 2.0.0)
 
 ########################
 ### GENERAL SETTINGS ###
@@ -9,12 +9,37 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_SHARED_LIBS "prefer shared libraries" ON)
 include(GNUInstallDirs)
 
+# RPATH: installed binaries find the installed shared libraries without LD_LIBRARY_PATH.
+# $ORIGIN-relative so the install tree is relocatable (works with Spack, Docker, etc.)
+if(APPLE)
+  set(CMAKE_INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+else()
+  set(CMAKE_INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+endif()
+set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)  # use build-tree paths during build
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE) # append any extra link dirs automatically
+
+# FZM file format uses little-endian byte order throughout — reject big-endian hosts.
+include(TestBigEndian)
+test_big_endian(FZGMOD_IS_BIG_ENDIAN)
+if(FZGMOD_IS_BIG_ENDIAN)
+  message(FATAL_ERROR
+    "FZGPUModules requires a little-endian host.\n"
+    "  The FZM file format stores all multi-byte integers in little-endian order.\n"
+    "  Big-endian support is not implemented.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-set(FZGMOD_CUDA_MODULE_LOADING_VALUE "EAGER")
-
 find_package(CUDAToolkit REQUIRED)
+if(CUDAToolkit_VERSION VERSION_LESS "11.2")
+  message(FATAL_ERROR
+    "FZGPUModules requires CUDA Toolkit 11.2 or newer.\n"
+    "  Reason: stream-ordered allocators (cudaMallocAsync / cudaMemPool_t) require 11.2+.\n"
+    "  Detected: ${CUDAToolkit_VERSION}")
+endif()
+
 enable_language(CUDA)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
@@ -239,7 +264,7 @@ add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
 
 #### Combined Library
 add_library(fzgmod
-  utils/cli/cli.cpp
+  src/utils/cli/cli.cpp
 )
 target_link_libraries(fzgmod
   PUBLIC
@@ -252,6 +277,16 @@ target_link_libraries(fzgmod
 )
 add_library(FZGMOD::fzgmod ALIAS fzgmod)
 
+# Shared library versioning — creates libfzgmod.so.2 → libfzgmod.so.2.0.0
+# SOVERSION (ABI version) = major only; bump on any breaking API/ABI change.
+# VERSION   (full version) = PROJECT_VERSION, updated every release.
+foreach(_lib fzgmod fzgmod_mem fzgmod_encoders fzgmod_predictors fzgmod_pipeline)
+  set_target_properties(${_lib} PROPERTIES
+    VERSION   ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+  )
+endforeach()
+
 ###################
 ### EXECUTABLES ###
 ###################
@@ -259,68 +294,18 @@ add_library(FZGMOD::fzgmod ALIAS fzgmod)
 option(BUILD_CLI "Build command-line executable" ON)
 
 if(BUILD_CLI)
-  add_executable(fzgmod-cli utils/cli/main.cpp)
+  add_executable(fzgmod-cli src/utils/cli/main.cpp)
   target_link_libraries(fzgmod-cli PRIVATE fzgmod)
   set_target_properties(fzgmod-cli PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
-######################
-### PROFILING MODE ###
-######################
-
-if(BUILD_PROFILING)
-    message(STATUS "Profiling mode enabled — NVTX3/nsys instrumentation active")
-
-    # Preprocessor guard consumed by #ifdef FZ_PROFILING_ENABLED in source files.
-    # Enables NVTX annotations in fzgmod_pipeline (decompressFromFile) and
-    # cudaProfilerStart/Stop in the fzgmod-profile binary.
-    target_compile_definitions(fzgmod_compile_settings INTERFACE FZ_PROFILING_ENABLED)
-
-    # Retain frame pointers so nsys CPU-sampling stack walks are complete.
-    target_compile_options(fzgmod_compile_settings INTERFACE
-        $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>
-        $<$<COMPILE_LANGUAGE:C>:-fno-omit-frame-pointer>
-    )
-    # Note: -lineinfo for CUDA device code is already set in fzgmod_compile_settings
-    # above for all non-Compute-sanitizer builds.
-
-    # ── Locate nvtx3/nvtx3.hpp ────────────────────────────────────────────────
-    # Ships with Nsight Systems but the path differs across machines
-    # (standalone install vs. bundled inside CUDA toolkit).
-    find_path(NVTX3_INCLUDE_DIR
-        NAMES nvtx3/nvtx3.hpp
-        HINTS
-            # Cluster: nsight-systems bundled inside the CUDA toolkit tree
-            "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
-            "${CUDAToolkit_ROOT_DIR}/nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
-            "${CUDAToolkit_ROOT_DIR}/nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
-            # Derived from nvcc location (covers any version glob)
-            "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.4.2/target-linux-x64/nvtx/include"
-            "${CUDAToolkit_BIN_DIR}/../nsight-systems-2024.5.1/target-linux-x64/nvtx/include"
-            "${CUDAToolkit_BIN_DIR}/../nsight-systems-2025.1.3/target-linux-x64/nvtx/include"
-            # WSL / workstation: standalone Nsight Systems install
-            "/opt/nvidia/nsight-systems/2025.1.3/target-linux-x64/nvtx/include"
-            "/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nvtx/include"
-            "/opt/nvidia/nsight-systems/2024.4.2/target-linux-x64/nvtx/include"
-            # Fallback: CUDA toolkit headers
-            "${CUDAToolkit_ROOT_DIR}/targets/x86_64-linux/include"
-        DOC "Path containing nvtx3/nvtx3.hpp"
-    )
-
-    if(NVTX3_INCLUDE_DIR)
-        message(STATUS "Found NVTX3 headers: ${NVTX3_INCLUDE_DIR}")
-        # fzgmod_pipeline compiles compressor.cpp which uses nvtx3 behind
-        # #ifdef FZ_PROFILING_ENABLED — it needs the headers when profiling is on.
-        target_include_directories(fzgmod_pipeline PRIVATE ${NVTX3_INCLUDE_DIR})
-    else()
-        message(WARNING "nvtx3/nvtx3.hpp not found — profiling builds may not compile.\n"
-                        "Override with: -DNVTX3_INCLUDE_DIR=/path/to/nvtx/include")
-    endif()
-
-endif()
+##########################
+### Examples/Profiling ###
+##########################
 
 add_subdirectory(examples)
+add_subdirectory(profiling)
 
 ####################
 ### INSTALLATION ###
@@ -429,4 +414,3 @@ message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  Build examples: ${BUILD_EXAMPLES}")
 message(STATUS "  Build profiling: ${BUILD_PROFILING}")
-message(STATUS "  CUDA_MODULE_LOADING for tests: ${FZGMOD_CUDA_MODULE_LOADING_VALUE}")
