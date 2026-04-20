@@ -704,6 +704,97 @@ TEST(Pipeline, MultiSourceRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MS2: Max decompressed output size query (single-source).
+//
+// After finalize(), getMaxDecompressedOutputSize() should return the source
+// size hint (alignment-rounded where applicable) and be usable for caller
+// allocation before decompressInto().
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, MaxDecompressedOutputSizeSingleSource) {
+    constexpr size_t N = 4096;
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    pipeline.finalize();
+
+    const size_t max_out = pipeline.getMaxDecompressedOutputSize();
+    EXPECT_EQ(max_out, in_bytes);
+
+    auto per_source = pipeline.getMaxDecompressedOutputSizes();
+    ASSERT_EQ(per_source.size(), 1u);
+    EXPECT_EQ(per_source[0], in_bytes);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MS3: Multi-source max decompressed output size query.
+//
+// Per-source hints should be reflected in getMaxDecompressedOutputSizes().
+// Single-source convenience API must throw for multi-source pipelines.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, MaxDecompressedOutputSizesMultiSource) {
+    const size_t in_bytes_1 = 1024 * sizeof(float);
+    const size_t in_bytes_2 = 2048 * sizeof(float);
+
+    Pipeline pipeline(in_bytes_1 + in_bytes_2, MemoryStrategy::MINIMAL, 5.0f);
+
+    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz1->setErrorBound(1e-2f);
+    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz2->setErrorBound(1e-2f);
+
+    pipeline.setInputSizeHint(lrz1, in_bytes_1);
+    pipeline.setInputSizeHint(lrz2, in_bytes_2);
+    pipeline.finalize();
+
+    auto sizes = pipeline.getMaxDecompressedOutputSizes();
+    ASSERT_EQ(sizes.size(), 2u);
+
+    std::sort(sizes.begin(), sizes.end());
+    EXPECT_EQ(sizes[0], in_bytes_1);
+    EXPECT_EQ(sizes[1], in_bytes_2);
+
+    EXPECT_THROW(pipeline.getMaxDecompressedOutputSize(), std::runtime_error);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CP1: Max compressed output size query returns a safe upper bound.
+//
+// The value from getMaxCompressedOutputSize() should be >= actual compressed
+// bytes produced by compress().
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, MaxCompressedOutputSizeCoversActualOutput) {
+    constexpr size_t N = 1 << 13;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_input = make_smooth_data(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.finalize();
+
+    const size_t max_comp = pipeline.getMaxCompressedOutputSize();
+    EXPECT_GT(max_comp, 0u);
+
+    void*  d_comp = nullptr;
+    size_t comp_sz = 0;
+    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+
+    EXPECT_LE(comp_sz, max_comp)
+        << "Actual compressed size exceeds getMaxCompressedOutputSize() upper bound";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RS1: Explicit reset() between compress cycles.
 //
 // After an explicit pipeline.reset(), was_compressed_ is cleared.  The next

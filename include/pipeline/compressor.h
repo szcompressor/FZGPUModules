@@ -135,6 +135,40 @@ public:
     );
 
     /**
+     * Compress into a caller-allocated device buffer.
+     *
+     * @param d_input          Device pointer to raw input.
+     * @param input_size       Input size in bytes.
+     * @param d_output         Caller-allocated device buffer for compressed bytes.
+     * @param output_capacity  Capacity of d_output in bytes.
+     * @param output_size      Receives the compressed size in bytes.
+     * @param stream           CUDA stream for all GPU operations.
+     */
+    void compressInto(
+        const void* d_input,
+        size_t      input_size,
+        void*       d_output,
+        size_t      output_capacity,
+        size_t*     output_size,
+        cudaStream_t stream = 0
+    );
+
+    /**
+     * Compress multi-source input into a caller-allocated device buffer.
+     *
+     * Output format matches compress(const std::vector<InputSpec>&):
+     * single output buffer for single-source pipelines; concat format for
+     * multi-source pipelines.
+     */
+    void compressInto(
+        const std::vector<InputSpec>& inputs,
+        void*       d_output,
+        size_t      output_capacity,
+        size_t*     output_size,
+        cudaStream_t stream = 0
+    );
+
+    /**
      * Compress (multi-source). One InputSpec per source stage; order does not matter.
      * *d_output is pool-owned — do NOT cudaFree.
      */
@@ -178,6 +212,45 @@ public:
     );
 
     /**
+     * Decompress into a caller-allocated device buffer (single-source only).
+     *
+     * @param d_input          nullptr to read from live forward DAG buffers, or
+     *                         a device pointer to external compressed bytes.
+     * @param input_size       Byte size of d_input (ignored when d_input is nullptr).
+     * @param d_output         Caller-allocated device buffer for decompressed bytes.
+     * @param output_capacity  Capacity of d_output in bytes.
+     * @param output_size      Receives the exact decompressed size in bytes.
+     * @param stream           CUDA stream for all GPU operations.
+     */
+    void decompressInto(
+        const void* d_input,
+        size_t      input_size,
+        void*       d_output,
+        size_t      output_capacity,
+        size_t*     output_size,
+        cudaStream_t stream = 0
+    );
+
+    /**
+     * Decompress multi-source data into caller-allocated output buffers.
+     *
+     * @param d_input             nullptr to read from live forward DAG buffers,
+     *                            or a device pointer to external compressed bytes.
+     * @param input_size          Byte size of d_input (ignored when d_input is nullptr).
+     * @param d_outputs           One device pointer per source output.
+     * @param output_capacities   Capacity (bytes) for each output pointer.
+     * @param stream              CUDA stream for all GPU operations.
+     * @return Exact decompressed size (bytes) for each source output.
+     */
+    std::vector<size_t> decompressMultiInto(
+        const void*                 d_input,
+        size_t                      input_size,
+        const std::vector<void*>&   d_outputs,
+        const std::vector<size_t>&  output_capacities,
+        cudaStream_t                stream = 0
+    );
+
+    /**
      * Decompress (multi-source). Returns one {device_ptr, size} pair per source,
      * in the same order as forward source discovery. Ownership follows
      * setPoolManagedDecompOutput().
@@ -187,6 +260,32 @@ public:
         size_t      input_size = 0,
         cudaStream_t stream    = 0
     );
+
+    /**
+     * Maximum compressed output size for the current finalized pipeline.
+     *
+     * Returned value is an upper bound suitable for caller allocation before
+     * compressInto(...). For multi-source pipelines this corresponds to the
+     * single concat output format returned by compress().
+     */
+    size_t getMaxCompressedOutputSize() const;
+
+    /**
+     * Maximum decompressed output size (single-source pipelines only).
+     *
+     * Value is derived from the most recent compress() input size when available,
+     * otherwise from finalize-time size hints. Returns an upper bound suitable
+     * for caller allocation before decompressInto().
+     */
+    size_t getMaxDecompressedOutputSize() const;
+
+    /**
+     * Maximum decompressed output size per source (multi-source aware).
+     *
+     * Order matches decompressMulti()/decompressMultiInto() source order.
+     * Values are upper bounds suitable for caller allocation.
+     */
+    std::vector<size_t> getMaxDecompressedOutputSizes() const;
 
     /** Free non-persistent buffers and reset execution state for re-use. */
     void reset(cudaStream_t stream = 0);
@@ -270,6 +369,12 @@ public:
     /** Parse the FZM header from a file without decompressing the payload. */
     static FZMFileHeader readHeader(const std::string& filename);
 
+    /** Exact decompressed output size from an FZM file (single-source convenience). */
+    static size_t getDecompressedOutputSizeFromFile(const std::string& filename);
+
+    /** Exact decompressed output sizes (one per source) from an FZM file header. */
+    static std::vector<size_t> getDecompressedOutputSizesFromFile(const std::string& filename);
+
     /** Build the FZM header from current pipeline state. Requires a prior compress(). */
     FZMFileHeader buildHeader() const;
 
@@ -331,6 +436,14 @@ private:
 
     std::vector<Stage*> getSourceStages() const;
     std::vector<Stage*> getSinkStages() const;
+
+    std::vector<std::pair<void*, size_t>> decompressMultiImpl(
+        const void*                 d_input,
+        size_t                      input_size,
+        cudaStream_t                stream,
+        const std::vector<void*>*   caller_outputs,
+        const std::vector<size_t>*  caller_capacities
+    );
 
     // ── Inverse DAG helpers ───────────────────────────────────────────────────
 

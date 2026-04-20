@@ -397,6 +397,40 @@ Pipeline::FZMFileHeader Pipeline::readHeader(const std::string& filename) {
     return fh;
 }
 
+std::vector<size_t> Pipeline::getDecompressedOutputSizesFromFile(const std::string& filename) {
+    FZMFileHeader fh = readHeader(filename);
+
+    std::vector<size_t> sizes;
+    const uint16_t nsrc = fh.core.num_sources;
+
+    if (nsrc > 0) {
+        sizes.reserve(nsrc);
+        for (uint16_t i = 0; i < nsrc; ++i) {
+            size_t sz = static_cast<size_t>(fh.core.source_uncompressed_sizes[i]);
+            if (sz == 0) {
+                // Legacy/sparse fallback: use total uncompressed size.
+                sz = static_cast<size_t>(fh.core.uncompressed_size);
+            }
+            sizes.push_back(sz);
+        }
+    } else {
+        // Legacy single-source files may have num_sources=0.
+        sizes.push_back(static_cast<size_t>(fh.core.uncompressed_size));
+    }
+
+    return sizes;
+}
+
+size_t Pipeline::getDecompressedOutputSizeFromFile(const std::string& filename) {
+    auto sizes = getDecompressedOutputSizesFromFile(filename);
+    if (sizes.size() != 1) {
+        throw std::runtime_error(
+            "getDecompressedOutputSizeFromFile() is single-source only; use "
+            "getDecompressedOutputSizesFromFile() for multi-source files");
+    }
+    return sizes[0];
+}
+
 void* Pipeline::loadCompressedData(
     const std::string& filename,
     const FZMFileHeader& fh,

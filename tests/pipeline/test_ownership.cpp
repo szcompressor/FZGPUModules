@@ -37,6 +37,16 @@
  *          verify correctly; the concat pointer is caller-owned (cudaFree)
  *   OW11 Pool-managed decompress pool usage stays bounded across 5 calls
  *          (previous output freed before next is allocated; no monotonic growth)
+ *   OW12 compressInto() writes compressed bytes into caller-allocated output
+ *          and round-trips correctly
+ *   OW13 compressInto() rejects undersized caller output buffers
+ *   OW14 decompressInto() writes decompressed bytes into caller-allocated output
+ *          and reconstructs correctly
+ *   OW15 decompressInto() rejects undersized caller output buffers
+ *   OW16 Multi-source compressInto()+decompressMultiInto() round-trips with
+ *          caller-allocated buffers
+ *   OW17 Multi-source compressInto() rejects undersized caller output buffers
+ *   OW18 Multi-source decompressMultiInto() rejects undersized output buffers
  */
 
 #include <gtest/gtest.h>
@@ -604,4 +614,287 @@ TEST(Ownership, PoolManagedDecompBoundedAcross5Calls) {
                 << " — previous pool-managed output may not have been freed";
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW12: compressInto() writes compressed bytes into caller-allocated memory.
+//
+// The compressed stream produced by compressInto() should be consumable by the
+// existing decompress() API and reconstruct within error bounds.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, CompressIntoCallerAllocatedRoundTrip) {
+    constexpr size_t N  = 2048;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto h_in = make_random_floats(N, 100);
+    auto p = make_pipeline(N);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_in, stream);
+    stream.sync();
+
+    // Raw-size capacity is comfortably above expected compressed size.
+    CudaBuffer<uint8_t> d_comp_user(in_bytes);
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        p->compressInto(d_in.void_ptr(), in_bytes, d_comp_user.void_ptr(), in_bytes, &comp_sz, stream));
+    ASSERT_GT(comp_sz, 0u);
+    ASSERT_LE(comp_sz, in_bytes);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(p->decompress(d_comp_user.void_ptr(), comp_sz, &d_dec, &dec_sz, stream));
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_dec);
+
+    EXPECT_LE(max_abs_error(h_in, h_recon), EB * 1.01f);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW13: compressInto() rejects undersized caller output buffers.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, CompressIntoRejectsUndersizedBuffer) {
+    constexpr size_t N = 1024;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto p = make_pipeline(N);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(make_random_floats(N, 101), stream);
+    stream.sync();
+
+    CudaBuffer<uint8_t> d_tiny(1);
+    size_t comp_sz = 0;
+
+    EXPECT_THROW(
+        p->compressInto(d_in.void_ptr(), in_bytes, d_tiny.void_ptr(), 1, &comp_sz, stream),
+        std::runtime_error);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW14: decompressInto() writes into caller-allocated memory.
+//
+// Phase 1 scope is single-source pipelines.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, DecompressIntoCallerAllocatedRoundTrip) {
+    constexpr size_t N  = 2048;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto h_in = make_random_floats(N, 102);
+    auto p = make_pipeline(N);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_in, stream);
+    stream.sync();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream));
+
+    CudaBuffer<float> d_dec_user(N);
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        p->decompressInto(d_comp, comp_sz, d_dec_user.void_ptr(), in_bytes, &dec_sz, stream));
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    auto h_recon = d_dec_user.download(stream);
+    EXPECT_LE(max_abs_error(h_in, h_recon), EB * 1.01f);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW15: decompressInto() rejects undersized caller output buffers.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, DecompressIntoRejectsUndersizedBuffer) {
+    constexpr size_t N = 1024;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto p = make_pipeline(N);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(make_random_floats(N, 103), stream);
+    stream.sync();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream));
+
+    CudaBuffer<uint8_t> d_tiny(1);
+    size_t dec_sz = 0;
+    EXPECT_THROW(
+        p->decompressInto(d_comp, comp_sz, d_tiny.void_ptr(), 1, &dec_sz, stream),
+        std::runtime_error);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW16: Multi-source caller-allocated round-trip.
+//
+// Uses the phase-2 APIs:
+//   - compressInto(vector<InputSpec>, ...)
+//   - decompressMultiInto(...)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, MultiSourceCallerAllocatedRoundTrip) {
+    constexpr size_t N  = 4096;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+    const size_t total_input_bytes = 2 * in_bytes;
+
+    auto h_input_1 = make_random_floats(N, 200);
+    auto h_input_2 = make_random_floats(N, 201);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in1(N), d_in2(N);
+    d_in1.upload(h_input_1, stream);
+    d_in2.upload(h_input_2, stream);
+    stream.sync();
+
+    Pipeline pipeline(total_input_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz1->setErrorBound(EB);
+    lrz1->setQuantRadius(512);
+    lrz1->setOutlierCapacity(0.2f);
+
+    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz2->setErrorBound(EB);
+    lrz2->setQuantRadius(512);
+    lrz2->setOutlierCapacity(0.2f);
+
+    pipeline.setInputSizeHint(lrz1, in_bytes);
+    pipeline.setInputSizeHint(lrz2, in_bytes);
+    pipeline.finalize();
+
+    // User-owned compressed output (concat format for multi-source).
+    CudaBuffer<uint8_t> d_comp_user(total_input_bytes * 4);
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compressInto(
+            {{lrz1, d_in1.void_ptr(), in_bytes},
+             {lrz2, d_in2.void_ptr(), in_bytes}},
+            d_comp_user.void_ptr(),
+            d_comp_user.bytes(),
+            &comp_sz,
+            stream));
+    ASSERT_GT(comp_sz, 0u);
+
+    // User-owned decompressed outputs (one per source stage).
+    CudaBuffer<float> d_out1(N), d_out2(N);
+    auto out_sizes = pipeline.decompressMultiInto(
+        d_comp_user.void_ptr(),
+        comp_sz,
+        {d_out1.void_ptr(), d_out2.void_ptr()},
+        {in_bytes, in_bytes},
+        stream);
+    stream.sync();
+
+    ASSERT_EQ(out_sizes.size(), 2u);
+    ASSERT_EQ(out_sizes[0], in_bytes);
+    ASSERT_EQ(out_sizes[1], in_bytes);
+
+    auto h_recon_1 = d_out1.download(stream);
+    auto h_recon_2 = d_out2.download(stream);
+
+    // decompressMultiInto() returns outputs in source-discovery order, which
+    // is not guaranteed to match the InputSpec vector order. Accept either
+    // permutation while still requiring both reconstructions to be valid.
+    const float e11 = max_abs_error(h_input_1, h_recon_1);
+    const float e12 = max_abs_error(h_input_1, h_recon_2);
+    const float e21 = max_abs_error(h_input_2, h_recon_1);
+    const float e22 = max_abs_error(h_input_2, h_recon_2);
+    const float tol = EB * 1.01f;
+
+    const bool direct_ok  = (e11 <= tol && e22 <= tol);
+    const bool swapped_ok = (e12 <= tol && e21 <= tol);
+
+    EXPECT_TRUE(direct_ok || swapped_ok)
+        << "Unexpected multi-source output mapping: "
+        << "e11=" << e11 << ", e12=" << e12
+        << ", e21=" << e21 << ", e22=" << e22
+        << ", tol=" << tol;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW17: Multi-source compressInto() rejects undersized caller output buffers.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, MultiSourceCompressIntoRejectsUndersizedBuffer) {
+    constexpr size_t N = 1024;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in1(N), d_in2(N);
+    d_in1.upload(make_random_floats(N, 210), stream);
+    d_in2.upload(make_random_floats(N, 211), stream);
+    stream.sync();
+
+    Pipeline pipeline(2 * in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz1->setErrorBound(1e-2f);
+    lrz2->setErrorBound(1e-2f);
+    pipeline.setInputSizeHint(lrz1, in_bytes);
+    pipeline.setInputSizeHint(lrz2, in_bytes);
+    pipeline.finalize();
+
+    CudaBuffer<uint8_t> d_tiny(1);
+    size_t comp_sz = 0;
+    EXPECT_THROW(
+        pipeline.compressInto(
+            {{lrz1, d_in1.void_ptr(), in_bytes},
+             {lrz2, d_in2.void_ptr(), in_bytes}},
+            d_tiny.void_ptr(),
+            1,
+            &comp_sz,
+            stream),
+        std::runtime_error);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW18: Multi-source decompressMultiInto() rejects undersized output buffers.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, MultiSourceDecompressMultiIntoRejectsUndersizedBuffer) {
+    constexpr size_t N = 1024;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in1(N), d_in2(N);
+    d_in1.upload(make_random_floats(N, 220), stream);
+    d_in2.upload(make_random_floats(N, 221), stream);
+    stream.sync();
+
+    Pipeline pipeline(2 * in_bytes, MemoryStrategy::MINIMAL, 5.0f);
+    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    lrz1->setErrorBound(1e-2f);
+    lrz2->setErrorBound(1e-2f);
+    pipeline.setInputSizeHint(lrz1, in_bytes);
+    pipeline.setInputSizeHint(lrz2, in_bytes);
+    pipeline.finalize();
+
+    void* d_comp = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compress(
+            {{lrz1, d_in1.void_ptr(), in_bytes},
+             {lrz2, d_in2.void_ptr(), in_bytes}},
+            &d_comp,
+            &comp_sz,
+            stream));
+
+    CudaBuffer<float> d_out1(N), d_out2(N);
+    EXPECT_THROW(
+        pipeline.decompressMultiInto(
+            d_comp,
+            comp_sz,
+            {d_out1.void_ptr(), d_out2.void_ptr()},
+            {in_bytes, 1},
+            stream),
+        std::runtime_error);
 }
