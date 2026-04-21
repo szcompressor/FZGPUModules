@@ -195,6 +195,7 @@ target_include_directories(fzgmod_compile_settings INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomlplusplus/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzgmod>
 )
 
@@ -246,6 +247,7 @@ add_library(fzgmod_pipeline
   src/pipeline/compressor_exec.cpp
   src/pipeline/compressor_inverse_dag.cpp
   src/pipeline/compressor_io.cpp
+  src/pipeline/config.cpp
   src/pipeline/concat_kernel.cu
   src/pipeline/dag.cpp
   src/pipeline/dag_coloring.cpp

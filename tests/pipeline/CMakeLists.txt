@@ -32,6 +32,14 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── Config file load/save (TOML) ─────────────────────────────────────────────
+fz_add_test(
+    NAME    test_config
+    SOURCES test_config.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu config
+)
+
 # ─── Memory strategy comparison (MINIMAL / PREALLOCATE) ──────────────────────
 fz_add_test(
     NAME    test_memory_strategies

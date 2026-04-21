@@ -2,6 +2,7 @@
 
 #include "pipeline/dag.h"
 #include "pipeline/perf.h"
+#include "pipeline/config.h"
 #include "stage/stage.h"
 #include "stage/stage_factory.h"
 #include "mem/mempool.h"
@@ -40,6 +41,15 @@ public:
         MemoryStrategy strategy = MemoryStrategy::MINIMAL,
         float pool_multiplier = 3.0f
     );
+
+    /**
+     * Construct directly from a TOML config file.
+     * Equivalent to the default constructor followed by loadConfig(path).
+     * The pipeline is finalized on return.
+     *
+     * @param config_path  Path to the .toml config file.
+     */
+    explicit Pipeline(const std::string& config_path);
 
     ~Pipeline();
 
@@ -293,6 +303,33 @@ public:
         PipelinePerfResult* perf_out           = nullptr,
         size_t              pool_override_bytes = 0
     );
+
+    // ── Config File ───────────────────────────────────────────────────────────
+
+    /**
+     * Build and finalize the pipeline from a TOML config file.
+     *
+     * Adds stages, wires connections, applies pipeline-level settings,
+     * then calls finalize() internally. The pipeline must not be finalized
+     * before this call.
+     *
+     * Recognized stage types: Lorenzo1D/2D/3D, Bitshuffle, RZE, RLE,
+     * Difference, Zigzag, Negabinary.
+     *
+     * @throws std::runtime_error  File not found, parse error, unknown stage
+     *                             type, bad wiring reference, or already finalized.
+     */
+    void loadConfig(const std::string& path);
+
+    /**
+     * Serialize the current pipeline to a TOML config file.
+     *
+     * Requires finalize() to have been called. The written file can be passed
+     * back to loadConfig() to reconstruct an equivalent pipeline.
+     *
+     * @throws std::runtime_error  Pipeline not finalized.
+     */
+    void saveConfig(const std::string& path) const;
 
 private:
     // ── Internal helpers ──────────────────────────────────────────────────────
