@@ -110,31 +110,41 @@ public:
     bool isWarmupOnFinalizeEnabled() const { return warmup_on_finalize_; }
 
     /**
-     * When true, decompress() returns a pool-owned pointer (do NOT cudaFree).
+     * When true (default), decompress() returns a pool-owned pointer (do NOT cudaFree).
      * Valid until the next decompress() call or Pipeline destruction.
-     * When false (default), decompress() returns a freshly cudaMalloc'd pointer
+     * When false, decompress() returns a freshly cudaMalloc'd pointer
      * that the caller must cudaFree().
      */
     void setPoolManagedDecompOutput(bool enable) { pool_managed_decomp_ = enable; }
     bool isPoolManagedDecompOutput() const { return pool_managed_decomp_; }
 
+    /**
+     * Return the worst-case compressed output size in bytes for the given input.
+     *
+     * Must be called after finalize(). Use this to pre-allocate a caller-owned
+     * output buffer before passing it to the user-owned compress() overload.
+     *
+     * The returned value is a tight upper bound derived from each stage's
+     * estimateOutputSizes() chain — it should rarely exceed ~110% of the actual
+     * compressed size for typical data.
+     *
+     * @param input_bytes  Number of bytes you intend to compress.
+     * @throws std::runtime_error if the pipeline is not yet finalized.
+     */
+    size_t getMaxCompressedSize(size_t input_bytes) const;
+
     // ── Execution ─────────────────────────────────────────────────────────────
 
     /**
-     * Input specification for multi-source compression.
-     * @param source  A DAG root stage already added to this pipeline.
-     * @param d_data  Device pointer to raw input for this source.
-     * @param size    Size of d_data in bytes.
-     */
-    struct InputSpec {
-        Stage*      source;
-        const void* d_data;
-        size_t      size;
-    };
-
-    /**
-     * Compress (single-source). Throws if the pipeline has more than one source.
-     * *d_output is pool-owned — do NOT cudaFree.
+     * Compress (pool-owned output). The pool retains the output buffer.
+     *
+     * @param d_input     Device pointer to raw input data.
+     * @param input_size  Size of d_input in bytes.
+     * @param d_output    Receives a pool-owned pointer to the compressed output.
+     *                    Do NOT call cudaFree() — valid until the next compress(),
+     *                    reset(), or Pipeline destruction.
+     * @param output_size Receives the exact compressed size in bytes.
+     * @param stream      CUDA stream for all GPU operations.
      */
     void compress(
         const void* d_input,
@@ -145,39 +155,53 @@ public:
     );
 
     /**
-     * Compress (multi-source). One InputSpec per source stage; order does not matter.
-     * *d_output is pool-owned — do NOT cudaFree.
+     * Compress (user-owned output). The compressed data is written into the
+     * caller-provided device buffer.
+     *
+     * The buffer just needs to be large enough for the actual compressed output
+     * of this specific call — which depends on the data. If the actual output
+     * exceeds `output_buf_capacity` a `std::runtime_error` is thrown with the
+     * actual and capacity sizes so the caller can retry with a larger buffer.
+     *
+     * Use `getMaxCompressedSize(input_bytes)` for a guaranteed safe upper bound.
+     * Alternatively, if you know empirically that your data compresses to at most
+     * X bytes for your workload, you can pass X directly and accept the small
+     * risk of a runtime error on unusually incompressible inputs.
+     *
+     * Incompatible with CUDA Graph mode (the output address cannot be baked into
+     * a captured graph). Throws if enableGraphMode(true) was set.
+     *
+     * @param d_input              Device pointer to raw input data.
+     * @param input_size           Size of d_input in bytes.
+     * @param d_output_buf         Caller-allocated device buffer to write compressed
+     *                             data into.
+     * @param output_buf_capacity  Capacity of d_output_buf in bytes. Must fit the
+     *                             actual compressed output for this call.
+     * @param actual_output_size   Receives the exact compressed bytes written.
+     * @param stream               CUDA stream for all GPU operations.
      */
     void compress(
-        const std::vector<InputSpec>& inputs,
-        void**  d_output,
-        size_t* output_size,
+        const void* d_input,
+        size_t      input_size,
+        void*       d_output_buf,
+        size_t      output_buf_capacity,
+        size_t*     actual_output_size,
         cudaStream_t stream = 0
     );
 
     /**
-     * Per-source input size hint for multi-source pipelines. Call after addStage()
-     * but before finalize() to seed propagateBufferSizes() for accurate estimates.
-     */
-    void setInputSizeHint(Stage* source, size_t size) {
-        per_source_hints_[source] = size;
-    }
-
-    /**
-     * Decompress (single-source). Inverse of compress().
+     * Decompress. Inverse of compress().
      *
      * @param d_input     nullptr to read from the forward DAG's live buffers
      *                    (simplest path, valid immediately after compress()).
      *                    Non-null for an external compressed buffer.
-     * @param input_size  Byte size of `d_input` (ignored when `d_input` is nullptr).
+     * @param input_size  Byte size of d_input (ignored when d_input is nullptr).
      * @param d_output    Receives the decompressed device pointer.
-     *                    Ownership depends on setPoolManagedDecompOutput().
+     *                    Ownership depends on setPoolManagedDecompOutput():
+     *                    false           → caller-owned, must cudaFree.
+     *                    true (default)  → pool-owned, do NOT cudaFree.
      * @param output_size Receives the exact decompressed size in bytes.
      * @param stream      CUDA stream for all GPU operations.
-     *
-     * For multi-source pipelines, `*d_output` is a concat buffer:
-     * `[num_bufs:u32][size1:u64][data1][size2:u64][data2]...`
-     * Use decompressMulti() to receive individual per-source buffers.
      */
     void decompress(
         const void* d_input,
@@ -188,14 +212,32 @@ public:
     );
 
     /**
-     * Decompress (multi-source). Returns one {device_ptr, size} pair per source,
-     * in the same order as forward source discovery. Ownership follows
-     * setPoolManagedDecompOutput().
+     * Decompress into a caller-provided device buffer (user-owned output).
+     *
+     * The decompressed data is written directly into d_output_buf. No cudaMalloc
+     * or pool allocation is performed — the caller owns the buffer entirely.
+     *
+     * The buffer just needs to be large enough for the actual decompressed output
+     * of this call. If it is too small a `std::runtime_error` is thrown with the
+     * actual size so the caller can retry. Typically the uncompressed size is
+     * known from the file header (`FZMHeaderCore::uncompressed_size`) or from
+     * the original compress() call.
+     *
+     * @param d_input              See decompress() above.
+     * @param input_size           See decompress() above.
+     * @param d_output_buf         Caller-allocated device buffer to receive
+     *                             decompressed data.
+     * @param output_buf_capacity  Capacity of d_output_buf in bytes.
+     * @param actual_output_size   Receives the exact bytes written.
+     * @param stream               CUDA stream for all GPU operations.
      */
-    std::vector<std::pair<void*, size_t>> decompressMulti(
-        const void* d_input    = nullptr,
-        size_t      input_size = 0,
-        cudaStream_t stream    = 0
+    void decompress(
+        const void* d_input,
+        size_t      input_size,
+        void*       d_output_buf,
+        size_t      output_buf_capacity,
+        size_t*     actual_output_size,
+        cudaStream_t stream = 0
     );
 
     /** Free non-persistent buffers and reset execution state for re-use. */
@@ -287,6 +329,8 @@ public:
      * One-shot decompress from an FZM file. Reconstructs the pipeline from the
      * file header, allocates a pool, and runs decompression.
      *
+     * Output is always caller-owned (caller must cudaFree *d_output).
+     *
      * @param filename             Path to the `.fzm` file.
      * @param d_output             Receives the decompressed device pointer (caller must `cudaFree`).
      * @param output_size          Receives the decompressed size in bytes.
@@ -302,6 +346,31 @@ public:
         cudaStream_t        stream             = 0,
         PipelinePerfResult* perf_out           = nullptr,
         size_t              pool_override_bytes = 0
+    );
+
+    /**
+     * One-shot decompress from an FZM file (instance overload).
+     *
+     * Behaves identically to the static `decompressFromFile()` overload but
+     * respects the setPoolManagedDecompOutput() flag on this instance:
+     *   false           → caller must `cudaFree(*d_output)`.
+     *   true (default)  → *d_output is pool-owned; do NOT `cudaFree`.
+     *
+     * The distinct name avoids overload-resolution ambiguity at call sites
+     * that are not member functions.
+     *
+     * @param filename    Path to the `.fzm` file.
+     * @param d_output    Receives the decompressed device pointer.
+     * @param output_size Receives the decompressed size in bytes.
+     * @param stream      CUDA stream for all GPU operations.
+     * @param perf_out    Optional timing result.
+     */
+    void decompressFromFileInstance(
+        const std::string&  filename,
+        void**              d_output,
+        size_t*             output_size,
+        cudaStream_t        stream   = 0,
+        PipelinePerfResult* perf_out = nullptr
     );
 
     // ── Config File ───────────────────────────────────────────────────────────
@@ -492,10 +561,6 @@ private:
 
     size_t input_size_hint_;
     float  pool_multiplier_;
-
-    // Per-source size hints (set via setInputSizeHint()). Override input_size_hint_
-    // for the matching source during propagateBufferSizes().
-    std::unordered_map<Stage*, size_t> per_source_hints_;
 
     // Dataset dimensions (x=fast, y, z). Used by convenience.h addLorenzo() to
     // select 1-D/2-D/3-D automatically. Default {0,1,1} = 1-D, infer x from input.

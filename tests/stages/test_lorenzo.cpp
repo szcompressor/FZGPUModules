@@ -666,6 +666,7 @@ TEST(LorenzoDoubleStage, RoundTripWithinErrorBound) {
     lrz->setErrorBound(static_cast<float>(EB));
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;

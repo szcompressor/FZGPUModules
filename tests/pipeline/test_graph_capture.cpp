@@ -49,6 +49,7 @@ static std::unique_ptr<Pipeline> make_graph_pipeline(size_t in_bytes, bool disab
     lrz->setOutlierCapacity(0.2f);
     if (disable_coloring) p->setColoringEnabled(false);
     p->enableGraphMode(true);
+    p->setPoolManagedDecompOutput(false);
     p->finalize();
     return p;
 }
@@ -168,7 +169,8 @@ TEST(GraphCapture, MatchesPreallocate) {
         lrz->setErrorBound(EB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
-        ref.finalize();
+        ref.setPoolManagedDecompOutput(false);
+    ref.finalize();
 
         void*  d_comp = nullptr;
         size_t comp_sz = 0;
@@ -341,7 +343,8 @@ TEST(GraphCapture, RZEInverseIncompatibleThrowsAtCapture) {
     CudaStream stream;
     bool threw = false;
     try {
-        p.finalize();
+        p.setPoolManagedDecompOutput(false);
+    p.finalize();
         p.captureGraph(stream);
     } catch (const std::runtime_error&) {
         threw = true;

@@ -29,12 +29,7 @@
  *          (pool usage stays bounded; new pointer has correct data)
  *   OW7  Pool-managed decompress pointer survives reset()
  *          (reset() invalidates the compress output but NOT the decompress output)
- *   OW8  decompressMulti() returns one caller-owned pointer per source;
- *          each cudaFree succeeds and memory is reclaimed
  *   OW9  Zero-size compress round-trips without crash (edge case)
- *   OW10 Multi-source decompress() returns a single caller-owned concat buffer
- *          in [num_bufs:u32][sz:u64][data]... format; both sources parse and
- *          verify correctly; the concat pointer is caller-owned (cudaFree)
  *   OW11 Pool-managed decompress pool usage stays bounded across 5 calls
  *          (previous output freed before next is allocated; no monotonic growth)
  */
@@ -286,7 +281,7 @@ TEST(Ownership, PoolManagedDecompSurvivesSubsequentCompress) {
 //
 // The pointer returned by the first decompress() becomes invalid when the
 // second decompress() is called (the implementation frees d_decomp_outputs_
-// at the start of decompressMulti).
+// at the start of decompress when pool-managed).
 //
 // We verify this indirectly: pool current usage must stay bounded (not grow
 // indefinitely), and the data from the SECOND decompress must be correct.
@@ -388,58 +383,7 @@ TEST(Ownership, PoolManagedDecompSurvivesReset) {
         << "Pool-managed decompress pointer must remain valid after reset()";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OW8: decompressMulti() returns one caller-owned pointer per source.
-//
-// Uses a single-source pipeline (decompressMulti still applies and returns a
-// vector of size 1). Verifies:
-//   - data is correct
-//   - cudaFree on each returned pointer succeeds
-//   - memory is reclaimed after freeing all pointers
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(Ownership, DecompressMultiCallerOwned) {
-    constexpr size_t N  = 2048;
-    constexpr float  EB = 1e-2f;
-    const size_t in_bytes = N * sizeof(float);
 
-    auto h_in = make_random_floats(N, 80);
-    auto p = make_pipeline(N);
-
-    CudaStream stream;
-    CudaBuffer<float> d_in(N);
-    d_in.upload(h_in, stream);
-    stream.sync();
-
-    void*  d_comp = nullptr;
-    size_t comp_sz = 0;
-    ASSERT_NO_THROW(p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream));
-
-    cudaDeviceSynchronize();
-    const size_t free_before = gpu_free_bytes();
-
-    auto results = p->decompressMulti(d_comp, comp_sz, stream);
-    ASSERT_EQ(results.size(), 1u);
-    ASSERT_NE(results[0].first, nullptr);
-    ASSERT_EQ(results[0].second, in_bytes);
-
-    std::vector<float> h_recon(N);
-    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), results[0].first, in_bytes,
-                            cudaMemcpyDeviceToHost));
-    EXPECT_LE(max_abs_error(h_in, h_recon), EB * 1.01f);
-
-    // Free all returned pointers — each is a fresh cudaMalloc'd buffer.
-    for (auto& [ptr, _] : results) {
-        cudaError_t err = cudaFree(ptr);
-        EXPECT_EQ(err, cudaSuccess)
-            << "cudaFree on decompressMulti result must succeed";
-    }
-
-    cudaDeviceSynchronize();
-    const size_t free_after = gpu_free_bytes();
-    constexpr size_t TOLERANCE = 1024 * 1024;
-    EXPECT_GE(free_after + TOLERANCE, free_before)
-        << "GPU memory not reclaimed after cudaFree of decompressMulti results";
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OW9: Zero-size compress round-trips without crash.
@@ -471,97 +415,7 @@ TEST(Ownership, ZeroSizeCompressRoundTrip) {
     if (d_dec) cudaFree(d_dec);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OW10: Multi-source decompress() returns a valid caller-owned concat buffer.
-//
-// A two-source pipeline is compressed via the vector<InputSpec> overload.
-// decompress() (not decompressMulti()) is called — for a multi-source pipeline
-// it must return a single caller-owned buffer packed as:
-//   [num_bufs:u32][sz0:u64][data0...][sz1:u64][data1...]
-// Both source regions are parsed host-side and verified against the originals.
-// The single returned pointer must be freed with cudaFree (caller-owned).
-//
-// Both sources use the same smooth data so results can be verified without
-// knowing which decompressMulti index maps to which InputSpec source.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(Ownership, MultiSourceDecompressReturnsConcatBuffer) {
-    constexpr size_t N  = 4096;
-    constexpr float  EB = 1e-2f;
-    const size_t     in_bytes = N * sizeof(float);
 
-    // Use smooth sinusoidal data — Lorenzo handles it well (few outliers).
-    auto h_input = make_sine_floats(N, 0.05f, 5.0f);
-
-    CudaStream stream;
-    CudaBuffer<float> d_in1(N), d_in2(N);
-    d_in1.upload(h_input, stream);
-    d_in2.upload(h_input, stream);
-    stream.sync();
-
-    // Two independent Lorenzo sources; total hint = 2 × per-source.
-    Pipeline pipeline(2 * in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-    lrz1->setErrorBound(EB);
-    lrz1->setQuantRadius(512);
-    lrz1->setOutlierCapacity(0.2f);
-
-    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-    lrz2->setErrorBound(EB);
-    lrz2->setQuantRadius(512);
-    lrz2->setOutlierCapacity(0.2f);
-
-    pipeline.setInputSizeHint(lrz1, in_bytes);
-    pipeline.setInputSizeHint(lrz2, in_bytes);
-    pipeline.finalize();
-
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    ASSERT_NO_THROW(pipeline.compress(
-        {{lrz1, d_in1.void_ptr(), in_bytes},
-         {lrz2, d_in2.void_ptr(), in_bytes}},
-        &d_comp, &comp_sz, stream
-    ));
-    stream.sync();
-    ASSERT_GT(comp_sz, 0u);
-
-    // decompress() on a multi-source pipeline returns a single concat buffer.
-    void*  d_dec  = nullptr;
-    size_t dec_sz = 0;
-    ASSERT_NO_THROW(pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream));
-    stream.sync();
-    ASSERT_NE(d_dec, nullptr);
-    ASSERT_GT(dec_sz, 0u);
-
-    // D2H the entire concat buffer so we can parse it on the host.
-    std::vector<uint8_t> h_concat(dec_sz);
-    FZ_TEST_CUDA(cudaMemcpy(h_concat.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost));
-
-    // Caller-owned: free it now (data is in h_concat on the host).
-    EXPECT_EQ(cudaFree(d_dec), cudaSuccess)
-        << "cudaFree on multi-source decompress concat pointer must succeed";
-
-    // Parse [num_bufs:u32][sz0:u64][data0...][sz1:u64][data1...]
-    const uint8_t* ptr = h_concat.data();
-    uint32_t num_bufs = 0;
-    std::memcpy(&num_bufs, ptr, sizeof(uint32_t));
-    ptr += sizeof(uint32_t);
-    ASSERT_EQ(num_bufs, 2u) << "Multi-source concat must contain 2 buffers";
-
-    for (uint32_t src = 0; src < num_bufs; ++src) {
-        uint64_t sz = 0;
-        std::memcpy(&sz, ptr, sizeof(uint64_t));
-        ptr += sizeof(uint64_t);
-        ASSERT_EQ(sz, in_bytes)
-            << "Source " << src << ": wrong byte-count in concat header";
-
-        std::vector<float> h_recon(N);
-        std::memcpy(h_recon.data(), ptr, in_bytes);
-        ptr += sz;
-
-        EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f)
-            << "Source " << src << ": reconstruction error exceeds bound";
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OW11: Pool-managed decompress pool usage stays bounded across 5 calls.

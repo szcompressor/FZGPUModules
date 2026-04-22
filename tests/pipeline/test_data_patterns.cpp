@@ -49,6 +49,7 @@ static float run_pattern(
     lrz->setErrorBound(error_bound);
     lrz->setQuantRadius(quant_radius);
     lrz->setOutlierCapacity(outlier_capacity);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -248,6 +249,7 @@ TEST(DataPatterns, ZeroOutlierCapacityNoCrash) {
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setOutlierCapacity(0.0f);  // intentionally drop all outliers
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     void*  d_comp  = nullptr;

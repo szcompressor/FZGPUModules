@@ -84,7 +84,8 @@ static std::vector<float> make_input() {
         _lrz->setOutlierCapacity(OUTLIER_CAP);                           \
         auto* _bs = name.addStage<BitshuffleStage>();                    \
         name.connect(_bs, _lrz, "codes");                                \
-        name.finalize();                                                  \
+        name.setPoolManagedDecompOutput(false);                          \
+        name.finalize();                                                 \
     } while (0)
 
 // ─────────────────────────────────────────────────────────────────────────────

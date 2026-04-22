@@ -61,6 +61,7 @@ static std::unique_ptr<Pipeline> build_linear3(size_t in_bytes, MemoryStrategy s
     auto* rle = p->addStage<RLEStage<uint16_t>>();
     p->connect(rle, diff);
 
+    p->setPoolManagedDecompOutput(false);
     p->finalize();
     return p;
 }
@@ -121,6 +122,7 @@ TEST(Liveness, DiamondTopologyLevelStructure) {
     p.connect(ptb, split, "copy2");
     p.connect(merge, {pta, ptb});
 
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     const auto& levels = p.getDAG()->getLevels();
@@ -162,6 +164,7 @@ TEST(Liveness, DiamondDagCompressOutputSize) {
     p.connect(pta, split, "copy1");
     p.connect(ptb, split, "copy2");
     p.connect(merge, {pta, ptb});
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     void*  d_comp  = nullptr;
@@ -270,6 +273,7 @@ TEST(Liveness, LivenessApiConsistentUnderGraphMode) {
     p->connect(bs, lrz, "codes");
 
     p->enableGraphMode(true);
+    p->setPoolManagedDecompOutput(false);
     p->finalize();
 
     // warmup() runs a dummy compress+decompress to JIT-compile kernels and

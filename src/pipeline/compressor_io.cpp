@@ -740,4 +740,55 @@ void Pipeline::decompressFromFile(
     }
 }
 
+// ── Instance decompressFromFile (respects setPoolManagedDecompOutput) ─────────
+
+void Pipeline::decompressFromFileInstance(
+    const std::string&  filename,
+    void**              d_output,
+    size_t*             output_size,
+    cudaStream_t        stream,
+    PipelinePerfResult* perf_out
+) {
+    // Delegate all the heavy lifting to the static overload (always gives us a
+    // fresh cudaMalloc'd caller-owned pointer).
+    void*  d_tmp  = nullptr;
+    size_t tmp_sz = 0;
+    Pipeline::decompressFromFile(filename, &d_tmp, &tmp_sz, stream, perf_out);
+
+    if (!pool_managed_decomp_) {
+        // Caller-owned: hand the cudaMalloc'd pointer straight through.
+        *d_output    = d_tmp;
+        *output_size = tmp_sz;
+        return;
+    }
+
+    // Pool-owned: allocate from our pool and D2D-copy, then free the temp.
+    // Free any previous pool-managed decompress output first.
+    for (void* p : d_decomp_outputs_) {
+        if (p && mem_pool_) mem_pool_->free(p, stream);
+    }
+    d_decomp_outputs_.clear();
+
+    void* d_pool = mem_pool_->allocate(tmp_sz, stream, "decomp_output_file",
+                                        /*persistent=*/true);
+    if (!d_pool) {
+        cudaFree(d_tmp);
+        throw std::runtime_error(
+            "decompressFromFile (pool-owned): pool allocation failed (" +
+            std::to_string(tmp_sz) + " bytes); pool may be exhausted");
+    }
+
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_pool, d_tmp, tmp_sz,
+                                   cudaMemcpyDeviceToDevice, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    cudaFree(d_tmp);
+
+    d_decomp_outputs_.push_back(d_pool);
+    *d_output    = d_pool;
+    *output_size = tmp_sz;
+
+    FZ_LOG(INFO, "decompressFromFile (pool-owned): %.2f MB at %p",
+           tmp_sz / (1024.0 * 1024.0), d_pool);
+}
+
 } // namespace fz

@@ -52,6 +52,7 @@ static std::unique_ptr<Pipeline> build_lorenzo(size_t in_bytes,
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    p->setPoolManagedDecompOutput(false);
     p->finalize();
     return p;
 }
@@ -66,6 +67,7 @@ static std::unique_ptr<Pipeline> build_lorenzo_rle(size_t in_bytes,
     lrz->setOutlierCapacity(0.2f);
     auto* rle = p->addStage<RLEStage<uint16_t>>();
     p->connect(rle, lrz, "codes");
+    p->setPoolManagedDecompOutput(false);
     p->finalize();
     return p;
 }

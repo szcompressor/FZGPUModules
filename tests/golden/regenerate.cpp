@@ -81,6 +81,7 @@ int main(int argc, char* argv[]) {
     auto* bs = pipeline.addStage<BitshuffleStage>();
     pipeline.connect(bs, lrz, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // ── Compress ─────────────────────────────────────────────────────────────

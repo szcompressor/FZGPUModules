@@ -73,6 +73,7 @@ TEST(PipelineErrors, AddStageAfterFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_THROW(
@@ -94,6 +95,7 @@ TEST(PipelineErrors, ConnectAfterFinalize) {
     auto* diff = p.addStage<DifferenceStage<uint16_t>>();
     lrz->setErrorBound(1e-2f);
     // Finalize with two unconnected stages (both become independent sources)
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_THROW(
@@ -109,6 +111,7 @@ TEST(PipelineErrors, FinalizeTwice) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_THROW(p.finalize(), std::runtime_error);
@@ -121,6 +124,7 @@ TEST(PipelineErrors, SetStrategyAfterFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_THROW(
@@ -156,12 +160,13 @@ TEST(PipelineErrors, CompressBeforeFinalize) {
 // E5: decompress() before compress() throws
 //
 // The pipeline is properly finalized but compress() was never called, so
-// buffer_metadata_ is empty and decompressMulti() will throw.
+// buffer_metadata_ is empty and decompress() will throw.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, DecompressBeforeCompress) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -198,7 +203,8 @@ TEST(PipelineErrors, ValidPipelineDoesNotThrow) {
         auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
         lrz->setErrorBound(1e-2f);
         lrz->setQuantRadius(512);
-        p.finalize();
+        p.setPoolManagedDecompOutput(false);
+    p.finalize();
     };
     ASSERT_NO_THROW(build());
 }
@@ -255,6 +261,7 @@ TEST(PipelineErrors, WriteToFileBeforeCompressThrows) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -288,6 +295,7 @@ TEST(PipelineErrors, CompressDecompressCompressNoReset) {
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     // --- First compress + decompress ---
@@ -332,7 +340,7 @@ TEST(PipelineErrors, CompressDecompressCompressNoReset) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// E9: compress() with a null device pointer in InputSpec → throws
+// E9: compress() with a null device pointer → throws
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, NullInputPointerThrows) {
     constexpr size_t N        = 1024;
@@ -341,6 +349,7 @@ TEST(PipelineErrors, NullInputPointerThrows) {
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -352,7 +361,7 @@ TEST(PipelineErrors, NullInputPointerThrows) {
     EXPECT_THROW(
         p.compress(nullptr, in_bytes, &d_out, &out_sz, stream),
         std::runtime_error
-    ) << "Null device pointer in InputSpec should throw";
+    ) << "Null device pointer should throw";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +378,7 @@ TEST(PipelineErrors, InputSizeExceedsHintThrows) {
     Pipeline p(HINT_BYTES, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -420,6 +430,7 @@ TEST(PipelineErrors, PipelineUsableAfterCompressThrow) {
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -477,6 +488,7 @@ TEST(PipelineErrors, NoMemoryLeakAfterCompressThrow) {
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     // Warm up CUDA runtime allocator so its own internal bookkeeping doesn't
@@ -532,6 +544,7 @@ TEST(PipelineErrors, BoundsCheckDetectsOverreport) {
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
     p.addStage<OverreportingStage>();
     p.enableBoundsCheck(true);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -567,6 +580,7 @@ TEST(PipelineErrors, PipelineUsableAfterDecompressThrow) {
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -628,6 +642,7 @@ TEST(PipelineErrors, PipelineUsableAfterCompressThrowPreallocate) {
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     CudaStream stream;
@@ -684,6 +699,7 @@ TEST(PipelineErrors, NoLeakAfterMultipleConsecutiveCompressThrows) {
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     // Warm up the CUDA runtime allocator so its internal bookkeeping does not

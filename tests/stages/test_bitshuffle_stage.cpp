@@ -543,6 +543,7 @@ TEST(BitshuffleStage, PipelineIntegration) {
     bs->setElementWidth(2);  // uint16_t codes
     pipeline.connect(bs, lrz, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;

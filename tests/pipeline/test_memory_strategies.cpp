@@ -53,6 +53,7 @@ static std::vector<float> roundtrip_with_strategy(
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -150,6 +151,7 @@ TEST(MemoryStrategy, ChangeStrategyBeforeFinalize) {
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -196,6 +198,7 @@ TEST(MemoryPool, ZeroInputSizeHint) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -241,6 +244,7 @@ TEST(MemoryPool, PeakUsageNonZeroAfterCompress) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -276,6 +280,7 @@ TEST(MemoryStrategies, PoolResetReleasesAllocations) {
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -318,7 +323,8 @@ TEST(MemoryStrategies, MinimalTopoPoolSizeLEPreallocate) {
         lrz->setOutlierCapacity(0.2f);
         auto* rle = p.addStage<RLEStage<uint16_t>>();
         p.connect(rle, lrz, "codes");
-        p.finalize();
+        p.setPoolManagedDecompOutput(false);
+    p.finalize();
         return p.getDAG()->computeTopoPoolSize();
     };
 
@@ -357,6 +363,7 @@ TEST(MemoryStrategies, RepeatedCompressResetStableMemory) {
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     constexpr int CYCLES = 5;
@@ -395,6 +402,7 @@ TEST(MemoryStrategies, ColoringAppliedInPreallocateMode) {
     lrz->setOutlierCapacity(0.2f);
     auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
     pipeline.connect(rle, lrz, "codes");
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     EXPECT_TRUE(pipeline.isColoringEnabled())
@@ -428,6 +436,7 @@ TEST(MemoryStrategies, DisabledColoringRoundTrip) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     EXPECT_FALSE(pipeline.isColoringEnabled())
@@ -477,6 +486,7 @@ TEST(MemoryStrategies, PersistentBufferSurvivesReset) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -546,6 +556,7 @@ TEST(MemoryStrategies, RLEScratchReusedAcrossCalls) {
     lrz->setOutlierCapacity(0.2f);
     auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
     pipeline.connect(rle, lrz, "codes");
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // First compress — allocates scratch (persistent) and working buffers
@@ -607,6 +618,7 @@ TEST(MemoryStrategies, CurrentUsageZeroAfterResetMinimal) {
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     for (int i = 0; i < 3; i++) {
@@ -678,6 +690,7 @@ TEST(MemoryStrategies, SetExternalPointerReflectsInGetBuffer) {
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // compress() to ensure buffers are live
@@ -748,6 +761,7 @@ TEST(MemoryStrategies, SetExternalPointerEndToEnd) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // Do one compress to settle buffer sizes.
@@ -840,6 +854,7 @@ TEST(MemoryStrategies, PreallocateCurrentUsageNonZeroAfterReset) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // Before any compress: PREALLOCATE allocates at finalize, so usage should
@@ -886,6 +901,7 @@ TEST(MemoryStrategies, MinimalCurrentUsageZeroAfterEachReset) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // Before compress: MINIMAL does not pre-allocate at finalize.

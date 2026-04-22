@@ -55,6 +55,7 @@ static std::unique_ptr<Pipeline> make_lorenzo_pipeline(bool disable_coloring) {
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    p->setPoolManagedDecompOutput(false);
     p->finalize();
     return p;
 }
@@ -96,6 +97,7 @@ TEST(BufferColoring, NotAppliedForMinimal) {
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_FALSE(p.isColoringEnabled())
@@ -153,6 +155,7 @@ TEST(BufferColoring, RegionCountPositiveAndBounded) {
     diff->setChunkSize(4096);
     p.connect(diff, lrz, "codes");
 
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     ASSERT_TRUE(p.isColoringEnabled());
@@ -186,7 +189,8 @@ TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
         auto* diff = p_col.addStage<DifferenceStage<int16_t, uint16_t>>();
         diff->setChunkSize(4096);
         p_col.connect(diff, lrz, "codes");
-        p_col.finalize();
+        p_col.setPoolManagedDecompOutput(false);
+    p_col.finalize();
     }
 
     // Uncolored pipeline (identical topology)
@@ -200,7 +204,8 @@ TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
         auto* diff = p_uncol.addStage<DifferenceStage<int16_t, uint16_t>>();
         diff->setChunkSize(4096);
         p_uncol.connect(diff, lrz, "codes");
-        p_uncol.finalize();
+        p_uncol.setPoolManagedDecompOutput(false);
+    p_uncol.finalize();
     }
 
     // Run both to establish peak usage.
@@ -274,6 +279,7 @@ TEST(BufferColoring, ColoredBuffersStableAcrossGraphReplays) {
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
     p.enableGraphMode(true);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     ASSERT_TRUE(p.isColoringEnabled())
@@ -342,6 +348,7 @@ TEST(BufferColoring, MultiStageLinearPipelineRoundTrip) {
     bitshuffle->setElementWidth(4);
     p.connect(bitshuffle, diff);
 
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     ASSERT_TRUE(p.isColoringEnabled())

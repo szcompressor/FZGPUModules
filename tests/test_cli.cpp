@@ -87,7 +87,7 @@ static int run_cli(std::vector<std::string> args) {
 } // namespace
 
 TEST(CLI, CompressMissingRequiredArgsFails) {
-    const int rc = run_cli({"fzgmod-cli", "compress"});
+    const int rc = run_cli({"fzgmod-cli", "-z"});
     EXPECT_NE(rc, 0);
 }
 
@@ -105,12 +105,12 @@ TEST(CLI, CompressCreatesFzmFile) {
 
     const int compress_rc = run_cli({
         "fzgmod-cli",
-        "compress",
-        "--input", input_path.string(),
-        "--output", compressed_path.string(),
-        "--pipeline", "pfpl",
-        "--mode", "abs",
-        "--error-bound", std::to_string(kEb),
+        "-z",
+        "-i", input_path.string(),
+        "-o", compressed_path.string(),
+        "--stages", "lorenzo->bitshuffle->rze",
+        "-m", "abs",
+        "-e", std::to_string(kEb),
         "--strategy", "minimal"
     });
     ASSERT_EQ(compress_rc, 0);
@@ -153,9 +153,9 @@ TEST(CLI, DecompressCommandRoundTripsKnownGoodFile) {
 
     const int decompress_rc = run_cli({
         "fzgmod-cli",
-        "decompress",
-        "--input", compressed_path.string(),
-        "--output", output_path.string()
+        "-x",
+        "-i", compressed_path.string(),
+        "-o", output_path.string()
     });
     ASSERT_EQ(decompress_rc, 0);
     ASSERT_TRUE(std::filesystem::exists(output_path));
@@ -182,19 +182,26 @@ TEST(CLI, PipelineFromConfigWorksWithOverride) {
     {
         std::ofstream cfg(config_path, std::ios::trunc);
         ASSERT_TRUE(cfg.is_open());
-        cfg << "input=" << input_path.string() << "\n";
-        cfg << "output=" << tmp.file("unused_from_config.fzm").string() << "\n";
-        cfg << "pipeline=pfpl\n";
-        cfg << "mode=abs\n";
-        cfg << "error-bound=1e-3\n";
-        cfg << "strategy=minimal\n";
+        cfg << "[pipeline]\n";
+        cfg << "input_size = " << (kN * sizeof(float)) << "\n";
+        cfg << "dims = [" << kN << ", 1, 1]\n";
+        cfg << "memory_strategy = \"MINIMAL\"\n";
+        cfg << "[[stage]]\n";
+        cfg << "name = \"lrz\"\n";
+        cfg << "type = \"Lorenzo1D\"\n";
+        cfg << "input_type = \"float32\"\n";
+        cfg << "code_type = \"uint16\"\n";
+        cfg << "error_bound = 1e-3\n";
+        cfg << "error_bound_mode = \"ABS\"\n";
+        cfg << "quant_radius = 32768\n";
     }
 
     const int rc = run_cli({
         "fzgmod-cli",
-        "pipeline-from-config",
-        "--config", config_path.string(),
-        "--output", override_output_path.string()
+        "-z",
+        "-c", config_path.string(),
+        "-i", input_path.string(),
+        "-o", override_output_path.string()
     });
 
     ASSERT_EQ(rc, 0);
@@ -212,14 +219,13 @@ TEST(CLI, BenchmarkCompressSingleRunWorks) {
 
     const int rc = run_cli({
         "fzgmod-cli",
-        "benchmark",
-        "--input", input_path.string(),
-        "--pipeline", "pfpl",
-        "--mode", "abs",
-        "--error-bound", "1e-3",
+        "-b",
+        "-i", input_path.string(),
+        "--stages", "lorenzo->bitshuffle->rze",
+        "-m", "abs",
+        "-e", "1e-3",
         "--strategy", "minimal",
-        "--runs", "1",
-        "--phase", "compress"
+        "--runs", "1"
     });
 
     EXPECT_EQ(rc, 0);

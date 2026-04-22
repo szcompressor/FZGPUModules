@@ -514,6 +514,7 @@ TEST(RZEStage, PipelineIntegration) {
     rze->setLevels(4);
     pipeline.connect(rze, lrz, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -576,6 +577,7 @@ TEST(RZEStage, PipelineCompressionRatio) {
     rze->setChunkSize(16384);
     rze->setLevels(4);
     pipeline.connect(rze, lrz, "codes");
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;

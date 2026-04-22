@@ -94,6 +94,7 @@ TYPED_TEST(LorenzoTypeMatrix, RoundTripAbs) {
     lrz->setErrorBound(static_cast<TIn>(eb_use));
     lrz->setQuantRadius(qrad);
     lrz->setOutlierCapacity(0.2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     auto res = pipeline_round_trip<TIn>(p, h_input, stream);
@@ -132,6 +133,7 @@ TYPED_TEST(LorenzoTypeMatrix, FileSerialization) {
     lrz->setErrorBound(static_cast<TIn>(eb_use));
     lrz->setQuantRadius(static_cast<TC>(512));
     lrz->setOutlierCapacity(0.2f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     auto res = pipeline_file_round_trip<TIn>(p, h_input, stream, tmp);
@@ -164,6 +166,7 @@ TYPED_TEST(LorenzoTypeMatrix, ConstantInputExact) {
     lrz->setErrorBound(static_cast<TIn>(eb_use));
     lrz->setQuantRadius(qrad2);
     lrz->setOutlierCapacity(0.1f);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     auto res = pipeline_round_trip<TIn>(p, h_input, stream);
@@ -229,6 +232,7 @@ TYPED_TEST(QuantizerTypeMatrix, RoundTripAbs) {
     auto* qtz = p.addStage<QuantizerStage<TIn, TC>>();
     qtz->setErrorBound(static_cast<TIn>(EB));
     qtz->setQuantRadius(512);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     auto res = pipeline_round_trip<TIn>(p, h_input, stream);
@@ -266,6 +270,7 @@ TYPED_TEST(QuantizerTypeMatrix, FileSerialization) {
     auto* qtz = p.addStage<QuantizerStage<TIn, TC>>();
     qtz->setErrorBound(static_cast<TIn>(EB));
     qtz->setQuantRadius(512);
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     auto res = pipeline_file_round_trip<TIn>(p, h_input, stream, tmp);

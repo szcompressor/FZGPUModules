@@ -224,6 +224,7 @@ TEST(ConfigSave, RoundTrip) {
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.15f);
     lrz->setZigzagCodes(true);
+    p1.setPoolManagedDecompOutput(false);
     p1.finalize();
 
     std::string cfg_path = "/tmp/fzgmod_save_roundtrip.toml";
@@ -273,6 +274,7 @@ TEST(ConfigSave, PreservesParams) {
     rze->setLevels(LEVELS);
     p.connect(rze, bs);
 
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     std::string cfg_path = "/tmp/fzgmod_preserve_params.toml";
@@ -350,6 +352,7 @@ error_bound = 0.01
 
     Pipeline p;
     p.addStage<LorenzoStage<float, uint16_t>>();
+    p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_THROW(p.loadConfig(path), std::runtime_error);
@@ -447,6 +450,7 @@ TEST(ConfigLoad, AllSupportedStageTypes) {
 
     // Lorenzo outlier outputs (ports 1-3) are unconnected → pipeline outputs.
 
+    p1.setPoolManagedDecompOutput(false);
     p1.finalize();
 
     std::string cfg_path = "/tmp/fzgmod_all_types.toml";

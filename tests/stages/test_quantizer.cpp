@@ -1301,6 +1301,7 @@ TEST(QuantizerTypeMatrix, DoubleUint16_PipelineRoundTrip) {
     // for this smooth sinusoidal data (avoids scatter-buffer overflow).
     q->setQuantRadius(8192);
     q->setOutlierCapacity(0.1f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -1353,6 +1354,7 @@ TEST(QuantizerTypeMatrix, DoubleUint32_PipelineRoundTrip) {
     q->setErrorBoundMode(ErrorBoundMode::ABS);
     q->setQuantRadius(1 << 20);  // wide range for uint32 codes
     q->setOutlierCapacity(0.05f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;

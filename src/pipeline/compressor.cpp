@@ -19,7 +19,7 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       num_streams_(1),
       is_finalized_(false),
       warmup_on_finalize_(false),
-      pool_managed_decomp_(false),
+      pool_managed_decomp_(true),
       is_compressed_(false),
       was_compressed_(false),
       profiling_enabled_(false),
@@ -298,7 +298,7 @@ void Pipeline::finalize() {
     // (CUB temp storage, RZE per-chunk scratch, etc.).
     // Skip when there is no input size hint — buffer sizes will be 1-byte
     // placeholders and the topology-derived value would be meaningless.
-    if (input_size_hint_ > 0 || !per_source_hints_.empty()) {
+    if (input_size_hint_ > 0) {
         // computeTopoPoolSize() already accounts for all intermediate buffers
         // and persistent stage scratch, so it is the accurate peak requirement.
         // Apply a small safety margin (10%) for transient CUB allocations that
@@ -344,7 +344,7 @@ void Pipeline::finalize() {
                 "Graph mode requires PREALLOCATE memory strategy. "
                 "Call setMemoryStrategy(MemoryStrategy::PREALLOCATE) before finalize().");
         }
-        if (input_size_hint_ == 0 && per_source_hints_.empty()) {
+        if (input_size_hint_ == 0) {
             throw std::runtime_error(
                 "Graph mode requires a non-zero input size hint. "
                 "Pass input_data_size to the Pipeline constructor.");
@@ -718,21 +718,17 @@ void Pipeline::configureStreamsIfNeeded() {
 }
 
 void Pipeline::propagateBufferSizes(bool force_from_current_inputs) {
-    bool has_hint = (input_size_hint_ > 0) || !per_source_hints_.empty();
+    bool has_hint = (input_size_hint_ > 0);
     if (!has_hint && !force_from_current_inputs) {
         FZ_LOG(DEBUG, "No input size hint, using placeholder buffer sizes");
         return;
     }
 
     if (!force_from_current_inputs) {
-        // Seed each source's external input buffer with its per-source hint,
-        // falling back to the global constructor hint when none is set.
+        // Seed the source's external input buffer with the constructor hint.
         for (size_t i = 0; i < input_nodes_.size(); i++) {
-            Stage* src_stage = input_nodes_[i]->stage;
-            auto it = per_source_hints_.find(src_stage);
-            size_t hint = (it != per_source_hints_.end()) ? it->second : input_size_hint_;
-            if (hint > 0) {
-                dag_->updateBufferSize(input_buffer_ids_[i], hint);
+            if (input_size_hint_ > 0) {
+                dag_->updateBufferSize(input_buffer_ids_[i], input_size_hint_);
             }
         }
     }

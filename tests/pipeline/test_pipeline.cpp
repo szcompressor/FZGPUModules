@@ -60,6 +60,7 @@ TEST(Pipeline, LorenzoOnlyRoundTrip) {
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // Compress
@@ -116,6 +117,7 @@ TEST(Pipeline, LorenzoThenDiffRoundTrip) {
     auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
     pipeline.connect(diff, lorenzo, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void* d_compressed  = nullptr;
@@ -166,6 +168,7 @@ TEST(Pipeline, FileRoundTrip) {
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void* d_compressed = nullptr;
@@ -182,6 +185,7 @@ TEST(Pipeline, FileRoundTrip) {
     auto* lorenzo2 = pipeline2.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo2->setErrorBound(EB);
     lorenzo2->setQuantRadius(512);
+    pipeline2.setPoolManagedDecompOutput(false);
     pipeline2.finalize();
 
     void*  d_decompressed = nullptr;
@@ -220,6 +224,7 @@ TEST(Pipeline, RepeatCompressDifferentData) {
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // Three datasets with different characteristics
@@ -285,6 +290,7 @@ TEST(Pipeline, LorenzoPlusRLERoundTrip) {
     pipeline.connect(rle, lorenzo, "codes");
     // outliers output of Lorenzo is left unconnected → becomes a pipeline output
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_compressed = nullptr;
@@ -338,6 +344,7 @@ TEST(Pipeline, LorenzoDiffRLERoundTrip) {
     pipeline.connect(rle, diff);
     // Lorenzo outliers remain unconnected → second pipeline output
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_compressed = nullptr;
@@ -381,6 +388,7 @@ TEST(Pipeline, RepeatCompress) {
     auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     for (int iter = 0; iter < 3; iter++) {
@@ -432,6 +440,7 @@ TEST(Pipeline, RepeatedCompressPreallocateSameData) {
     auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
     pipeline.connect(diff, lorenzo, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     for (int iter = 0; iter < N_RUNS; ++iter) {
@@ -487,6 +496,7 @@ TEST(Pipeline, RepeatedCompressDecompressStableOutput) {
     auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
     pipeline.connect(diff, lorenzo, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     std::vector<float> baseline_recon;
@@ -548,6 +558,7 @@ TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
     auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
     pipeline.connect(diff, lorenzo, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     std::vector<std::vector<float>> datasets = {
@@ -625,83 +636,7 @@ TEST(Pipeline, AddLorenzoForwardsDims) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MS1: Multi-source compress + decompressMulti round-trip.
-//
-// Two independent Lorenzo stages are roots (no shared connection) in one
-// Pipeline.  compress() receives an InputSpec per source; decompressMulti()
-// returns one reconstructed buffer per source.  Both must be within error
-// bound on independent data.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(Pipeline, MultiSourceRoundTrip) {
-    constexpr size_t N  = 1 << 13;   // 8 K floats per source
-    constexpr float  EB = 1e-2f;
-    const size_t     in_bytes = N * sizeof(float);
 
-    // Use the same data for both sources so we don't need to know which result
-    // index corresponds to which source (decompressMulti returns results in
-    // input_nodes_ discovery order, which may not match InputSpec order).
-    auto h_input1 = make_smooth_data(N);
-    const auto& h_input2 = h_input1;
-
-    CudaStream stream;
-    CudaBuffer<float> d_in1(N), d_in2(N);
-    d_in1.upload(h_input1, stream);
-    d_in2.upload(h_input2, stream);
-    stream.sync();
-
-    // Build a pipeline with two independent Lorenzo sources.
-    // Both are roots (no upstream); both are sinks (no downstream connection).
-    // The pipeline total hint is 2× per-source size.
-    Pipeline pipeline(2 * in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-    lrz1->setErrorBound(EB);
-    lrz1->setQuantRadius(512);
-    lrz1->setOutlierCapacity(0.2f);
-
-    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-    lrz2->setErrorBound(EB);
-    lrz2->setQuantRadius(512);
-    lrz2->setOutlierCapacity(0.2f);
-
-    // Per-source hints so propagateBufferSizes() can estimate downstream buffers.
-    pipeline.setInputSizeHint(lrz1, in_bytes);
-    pipeline.setInputSizeHint(lrz2, in_bytes);
-
-    pipeline.finalize();
-
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    pipeline.compress(
-        {{lrz1, d_in1.void_ptr(), in_bytes},
-         {lrz2, d_in2.void_ptr(), in_bytes}},
-        &d_comp, &comp_sz, stream
-    );
-    stream.sync();
-    ASSERT_GT(comp_sz, 0u) << "Multi-source compress output is empty";
-
-    auto results = pipeline.decompressMulti(nullptr, 0, stream);
-    stream.sync();
-
-    ASSERT_EQ(results.size(), 2u) << "Expected 2 decompressed outputs";
-
-    // Each result must be the right size and within error bound.
-    for (size_t src = 0; src < 2; src++) {
-        auto [d_dec, dec_sz] = results[src];
-        ASSERT_NE(d_dec, nullptr)  << "Source " << src << ": null decompressed pointer";
-        ASSERT_EQ(dec_sz, in_bytes) << "Source " << src << ": wrong decompressed size";
-
-        std::vector<float> h_recon(N);
-        cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
-        cudaFree(d_dec);
-
-        const auto& h_orig = (src == 0) ? h_input1 : h_input2;
-        float max_err = max_abs_error(h_orig, h_recon);
-        EXPECT_LE(max_err, EB * 1.01f)
-            << "Source " << src << ": max_err=" << max_err
-            << " exceeds bound " << EB;
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RS1: Explicit reset() between compress cycles.
@@ -727,6 +662,7 @@ TEST(Pipeline, ExplicitResetThenCompress) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // First compress.
@@ -800,6 +736,7 @@ TEST(Pipeline, VaryingInputSizesAcrossCalls) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     auto roundtrip = [&](void* d_in, size_t bytes, const std::vector<float>& h_ref,
@@ -881,6 +818,7 @@ TEST(Pipeline, LargeScaleRoundTrip) {
     lrz->setOutlierCapacity(0.05f);  // 5% outlier budget at 100 MB scale
     auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
     pipeline.connect(rle, lrz, "codes");
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // Compress

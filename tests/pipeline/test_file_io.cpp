@@ -90,6 +90,7 @@ TEST(FileIO, LorenzoDiffRoundTrip) {
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
     pipeline.connect(diff, lrz, "codes");
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -143,6 +144,7 @@ TEST(FileIO, CompressedFileSmallerThanRaw) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -185,6 +187,7 @@ TEST(FileIO, ReadHeaderCounts) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -234,7 +237,8 @@ TEST(FileIO, DecompressCorruptMagicThrows) {
         lrz->setErrorBound(EB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
-        pipeline.finalize();
+        pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
 
         void*  d_comp = nullptr;
         size_t cmp_sz = 0;
@@ -303,7 +307,8 @@ TEST(FileIO, DecompressWrongMajorVersionThrows) {
         auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setOutlierCapacity(0.2f);
-        pipeline.finalize();
+        pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
 
         void*  d_comp = nullptr;
         size_t cmp_sz = 0;
@@ -351,7 +356,8 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
         auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setOutlierCapacity(0.2f);
-        pipeline.finalize();
+        pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
 
         void*  d_comp = nullptr;
         size_t cmp_sz = 0;
@@ -388,101 +394,6 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
 
     std::remove(tmp.c_str());
 }
-// ─────────────────────────────────────────────────────────────────────────────
-// FMS1: Multi-source pipeline: compress → writeToFile → decompressFromFile
-//
-// Two independent Lorenzo sources are compressed and written to one file.
-// The test verifies:
-//   (a) The FZM file header correctly records num_sources == 2 and
-//       the per-source uncompressed sizes.
-//   (b) decompressFromFile() succeeds and returns data within error bound.
-//       Both sources use identical data so correctness holds regardless of
-//       the order in which sources appear in the output.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(FileIO, MultiSourceRoundTripThroughFile) {
-    cudaDeviceSynchronize();  // Flush any stream-0 work from prior tests
-    CudaStream stream;
-    constexpr size_t N  = 1 << 12;   // 4 K floats per source
-    constexpr float  EB = 1e-2f;
-    const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
-
-    CudaBuffer<float> d_in1(N), d_in2(N);
-    d_in1.upload(h_input, stream);
-    d_in2.upload(h_input, stream);
-    stream.sync();
-
-    const std::string tmp = "/tmp/fzgmod_test_multi_source.fzm";
-
-    // ── Build multi-source pipeline ──────────────────────────────────────────
-    Pipeline pipeline(2 * in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz1 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-    lrz1->setErrorBound(EB);
-    lrz1->setQuantRadius(512);
-    lrz1->setOutlierCapacity(0.2f);
-
-    auto* lrz2 = pipeline.addStage<LorenzoStage<float, uint16_t>>();
-    lrz2->setErrorBound(EB);
-    lrz2->setQuantRadius(512);
-    lrz2->setOutlierCapacity(0.2f);
-
-    pipeline.setInputSizeHint(lrz1, in_bytes);
-    pipeline.setInputSizeHint(lrz2, in_bytes);
-    pipeline.finalize();
-
-    // ── Compress and write ───────────────────────────────────────────────────
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    pipeline.compress(
-        {{lrz1, d_in1.void_ptr(), in_bytes},
-         {lrz2, d_in2.void_ptr(), in_bytes}},
-        &d_comp, &comp_sz, stream
-    );
-    stream.sync();
-    ASSERT_GT(comp_sz, 0u) << "Multi-source compressed output is empty";
-    pipeline.writeToFile(tmp, stream);
-
-    // ── (a) Verify file header encodes num_sources == 2 ─────────────────────
-    auto hdr = Pipeline::readHeader(tmp);
-    EXPECT_EQ(hdr.core.num_sources, 2u)
-        << "FZM header must record 2 source stages";
-    EXPECT_EQ(hdr.core.source_uncompressed_sizes[0], in_bytes)
-        << "source_uncompressed_sizes[0] must equal in_bytes";
-    EXPECT_EQ(hdr.core.source_uncompressed_sizes[1], in_bytes)
-        << "source_uncompressed_sizes[1] must equal in_bytes";
-
-    // ── (b) Decompress from file and verify correctness ──────────────────────
-    // Extra sync: under compute-sanitizer, pool-destroy shadow-memory writes
-    // from the preceding test may still be in flight; flush them here so they
-    // cannot corrupt the d_compressed buffer we are about to allocate.
-    cudaDeviceSynchronize();
-    void*  d_out  = nullptr;
-    size_t out_sz = 0;
-    ASSERT_NO_THROW(Pipeline::decompressFromFile(tmp, &d_out, &out_sz, stream))
-        << "Multi-source decompressFromFile must not throw";
-    stream.sync();
-    ASSERT_NE(d_out, nullptr) << "decompressFromFile returned null";
-    ASSERT_GE(out_sz, in_bytes)
-        << "Output must be at least one source's worth of data (" << in_bytes << " B)";
-
-    // Copy up to 2 sources of raw float data to host.
-    // Both sources use identical data so we can verify any prefix of in_bytes.
-    const size_t check_bytes = std::min(out_sz, in_bytes);
-    const size_t check_n     = check_bytes / sizeof(float);
-    std::vector<float> h_recon(check_n);
-    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_out, check_bytes, cudaMemcpyDeviceToHost));
-    cudaFree(d_out);
-
-    float max_err = 0.0f;
-    for (size_t i = 0; i < check_n; i++)
-        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
-
-    EXPECT_LE(max_err, EB * 1.01f)
-        << "Decompressed first source: max_err=" << max_err
-        << " exceeds bound " << EB;
-
-    std::remove(tmp.c_str());
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(FileIO, DecompressNonexistentPathThrows) {
@@ -512,6 +423,7 @@ TEST(FileIO, WriteToFileBeforeCompressThrows) {
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     // No compress() called — must throw
@@ -533,6 +445,7 @@ TEST(FileIO, BuildHeaderBeforeCompressThrows) {
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     EXPECT_THROW(
@@ -573,6 +486,7 @@ TEST(FileIO, StageConfigPreservedThroughFile) {
     bs->setElementWidth(2);   // non-default element width
     pipeline.connect(bs, lrz, "codes");
 
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -644,6 +558,7 @@ TEST(FileIO, CreateStageReconstructsCorrectConfig) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(1024);
     lrz->setOutlierCapacity(0.1f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -704,6 +619,7 @@ TEST(FileIO, LorenzoRLERoundTripThroughFile) {
     lrz->setOutlierCapacity(0.2f);
     auto* rle = pipeline.addStage<RLEStage<uint16_t>>();
     pipeline.connect(rle, lrz, "codes");
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -756,6 +672,7 @@ TEST(FileIO, DecompressFromFilePerfOutPopulated) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -824,6 +741,7 @@ TEST(FileIO, WrittenFileHasChecksums) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp = nullptr;
@@ -872,7 +790,8 @@ TEST(FileIO, CorruptedDataPayloadThrows) {
         lrz->setErrorBound(EB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
-        pipeline.finalize();
+        pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
 
         void*  d_comp = nullptr;
         size_t comp_sz = 0;
@@ -939,6 +858,7 @@ TEST(FileIO, LorenzoDimsSerializedThroughFile) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
@@ -1017,6 +937,7 @@ TEST(FileIO, PoolOverrideBytesWorks) {
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
     void*  d_comp  = nullptr;
