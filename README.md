@@ -39,7 +39,7 @@ auto* lrz = pipeline.addStage<fz::LorenzoStage<float, uint16_t>>(
     fz::LorenzoStage<float, uint16_t>::Config{1e-4f});
 auto* rle = pipeline.addStage<fz::RLEStage<uint16_t>>();
 
-pipeline.connect(lrz, "codes", rle);
+pipeline.connect(rle, lrz, "codes");
 pipeline.finalize();
 
 // 2. Compress
@@ -88,7 +88,13 @@ For non-linear pipelines or per-stage configuration, use a TOML config file:
 ```bash
 fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --report
 ```
-Ready-to-use presets are in `examples/presets/`: `pfpl.toml`, `speed.toml`.
+Ready-to-use presets are in `examples/presets/`:
+- `pfpl.toml` — Quantizer (REL) → Difference → Bitshuffle → RZE
+- `speed.toml` — Quantizer → Bitshuffle → RZE
+
+The CLI passes the input file size to the `Pipeline` constructor before calling `loadConfig()`,
+so presets that use `memory_strategy = "PREALLOCATE"` work correctly even without an
+`input_size` key in the TOML file.
 
 **Benchmarking**
 Run a pipeline multiple times to measure host time, DAG time, and throughput (GB/s):
