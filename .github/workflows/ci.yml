@@ -84,4 +84,13 @@ jobs:
           #   "ASan runtime does not come first in initial library list"
           ASAN_LIB=$(gcc -print-file-name=libasan.so)
           echo "Preloading: $ASAN_LIB"
+          
+          # CUDA memory pools conflict with ASan's huge shadow memory mapping (OOM error).
+          # protect_shadow_gap=0 fixes this on Linux.
+          export ASAN_OPTIONS="protect_shadow_gap=0"
+          
+          # Ignore known memory leaks in the NVIDIA driver
+          echo -e "leak:libcuda\nleak:libnv" > lsan.supp
+          export LSAN_OPTIONS="suppressions=$(pwd)/lsan.supp"
+          
           LD_PRELOAD="$ASAN_LIB" ctest --preset asan --output-on-failure

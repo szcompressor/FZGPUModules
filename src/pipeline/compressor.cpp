@@ -11,6 +11,7 @@
 #include <limits>
 #include <unordered_set>
 #include <vector>
+#include <cstring>
 
 namespace fz {
 
@@ -892,10 +893,12 @@ size_t Pipeline::writeConcatBuffer(
     const size_t hdr_bytes = sizeof(uint32_t) + n * sizeof(uint64_t);
 
     uint8_t* h = static_cast<uint8_t*>(h_concat_header_);
-    *reinterpret_cast<uint32_t*>(h) = static_cast<uint32_t>(n);
+    uint32_t n_u32 = static_cast<uint32_t>(n);
+    std::memcpy(h, &n_u32, sizeof(uint32_t));
     h += sizeof(uint32_t);
     for (const auto& out : outputs) {
-        *reinterpret_cast<uint64_t*>(h) = static_cast<uint64_t>(out.actual_size);
+        uint64_t sz_u64 = static_cast<uint64_t>(out.actual_size);
+        std::memcpy(h, &sz_u64, sizeof(uint64_t));
         h += sizeof(uint64_t);
     }
 
