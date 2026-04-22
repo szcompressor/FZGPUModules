@@ -48,7 +48,7 @@ jobs:
 
       - name: Run tests
         working-directory: build/ci
-        run: ctest --parallel --output-on-failure
+        run: ctest --output-on-failure
 
       - name: Upload test results
         if: failure()
