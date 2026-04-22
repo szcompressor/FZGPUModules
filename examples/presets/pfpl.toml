@@ -1,0 +1,28 @@
+[pipeline]
+# PFPL Preset (SZ-like predictor-based pipeline)
+# Fast, relatively high quality scientific floating-point data compressor.
+# Topology: Lorenzo -> Difference -> Bitshuffle -> RZE
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "pred"
+type = "Lorenzo1D"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 1e-3
+error_bound_mode = "REL"
+quant_radius = 32768
+outlier_capacity = 0.1
+zigzag_codes = true
+
+[[stage]]
+name = "bshuf"
+type = "Bitshuffle"
+element_width = 2
+block_size = 16384
+input_port = "pred:codes"
+
+[[stage]]
+name = "rze"
+type = "RZE"
+levels = 4

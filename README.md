@@ -61,15 +61,69 @@ capture, and the low-level DAG API.
 
 ---
 
+## Command Line Interface (CLI)
+
+FZGPUModules provides a fully-featured CLI (`fzgmod-cli`) for testing, comparing, and benchmarking pipelines without writing C++ code.
+
+**Dynamic Linear Pipelines**
+Chain stages together using `--stages` with `->` separators — any number of stages:
+```bash
+# Lorenzo -> Bitshuffle -> RZE (the default)
+fzgmod-cli -z -i data.f32 -o compressed.fzm --stages lorenzo->bitshuffle->rze -m rel -e 1e-3
+
+# Four-stage pipeline
+fzgmod-cli -z -i data.f32 --stages lorenzo->diff->bitshuffle->rze -e 1e-4
+```
+
+**Decompress, Compare, and Report**
+Decompress an `.fzm` file and compare it against the original to verify correctness and compute error metrics:
+```bash
+fzgmod-cli -x -i compressed.fzm -o decompressed.f32 --compare data.f32 --report
+# Prints: Output size, Time, Throughput, Value Range, Max Abs Error, PSNR, NRMSE
+```
+
+**Complex Branched Pipelines via TOML**
+For non-linear pipelines or per-stage configuration, use a TOML config file:
+```bash
+fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --report
+```
+Ready-to-use presets are in `examples/presets/`: `pfpl.toml`, `speed.toml`.
+
+**Benchmarking**
+Run a pipeline multiple times to measure host time, DAG time, and throughput (GB/s):
+```bash
+fzgmod-cli -b -i data.f32 --stages lorenzo->bitshuffle->rze -m rel -e 1e-3 --runs 10
+```
+
+**Key Flags**
+
+| Flag | Description |
+|---|---|
+| `-z` / `-x` / `-b` | Compress / Decompress / Benchmark mode |
+| `-i <file>` | Input file |
+| `-o <file>` | Output file |
+| `-c <file.toml>` | Load pipeline from TOML config |
+| `--stages <s1->s2->...>` | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze, diff, rle) |
+| `-t <f32\|f64>` | Data type (default: f32) |
+| `-m <rel\|abs\|noa>` | Error bound mode (default: rel) |
+| `-e <val>` | Error bound value (default: 1e-3) |
+| `-r <val>` | Quantization radius (default: 32768) |
+| `-l <x>x<y>x<z>` | Dimensions (inferred if omitted) |
+| `-R` / `--report` | Print compression ratio and throughput |
+| `--compare <file>` | Compare decompressed vs original (MaxErr, PSNR, NRMSE) |
+| `--runs <n>` | Benchmark iteration count (default: 10) |
+
+---
+
 ## Caller-Allocated Output (With Size Query)
 
-If you want full memory control, use the `Into` APIs and ask the pipeline for
-max output sizes before allocating:
+If you want full memory control, use the caller-allocated `compress` and `decompress` overloads and ask the pipeline for max output sizes before allocating:
 
 ```cpp
 // After finalize()
-size_t comp_capacity   = pipeline.getMaxCompressedOutputSize();
-size_t decomp_capacity = pipeline.getMaxDecompressedOutputSize();
+size_t comp_capacity = pipeline.getMaxCompressedSize(input_bytes);
+// typically the decompressed size is known or equals input_bytes
+size_t decomp_capacity = input_bytes; 
 
 void* d_comp_user = nullptr;
 void* d_decomp_user = nullptr;
@@ -77,24 +131,18 @@ cudaMalloc(&d_comp_user, comp_capacity);
 cudaMalloc(&d_decomp_user, decomp_capacity);
 
 size_t comp_size = 0;
-pipeline.compressInto(d_input, input_bytes,
-                      d_comp_user, comp_capacity,
-                      &comp_size, stream);
+pipeline.compress(d_input, input_bytes,
+                  d_comp_user, comp_capacity,
+                  &comp_size, stream);
 
 size_t decomp_size = 0;
-pipeline.decompressInto(d_comp_user, comp_size,
-                        d_decomp_user, decomp_capacity,
-                        &decomp_size, stream);
+pipeline.decompress(d_comp_user, comp_size,
+                    d_decomp_user, decomp_capacity,
+                    &decomp_size, stream);
 ```
 
-For multi-source pipelines:
-- Use `compressInto(const std::vector<InputSpec>&, ...)`
-- Use `getMaxDecompressedOutputSizes()` to size one output buffer per source
-- Use `decompressMultiInto(...)` to decode directly into those buffers
-
-For `.fzm` files, you can query exact decompressed size(s) from header metadata:
-- `Pipeline::getDecompressedOutputSizeFromFile(path)`
-- `Pipeline::getDecompressedOutputSizesFromFile(path)`
+For `.fzm` files, you can query the exact decompressed size from the header metadata before allocating:
+- `fz::Pipeline::readHeader(path)` -> `header.core.uncompressed_size`
 
 See `examples/caller_allocated_output.cpp` for a minimal end-to-end example.
 

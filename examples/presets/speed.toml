@@ -1,0 +1,28 @@
+[pipeline]
+# Speed Preset
+# Ultra-fast compressor optimized for maximum throughput.
+# Topology: Quantizer -> Bitshuffle -> RZE
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "REL"
+quant_radius = 32768
+outlier_capacity = 0.05
+zigzag_codes = true
+
+[[stage]]
+name = "bshuf"
+type = "Bitshuffle"
+element_width = 4
+block_size = 16384
+input_port = "quant:codes"
+
+[[stage]]
+name = "rze"
+type = "RZE"
+levels = 4
