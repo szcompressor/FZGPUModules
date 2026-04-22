@@ -110,7 +110,7 @@
       "name": "asan",
       "configurePreset": "asan",
       "displayName": "All tests (ASan + UBSan)",
-      "description": "Run the full test suite against the ASan+UBSan build.  ASan is baked into the binaries — no extra wrapper needed.",
+      "description": "Run the full test suite against the ASan+UBSan build. Because ASan is baked into shared libraries (.so), LD_PRELOAD must be set so the runtime initialises before main(). Run as: LD_PRELOAD=$(gcc -print-file-name=libasan.so) ctest --preset asan",
       "output": { "outputOnFailure": true }
     },
 

@@ -77,4 +77,11 @@ jobs:
         run: cmake --build --preset asan --parallel
 
       - name: Run tests (ASan)
-        run: ctest --preset asan --output-on-failure
+        run: |
+          # ASan is baked into the shared libraries. The dynamic linker does not
+          # guarantee it initializes before main(), so we must preload it first.
+          # Without this, every test fails with:
+          #   "ASan runtime does not come first in initial library list"
+          ASAN_LIB=$(gcc -print-file-name=libasan.so)
+          echo "Preloading: $ASAN_LIB"
+          LD_PRELOAD="$ASAN_LIB" ctest --preset asan --output-on-failure
