@@ -13,6 +13,7 @@
 
 // All stage types supported by loadConfig / saveConfig
 #include "predictors/lorenzo/lorenzo.h"
+#include "predictors/quantizer/quantizer.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
 #include "transforms/rze/rze_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
@@ -124,6 +125,47 @@ static Stage* addLorenzoStage(Pipeline& p, const toml::table& t) {
     else
         throw std::runtime_error(
             "loadConfig: unsupported Lorenzo type combination input_type=\""
+            + in_type + "\" code_type=\"" + code_type + "\"");
+
+    return s;
+}
+
+static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
+    std::string in_type   = optStr(t, "input_type", "float32");
+    std::string code_type = optStr(t, "code_type",  "uint32");
+
+    DataType in_dt   = dataTypeFromString(in_type);
+    DataType code_dt = dataTypeFromString(code_type);
+
+    Stage* s = nullptr;
+
+    auto configure = [&](auto* quant) {
+        quant->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
+        quant->setErrorBoundMode(ebModeFromString(optStr(t, "error_bound_mode", "REL")));
+        quant->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 32768)));
+        quant->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.05)));
+        quant->setZigzagCodes(optBool(t, "zigzag_codes", true));
+        
+        float threshold = static_cast<float>(optDbl(t, "outlier_threshold", std::numeric_limits<float>::infinity()));
+        if (std::isfinite(threshold)) {
+            quant->setOutlierThreshold(threshold);
+        }
+        
+        quant->setInplaceOutliers(optBool(t, "inplace_outliers", false));
+        s = quant;
+    };
+
+    if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16)
+        configure(p.addStage<QuantizerStage<float, uint16_t>>());
+    else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT32)
+        configure(p.addStage<QuantizerStage<float, uint32_t>>());
+    else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16)
+        configure(p.addStage<QuantizerStage<double, uint16_t>>());
+    else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32)
+        configure(p.addStage<QuantizerStage<double, uint32_t>>());
+    else
+        throw std::runtime_error(
+            "loadConfig: unsupported Quantizer type combination input_type=\""
             + in_type + "\" code_type=\"" + code_type + "\"");
 
     return s;
@@ -268,6 +310,8 @@ void Pipeline::loadConfig(const std::string& path) {
 
         if (type == "Lorenzo1D" || type == "Lorenzo2D" || type == "Lorenzo3D") {
             s = addLorenzoStage(*this, *t);
+        } else if (type == "Quantizer") {
+            s = addQuantizerStage(*this, *t);
         } else if (type == "Bitshuffle") {
             auto* bs = addStage<BitshuffleStage>();
             bs->setBlockSize(static_cast<size_t>(optInt(*t, "block_size", 16384)));

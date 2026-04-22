@@ -66,13 +66,14 @@ capture, and the low-level DAG API.
 FZGPUModules provides a fully-featured CLI (`fzgmod-cli`) for testing, comparing, and benchmarking pipelines without writing C++ code.
 
 **Dynamic Linear Pipelines**
-Chain stages together using `--stages` with `->` separators — any number of stages:
+Chain stages together using `--stages` with `->` separators — any number of stages. 
+*(Note: Always wrap the stage list in quotes to prevent your shell from interpreting `->` as file redirection)*:
 ```bash
 # Lorenzo -> Bitshuffle -> RZE (the default)
-fzgmod-cli -z -i data.f32 -o compressed.fzm --stages lorenzo->bitshuffle->rze -m rel -e 1e-3
+fzgmod-cli -z -i data.f32 -o compressed.fzm --stages "lorenzo->bitshuffle->rze" -m rel -e 1e-3
 
 # Four-stage pipeline
-fzgmod-cli -z -i data.f32 --stages lorenzo->diff->bitshuffle->rze -e 1e-4
+fzgmod-cli -z -i data.f32 --stages "lorenzo->diff->bitshuffle->rze" -e 1e-4
 ```
 
 **Decompress, Compare, and Report**

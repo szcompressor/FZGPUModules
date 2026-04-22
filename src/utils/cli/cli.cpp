@@ -441,7 +441,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             lrz->setZigzagCodes(true);
             connect_next(lrz, /*emits_codes=*/true);
         } else if (name == "quantizer") {
-            auto* quant = pipeline->addStage<QuantizerStage<T, uint32_t>>();
+            auto* quant = pipeline->addStage<QuantizerStage<T, uint16_t>>();
             quant->setErrorBound(s.error_bound);
             quant->setErrorBoundMode(s.error_mode);
             quant->setQuantRadius(s.quant_radius);
@@ -500,7 +500,8 @@ static void print_root_usage(const char* argv0) {
         << "  -R, --report                      Generate a report\n"
         << "  --compare <original>              Compare decompressed output with original\n\n"
         << "Compression Parameters (for dynamic linear pipelines):\n"
-        << "  --stages <s1->s2->...>            Ordered pipeline stages (default: lorenzo->bitshuffle->rze)\n"
+        << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
+        << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
         << "                                                      rze, diff, rle\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
@@ -548,7 +549,9 @@ static int run_compress(CliSettings s) {
 
         std::unique_ptr<Pipeline> pipeline;
         if (!s.config_path.empty()) {
-            pipeline = std::make_unique<Pipeline>(s.config_path);
+            pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
+            pipeline->setDims(s.nx, s.ny, s.nz);
+            pipeline->loadConfig(s.config_path);
         } else {
             pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
             if (s.type == "f32") {
@@ -677,7 +680,9 @@ static int run_benchmark(CliSettings s) {
         s.profile = true;
         std::unique_ptr<Pipeline> pipeline;
         if (!s.config_path.empty()) {
-            pipeline = std::make_unique<Pipeline>(s.config_path);
+            pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
+            pipeline->setDims(s.nx, s.ny, s.nz);
+            pipeline->loadConfig(s.config_path);
             pipeline->enableProfiling(true);
         } else {
             pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
