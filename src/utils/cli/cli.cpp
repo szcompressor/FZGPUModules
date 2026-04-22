@@ -598,15 +598,26 @@ static int run_decompress(CliSettings s) {
     size_t output_size = 0;
 
     try {
+        std::vector<uint8_t> orig;
+        if (!s.original_path.empty()) {
+            orig = read_binary_file(s.original_path);
+        }
+
         const auto t0 = std::chrono::high_resolution_clock::now();
         Pipeline::decompressFromFile(s.input_path, &d_output, &output_size, 0);
         FZ_CUDA_CHECK(cudaDeviceSynchronize());
         const auto t1 = std::chrono::high_resolution_clock::now();
         double host_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-        std::vector<uint8_t> host(output_size);
-        if (output_size > 0) {
-            FZ_CUDA_CHECK(cudaMemcpy(host.data(), d_output, output_size, cudaMemcpyDeviceToHost));
+        // Truncate to the original size if we have it (to remove chunk padding)
+        size_t usable_size = output_size;
+        if (!orig.empty() && orig.size() < output_size) {
+            usable_size = orig.size();
+        }
+
+        std::vector<uint8_t> host(usable_size);
+        if (usable_size > 0) {
+            FZ_CUDA_CHECK(cudaMemcpy(host.data(), d_output, usable_size, cudaMemcpyDeviceToHost));
         }
 
         if (!s.output_path.empty()) {
@@ -614,14 +625,16 @@ static int run_decompress(CliSettings s) {
         }
 
         if (s.report || !s.original_path.empty()) {
-            double tput = static_cast<double>(output_size) / (host_ms * 1e-3) / 1e9;
+            double tput = static_cast<double>(usable_size) / (host_ms * 1e-3) / 1e9;
             std::cout << "\n[Decompress Report]\n"
-                      << "  Output size:     " << output_size << " bytes\n"
-                      << "  Time:            " << std::fixed << std::setprecision(3) << host_ms << " ms\n"
+                      << "  Output size:     " << usable_size << " bytes\n";
+            if (usable_size != output_size) {
+                std::cout << "  (Padded size:    " << output_size << " bytes, truncated to match original)\n";
+            }
+            std::cout << "  Time:            " << std::fixed << std::setprecision(3) << host_ms << " ms\n"
                       << "  Throughput:      " << std::setprecision(2) << tput << " GB/s\n";
             
-            if (!s.original_path.empty()) {
-                std::vector<uint8_t> orig = read_binary_file(s.original_path);
+            if (!orig.empty()) {
                 if (orig.size() != host.size()) {
                     std::cout << "  Compare error:   Size mismatch! Original=" << orig.size() 
                               << ", Reconstructed=" << host.size() << "\n";
@@ -683,6 +696,7 @@ static int run_benchmark(CliSettings s) {
         FZ_CUDA_CHECK(cudaDeviceSynchronize());
 
         TimingSummary compress_stats, decompress_stats;
+        std::vector<uint8_t> final_recon;
 
         for (int i = 0; i < s.benchmark_runs; ++i) {
             const auto t0 = std::chrono::high_resolution_clock::now();
@@ -704,6 +718,11 @@ static int run_benchmark(CliSettings s) {
             }
             decompress_stats.add(std::chrono::duration<double, std::milli>(t3 - t2).count(), pipeline->getLastPerfResult().dag_elapsed_ms);
             
+            if ((s.report || !s.original_path.empty()) && i == s.benchmark_runs - 1) {
+                final_recon.resize(recon_size);
+                FZ_CUDA_CHECK(cudaMemcpy(final_recon.data(), d_recon, recon_size, cudaMemcpyDeviceToHost));
+            }
+            
             if (!pipeline->isPoolManagedDecompOutput() && d_recon) {
                 FZ_CUDA_CHECK(cudaFree(d_recon));
             }
@@ -711,6 +730,37 @@ static int run_benchmark(CliSettings s) {
 
         print_summary("compress", compress_stats, payload_bytes);
         print_summary("decompress", decompress_stats, payload_bytes);
+        
+        if (s.report || !s.original_path.empty()) {
+            double ratio = static_cast<double>(payload_bytes) / compressed_size;
+            std::cout << "\n[Quality Report]\n"
+                      << "  Input size:      " << payload_bytes << " bytes\n"
+                      << "  Compressed size: " << compressed_size << " bytes\n"
+                      << "  Ratio:           " << std::fixed << std::setprecision(2) << ratio << "x\n";
+            
+            std::vector<uint8_t> orig;
+            if (!s.original_path.empty()) {
+                orig = read_binary_file(s.original_path);
+            } else {
+                orig = input_bytes;
+            }
+            
+            if (!orig.empty() && orig.size() == final_recon.size()) {
+                Metrics m;
+                if (s.type == "f32") m = calc_metrics<float>(orig, final_recon);
+                else if (s.type == "f64") m = calc_metrics<double>(orig, final_recon);
+                else if (s.type == "i32") m = calc_metrics<int32_t>(orig, final_recon);
+                else if (s.type == "i64") m = calc_metrics<int64_t>(orig, final_recon);
+                
+                std::cout << "  Value Range:     [" << std::scientific << m.val_min << ", " << m.val_max << "] (Span: " << m.val_range << ")\n"
+                          << "  Max Abs Error:   " << std::scientific << m.max_err << "\n"
+                          << "  PSNR:            " << std::fixed << std::setprecision(2) << m.psnr << " dB\n"
+                          << "  NRMSE:           " << std::scientific << m.nrmse << "\n";
+            } else if (!orig.empty()) {
+                std::cout << "  Compare error:   Size mismatch! Original=" << orig.size() 
+                          << ", Reconstructed=" << final_recon.size() << "\n";
+            }
+        }
         
     } catch (...) {
         if (d_input) FZ_CUDA_CHECK_WARN(cudaFree(d_input));
