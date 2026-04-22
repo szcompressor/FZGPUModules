@@ -1,0 +1,80 @@
+name: CI
+
+# GPU jobs run on a local workstation self-hosted runner.
+# To avoid burning allocation on every PR — and to protect against
+# untrusted fork PRs executing arbitrary code on the runner — GPU CI
+# only fires on:
+#   1. A push to main (i.e., after a PR is merged)
+#   2. A manual trigger from the Actions tab
+#
+# All PRs still get the free compile-only check from build-check.yml.
+# External contributor PRs also require explicit approval before any
+# workflow runs (configured in Settings → Actions → General).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Only one GPU run at a time — cancels queued runs if a newer push arrives
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Build + full test suite ──────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test (GPU)
+    # Requires a self-hosted runner with CUDA, GPU, and the label 'gpu'.
+    # Register one at: Settings → Actions → Runners → New self-hosted runner
+    runs-on: [self-hosted, gpu, linux]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (Release)
+        run: |
+          cmake -S . -B build/ci \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DBUILD_EXAMPLES=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=native \
+            -DCMAKE_INSTALL_PREFIX=./build/ci/install
+
+      - name: Build
+        run: cmake --build build/ci --parallel
+
+      - name: Run tests
+        working-directory: build/ci
+        run: ctest --parallel --output-on-failure
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/ci/Testing/
+
+  # ── ASan + UBSan ────────────────────────────────────────────────────────────
+  sanitizers:
+    name: Sanitizers (ASan + UBSan)
+    runs-on: [self-hosted, gpu, linux]
+    # Only run after a clean build+test passes — saves time on broken PRs
+    needs: build-and-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (ASan preset)
+        run: cmake --preset asan
+
+      - name: Build
+        run: cmake --build --preset asan --parallel
+
+      - name: Run tests (ASan)
+        run: ctest --preset asan --output-on-failure

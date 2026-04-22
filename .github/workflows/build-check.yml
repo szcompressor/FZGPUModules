@@ -1,0 +1,59 @@
+name: Build Check
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel any in-progress run on the same PR
+concurrency:
+  group: build-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Header / compilation smoke test (no GPU required) ──────────────────────
+  # This job uses a free GitHub-hosted runner. It installs CUDA stubs (headers
+  # + import libraries only — no driver, no device) so we can compile all
+  # library and CLI targets and catch API breakage, missing includes, and
+  # CMake errors without needing a real GPU.
+  #
+  # Tests are NOT run here (they require a real CUDA device). Full GPU testing
+  # happens in ci.yml on the self-hosted runner.
+  compile-only:
+    name: Compile (CPU-only, stub CUDA)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install CUDA stub toolkit
+        run: |
+          # Install CUDA keyring and then only the headers + stub libs.
+          # This lets nvcc compile host-side code without a GPU.
+          wget -qO /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update -qq
+          # cuda-cudart-dev  — headers for cudart
+          # cuda-nvcc         — the nvcc compiler
+          # libcuda1-stub     — linker stubs (no driver needed)
+          sudo apt-get install -y --no-install-recommends \
+            cuda-cudart-dev-12-6 \
+            cuda-nvcc-12-6 \
+            libcuda1-560-server || true
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/check \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_PROFILING=OFF \
+            -DCMAKE_CUDA_ARCHITECTURES=86
+
+      - name: Build (library + CLI only)
+        run: cmake --build build/check --parallel --target fzgmod fzgmod-cli
