@@ -13,10 +13,11 @@
  * timed region.  Throughput is reported for the original (unpadded) data size.
  *
  * Usage:
- *   ./build/bin/pfpl_manual_vs_dag [runs]
+ *   ./build/bin/examples/pfpl_manual_vs_dag <file> [dim_x [dim_y [error_bound [runs]]]]
  *
  * Example:
- *   ./build/bin/pfpl_manual_vs_dag 20
+ *   ./build/bin/examples/pfpl_manual_vs_dag data/CLDHGH.f32 3600 1800
+ *   ./build/bin/examples/pfpl_manual_vs_dag data/CLDHGH.f32 3600 1800 1e-4 20
  */
 
 #include "fzgpumodules.h"
@@ -33,27 +34,22 @@
 
 using namespace fz;
 
-static const char*      DATA_PATH    = "/home/skyler/data/SDRB/CESM_ATM_1800x3600/CLDHGH.f32";
-static constexpr size_t DIM_X        = 3600;
-static constexpr size_t DIM_Y        = 1800;
-static constexpr size_t N_ELEMS      = DIM_X * DIM_Y;
 static constexpr size_t CHUNK        = 16384;   // bytes; all chunked stages use this
-static constexpr float  EB           = 1e-4f;
 static constexpr float  POOL_MULT    = 3.0f;
 static constexpr int    DEFAULT_RUNS = 20;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-static float* load_to_device() {
-    std::vector<float> h(N_ELEMS);
-    std::FILE* fp = std::fopen(DATA_PATH, "rb");
-    if (!fp) { std::cerr << "[ERROR] cannot open " << DATA_PATH << "\n"; std::exit(1); }
-    const size_t got = std::fread(h.data(), sizeof(float), N_ELEMS, fp);
+static float* load_to_device(const char* path, size_t n_elems) {
+    std::vector<float> h(n_elems);
+    std::FILE* fp = std::fopen(path, "rb");
+    if (!fp) { std::cerr << "[ERROR] cannot open " << path << "\n"; std::exit(1); }
+    const size_t got = std::fread(h.data(), sizeof(float), n_elems, fp);
     std::fclose(fp);
-    if (got != N_ELEMS) { std::cerr << "[ERROR] short read\n"; std::exit(1); }
+    if (got != n_elems) { std::cerr << "[ERROR] short read\n"; std::exit(1); }
     float* d = nullptr;
-    cudaMalloc(&d, N_ELEMS * sizeof(float));
-    cudaMemcpy(d, h.data(), N_ELEMS * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMalloc(&d, n_elems * sizeof(float));
+    cudaMemcpy(d, h.data(), n_elems * sizeof(float), cudaMemcpyHostToDevice);
     return d;
 }
 
@@ -70,29 +66,51 @@ static float tput_gbs(size_t bytes, double ms) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::cerr << "Usage: pfpl_manual_vs_dag <file> [dim_x [dim_y [error_bound [runs]]]]\n"
+                  << "  file:        path to float32 binary input file (required)\n"
+                  << "  dim_x:       X dimension (default: 3600)\n"
+                  << "  dim_y:       Y dimension (default: 1800)\n"
+                  << "  error_bound: positive float (default: 1e-4)\n"
+                  << "  runs:        integer > 0 (default: 20)\n";
+        return 1;
+    }
+
+    const char* input_file = argv[1];
+    size_t dim_x = 3600;
+    size_t dim_y = 1800;
+    float eb = 1e-4f;
     int runs = DEFAULT_RUNS;
-    if (argc > 1) {
-        runs = std::stoi(argv[1]);
+
+    if (argc > 2) dim_x = std::stoull(argv[2]);
+    if (argc > 3) dim_y = std::stoull(argv[3]);
+    if (argc > 4) {
+        eb = std::stof(argv[4]);
+        if (eb <= 0.0f) { std::cerr << "error_bound must be positive\n"; return 1; }
+    }
+    if (argc > 5) {
+        runs = std::stoi(argv[5]);
         if (runs <= 0) { std::cerr << "runs must be > 0\n"; return 1; }
     }
 
-    const size_t data_bytes = N_ELEMS * sizeof(float);
+    const size_t n_elems    = dim_x * dim_y;
+    const size_t data_bytes = n_elems * sizeof(float);
 
     // Diff, Bitshuffle, and RZE require input aligned to CHUNK bytes.
     // Pipeline handles this transparently; manual path does it explicitly.
     const size_t padded_bytes = (data_bytes + CHUNK - 1) / CHUNK * CHUNK;
 
     std::cout << "=== PFPL manual stages vs Pipeline DAG — throughput comparison ===\n"
-              << "  Dataset : CESM ATM CLDHGH " << DIM_X << "x" << DIM_Y
+              << "  Dataset : " << input_file << " " << dim_x << "x" << dim_y
               << "  (" << std::fixed << std::setprecision(2)
               << data_bytes / (1024.0 * 1024.0) << " MB unpadded, "
               << padded_bytes / (1024.0 * 1024.0) << " MB padded)\n"
               << "  Stages  : Quantizer(ABS,inplace) → Diff → Bitshuffle → RZE\n"
-              << "  EB      : " << std::scientific << std::setprecision(1) << EB << "\n"
+              << "  EB      : " << std::scientific << std::setprecision(1) << eb << "\n"
               << "  Chunk   : " << CHUNK << " bytes\n"
               << "  Runs    : " << runs << " (post-warmup)\n\n";
 
-    float* d_input = load_to_device();
+    float* d_input = load_to_device(input_file, n_elems);
     std::cout << "Loaded " << std::fixed << std::setprecision(2)
               << data_bytes / (1024.0 * 1024.0) << " MB to device.\n\n";
 
@@ -107,7 +125,7 @@ int main(int argc, char* argv[]) {
 
     // Stages — configured identically to the DAG path below.
     QuantizerStage<float, uint32_t> m_quant;
-    m_quant.setErrorBound(EB);
+    m_quant.setErrorBound(eb);
     m_quant.setErrorBoundMode(ErrorBoundMode::ABS);
     m_quant.setQuantRadius(1 << 22);
     m_quant.setOutlierCapacity(0.05f);
@@ -176,7 +194,7 @@ int main(int argc, char* argv[]) {
     dag_p.enableProfiling(true);    // enables CUDA-event timing for dag_elapsed_ms
 
     auto* dq = dag_p.addStage<QuantizerStage<float, uint32_t>>();
-    dq->setErrorBound(EB);
+    dq->setErrorBound(eb);
     dq->setErrorBoundMode(ErrorBoundMode::ABS);
     dq->setQuantRadius(1 << 22);
     dq->setOutlierCapacity(0.05f);
