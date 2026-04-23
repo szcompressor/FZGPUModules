@@ -35,3 +35,21 @@ add_executable(pfpl_manual_vs_dag manual_pipeline.cpp)
 target_link_libraries(pfpl_manual_vs_dag PRIVATE fzgmod)
 set_target_properties(pfpl_manual_vs_dag PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# ── File IO: compress to .fzm file and decompress from file ───────────────────
+add_executable(file_io_example file_io_example.cpp)
+target_link_libraries(file_io_example PRIVATE fzgmod)
+set_target_properties(file_io_example PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# ── Ownership: pool-owned vs caller-owned compress and decompress output ──────
+add_executable(ownership_example ownership_example.cpp)
+target_link_libraries(ownership_example PRIVATE fzgmod)
+set_target_properties(ownership_example PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# ── Debugging and logging: Logger, printDAG, profiling, bounds checking ───────
+add_executable(debug_logging debug_logging.cpp)
+target_link_libraries(debug_logging PRIVATE fzgmod)
+set_target_properties(debug_logging PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

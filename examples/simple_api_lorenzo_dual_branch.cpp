@@ -1,13 +1,17 @@
 /**
- * Simple API usage example:
+ * Simple API usage example: Lorenzo → Bitshuffle → RZE pipeline on a real input file.
  *
- *   Lorenzo(+fused quantization, zigzag codes) -> bitshuffle -> RZE
+ * Demonstrates:
+ *   - Building and running a Pipeline on a binary float32 input file
+ *   - 2D Lorenzo with zigzag codes on the "codes" output port
+ *   - Accessing per-stage actual output sizes after compress()
+ *   - enableProfiling() + getLastPerfResult().print() for timing
+ *   - Computing compression error statistics on the host
  *
  * Usage:
  *   ./build/bin/simple_api_lorenzo_dual_branch <input_file> [dim_x] [dim_y] [error_bound]
  */
 
-#include "cuda_check.h"
 #include "fzgpumodules.h"
 
 #include <algorithm>
@@ -61,8 +65,8 @@ int main(int argc, char** argv) {
     infile.close();
 
     float* d_input = nullptr;
-    FZ_CUDA_CHECK(cudaMalloc(&d_input, input_bytes));
-    FZ_CUDA_CHECK(cudaMemcpy(d_input, h_input.data(), input_bytes, cudaMemcpyHostToDevice));
+    cudaMalloc(&d_input, input_bytes);
+    cudaMemcpy(d_input, h_input.data(), input_bytes, cudaMemcpyHostToDevice);
 
     Pipeline p(input_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
     p.enableProfiling(true);
@@ -90,7 +94,7 @@ int main(int argc, char** argv) {
     void* d_compressed = nullptr;
     size_t compressed_size = 0;
     p.compress(d_input, input_bytes, &d_compressed, &compressed_size, 0);
-    FZ_CUDA_CHECK(cudaDeviceSynchronize());
+    cudaDeviceSynchronize();
 
     const auto lrz_sizes = lorenzo->getActualOutputSizesByName();
     const size_t outlier_indices_bytes =
@@ -103,7 +107,7 @@ int main(int argc, char** argv) {
     void* d_reconstructed = nullptr;
     size_t reconstructed_size = 0;
     p.decompress(d_compressed, compressed_size, &d_reconstructed, &reconstructed_size, 0);
-    FZ_CUDA_CHECK(cudaDeviceSynchronize());
+    cudaDeviceSynchronize();
 
     std::cout << "\n-- Decompress profiling --\n";
     p.getLastPerfResult().print(std::cout);
@@ -111,17 +115,17 @@ int main(int argc, char** argv) {
     if (reconstructed_size != input_bytes) {
         std::cerr << "unexpected reconstructed size: " << reconstructed_size
                   << " (expected " << input_bytes << ")\n";
-        if (d_reconstructed) FZ_CUDA_CHECK(cudaFree(d_reconstructed));
-        FZ_CUDA_CHECK(cudaFree(d_input));
+        // d_reconstructed is pool-owned — do NOT cudaFree.
+        cudaFree(d_input);
         return 1;
     }
 
     std::vector<float> h_reconstructed(N);
-    FZ_CUDA_CHECK(cudaMemcpy(
+    cudaMemcpy(
         h_reconstructed.data(),
         d_reconstructed,
         reconstructed_size,
-        cudaMemcpyDeviceToHost));
+        cudaMemcpyDeviceToHost);
 
     float max_abs_error = 0.0f;
     double sum_abs_error = 0.0;
@@ -162,7 +166,7 @@ int main(int argc, char** argv) {
     std::cout << "  rmse:          " << rmse << "\n";
     std::cout << "  <= eb:         " << within_eb_pct << "%\n";
 
-    FZ_CUDA_CHECK(cudaFree(d_reconstructed));
-    FZ_CUDA_CHECK(cudaFree(d_input));
+    // d_reconstructed is pool-owned (default) — do NOT cudaFree.
+    cudaFree(d_input);
     return 0;
 }

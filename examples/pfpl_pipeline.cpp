@@ -17,10 +17,6 @@
  */
 
 #include "fzgpumodules.h"
-#ifdef FZ_PROFILING_ENABLED
-#include <cuda_profiler_api.h>
-#include <nvtx3/nvtx3.hpp>
-#endif
 
 #include <algorithm>
 #include <chrono>
@@ -164,11 +160,6 @@ static StrategyResult run_strategy(
     bool printed_first = false;
 
     for (int i = 0; i < runs; ++i) {
-#ifdef FZ_PROFILING_ENABLED
-        const std::string range_name =
-            strat_name + "::" + phase_str + "::" + std::to_string(i + 1);
-        nvtx3::scoped_range bench_range{range_name.c_str()};
-#endif
         const auto t0 = std::chrono::high_resolution_clock::now();
 
         if (phase == ProfilePhase::Compress) {
@@ -179,7 +170,7 @@ static StrategyResult run_strategy(
             size_t rec_sz  = 0;
             comp.decompress(d_compressed, compressed_sz, &d_rec, &rec_sz, 0);
             cudaDeviceSynchronize();
-            if (d_rec) cudaFree(d_rec);
+            // d_rec is pool-owned (default) — do NOT cudaFree.
         }
 
         const auto t1 = std::chrono::high_resolution_clock::now();
@@ -291,10 +282,6 @@ int main(int argc, char* argv[]) {
         std::cout << "  Threshold:   " << threshold << "\n";
     std::cout << "\n";
 
-#ifdef FZ_PROFILING_ENABLED
-    cudaProfilerStart();
-#endif
-
     const StrategyResult pre = run_strategy(
         MemoryStrategy::PREALLOCATE, "PREALLOCATE",
         phase, phase_str, d_input, data_bytes, eb, mode, threshold, runs);
@@ -302,10 +289,6 @@ int main(int argc, char* argv[]) {
     const StrategyResult min = run_strategy(
         MemoryStrategy::MINIMAL, "MINIMAL",
         phase, phase_str, d_input, data_bytes, eb, mode, threshold, runs);
-
-#ifdef FZ_PROFILING_ENABLED
-    cudaProfilerStop();
-#endif
 
     // ── Memory + throughput comparison ───────────────────────────────────────
     const auto tput = [&](float ms) {

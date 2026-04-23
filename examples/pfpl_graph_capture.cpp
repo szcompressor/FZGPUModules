@@ -24,10 +24,6 @@
  */
 
 #include "fzgpumodules.h"
-#ifdef FZ_PROFILING_ENABLED
-#include <cuda_profiler_api.h>
-#include <nvtx3/nvtx3.hpp>
-#endif
 
 #include <algorithm>
 #include <chrono>
@@ -144,10 +140,6 @@ static StrategyResult run_normal(
     bool printed_first = false;
 
     for (int i = 0; i < runs; ++i) {
-#ifdef FZ_PROFILING_ENABLED
-        const std::string rng = strat_name + "::compress::" + std::to_string(i + 1);
-        nvtx3::scoped_range bench_range{rng.c_str()};
-#endif
         const auto t0 = std::chrono::high_resolution_clock::now();
         comp.compress(d_input, data_bytes, &d_out, &out_sz, 0);
         cudaDeviceSynchronize();
@@ -260,10 +252,6 @@ static StrategyResult run_graph(
     bool printed_first = false;
 
     for (int i = 0; i < runs; ++i) {
-#ifdef FZ_PROFILING_ENABLED
-        const std::string rng = strat_name + "::compress::" + std::to_string(i + 1);
-        nvtx3::scoped_range bench_range{rng.c_str()};
-#endif
         const auto t0 = std::chrono::high_resolution_clock::now();
         comp.compress(d_input, data_bytes, &d_out, &out_sz, graph_stream);
         cudaStreamSynchronize(graph_stream);
@@ -376,19 +364,11 @@ int main(int argc, char* argv[]) {
               << "  Pool mult:   " << std::fixed << POOL_MULT
               << "x (initial), 1.1x (post-finalize topo)\n\n";
 
-#ifdef FZ_PROFILING_ENABLED
-    cudaProfilerStart();
-#endif
-
     const StrategyResult r_min  = run_normal(MemoryStrategy::MINIMAL,      "MINIMAL",
                                              d_input, data_bytes, eb, mode, runs);
     const StrategyResult r_pre  = run_normal(MemoryStrategy::PREALLOCATE,   "PREALLOCATE",
                                              d_input, data_bytes, eb, mode, runs);
     const StrategyResult r_graph = run_graph(d_input, data_bytes, eb, mode, runs);
-
-#ifdef FZ_PROFILING_ENABLED
-    cudaProfilerStop();
-#endif
 
     // ── 3-column comparison table ─────────────────────────────────────────────
     const auto tput = [&](float ms) {
