@@ -8,7 +8,7 @@
 #
 # Run under nsys:
 #   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
-#        -o my_profile ./build/bin/fzgmod-profile
+#        -o my_profile ./build/bin/profiling/fzgmod-profile
 #   nsys-ui my_profile.nsys-rep
 
 if(NOT BUILD_PROFILING)
@@ -70,7 +70,7 @@ endif()
 add_executable(fzgmod-profile basic_profiling_example.cpp)
 target_link_libraries(fzgmod-profile PRIVATE fzgmod)
 set_target_properties(fzgmod-profile PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
 if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
@@ -81,7 +81,7 @@ endif()
 add_executable(fzgmod-profile-repeat profile_repeat.cpp)
 target_link_libraries(fzgmod-profile-repeat PRIVATE fzgmod)
 set_target_properties(fzgmod-profile-repeat PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
 if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-repeat PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
