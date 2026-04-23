@@ -9,7 +9,8 @@
  *   - Computing compression error statistics on the host
  *
  * Usage:
- *   ./build/bin/simple_api_lorenzo_dual_branch <input_file> [dim_x] [dim_y] [error_bound]
+ *   ./build/bin/examples/simple_api_lorenzo_dual_branch <input_file> [dim_x=3600] [dim_y=1800] [error_bound=1e-3]
+ *   Positional and key=value args are both accepted (e.g. dim_x=3600 or just 3600).
  */
 
 #include "fzgpumodules.h"
@@ -30,7 +31,10 @@ static constexpr size_t CHUNK = 16384;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <input_file> [dim_x=3600] [dim_y=1800] [error_bound=1e-3]\n";
+        std::cerr << "Usage: " << argv[0]
+                  << " <input_file> [dim_x=3600] [dim_y=1800] [error_bound=1e-3]\n"
+                  << "  Positional:  <file> <dim_x> <dim_y> <error_bound>\n"
+                  << "  Named:       dim_x=N  dim_y=N  error_bound=F  (case-insensitive keys)\n";
         return 1;
     }
 
@@ -39,9 +43,26 @@ int main(int argc, char** argv) {
     size_t dim_y = 1800;
     float eb = 1e-3f;
 
-    if (argc > 2) dim_x = std::stoul(argv[2]);
-    if (argc > 3) dim_y = std::stoul(argv[3]);
-    if (argc > 4) eb = std::stof(argv[4]);
+    // Parse remaining args as either positional or key=value (case-insensitive key).
+    int positional = 0;
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        const auto eq = arg.find('=');
+        if (eq != std::string::npos) {
+            std::string key = arg.substr(0, eq);
+            const std::string val = arg.substr(eq + 1);
+            for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (key == "dim_x" || key == "dimx")          dim_x = std::stoull(val);
+            else if (key == "dim_y" || key == "dimy")     dim_y = std::stoull(val);
+            else if (key == "error_bound" || key == "eb") eb    = std::stof(val);
+            else { std::cerr << "Unknown argument: " << arg << "\n"; return 1; }
+        } else {
+            if      (positional == 0) dim_x = std::stoull(arg);
+            else if (positional == 1) dim_y = std::stoull(arg);
+            else if (positional == 2) eb    = std::stof(arg);
+            ++positional;
+        }
+    }
 
     if (eb <= 0.0f) {
         std::cerr << "error_bound must be > 0\n";
