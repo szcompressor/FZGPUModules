@@ -14,6 +14,7 @@
 #include "transforms/negabinary/negabinary_stage.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
 #include "transforms/rze/rze_stage.h"
+#include "transforms/bitpack/bitpack_stage.h"
 
 #include <memory>
 #include <stdexcept>
@@ -183,6 +184,21 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             auto* s = new BitshuffleStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+            break;
+        }
+
+        case StageType::BITPACK: {
+            // config[0] holds the DataType of T; use it to pick the instantiation.
+            DataType dt = (config_size > 0)
+                ? static_cast<DataType>(config[0])
+                : DataType::UINT16;
+            if      (dt == DataType::UINT8)  stage = new BitpackStage<uint8_t>();
+            else if (dt == DataType::UINT16) stage = new BitpackStage<uint16_t>();
+            else if (dt == DataType::UINT32) stage = new BitpackStage<uint32_t>();
+            else throw std::runtime_error(
+                    "Unsupported BitpackStage DataType: "
+                    + std::to_string(static_cast<int>(dt)));
+            stage->deserializeHeader(config, config_size);
             break;
         }
 

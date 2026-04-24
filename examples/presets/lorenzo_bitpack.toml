@@ -1,0 +1,31 @@
+[pipeline]
+# Lorenzo → Bitpack
+#
+# Predictor-based pipeline using Bitpack instead of entropy coding.
+# Lorenzo residuals are zigzag-encoded; with a modest quant_radius the codes
+# cluster near zero and fit in nbits bits. Outliers (codes outside the radius)
+# are handled losslessly via the Lorenzo outlier path.
+#
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/lorenzo_bitpack.toml \
+#              -i data/field.f32 -l 100x500x500 -b --report
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "lrz"
+type = "Lorenzo1D"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 1e-3
+error_bound_mode = "NOA"
+quant_radius = 64
+outlier_capacity = 0.2
+zigzag_codes = true
+
+[[stage]]
+name = "pack"
+type = "Bitpack"
+input_type = "uint16"
+nbits = 8
+inputs = [{from = "lrz", port = "codes"}]

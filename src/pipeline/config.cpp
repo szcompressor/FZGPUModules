@@ -18,6 +18,7 @@
 #include "transforms/rze/rze_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
+#include "transforms/bitpack/bitpack_stage.h"
 #include "encoders/RLE/rle.h"
 #include "encoders/diff/diff.h"
 
@@ -223,6 +224,25 @@ static Stage* addZigzagStage(Pipeline& p, const toml::table& t) {
     throw std::runtime_error("loadConfig: unsupported Zigzag type combination");
 }
 
+static Stage* addBitpackStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
+    uint8_t nbits = static_cast<uint8_t>(optInt(t, "nbits", 16));
+    if (dt == DataType::UINT8) {
+        auto* s = p.addStage<BitpackStage<uint8_t>>();
+        s->setNBits(nbits);
+        return s;
+    } else if (dt == DataType::UINT16) {
+        auto* s = p.addStage<BitpackStage<uint16_t>>();
+        s->setNBits(nbits);
+        return s;
+    } else if (dt == DataType::UINT32) {
+        auto* s = p.addStage<BitpackStage<uint32_t>>();
+        s->setNBits(nbits);
+        return s;
+    }
+    throw std::runtime_error("loadConfig: unsupported Bitpack input_type");
+}
+
 static Stage* addNegabinaryStage(Pipeline& p, const toml::table& t) {
     DataType in_dt  = dataTypeFromString(optStr(t, "input_type",  "int32"));
     DataType out_dt = dataTypeFromString(optStr(t, "output_type", "uint32"));
@@ -330,6 +350,8 @@ void Pipeline::loadConfig(const std::string& path) {
             s = addZigzagStage(*this, *t);
         } else if (type == "Negabinary") {
             s = addNegabinaryStage(*this, *t);
+        } else if (type == "Bitpack") {
+            s = addBitpackStage(*this, *t);
         } else {
             throw std::runtime_error("loadConfig: unknown stage type \"" + type + "\"");
         }
@@ -521,6 +543,18 @@ void Pipeline::saveConfig(const std::string& path) const {
                     dataTypeToString(static_cast<DataType>(s->getInputDataType(0))));
                 st.insert("output_type",
                     dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))));
+                break;
+            }
+            case StageType::BITPACK: {
+                // Read nbits from the serialized header (byte 1).
+                uint8_t buf[10] = {};
+                size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+                DataType dt = (sz >= 1)
+                    ? static_cast<DataType>(buf[0])
+                    : DataType::UINT16;
+                uint8_t nbits = (sz >= 2) ? buf[1] : 16;
+                st.insert("input_type", dataTypeToString(dt));
+                st.insert("nbits", static_cast<int64_t>(nbits));
                 break;
             }
             default:

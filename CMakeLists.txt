@@ -221,6 +221,7 @@ add_library(fzgmod_encoders
   modules/transforms/negabinary/negabinary_stage.cu
   modules/transforms/bitshuffle/bitshuffle_stage.cu
   modules/transforms/rze/rze_stage.cu
+  modules/transforms/bitpack/bitpack_stage.cu
 )
 target_link_libraries(fzgmod_encoders
   PUBLIC

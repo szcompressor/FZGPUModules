@@ -2,39 +2,47 @@
 # new_stage.sh — scaffold a new FZGPUModules stage
 #
 # Usage:
-#   scripts/new_stage.sh <StageName> <category> [StageTypeId]
+#   scripts/new_stage.sh <StageName> <category> <StageTypeId>
 #
 #   StageName   : PascalCase name, e.g. "MyEncoder"
 #   category    : "transforms", "encoders", or "predictors"
-#   StageTypeId : integer for the StageType enum (optional — prints a reminder if omitted)
+#   StageTypeId : integer for the StageType enum (required)
 #
 # Example:
 #   scripts/new_stage.sh MyEncoder encoders 19
 #
-# What it creates:
+# What it creates/modifies automatically:
 #   modules/<category>/<lower>/
 #     <lower>_stage.h
 #     <lower>_stage.cu
 #   tests/stages/test_<lower>.cpp
+#   include/fzm_format.h         — StageType enum entry + stageTypeToString() case
+#   CMakeLists.txt               — .cu added to fzgmod_encoders/predictors/transforms target
+#   tests/stages/CMakeLists.txt  — fz_add_test() entry
 #
-# What it prints (must be done manually):
-#   - StageType enum entry in include/fzm_format.h
-#   - stageTypeToString() case in include/fzm_format.h
-#   - createStage() case in include/stage/stage_factory.h
-#   - CMakeLists.txt library addition
+# What still needs manual attention (printed at the end):
+#   include/stage/stage_factory.h  — createStage() case
+#   src/pipeline/config.cpp        — TOML load/save
 
 set -euo pipefail
 
 # ── Args ───────────────────────────────────────────────────────────────────────
-if [[ $# -lt 2 ]]; then
-    echo "Usage: $0 <StageName> <category> [StageTypeId]"
+if [[ $# -lt 3 ]]; then
+    echo "Usage: $0 <StageName> <category> <StageTypeId>"
     echo "  category: transforms | encoders | predictors"
+    echo "  StageTypeId: integer (required — check include/fzm_format.h for next unused value)"
     exit 1
 fi
 
 NAME="$1"       # e.g. MyEncoder (without "Stage" suffix)
 CATEGORY="$2"   # transforms | encoders | predictors
-TYPE_ID="${3:-}"
+TYPE_ID="$3"    # integer StageType value
+
+# Validate TYPE_ID is a non-negative integer
+if ! [[ "$TYPE_ID" =~ ^[0-9]+$ ]]; then
+    echo "Error: StageTypeId must be a non-negative integer, got: $TYPE_ID"
+    exit 1
+fi
 
 # Strip trailing "Stage" if the user included it, so class is always <NAME>Stage
 NAME="${NAME%Stage}"
@@ -42,9 +50,15 @@ NAME="${NAME%Stage}"
 LOWER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:upper:]' '[:lower:]')
 # e.g. MyEncoder → my_encoder
 
+UPPER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:lower:]' '[:upper:]')
+# e.g. MyEncoder → MY_ENCODER
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODULE_DIR="${REPO_ROOT}/modules/${CATEGORY}/${LOWER}"
 TEST_FILE="${REPO_ROOT}/tests/stages/test_${LOWER}.cpp"
+FZM_FORMAT_H="${REPO_ROOT}/include/fzm_format.h"
+CMAKELISTS="${REPO_ROOT}/CMakeLists.txt"
+TESTS_CMAKELISTS="${REPO_ROOT}/tests/stages/CMakeLists.txt"
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────
 if [[ "$CATEGORY" != "transforms" && "$CATEGORY" != "encoders" && "$CATEGORY" != "predictors" ]]; then
@@ -56,6 +70,17 @@ if [[ -d "$MODULE_DIR" ]]; then
     echo "Error: directory already exists: $MODULE_DIR"
     exit 1
 fi
+
+# Check StageTypeId is not already in use
+if grep -q "= ${TYPE_ID}," "$FZM_FORMAT_H" || grep -q "= ${TYPE_ID}$" "$FZM_FORMAT_H"; then
+    echo "Error: StageTypeId ${TYPE_ID} is already used in include/fzm_format.h"
+    echo "  Check existing values and pick a different ID."
+    exit 1
+fi
+
+# ── Determine which CMake library target to add the .cu to ────────────────────
+# All three categories currently go into fzgmod_encoders; adjust if that changes.
+CMAKE_TARGET="fzgmod_encoders"
 
 # ── Create module directory ────────────────────────────────────────────────────
 mkdir -p "$MODULE_DIR"
@@ -111,7 +136,9 @@ public:
     std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const override {
-        // TODO: return a safe upper bound. This assumes size-preserving.
+        // TODO: return a safe upper bound for both forward AND inverse directions.
+        // Non-size-preserving stages must check is_inverse_ and return the correct
+        // bound for each direction — the DAG allocates output buffers before execute().
         return {input_sizes.empty() ? 0 : input_sizes[0]};
     }
 
@@ -126,9 +153,7 @@ public:
 
     // ── Type system ───────────────────────────────────────────────────────────
     uint16_t getStageTypeId() const override {
-        // TODO: replace with the correct StageType enum value after adding it
-        // to include/fzm_format.h.
-        return static_cast<uint16_t>(StageType::UNKNOWN);
+        return static_cast<uint16_t>(StageType::${UPPER});
     }
 
     uint8_t getOutputDataType(size_t /*output_index*/) const override {
@@ -234,166 +259,241 @@ IMPL
 # ── Test skeleton ─────────────────────────────────────────────────────────────
 cat > "$TEST_FILE" << TESTS
 #include <gtest/gtest.h>
-#include <cuda_runtime.h>
 #include <cstdint>
 #include <vector>
 
 #include "${CATEGORY}/${LOWER}/${LOWER}_stage.h"
 #include "helpers/stage_harness.h"
 #include "helpers/fz_test_utils.h"
-#include "pipeline/compressor.h"
-#include "mem/mempool.h"
 
-// TODO: adjust T and TOut to the types your stage uses
-using T    = float;
-using TOut = float;
+using namespace fz;
+using namespace fz_test;
 
-// ── ForwardRoundTrip ──────────────────────────────────────────────────────────
+// ── RoundTrip ────────────────────────────────────────────────────────────────
 // Forward compression followed by inverse decompression produces correct output.
-TEST(${NAME}Stage, ForwardRoundTrip) {
-    const size_t n = 1024;
-    auto data = fz_test::make_smooth_data<T>(n);
+// Uses a single Pipeline instance — compress() and decompress() must share state.
+TEST(${NAME}Stage, RoundTrip) {
+    const size_t N = 4096;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth_data<float>(N);
 
-    fz::Pipeline p(fz::MemoryPoolConfig(n * sizeof(T)));
-    auto* stage = p.addStage<fz::${NAME}Stage>();
-    // TODO: connect stages if needed
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    auto* stage = p.addStage<${NAME}Stage>();
+    // TODO: set stage parameters and connect if not the first stage
     p.finalize();
 
-    // Upload
-    T* d_in = nullptr;
-    cudaMalloc(&d_in, n * sizeof(T));
-    cudaMemcpy(d_in, data.data(), n * sizeof(T), cudaMemcpyHostToDevice);
-
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    void* d_comp = nullptr; size_t comp_sz = 0;
-    p.compress(d_in, n * sizeof(T), &d_comp, &comp_sz, stream);
-
-    void* d_out = nullptr; size_t out_sz = 0;
-    p.decompress(d_comp, comp_sz, &d_out, &out_sz, stream);
-    cudaStreamSynchronize(stream);
-
-    std::vector<T> result(n);
-    cudaMemcpy(result.data(), d_out, out_sz, cudaMemcpyDeviceToHost);
-
-    cudaFree(d_in);
-    cudaFree(d_out);
-    cudaStreamDestroy(stream);
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
 
     // TODO: adjust tolerance or use EXPECT_EQ for lossless stages
-    for (size_t i = 0; i < n; i++)
-        EXPECT_NEAR(result[i], data[i], 1e-4f) << "mismatch at i=" << i;
+    EXPECT_LT(res.max_error, 1e-4f);
 }
 
 // ── ZeroInput ─────────────────────────────────────────────────────────────────
 TEST(${NAME}Stage, ZeroInput) {
-    fz::Pipeline p(fz::MemoryPoolConfig(0));
-    p.addStage<fz::${NAME}Stage>();
+    Pipeline p(0, MemoryStrategy::PREALLOCATE);
+    p.addStage<${NAME}Stage>();
     p.finalize();
 
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-    T dummy = 0;
-    T* d_in = nullptr;
-    cudaMalloc(&d_in, sizeof(T));
-    cudaMemcpy(d_in, &dummy, sizeof(T), cudaMemcpyHostToDevice);
-
-    void* d_comp = nullptr; size_t comp_sz = 0;
-    // Zero-size compress should not crash
-    EXPECT_NO_THROW(p.compress(d_in, 0, &d_comp, &comp_sz, stream));
-    cudaStreamSynchronize(stream);
-    cudaFree(d_in);
-    cudaStreamDestroy(stream);
+    CudaStream cs;
+    std::vector<float> empty;
+    EXPECT_NO_THROW({
+        auto res = pipeline_round_trip<float>(p, empty, cs.stream);
+    });
 }
 
 // ── SerializeDeserialize ──────────────────────────────────────────────────────
 TEST(${NAME}Stage, SerializeDeserialize) {
-    fz::${NAME}Stage original;
+    ${NAME}Stage original;
+    // TODO: set parameters on original
+
     uint8_t buf[128] = {};
     size_t written = original.serializeHeader(0, buf, sizeof(buf));
 
-    fz::${NAME}Stage restored;
+    ${NAME}Stage restored;
     restored.deserializeHeader(buf, written);
 
     // TODO: EXPECT_EQ the relevant config fields between original and restored
-    // e.g. EXPECT_EQ(original.getConfig(), restored.getConfig());
+    // e.g. EXPECT_EQ(original.getFoo(), restored.getFoo());
+    SUCCEED(); // replace with real assertions
+}
+
+// ── SaveRestoreState ──────────────────────────────────────────────────────────
+// Only needed if deserializeHeader() overwrites fields used by forward passes.
+// The pipeline calls saveState() before and restoreState() after each decompress.
+TEST(${NAME}Stage, SaveRestoreState) {
+    ${NAME}Stage s;
+    // TODO: set a parameter, saveState, call deserializeHeader with different
+    // bytes, restoreState, verify the original value is back.
     SUCCEED(); // replace with real assertions
 }
 
 // ── PipelineIntegration ───────────────────────────────────────────────────────
+// Wires the stage into a full pipeline and verifies end-to-end round-trip.
+// IMPORTANT: use one Pipeline instance — decompress() builds the inverse DAG
+// from the same object that ran compress(). Two separate pipelines will throw.
 TEST(${NAME}Stage, PipelineIntegration) {
-    const size_t n = 4096;
-    auto data = fz_test::make_smooth_data<T>(n);
+    const size_t N = 4096;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth_data<float>(N);
 
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-    T* d_in = nullptr;
-    cudaMalloc(&d_in, n * sizeof(T));
-    cudaMemcpy(d_in, data.data(), n * sizeof(T), cudaMemcpyHostToDevice);
-
-    fz::Pipeline p(fz::MemoryPoolConfig(n * sizeof(T)));
-    p.addStage<fz::${NAME}Stage>();
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.addStage<${NAME}Stage>();
+    // TODO: add other stages, connect ports
     p.finalize();
 
-    void* d_comp = nullptr; size_t comp_sz = 0;
-    ASSERT_NO_THROW(p.compress(d_in, n * sizeof(T), &d_comp, &comp_sz, stream));
-    EXPECT_GT(comp_sz, 0u);
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
 
-    void* d_out = nullptr; size_t out_sz = 0;
-    ASSERT_NO_THROW(p.decompress(d_comp, comp_sz, &d_out, &out_sz, stream));
-    cudaStreamSynchronize(stream);
-
-    std::vector<T> result(n);
-    cudaMemcpy(result.data(), d_out, out_sz, cudaMemcpyDeviceToHost);
-    cudaFree(d_in);
-    cudaFree(d_out);
-    cudaStreamDestroy(stream);
-
-    EXPECT_EQ(out_sz, n * sizeof(T));
+    EXPECT_LT(res.max_error, 1e-4f);
+    // TODO: EXPECT_LT(res.compressed_bytes, in_bytes) if stage is compressive
 }
 
 // ── GraphCompatible ───────────────────────────────────────────────────────────
 TEST(${NAME}Stage, GraphCompatible) {
-    fz::${NAME}Stage stage;
+    ${NAME}Stage stage;
     // TODO: change expected value to false if execute() does D2H transfers
     EXPECT_TRUE(stage.isGraphCompatible());
 }
 TESTS
 
+# ── fzm_format.h: StageType enum entry ───────────────────────────────────────
+# Insert before the closing brace of the enum (the line with just "};")
+# We target the last enum value line (ends with a comment) and insert after it.
+# Strategy: find the RZE line (currently last) and insert after it.
+LAST_ENUM_LINE="    RZE        = 18,"
+NEW_ENUM_LINE="    ${UPPER}    = ${TYPE_ID},"
+if grep -q "${UPPER}" "$FZM_FORMAT_H"; then
+    echo "Warning: ${UPPER} already appears in fzm_format.h — skipping enum insertion."
+else
+    # Find the last "= <number>," line in the StageType enum and append after it.
+    # We use Python for reliable multi-line in-place editing.
+    python3 - "$FZM_FORMAT_H" "$UPPER" "$TYPE_ID" << 'PYEOF'
+import sys, re
+
+path   = sys.argv[1]
+upper  = sys.argv[2]
+tid    = sys.argv[3]
+
+text = open(path).read()
+
+# Match the last "    IDENTIFIER = NUMBER,  ///< ..." line inside the enum
+# and insert the new entry immediately after it.
+pattern = r'([ \t]+\w+\s*=\s*\d+,\s*///[^\n]*\n)(\s*\};)'
+new_entry = f'    {upper:<10} = {tid},   ///< TODO: describe this stage\n'
+replacement = r'\1' + new_entry + r'\2'
+
+new_text, n = re.subn(pattern, replacement, text, count=1)
+if n == 0:
+    print(f"Warning: could not find insertion point in StageType enum — edit fzm_format.h manually.")
+    sys.exit(0)
+
+open(path, 'w').write(new_text)
+print(f"  + StageType::{upper} = {tid} added to enum")
+PYEOF
+fi
+
+# ── fzm_format.h: stageTypeToString() case ────────────────────────────────────
+if grep -q "StageType::${UPPER}" "$FZM_FORMAT_H"; then
+    echo "  (stageTypeToString case already present — skipping)"
+else
+    python3 - "$FZM_FORMAT_H" "$UPPER" "$NAME" << 'PYEOF'
+import sys, re
+
+path  = sys.argv[1]
+upper = sys.argv[2]
+name  = sys.argv[3]
+
+text = open(path).read()
+
+# Insert before the "default:" line in stageTypeToString
+new_case = f'        case StageType::{upper}:  return "{name}";\n'
+new_text = text.replace(
+    '        default:                     return "Unknown";',
+    new_case + '        default:                     return "Unknown";',
+    1
+)
+if new_text == text:
+    print("Warning: could not patch stageTypeToString() — add case manually.")
+else:
+    open(path, 'w').write(new_text)
+    print(f"  + stageTypeToString() case for {upper} added")
+PYEOF
+fi
+
+# ── CMakeLists.txt: add .cu to library target ─────────────────────────────────
+CU_ENTRY="  modules/${CATEGORY}/${LOWER}/${LOWER}_stage.cu"
+if grep -qF "modules/${CATEGORY}/${LOWER}/${LOWER}_stage.cu" "$CMAKELISTS"; then
+    echo "  (CMakeLists.txt entry already present — skipping)"
+else
+    python3 - "$CMAKELISTS" "$CU_ENTRY" "$CMAKE_TARGET" << 'PYEOF'
+import sys
+
+path      = sys.argv[1]
+cu_entry  = sys.argv[2]
+target    = sys.argv[3]
+
+text = open(path).read()
+
+# Find the add_library(fzgmod_encoders ...) block and insert the .cu before the closing paren.
+# We look for the last existing modules/ line inside that block and insert after it.
+import re
+
+# Match the block: add_library(<target>\n  ...sources...\n)
+block_pattern = rf'(add_library\({re.escape(target)}\n(?:  [^\n]+\n)*?)(  modules/[^\n]+\n)(\))'
+def inserter(m):
+    return m.group(1) + m.group(2) + cu_entry + '\n' + m.group(3)
+
+new_text, n = re.subn(block_pattern, inserter, text, count=1)
+if n == 0:
+    print(f"Warning: could not find {target} add_library block — add .cu manually.")
+else:
+    open(path, 'w').write(new_text)
+    print(f"  + {cu_entry.strip()} added to {target}")
+PYEOF
+fi
+
+# ── tests/stages/CMakeLists.txt: fz_add_test entry ───────────────────────────
+if grep -q "test_${LOWER}" "$TESTS_CMAKELISTS"; then
+    echo "  (tests/stages/CMakeLists.txt entry already present — skipping)"
+else
+    cat >> "$TESTS_CMAKELISTS" << CMTEST
+
+# ─── ${NAME} stage ────────────────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_${LOWER}
+    SOURCES test_${LOWER}.cpp
+    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+CMTEST
+    echo "  + test_${LOWER} added to tests/stages/CMakeLists.txt"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
-echo "✓ Created:"
+echo "Done. Created/modified:"
 echo "    ${MODULE_DIR}/${LOWER}_stage.h"
 echo "    ${MODULE_DIR}/${LOWER}_stage.cu"
 echo "    ${TEST_FILE}"
+echo "    ${FZM_FORMAT_H}  (StageType enum + stageTypeToString)"
+echo "    ${CMAKELISTS}    (.cu added to ${CMAKE_TARGET})"
+echo "    ${TESTS_CMAKELISTS}  (fz_add_test entry)"
 echo ""
-echo "Manual steps remaining:"
+echo "Two steps still require manual edits:"
 echo ""
-
-if [[ -n "$TYPE_ID" ]]; then
-    echo "  1. include/fzm_format.h — add to StageType enum:"
-    echo "       ${NAME^^} = ${TYPE_ID},"
-else
-    echo "  1. include/fzm_format.h — add to StageType enum:"
-    echo "       ${NAME^^} = <next_available_id>,  // check existing values first"
-fi
-
-echo ""
-echo "  2. include/fzm_format.h — add to stageTypeToString():"
-echo "       case StageType::${NAME^^}: return \"${NAME}\";"
-echo ""
-echo "  3. include/stage/stage_factory.h — add to createStage():"
-echo "       case StageType::${NAME^^}: {"
-echo "           stage = new ${NAME}Stage();"
-echo "           if (config_size > 0) stage->deserializeHeader(config, config_size);"
+echo "  1. include/stage/stage_factory.h — add createStage() case:"
+echo "       case StageType::${UPPER}: {"
+echo "           auto* s = new ${NAME}Stage();"
+echo "           if (config_size > 0) s->deserializeHeader(config, config_size);"
+echo "           stage = s;"
 echo "           break;"
 echo "       }"
 echo ""
-echo "  4. CMakeLists.txt — add .cu to the library target:"
-echo "       modules/${CATEGORY}/${LOWER}/${LOWER}_stage.cu"
-echo ""
-echo "  5. tests/stages/CMakeLists.txt — register the test:"
-echo "       fz_add_test(test_${LOWER} test_${LOWER}.cpp LABELS stages gpu)"
+echo "  2. src/pipeline/config.cpp — add TOML load/save support:"
+echo "       #include \"${CATEGORY}/${LOWER}/${LOWER}_stage.h\""
+echo "       static Stage* add${NAME}Stage(Pipeline&, const toml::table&) { ... }"
+echo "       } else if (type == \"${NAME}\") { s = add${NAME}Stage(*this, *t); }"
+echo "       // + saveConfig() case"
 echo ""
 echo "See memory/how_to_add_a_stage.md for full details."

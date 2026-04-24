@@ -210,6 +210,7 @@ All targets: `FZGMOD::fzgmod`, `FZGMOD::fzgmod_mem`, `FZGMOD::fzgmod_encoders`,
 | `RZEStage` | Recursive zero-byte elimination |
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
+| `BitpackStage<T>` | Pack/unpack power-of-two value streams |
 
 ---
 

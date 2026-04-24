@@ -84,6 +84,14 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── Bitpack transform ────────────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_bitpack
+    SOURCES test_bitpack.cpp
+    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── Lorenzo predictor ────────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_lorenzo
