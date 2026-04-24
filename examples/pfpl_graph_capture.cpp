@@ -14,6 +14,12 @@
  *   2. cudaGraphLaunch() — replays all kernels with zero CPU dispatch
  *   3. postStreamSync + output collection (unchanged CPU-side work)
  *
+ * NOTE: NOA and REL modes normally perform a host-side min/max scan inside
+ * execute() (cudaStreamSynchronize + D2H copy), which is illegal during CUDA
+ * graph capture.  This example works around it by computing the value range
+ * from the host data before capture and injecting it via setValueBase(), so
+ * all three modes work with all three strategies.
+ *
  * Usage:
  *   ./build/bin/examples/pfpl_graph_capture <file> [dim_x [dim_y [error_bound [mode [runs]]]]]
  *
@@ -27,6 +33,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <iomanip>
@@ -43,23 +50,41 @@ static constexpr int    DEFAULT_RUNS = 30;
 static constexpr float  POOL_MULT    = 3.0f;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-static std::pair<float*, size_t> load_data(const char* path, size_t dim_x, size_t dim_y) {
+
+struct LoadedData {
+    float*  d_ptr   = nullptr;
+    size_t  n       = 0;
+    float   vmin    = 0.0f;   // host-side min
+    float   vmax    = 0.0f;   // host-side max
+    float   max_abs = 0.0f;   // max(|v|) — for REL value_base
+    float   range   = 0.0f;   // vmax - vmin  — for NOA value_base
+};
+
+static LoadedData load_data(const char* path, size_t dim_x, size_t dim_y) {
     const size_t n = dim_x * dim_y;
     std::vector<float> h(n);
     std::FILE* fp = std::fopen(path, "rb");
-    if (!fp) return {nullptr, 0};
+    if (!fp) return {};
     const size_t r = std::fread(h.data(), sizeof(float), n, fp);
     std::fclose(fp);
-    if (r != n) return {nullptr, 0};
+    if (r != n) return {};
+
+    auto [it_min, it_max] = std::minmax_element(h.begin(), h.end());
+    const float vmin = *it_min;
+    const float vmax = *it_max;
+    const float max_abs = std::max(std::abs(vmin), std::abs(vmax));
+
     float* d = nullptr;
     cudaMalloc(&d, n * sizeof(float));
     cudaMemcpy(d, h.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-    return {d, n};
+    return {d, n, vmin, vmax, max_abs, vmax - vmin};
 }
 
 // Build the PFPL stage graph onto `p`.  Does NOT call finalize() so the
 // caller can set graph mode flags before finalizing.
-static void build_pfpl_stages(
+// Returns the QuantizerStage pointer so the caller can inject a precomputed
+// value_base for NOA/REL modes before graph capture.
+static QuantizerStage<float, uint32_t>* build_pfpl_stages(
     Pipeline& p,
     float eb,
     ErrorBoundMode mode = ErrorBoundMode::REL)
@@ -85,6 +110,8 @@ static void build_pfpl_stages(
     rze->setChunkSize(CHUNK);
     rze->setLevels(4);
     p.connect(rze, bitshuffle);
+
+    return quant;
 }
 
 // ── Per-strategy result ───────────────────────────────────────────────────────
@@ -114,7 +141,7 @@ static StrategyResult run_normal(
     std::cout << "\n══ Strategy: " << strat_name << " ══════════════════════\n";
 
     Pipeline comp(data_bytes, strat, POOL_MULT);
-    build_pfpl_stages(comp, eb, mode);
+    build_pfpl_stages(comp, eb, mode);  // normal path: stage performs its own scan
     comp.finalize();
     comp.enableProfiling(true);
 
@@ -192,6 +219,7 @@ static StrategyResult run_graph(
     size_t             data_bytes,
     float              eb,
     ErrorBoundMode     mode,
+    float              value_base,   // precomputed: range (NOA), max_abs (REL), 0 (ABS)
     int                runs)
 {
     const std::string strat_name = "GRAPH";
@@ -199,7 +227,14 @@ static StrategyResult run_graph(
 
     // Graph mode requires PREALLOCATE and a non-zero input size hint.
     Pipeline comp(data_bytes, MemoryStrategy::PREALLOCATE, POOL_MULT);
-    build_pfpl_stages(comp, eb, mode);
+    auto* quant = build_pfpl_stages(comp, eb, mode);
+
+    // For NOA/REL modes the stage normally performs a cudaStreamSynchronize +
+    // D2H copy inside execute() to compute the value range, which is illegal
+    // inside a CUDA graph capture window.  Inject the host-precomputed value
+    // so execute() skips the scan entirely during capture (and every replay).
+    if (mode != ErrorBoundMode::ABS && value_base > 0.0f)
+        quant->setValueBase(value_base);
 
     // enableGraphMode() must be called before finalize().
     comp.enableGraphMode(true);
@@ -349,31 +384,41 @@ int main(int argc, char* argv[]) {
         if (runs <= 0) { std::cerr << "runs must be > 0\n"; return 1; }
     }
 
-    auto [d_input, n] = load_data(input_file, dim_x, dim_y);
-    if (!d_input || n == 0) {
+    LoadedData ld = load_data(input_file, dim_x, dim_y);
+    if (!ld.d_ptr || ld.n == 0) {
         std::cerr << "Dataset not found or unreadable: " << input_file << "\n";
         return 1;
     }
-    const size_t data_bytes = n * sizeof(float);
+    const size_t data_bytes = ld.n * sizeof(float);
+
+    // value_base is used only by run_graph to inject a precomputed scan result
+    // so the stage skips cudaStreamSynchronize during graph capture.
+    // ABS needs no value_base (0 signals ABS path); NOA uses range; REL uses max_abs.
+    const float value_base = (mode == ErrorBoundMode::NOA) ? ld.range
+                           : (mode == ErrorBoundMode::REL) ? ld.max_abs
+                           : 0.0f;
 
     std::cout << "=== PFPL Graph Capture Comparison ===\n"
               << "  Dataset:     " << input_file << " (" << dim_x << "x" << dim_y << ")\n"
-              << "  Elements:    " << n << "\n"
+              << "  Elements:    " << ld.n << "\n"
               << "  Raw size:    " << std::fixed << std::setprecision(2)
               << data_bytes / (1024.0 * 1024.0) << " MB\n"
               << "  Error bound: " << std::scientific << std::setprecision(1)
-              << eb << " (" << mode_str << ")\n"
-              << "  Runs:        " << runs << " (+ 1 warmup + 1 untimed pre-loop)\n"
+              << eb << " (" << mode_str << ")\n";
+    if (mode != ErrorBoundMode::ABS)
+        std::cout << "  Value base:  " << std::fixed << std::setprecision(6) << value_base
+                  << " (precomputed host-side; injected into GRAPH stage to skip scan)\n";
+    std::cout << "  Runs:        " << runs << " (+ 1 warmup + 1 untimed pre-loop)\n"
               << "  Strategies:  MINIMAL | PREALLOCATE | GRAPH\n"
               << "  Chunk size:  " << CHUNK << " bytes\n"
               << "  Pool mult:   " << std::fixed << POOL_MULT
               << "x (initial), 1.1x (post-finalize topo)\n\n";
 
-    const StrategyResult r_min  = run_normal(MemoryStrategy::MINIMAL,      "MINIMAL",
-                                             d_input, data_bytes, eb, mode, runs);
-    const StrategyResult r_pre  = run_normal(MemoryStrategy::PREALLOCATE,   "PREALLOCATE",
-                                             d_input, data_bytes, eb, mode, runs);
-    const StrategyResult r_graph = run_graph(d_input, data_bytes, eb, mode, runs);
+    const StrategyResult r_min   = run_normal(MemoryStrategy::MINIMAL,     "MINIMAL",
+                                              ld.d_ptr, data_bytes, eb, mode, runs);
+    const StrategyResult r_pre   = run_normal(MemoryStrategy::PREALLOCATE,  "PREALLOCATE",
+                                              ld.d_ptr, data_bytes, eb, mode, runs);
+    const StrategyResult r_graph = run_graph(ld.d_ptr, data_bytes, eb, mode, value_base, runs);
 
     // ── 3-column comparison table ─────────────────────────────────────────────
     const auto tput = [&](float ms) {
@@ -434,17 +479,12 @@ int main(int argc, char* argv[]) {
          static_cast<float>(data_bytes) / (r_pre.mean_host_ms  * 1e-3) / 1e9f,
          static_cast<float>(data_bytes) / (r_graph.mean_host_ms * 1e-3) / 1e9f, " GB/s");
     row3("Throughput dag  mean",
-         tput(r_min.mean_dag_ms),
-         tput(r_pre.mean_dag_ms),
-         tput(r_graph.mean_dag_ms), " GB/s");
+         tput(r_min.mean_dag_ms), tput(r_pre.mean_dag_ms), tput(r_graph.mean_dag_ms), " GB/s");
     row3("Throughput dag  min",
-         tput(r_min.min_dag_ms),
-         tput(r_pre.min_dag_ms),
-         tput(r_graph.min_dag_ms),  " GB/s");
+         tput(r_min.min_dag_ms),  tput(r_pre.min_dag_ms),  tput(r_graph.min_dag_ms),  " GB/s");
 
     std::cout << std::string(64, '-') << "\n";
 
-    // Speedup of GRAPH over PREALLOCATE
     const double spdup_host = r_pre.mean_host_ms / r_graph.mean_host_ms;
     const double spdup_dag  = r_pre.mean_dag_ms  / r_graph.mean_dag_ms;
     std::cout << std::fixed << std::setprecision(2)
@@ -452,7 +492,7 @@ int main(int argc, char* argv[]) {
               << "   dag " << spdup_dag << "x faster\n"
               << "  (DAG speedup reflects reduced CPU dispatch; GPU compute is identical)\n";
 
-    cudaFree(d_input);
+    cudaFree(ld.d_ptr);
     std::cout << "\nDone.\n";
     return 0;
 }
