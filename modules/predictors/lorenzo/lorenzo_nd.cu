@@ -3,7 +3,7 @@
  *
  * 2-D and 3-D Lorenzo prediction kernels and their launchers.
  * Split from lorenzo.cu to keep per-file size manageable.
- * The LorenzoStage class implementation remains in lorenzo.cu.
+ * The LorenzoQuantizerStage class implementation remains in lorenzo.cu.
  */
 
 #include "predictors/lorenzo/lorenzo.h"

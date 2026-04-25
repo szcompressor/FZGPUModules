@@ -79,7 +79,7 @@ static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig mus
  * @tparam TCode   Quantization code type (`uint8_t`, `uint16_t`, `uint32_t`).
  */
 template<typename TInput = float, typename TCode = uint16_t>
-class LorenzoStage : public Stage {
+class LorenzoQuantizerStage : public Stage {
 public:
     /** Construction parameters. */
     struct Config {
@@ -104,7 +104,7 @@ public:
               dims(d) {}
     };
     
-    explicit LorenzoStage(const Config& config = Config());
+    explicit LorenzoQuantizerStage(const Config& config = Config());
 
     void execute(
         cudaStream_t stream,
@@ -121,13 +121,7 @@ public:
      */
     void postStreamSync(cudaStream_t stream) override;
     
-    std::string getName() const override {
-        switch (ndim()) {
-            case 2:  return "Lorenzo2D";
-            case 3:  return "Lorenzo3D";
-            default: return "Lorenzo1D";
-        }
-    }
+    std::string getName() const override { return "Lorenzo"; }
     size_t getNumInputs()  const override { return is_inverse_ ? 4 : 1; }
     size_t getNumOutputs() const override { return is_inverse_ ? 1 : 4; }
     
@@ -192,11 +186,7 @@ public:
     // ── Serialization ─────────────────────────────────────────────────────────
     
     uint16_t getStageTypeId() const override {
-        switch (ndim()) {
-            case 2:  return static_cast<uint16_t>(StageType::LORENZO_2D);
-            case 3:  return static_cast<uint16_t>(StageType::LORENZO_3D);
-            default: return static_cast<uint16_t>(StageType::LORENZO_1D);
-        }
+        return static_cast<uint16_t>(StageType::LORENZO);
     }
     
     uint8_t getOutputDataType(size_t output_index) const override {
@@ -339,10 +329,10 @@ private:
     }
 };
 
-extern template class LorenzoStage<float, uint16_t>;
-extern template class LorenzoStage<float, uint8_t>;
-extern template class LorenzoStage<double, uint16_t>;
-extern template class LorenzoStage<double, uint32_t>;
+extern template class LorenzoQuantizerStage<float, uint16_t>;
+extern template class LorenzoQuantizerStage<float, uint8_t>;
+extern template class LorenzoQuantizerStage<double, uint16_t>;
+extern template class LorenzoQuantizerStage<double, uint32_t>;
 
 // Kernel launcher declarations — defined in lorenzo.cu.
 

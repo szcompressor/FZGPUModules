@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
 
     // ── Build pipeline: Lorenzo<float,uint16> → Bitshuffle ──────────────────
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(QRAD);
     lrz->setOutlierCapacity(OUTLIER_CAP);

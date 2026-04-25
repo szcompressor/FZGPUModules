@@ -110,7 +110,7 @@ fz_add_test(
 
 # ─── Type-matrix tests (TYPED_TEST_SUITE) ─────────────────────────────────────
 # Parametric round-trip + serialization tests for all <TInput,TCode> pairs
-# supported by LorenzoStage and QuantizerStage.  Uses the stage_harness.h
+# supported by LorenzoQuantizerStage and QuantizerStage.  Uses the stage_harness.h
 # helpers so each type pair needs only 3-5 lines of test body.
 fz_add_test(
     NAME    test_type_matrix

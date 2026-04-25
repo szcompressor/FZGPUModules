@@ -17,7 +17,7 @@ INPUT                  = include/ \
                          modules/ \
                          docs/mainpage.md
 RECURSIVE              = YES
-FILE_PATTERNS          = *.h
+FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
 
 # Strip the repo root from displayed paths so paths look like include/pipeline/dag.h

@@ -4,7 +4,7 @@
  * Unit tests for QuantizerStage<float, uint16_t> (ABS and NOA modes)
  * and QuantizerStage<float, uint32_t> (REL mode).
  *
- * QuantizerStage quantises input *values* directly (unlike LorenzoStage which
+ * QuantizerStage quantises input *values* directly (unlike LorenzoQuantizerStage which
  * quantises prediction residuals).  Values that would exceed the code range
  * are stored losslessly as outliers.
  *

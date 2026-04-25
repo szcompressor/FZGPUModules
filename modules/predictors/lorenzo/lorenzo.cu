@@ -473,10 +473,10 @@ void launchLorenzoInverseKernel(
     }
 }
 
-// ========== LorenzoStage Implementation ==========
+// ========== LorenzoQuantizerStage Implementation ==========
 
 template<typename TInput, typename TCode>
-LorenzoStage<TInput, TCode>::LorenzoStage(const Config& config)
+LorenzoQuantizerStage<TInput, TCode>::LorenzoQuantizerStage(const Config& config)
     : config_(config),
       computed_abs_eb_(static_cast<TInput>(config.error_bound)),
       computed_value_base_(config.precomputed_value_base) {
@@ -484,7 +484,7 @@ LorenzoStage<TInput, TCode>::LorenzoStage(const Config& config)
 }
 
 template<typename TInput, typename TCode>
-void LorenzoStage<TInput, TCode>::execute(
+void LorenzoQuantizerStage<TInput, TCode>::execute(
     cudaStream_t stream,
     MemoryPool* pool,
     const std::vector<void*>& inputs,
@@ -494,7 +494,7 @@ void LorenzoStage<TInput, TCode>::execute(
     if (is_inverse_) {
         // ===== DECOMPRESSION MODE: 4 inputs → 1 output =====
         if (inputs.size() < 4 || outputs.empty() || sizes.size() < 4) {
-            throw std::runtime_error("LorenzoStage (inverse): Requires 4 inputs and 1 output");
+            throw std::runtime_error("LorenzoQuantizerStage (inverse): Requires 4 inputs and 1 output");
         }
 
         size_t codes_size   = sizes[0];
@@ -570,7 +570,7 @@ void LorenzoStage<TInput, TCode>::execute(
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             throw std::runtime_error(
-                std::string("LorenzoStage (inverse) kernel launch failed: ") +
+                std::string("LorenzoQuantizerStage (inverse) kernel launch failed: ") +
                 cudaGetErrorString(err)
             );
         }
@@ -582,7 +582,7 @@ void LorenzoStage<TInput, TCode>::execute(
     } else {
         // ===== COMPRESSION MODE: 1 input → 4 outputs =====
         if (inputs.empty() || outputs.size() < 4 || sizes.empty()) {
-            throw std::runtime_error("LorenzoStage: Requires 1 input and 4 outputs");
+            throw std::runtime_error("LorenzoQuantizerStage: Requires 1 input and 4 outputs");
         }
 
         size_t input_size  = sizes[0];
@@ -623,7 +623,7 @@ void LorenzoStage<TInput, TCode>::execute(
 
             if (value_base <= 0.0f) {
                 FZ_LOG(WARN,
-                    "LorenzoStage: value_base is zero for %s mode "
+                    "LorenzoQuantizerStage: value_base is zero for %s mode "
                     "(constant or empty data?); falling back to ABS",
                     config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL");
                 computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
@@ -632,7 +632,7 @@ void LorenzoStage<TInput, TCode>::execute(
                                    * static_cast<TInput>(value_base);
             }
             FZ_LOG(DEBUG,
-                "LorenzoStage %s: user_eb=%.6g value_base=%.6g -> abs_eb=%.6g",
+                "LorenzoQuantizerStage %s: user_eb=%.6g value_base=%.6g -> abs_eb=%.6g",
                 config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL",
                 static_cast<double>(config_.error_bound),
                 static_cast<double>(value_base),
@@ -699,7 +699,7 @@ void LorenzoStage<TInput, TCode>::execute(
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             throw std::runtime_error(
-                std::string("LorenzoStage kernel launch failed: ") +
+                std::string("LorenzoQuantizerStage kernel launch failed: ") +
                 cudaGetErrorString(err)
             );
         }
@@ -720,7 +720,7 @@ void LorenzoStage<TInput, TCode>::execute(
 }
 
 template<typename TInput, typename TCode>
-void LorenzoStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
+void LorenzoQuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
     // Only applies to compression mode and only when execute() set the ptr.
     if (is_inverse_ || d_outlier_count_ptr_ == nullptr) return;
 
@@ -766,7 +766,7 @@ void LorenzoStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
 }
 
 template<typename TInput, typename TCode>
-std::vector<size_t> LorenzoStage<TInput, TCode>::estimateOutputSizes(
+std::vector<size_t> LorenzoQuantizerStage<TInput, TCode>::estimateOutputSizes(
     const std::vector<size_t>& input_sizes
 ) const {
     size_t input_size = input_sizes[0];
@@ -784,10 +784,10 @@ std::vector<size_t> LorenzoStage<TInput, TCode>::estimateOutputSizes(
 // ========== Explicit Template Instantiations ==========
 
 // Instantiate classes
-template class LorenzoStage<float, uint16_t>;
-template class LorenzoStage<float, uint8_t>;
-template class LorenzoStage<double, uint16_t>;
-template class LorenzoStage<double, uint32_t>;
+template class LorenzoQuantizerStage<float, uint16_t>;
+template class LorenzoQuantizerStage<float, uint8_t>;
+template class LorenzoQuantizerStage<double, uint16_t>;
+template class LorenzoQuantizerStage<double, uint32_t>;
 
 // Instantiate kernel launchers
 template void launchLorenzoKernel<float, uint16_t>(

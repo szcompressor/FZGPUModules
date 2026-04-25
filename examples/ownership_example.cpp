@@ -55,7 +55,7 @@ static std::vector<float> make_data(size_t n) {
 }
 
 static void build_pipeline(Pipeline& p) {
-    auto* lorenzo = p.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(ERROR_BOUND);
     lorenzo->setErrorBoundMode(ErrorBoundMode::REL);
     auto* rle = p.addStage<RLEStage<uint16_t>>();

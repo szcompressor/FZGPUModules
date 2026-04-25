@@ -55,7 +55,7 @@ TEST(Pipeline, LorenzoOnlyRoundTrip) {
     // Build pipeline
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -109,7 +109,7 @@ TEST(Pipeline, LorenzoThenDiffRoundTrip) {
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -164,7 +164,7 @@ TEST(Pipeline, FileRoundTrip) {
     const std::string tmp_file = "/tmp/fzgmod_test_roundtrip.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -182,7 +182,7 @@ TEST(Pipeline, FileRoundTrip) {
     Pipeline pipeline2(in_bytes, MemoryStrategy::MINIMAL);
     // pipeline2 only needs to be finalized enough to call decompressFromFile
     // (decompressFromFile is static-ish — it reads the header and rebuilds stages)
-    auto* lorenzo2 = pipeline2.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo2 = pipeline2.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo2->setErrorBound(EB);
     lorenzo2->setQuantRadius(512);
     pipeline2.setPoolManagedDecompOutput(false);
@@ -221,7 +221,7 @@ TEST(Pipeline, RepeatCompressDifferentData) {
     size_t in_bytes = N * sizeof(float);
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     pipeline.setPoolManagedDecompOutput(false);
@@ -281,7 +281,7 @@ TEST(Pipeline, LorenzoPlusRLERoundTrip) {
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -332,7 +332,7 @@ TEST(Pipeline, LorenzoDiffRLERoundTrip) {
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -385,7 +385,7 @@ TEST(Pipeline, RepeatCompress) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     pipeline.setPoolManagedDecompOutput(false);
@@ -432,7 +432,7 @@ TEST(Pipeline, RepeatedCompressPreallocateSameData) {
     // Single PREALLOCATE pipeline — mirrors ARM A of profile_repeat
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -488,7 +488,7 @@ TEST(Pipeline, RepeatedCompressDecompressStableOutput) {
 
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -550,7 +550,7 @@ TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
 
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
 
-    auto* lorenzo = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(EB);
     lorenzo->setQuantRadius(512);
     lorenzo->setOutlierCapacity(0.2f);
@@ -603,7 +603,7 @@ TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
 // DIM4: addLorenzo() correctly forwards pipeline dims_ to stage config.
 //
 // Verifies that setDims() + addLorenzo() produces the same ndim() as manually
-// calling setDims() on a LorenzoStage directly.
+// calling setDims() on a LorenzoQuantizerStage directly.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, AddLorenzoForwardsDims) {
     // 1D: default (no setDims call)
@@ -658,7 +658,7 @@ TEST(Pipeline, ExplicitResetThenCompress) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -732,7 +732,7 @@ TEST(Pipeline, VaryingInputSizesAcrossCalls) {
 
     // Hint = full N — large enough for all calls below.
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -812,7 +812,7 @@ TEST(Pipeline, LargeScaleRoundTrip) {
 
     // Build pipeline: Lorenzo → RLE
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.05f);  // 5% outlier budget at 100 MB scale

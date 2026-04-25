@@ -1,7 +1,7 @@
 /**
  * tests/test_lorenzo.cpp
  *
- * Unit tests for LorenzoStage<float, uint16_t>.
+ * Unit tests for LorenzoQuantizerStage<float, uint16_t>.
  *
  * Lorenzo is a lossy predictor with quantization:
  *   Forward: produces 4 outputs — codes, outlier_errors, outlier_indices, outlier_count
@@ -42,7 +42,7 @@ struct LorenzoForwardResult {
 };
 
 static LorenzoForwardResult run_lorenzo_forward(
-    LorenzoStage<float, uint16_t>& stage,
+    LorenzoQuantizerStage<float, uint16_t>& stage,
     const std::vector<float>&      h_input,
     cudaStream_t                   stream,
     fz::MemoryPool&                pool)
@@ -89,7 +89,7 @@ static LorenzoForwardResult run_lorenzo_forward(
 
 // Run Lorenzo inverse pass and return reconstructed floats.
 static std::vector<float> run_lorenzo_inverse(
-    LorenzoStage<float, uint16_t>& stage,
+    LorenzoQuantizerStage<float, uint16_t>& stage,
     const LorenzoForwardResult&    fwd,
     size_t                          n_elements,
     cudaStream_t                    stream,
@@ -119,7 +119,7 @@ static std::vector<float> run_lorenzo_inverse(
 // ─────────────────────────────────────────────────────────────────────────────
 // Test: smooth sinusoidal data round-trip within error_bound
 // ─────────────────────────────────────────────────────────────────────────────
-TEST(LorenzoStage, SmoothRoundTrip) {
+TEST(LorenzoQuantizerStage, SmoothRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1024;
     constexpr float  EB = 1e-2f;
@@ -129,7 +129,7 @@ TEST(LorenzoStage, SmoothRoundTrip) {
     auto h_input = make_sine_floats(N, 0.05f, 10.0f);
 
     // Forward
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
@@ -140,7 +140,7 @@ TEST(LorenzoStage, SmoothRoundTrip) {
     EXPECT_GT(fwd_result.codes_bytes, 0u) << "Codes output is empty";
 
     // Inverse
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setErrorBound(EB);
     inv.setQuantRadius(512);
     inv.setInverse(true);
@@ -165,7 +165,7 @@ TEST(LorenzoStage, SmoothRoundTrip) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Test: constant input — zero prediction errors, should have no outliers
 // ─────────────────────────────────────────────────────────────────────────────
-TEST(LorenzoStage, ConstantInputRoundTrip) {
+TEST(LorenzoQuantizerStage, ConstantInputRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 512;
     constexpr float  EB = 1e-3f;
@@ -174,7 +174,7 @@ TEST(LorenzoStage, ConstantInputRoundTrip) {
 
     std::vector<float> h_input(N, 5.0f);
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
@@ -193,7 +193,7 @@ TEST(LorenzoStage, ConstantInputRoundTrip) {
         << "Constant input should produce at most 1 outlier (first-element boundary)";
 
     // Round-trip
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     size_t  cfg_sz = fwd.serializeHeader(0, cfg, sizeof(cfg));
@@ -211,7 +211,7 @@ TEST(LorenzoStage, ConstantInputRoundTrip) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Test: large dataset (64 K floats), tighter error bound
 // ─────────────────────────────────────────────────────────────────────────────
-TEST(LorenzoStage, LargeDataRoundTrip) {
+TEST(LorenzoQuantizerStage, LargeDataRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 16;  // 64 K
     constexpr float  EB = 1e-3f;
@@ -223,7 +223,7 @@ TEST(LorenzoStage, LargeDataRoundTrip) {
         h_input[i] = std::cos(static_cast<float>(i) * 0.001f) * 50.0f
                    + std::sin(static_cast<float>(i) * 0.003f) * 20.0f;
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
@@ -231,7 +231,7 @@ TEST(LorenzoStage, LargeDataRoundTrip) {
     auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, *pool);
     EXPECT_GT(fwd_result.codes_bytes, 0u);
 
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -255,7 +255,7 @@ TEST(LorenzoStage, LargeDataRoundTrip) {
 // the max absolute error.  The caller is responsible for configuring dims on
 // `fwd` before calling.
 static float roundtrip_max_error(
-    LorenzoStage<float, uint16_t>& fwd,
+    LorenzoQuantizerStage<float, uint16_t>& fwd,
     const std::vector<float>&       h_input,
     size_t                           n_elements,
     cudaStream_t                     stream,
@@ -264,7 +264,7 @@ static float roundtrip_max_error(
     auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, pool);
     EXPECT_GT(fwd_result.codes_bytes, 0u) << "Forward produced empty codes";
 
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -294,14 +294,14 @@ TEST(Lorenzo2DStage, SmoothRoundTrip) {
         for (size_t x = 0; x < NX; x++)
             h_input[y * NX + x] = std::sin(x * 0.05f) * std::cos(y * 0.07f) * 10.0f;
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.25f);
     fwd.setDims(NX, NY);
 
     EXPECT_EQ(fwd.ndim(), 2) << "ndim() should be 2 for a 2D stage";
-    EXPECT_EQ(fwd.getName(), "Lorenzo2D");
+    EXPECT_EQ(fwd.getName(), "Lorenzo");
 
     float max_err = roundtrip_max_error(fwd, h_input, N, stream, *pool);
     EXPECT_LE(max_err, EB * 1.01f)
@@ -322,7 +322,7 @@ TEST(Lorenzo2DStage, ConstantInput) {
 
     std::vector<float> h_input(N, VAL);
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.25f);
@@ -341,7 +341,7 @@ TEST(Lorenzo2DStage, ConstantInput) {
         << "Constant 2D surface should have few boundary outliers";
 
     // Full roundtrip
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -368,7 +368,7 @@ TEST(Lorenzo2DStage, LinearRampRoundTrip) {
         for (size_t x = 0; x < NX; x++)
             h_input[y * NX + x] = x * 0.001f + y * 0.001f;
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.25f);
@@ -385,7 +385,7 @@ TEST(Lorenzo2DStage, LinearRampRoundTrip) {
 TEST(Lorenzo2DStage, SerializeDeserializeDims) {
     constexpr size_t NX = 100, NY = 50;
 
-    LorenzoStage<float, uint16_t> src;
+    LorenzoQuantizerStage<float, uint16_t> src;
     src.setErrorBound(1e-3f);
     src.setQuantRadius(512);
     src.setDims(NX, NY);
@@ -396,7 +396,7 @@ TEST(Lorenzo2DStage, SerializeDeserializeDims) {
     size_t sz = src.serializeHeader(0, cfg, sizeof(cfg));
     ASSERT_GE(sz, sizeof(LorenzoConfig));
 
-    LorenzoStage<float, uint16_t> dst;
+    LorenzoQuantizerStage<float, uint16_t> dst;
     dst.setInverse(true);
     dst.deserializeHeader(cfg, sz);
 
@@ -404,7 +404,7 @@ TEST(Lorenzo2DStage, SerializeDeserializeDims) {
     EXPECT_EQ(dst.getDims()[0], NX)   << "dim_x should be " << NX;
     EXPECT_EQ(dst.getDims()[1], NY)   << "dim_y should be " << NY;
     EXPECT_EQ(dst.getDims()[2], 1u)   << "dim_z should be 1 for 2D";
-    EXPECT_EQ(dst.getName(), "Lorenzo2D");
+    EXPECT_EQ(dst.getName(), "Lorenzo");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -430,14 +430,14 @@ TEST(Lorenzo3DStage, SmoothRoundTrip) {
                 h_input[idx] = std::sin(x * 0.1f) * std::cos(y * 0.1f) * (1.0f + z * 0.02f);
             }
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.25f);
     fwd.setDims(NX, NY, NZ);
 
     EXPECT_EQ(fwd.ndim(), 3) << "ndim() should be 3 for a 3D stage";
-    EXPECT_EQ(fwd.getName(), "Lorenzo3D");
+    EXPECT_EQ(fwd.getName(), "Lorenzo");
 
     float max_err = roundtrip_max_error(fwd, h_input, N, stream, *pool);
     EXPECT_LE(max_err, EB * 1.01f)
@@ -458,7 +458,7 @@ TEST(Lorenzo3DStage, ConstantInput) {
 
     std::vector<float> h_input(N, VAL);
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.5f);
@@ -473,7 +473,7 @@ TEST(Lorenzo3DStage, ConstantInput) {
         << "Constant 3D volume should have outliers only on faces";
 
     // Full roundtrip
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -500,7 +500,7 @@ TEST(Lorenzo3DStage, LinearRampRoundTrip) {
 
     auto h_input = make_ramp<float>(N, 0.001f);
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.25f);
@@ -517,7 +517,7 @@ TEST(Lorenzo3DStage, LinearRampRoundTrip) {
 TEST(Lorenzo3DStage, SerializeDeserializeDims) {
     constexpr size_t NX = 40, NY = 24, NZ = 16;
 
-    LorenzoStage<float, uint16_t> src;
+    LorenzoQuantizerStage<float, uint16_t> src;
     src.setErrorBound(1e-3f);
     src.setQuantRadius(512);
     src.setDims(NX, NY, NZ);
@@ -526,7 +526,7 @@ TEST(Lorenzo3DStage, SerializeDeserializeDims) {
     size_t sz = src.serializeHeader(0, cfg, sizeof(cfg));
     ASSERT_GE(sz, sizeof(LorenzoConfig));
 
-    LorenzoStage<float, uint16_t> dst;
+    LorenzoQuantizerStage<float, uint16_t> dst;
     dst.setInverse(true);
     dst.deserializeHeader(cfg, sz);
 
@@ -534,7 +534,7 @@ TEST(Lorenzo3DStage, SerializeDeserializeDims) {
     EXPECT_EQ(dst.getDims()[0], NX)   << "dim_x should be " << NX;
     EXPECT_EQ(dst.getDims()[1], NY)   << "dim_y should be " << NY;
     EXPECT_EQ(dst.getDims()[2], NZ)   << "dim_z should be " << NZ;
-    EXPECT_EQ(dst.getName(), "Lorenzo3D");
+    EXPECT_EQ(dst.getName(), "Lorenzo");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -556,7 +556,7 @@ TEST(LorenzoNOA, SmoothRoundTrip) {
     float vmax = *std::max_element(h_input.begin(), h_input.end());
     float expected_abs_eb = USER_EB * (vmax - vmin);
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(USER_EB);
     fwd.setErrorBoundMode(ErrorBoundMode::NOA);
     fwd.setQuantRadius(512);
@@ -565,7 +565,7 @@ TEST(LorenzoNOA, SmoothRoundTrip) {
     auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, *pool);
     EXPECT_GT(fwd_result.codes_bytes, 0u) << "NOA forward produced no codes";
 
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -591,7 +591,7 @@ TEST(LorenzoNOA, SerializeDeserializeMode) {
 
     auto h_input = make_sine_floats(N, 0.05f, 10.0f);
 
-    LorenzoStage<float, uint16_t> src;
+    LorenzoQuantizerStage<float, uint16_t> src;
     src.setErrorBound(0.02f);
     src.setErrorBoundMode(ErrorBoundMode::NOA);
     src.setQuantRadius(512);
@@ -606,7 +606,7 @@ TEST(LorenzoNOA, SerializeDeserializeMode) {
     size_t  sz = src.serializeHeader(0, cfg, sizeof(cfg));
     ASSERT_GE(sz, sizeof(LorenzoConfig));
 
-    LorenzoStage<float, uint16_t> dst;
+    LorenzoQuantizerStage<float, uint16_t> dst;
     dst.setInverse(true);
     dst.deserializeHeader(cfg, sz);
 
@@ -621,27 +621,27 @@ TEST(LorenzoNOA, SerializeDeserializeMode) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lorenzo3DStage: getStageTypeId() returns correct enum values per dimensionality
+// LorenzoQuantizerStage: getStageTypeId() always returns LORENZO regardless of ndim
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Lorenzo3DStage, StageTypeIds) {
-    LorenzoStage<float, uint16_t> s1d;
+    LorenzoQuantizerStage<float, uint16_t> s1d;
     s1d.setDims(1024, 1, 1);
     EXPECT_EQ(s1d.getStageTypeId(),
-              static_cast<uint16_t>(StageType::LORENZO_1D)) << "1D stage type";
+              static_cast<uint16_t>(StageType::LORENZO)) << "1D stage type";
 
-    LorenzoStage<float, uint16_t> s2d;
+    LorenzoQuantizerStage<float, uint16_t> s2d;
     s2d.setDims(128, 64, 1);
     EXPECT_EQ(s2d.getStageTypeId(),
-              static_cast<uint16_t>(StageType::LORENZO_2D)) << "2D stage type";
+              static_cast<uint16_t>(StageType::LORENZO)) << "2D stage type";
 
-    LorenzoStage<float, uint16_t> s3d;
+    LorenzoQuantizerStage<float, uint16_t> s3d;
     s3d.setDims(32, 32, 32);
     EXPECT_EQ(s3d.getStageTypeId(),
-              static_cast<uint16_t>(StageType::LORENZO_3D)) << "3D stage type";
+              static_cast<uint16_t>(StageType::LORENZO)) << "3D stage type";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// L9 / DP14: LorenzoStage<double, uint16_t> — verifies the double CUDA kernel
+// L9 / DP14: LorenzoQuantizerStage<double, uint16_t> — verifies the double CUDA kernel
 //            instantiation and checks round-trip is within error_bound.
 //
 //            Uses the Pipeline API (handles all buffer sizing automatically).
@@ -662,7 +662,7 @@ TEST(LorenzoDoubleStage, RoundTripWithinErrorBound) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoStage<double, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<double, uint16_t>>();
     lrz->setErrorBound(static_cast<float>(EB));
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -693,7 +693,7 @@ TEST(LorenzoDoubleStage, RoundTripWithinErrorBound) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ZigzagCodes tests
-// These verify the setZigzagCodes(true) path of LorenzoStage:
+// These verify the setZigzagCodes(true) path of LorenzoQuantizerStage:
 //   1. Round-trip reconstructs within the error bound.
 //   2. Round-trip result matches the non-zigzag path (same accuracy guarantee).
 //   3. The zigzag_codes flag is preserved through serializeHeader/deserializeHeader.
@@ -710,7 +710,7 @@ TEST(LorenzoZigzag, SmoothRoundTrip_1D) {
     auto h_input = make_sine_floats(N, 0.05f, 10.0f);
 
     // Forward with zigzag enabled
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
@@ -721,7 +721,7 @@ TEST(LorenzoZigzag, SmoothRoundTrip_1D) {
     EXPECT_GT(fwd_result.codes_bytes, 0u);
 
     // Inverse: restore flag via header serialization
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     size_t cfg_sz = fwd.serializeHeader(0, cfg, sizeof(cfg));
@@ -751,7 +751,7 @@ TEST(LorenzoZigzag, MatchesRegularRoundTrip) {
     auto h_input = make_sine_floats(N, 0.02f, 5.0f);  // cos-like smooth wave
 
     auto run_and_reconstruct = [&](bool use_zigzag) {
-        LorenzoStage<float, uint16_t> fwd;
+        LorenzoQuantizerStage<float, uint16_t> fwd;
         fwd.setErrorBound(EB);
         fwd.setQuantRadius(512);
         fwd.setOutlierCapacity(0.2f);
@@ -759,7 +759,7 @@ TEST(LorenzoZigzag, MatchesRegularRoundTrip) {
 
         auto fwd_result = run_lorenzo_forward(fwd, h_input, stream, *pool);
 
-        LorenzoStage<float, uint16_t> inv;
+        LorenzoQuantizerStage<float, uint16_t> inv;
         inv.setInverse(true);
         uint8_t cfg[128] = {};
         inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -784,12 +784,12 @@ TEST(LorenzoZigzag, MatchesRegularRoundTrip) {
 TEST(LorenzoZigzag, HeaderSerialization) {
     // Verify that zigzag_codes=true survives a full header round-trip and that
     // zigzag_codes=false also round-trips correctly (no cross-contamination).
-    LorenzoStage<float, uint16_t> src_on;
+    LorenzoQuantizerStage<float, uint16_t> src_on;
     src_on.setErrorBound(1e-3f);
     src_on.setQuantRadius(512);
     src_on.setZigzagCodes(true);
 
-    LorenzoStage<float, uint16_t> src_off;
+    LorenzoQuantizerStage<float, uint16_t> src_off;
     src_off.setErrorBound(1e-3f);
     src_off.setQuantRadius(512);
     src_off.setZigzagCodes(false);
@@ -802,7 +802,7 @@ TEST(LorenzoZigzag, HeaderSerialization) {
     EXPECT_EQ(sz_on,  sizeof(LorenzoConfig));
     EXPECT_EQ(sz_off, sizeof(LorenzoConfig));
 
-    LorenzoStage<float, uint16_t> dst_on, dst_off;
+    LorenzoQuantizerStage<float, uint16_t> dst_on, dst_off;
     dst_on.setInverse(true);
     dst_off.setInverse(true);
     dst_on.deserializeHeader(buf_on,   sz_on);
@@ -833,7 +833,7 @@ TEST(LorenzoZigzag, Supports2D) {
         }
     }
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
@@ -842,7 +842,7 @@ TEST(LorenzoZigzag, Supports2D) {
 
     auto result = run_lorenzo_forward(fwd, h_input, stream, *pool);
 
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -881,7 +881,7 @@ TEST(LorenzoZigzag, Supports3D) {
         }
     }
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.2f);
@@ -890,7 +890,7 @@ TEST(LorenzoZigzag, Supports3D) {
 
     auto result = run_lorenzo_forward(fwd, h_input, stream, *pool);
 
-    LorenzoStage<float, uint16_t> inv;
+    LorenzoQuantizerStage<float, uint16_t> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -913,7 +913,7 @@ TEST(LorenzoZigzag, Supports3D) {
 // ─────────────────────────────────────────────────────────────────────────────
 template<typename TInput, typename TCode>
 static double run_typed_roundtrip(
-    LorenzoStage<TInput, TCode>& fwd,
+    LorenzoQuantizerStage<TInput, TCode>& fwd,
     const std::vector<TInput>&   h_input,
     cudaStream_t                 stream,
     fz::MemoryPool&              pool)
@@ -945,7 +945,7 @@ static double run_typed_roundtrip(
     size_t ib = actual.count("outlier_indices") ? actual.at("outlier_indices") : est[2];
     size_t kb = actual.count("outlier_count")   ? actual.at("outlier_count")   : est[3];
 
-    LorenzoStage<TInput, TCode> inv;
+    LorenzoQuantizerStage<TInput, TCode> inv;
     inv.setInverse(true);
     uint8_t cfg[128] = {};
     inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
@@ -971,15 +971,15 @@ static double run_typed_roundtrip(
 // ─────────────────────────────────────────────────────────────────────────────
 //  LorenzoTypeMatrix — tests all four (TInput, TCode) instantiations
 //
-//  The existing LorenzoStage / LorenzoDoubleStage suites only exercise
+//  The existing LorenzoQuantizerStage / LorenzoDoubleStage suites only exercise
 //  float/uint16_t.  These tests verify that every instantiation in the .cu
 //  file actually works correctly end-to-end.
 //
 //  Instantiations covered:
-//    LorenzoStage<float,  uint16_t>  — already tested above (regression guard)
-//    LorenzoStage<float,  uint8_t>   — NEW: narrow 8-bit code type
-//    LorenzoStage<double, uint16_t>  — NEW: double-precision input
-//    LorenzoStage<double, uint32_t>  — NEW: double-precision with wide codes
+//    LorenzoQuantizerStage<float,  uint16_t>  — already tested above (regression guard)
+//    LorenzoQuantizerStage<float,  uint8_t>   — NEW: narrow 8-bit code type
+//    LorenzoQuantizerStage<double, uint16_t>  — NEW: double-precision input
+//    LorenzoQuantizerStage<double, uint32_t>  — NEW: double-precision with wide codes
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Smooth sinusoidal regression guard — same type as existing suite
@@ -991,7 +991,7 @@ TEST(LorenzoTypeMatrix, FloatUint16_RoundTrip) {
 
     auto h_in = make_sine_floats(N, 0.05f, 10.0f);
 
-    LorenzoStage<float, uint16_t> fwd;
+    LorenzoQuantizerStage<float, uint16_t> fwd;
     fwd.setErrorBound(static_cast<float>(EB));
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.1f);
@@ -1012,7 +1012,7 @@ TEST(LorenzoTypeMatrix, FloatUint8_RoundTrip) {
     // with the narrow uint8_t code range.
     auto h_in = make_ramp<float>(N, 1.0f);
 
-    LorenzoStage<float, uint8_t> fwd;
+    LorenzoQuantizerStage<float, uint8_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(64);     // 64 * 2 * EB = 64 steps → easily fits uint8
     fwd.setOutlierCapacity(0.2f);
@@ -1033,7 +1033,7 @@ TEST(LorenzoTypeMatrix, DoubleUint16_RoundTrip) {
     for (size_t i = 0; i < N; i++)
         h_in[i] = std::sin(static_cast<double>(i) * 0.05) * 1e-3;
 
-    LorenzoStage<double, uint16_t> fwd;
+    LorenzoQuantizerStage<double, uint16_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(512);
     fwd.setOutlierCapacity(0.1);
@@ -1054,7 +1054,7 @@ TEST(LorenzoTypeMatrix, DoubleUint32_RoundTrip) {
     for (size_t i = 0; i < N; i++)
         h_in[i] = std::cos(static_cast<double>(i) * 0.03) * 1e-4;
 
-    LorenzoStage<double, uint32_t> fwd;
+    LorenzoQuantizerStage<double, uint32_t> fwd;
     fwd.setErrorBound(EB);
     fwd.setQuantRadius(65536);
     fwd.setOutlierCapacity(0.1);
@@ -1074,7 +1074,7 @@ TEST(LorenzoTypeMatrix, DoubleUint32_HeaderRoundTrip) {
     std::vector<double> h_in(N);
     for (size_t i = 0; i < N; i++) h_in[i] = std::cos(static_cast<double>(i) * 0.03) * 1e-4;
 
-    LorenzoStage<double, uint32_t> src;
+    LorenzoQuantizerStage<double, uint32_t> src;
     src.setErrorBound(1e-8);
     src.setQuantRadius(65536);
     src.setOutlierCapacity(0.1);
@@ -1087,7 +1087,7 @@ TEST(LorenzoTypeMatrix, DoubleUint32_HeaderRoundTrip) {
     size_t sz = src.serializeHeader(0, buf, sizeof(buf));
     EXPECT_EQ(sz, sizeof(LorenzoConfig));
 
-    LorenzoStage<double, uint32_t> dst;
+    LorenzoQuantizerStage<double, uint32_t> dst;
     dst.setInverse(true);
     dst.deserializeHeader(buf, sz);
 

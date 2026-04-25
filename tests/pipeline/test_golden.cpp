@@ -78,7 +78,7 @@ static std::vector<float> make_input() {
 #define MAKE_REFERENCE_PIPELINE(name)                                    \
     Pipeline name(N * sizeof(float), MemoryStrategy::MINIMAL);          \
     do {                                                                  \
-        auto* _lrz = name.addStage<LorenzoStage<float, uint16_t>>();    \
+        auto* _lrz = name.addStage<LorenzoQuantizerStage<float, uint16_t>>();    \
         _lrz->setErrorBound(EB);                                         \
         _lrz->setQuantRadius(QRAD);                                      \
         _lrz->setOutlierCapacity(OUTLIER_CAP);                           \

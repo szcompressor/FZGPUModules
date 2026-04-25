@@ -43,7 +43,7 @@ static std::vector<float> make_smooth(size_t n) {
 // Caller owns the pipeline; the graph stream must be non-default.
 static std::unique_ptr<Pipeline> make_graph_pipeline(size_t in_bytes, bool disable_coloring = false) {
     auto p = std::make_unique<Pipeline>(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    auto* lrz = p->addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -165,7 +165,7 @@ TEST(GraphCapture, MatchesPreallocate) {
     std::vector<float> h_ref;
     {
         Pipeline ref(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
-        auto* lrz = ref.addStage<LorenzoStage<float, uint16_t>>();
+        auto* lrz = ref.addStage<LorenzoQuantizerStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
@@ -223,7 +223,7 @@ TEST(GraphCapture, MinimalStrategyThrowsAtFinalize) {
     const size_t in_bytes = N * sizeof(float);
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.enableGraphMode(true);
 
@@ -236,7 +236,7 @@ TEST(GraphCapture, MinimalStrategyThrowsAtFinalize) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, ZeroInputHintThrowsAtFinalize) {
     Pipeline p(0, MemoryStrategy::PREALLOCATE);  // hint = 0
-    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.enableGraphMode(true);
 
@@ -250,7 +250,7 @@ TEST(GraphCapture, ZeroInputHintThrowsAtFinalize) {
 TEST(GraphCapture, CaptureBeforeFinalizeThrows) {
     constexpr size_t N = 1024;
     Pipeline p(N * sizeof(float), MemoryStrategy::PREALLOCATE);
-    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.enableGraphMode(true);
     // Do NOT call finalize()
@@ -358,7 +358,7 @@ TEST(GraphCapture, RZEInverseIncompatibleThrowsAtCapture) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, IsGraphCompatiblePerStage) {
     // Forward stages — must all return true
-    { LorenzoStage<float, uint16_t> s; EXPECT_TRUE(s.isGraphCompatible())  << "Lorenzo forward"; }
+    { LorenzoQuantizerStage<float, uint16_t> s; EXPECT_TRUE(s.isGraphCompatible())  << "Lorenzo forward"; }
     { RLEStage<uint16_t> s;            EXPECT_TRUE(s.isGraphCompatible())  << "RLE forward"; }
     { DifferenceStage<int16_t, uint16_t> s; EXPECT_TRUE(s.isGraphCompatible()) << "Diff forward"; }
     { ZigzagStage<int16_t, uint16_t> s; EXPECT_TRUE(s.isGraphCompatible()) << "Zigzag forward"; }

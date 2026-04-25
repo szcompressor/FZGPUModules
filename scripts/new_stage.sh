@@ -2,14 +2,15 @@
 # new_stage.sh — scaffold a new FZGPUModules stage
 #
 # Usage:
-#   scripts/new_stage.sh <StageName> <category> <StageTypeId>
+#   scripts/new_stage.sh <StageName> <category> [StageTypeId]
 #
 #   StageName   : PascalCase name, e.g. "MyEncoder"
 #   category    : "transforms", "encoders", or "predictors"
-#   StageTypeId : integer for the StageType enum (required)
+#   StageTypeId : integer for the StageType enum (optional — auto-detected if omitted)
 #
-# Example:
-#   scripts/new_stage.sh MyEncoder encoders 19
+# Examples:
+#   scripts/new_stage.sh MyEncoder encoders       # ID auto-assigned
+#   scripts/new_stage.sh MyEncoder encoders 42    # ID explicitly pinned
 #
 # What it creates/modifies automatically:
 #   modules/<category>/<lower>/
@@ -27,33 +28,43 @@
 set -euo pipefail
 
 # ── Args ───────────────────────────────────────────────────────────────────────
-if [[ $# -lt 3 ]]; then
-    echo "Usage: $0 <StageName> <category> <StageTypeId>"
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 <StageName> <category> [StageTypeId]"
     echo "  category: transforms | encoders | predictors"
-    echo "  StageTypeId: integer (required — check include/fzm_format.h for next unused value)"
+    echo "  StageTypeId: optional integer — lowest unused value is auto-selected if omitted"
     exit 1
 fi
 
 NAME="$1"       # e.g. MyEncoder (without "Stage" suffix)
 CATEGORY="$2"   # transforms | encoders | predictors
-TYPE_ID="$3"    # integer StageType value
-
-# Validate TYPE_ID is a non-negative integer
-if ! [[ "$TYPE_ID" =~ ^[0-9]+$ ]]; then
-    echo "Error: StageTypeId must be a non-negative integer, got: $TYPE_ID"
-    exit 1
-fi
 
 # Strip trailing "Stage" if the user included it, so class is always <NAME>Stage
 NAME="${NAME%Stage}"
 
 LOWER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:upper:]' '[:lower:]')
-# e.g. MyEncoder → my_encoder
-
 UPPER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:lower:]' '[:upper:]')
-# e.g. MyEncoder → MY_ENCODER
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FZM_FORMAT_H="${REPO_ROOT}/include/fzm_format.h"
+
+# ── StageTypeId: explicit or auto-detect lowest unused ────────────────────────
+if [[ $# -ge 3 ]]; then
+    TYPE_ID="$3"
+    if ! [[ "$TYPE_ID" =~ ^[0-9]+$ ]]; then
+        echo "Error: StageTypeId must be a non-negative integer, got: $TYPE_ID"
+        exit 1
+    fi
+    echo "  Using explicit StageTypeId: ${TYPE_ID}"
+else
+    # Find the lowest positive integer not already assigned in the StageType enum.
+    # Reads all "= <number>," occurrences from the enum block, sorts them, then
+    # walks from 1 upward to find the first gap.
+    TYPE_ID=$(grep -oP '=\s*\K[0-9]+(?=\s*,)' "$FZM_FORMAT_H" \
+        | sort -n \
+        | awk 'BEGIN{e=1} {if($1==e)e++} END{print e}')
+    echo "  Auto-selected StageTypeId: ${TYPE_ID} (lowest unused value)"
+fi
+
 MODULE_DIR="${REPO_ROOT}/modules/${CATEGORY}/${LOWER}"
 TEST_FILE="${REPO_ROOT}/tests/stages/test_${LOWER}.cpp"
 FZM_FORMAT_H="${REPO_ROOT}/include/fzm_format.h"

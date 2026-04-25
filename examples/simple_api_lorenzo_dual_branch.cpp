@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
     p.enableProfiling(true);
     p.setDims(dim_x, dim_y, 1);
 
-    auto* lorenzo = p.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lorenzo = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lorenzo->setErrorBound(eb);
     lorenzo->setErrorBoundMode(ErrorBoundMode::ABS);
     lorenzo->setQuantRadius(32768);

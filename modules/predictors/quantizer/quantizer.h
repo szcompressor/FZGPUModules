@@ -51,7 +51,7 @@ static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
 /**
  * Direct-value quantizer with error-bounded coding and lossless outlier fallback.
  *
- * Unlike LorenzoStage (which quantizes prediction *differences*), this stage
+ * Unlike LorenzoQuantizerStage (which quantizes prediction *differences*), this stage
  * quantizes the input *values* directly.  It supports all three error-bound
  * modes:
  *

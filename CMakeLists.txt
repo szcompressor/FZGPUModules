@@ -214,7 +214,6 @@ target_link_libraries(fzgmod_mem
 
 #### Encoders Module
 add_library(fzgmod_encoders
-  modules/encoders/bitpacking/bitpacking.cu
   modules/encoders/diff/diff.cu
   modules/encoders/RLE/rle.cu
   modules/transforms/zigzag/zigzag_stage.cu

@@ -502,9 +502,9 @@ TEST(RZEStage, PipelineIntegration) {
     d_in.upload(h_input, stream);
     stream.sync();
 
-    // LorenzoStage<float, uint16_t> → RZEStage: codes output feeds RZE.
+    // LorenzoQuantizerStage<float, uint16_t> → RZEStage: codes output feeds RZE.
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -568,7 +568,7 @@ TEST(RZEStage, PipelineCompressionRatio) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

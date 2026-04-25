@@ -90,7 +90,7 @@ TYPED_TEST(LorenzoTypeMatrix, RoundTripAbs) {
     const TC qrad = static_cast<TC>(std::is_same<TC, uint8_t>::value ? 64 : 512);
 
     Pipeline p(N * sizeof(TIn), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoStage<TIn, TC>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<TIn, TC>>();
     lrz->setErrorBound(static_cast<TIn>(eb_use));
     lrz->setQuantRadius(qrad);
     lrz->setOutlierCapacity(0.2f);
@@ -129,7 +129,7 @@ TYPED_TEST(LorenzoTypeMatrix, FileSerialization) {
         + std::to_string(sizeof(TIn)) + "_" + std::to_string(sizeof(TC)) + ".fzm";
 
     Pipeline p(N * sizeof(TIn), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoStage<TIn, TC>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<TIn, TC>>();
     lrz->setErrorBound(static_cast<TIn>(eb_use));
     lrz->setQuantRadius(static_cast<TC>(512));
     lrz->setOutlierCapacity(0.2f);
@@ -162,7 +162,7 @@ TYPED_TEST(LorenzoTypeMatrix, ConstantInputExact) {
     const TC qrad2 = static_cast<TC>(std::is_same<TC, uint8_t>::value ? 64 : 512);
 
     Pipeline p(N * sizeof(TIn), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoStage<TIn, TC>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<TIn, TC>>();
     lrz->setErrorBound(static_cast<TIn>(eb_use));
     lrz->setQuantRadius(qrad2);
     lrz->setOutlierCapacity(0.1f);
@@ -188,7 +188,7 @@ TYPED_TEST(LorenzoTypeMatrix, SerializeDeserialize) {
                         : TypeParam::lorenzo_eb();
     const TC qr = static_cast<TC>(std::is_same<TC, uint8_t>::value ? 64 : 512);
 
-    LorenzoStage<TIn, TC> stage;
+    LorenzoQuantizerStage<TIn, TC> stage;
     stage.setErrorBound(static_cast<TIn>(eb_use));
     stage.setQuantRadius(qr);
 
@@ -196,7 +196,7 @@ TYPED_TEST(LorenzoTypeMatrix, SerializeDeserialize) {
     size_t written = stage.serializeHeader(0, buf, sizeof(buf));
     ASSERT_GT(written, 0u);
 
-    LorenzoStage<TIn, TC> restored;
+    LorenzoQuantizerStage<TIn, TC> restored;
     ASSERT_NO_THROW(restored.deserializeHeader(buf, written));
 
     EXPECT_EQ(restored.getQuantRadius(), static_cast<TC>(qr));

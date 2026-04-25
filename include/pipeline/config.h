@@ -18,7 +18,7 @@
  *
  *   [[stage]]
  *   name            = "lorenzo"
- *   type            = "Lorenzo2D"
+ *   type            = "Lorenzo"
  *   input_type      = "float32"
  *   code_type       = "uint16"
  *   error_bound     = 1e-4

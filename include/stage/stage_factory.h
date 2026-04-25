@@ -35,19 +35,17 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
     Stage* stage = nullptr;
 
     switch (type) {
-        case StageType::LORENZO_1D:
-        case StageType::LORENZO_2D:
-        case StageType::LORENZO_3D: {
+        case StageType::LORENZO: {
             // Dims are restored by deserializeHeader(); template types come from stored fields.
             if (config_size >= sizeof(LorenzoConfig)) {
                 LorenzoConfig lc;
                 std::memcpy(&lc, config, sizeof(LorenzoConfig));
                 if (lc.input_type == DataType::FLOAT32 && lc.code_type == DataType::UINT16) {
-                    auto* s = new LorenzoStage<float, uint16_t>();
+                    auto* s = new LorenzoQuantizerStage<float, uint16_t>();
                     s->deserializeHeader(config, config_size);
                     stage = s;
                 } else if (lc.input_type == DataType::FLOAT64 && lc.code_type == DataType::UINT16) {
-                    auto* s = new LorenzoStage<double, uint16_t>();
+                    auto* s = new LorenzoQuantizerStage<double, uint16_t>();
                     s->deserializeHeader(config, config_size);
                     stage = s;
                 } else {

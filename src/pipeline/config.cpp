@@ -97,7 +97,7 @@ static bool optBool(const toml::table& t, std::string_view key, bool def = false
 }
 
 // Add a Lorenzo stage (dispatches on input_type / code_type strings).
-static Stage* addLorenzoStage(Pipeline& p, const toml::table& t) {
+static Stage* addLorenzoQuantizerStage(Pipeline& p, const toml::table& t) {
     std::string in_type   = optStr(t, "input_type", "float32");
     std::string code_type = optStr(t, "code_type",  "uint16");
 
@@ -116,13 +116,13 @@ static Stage* addLorenzoStage(Pipeline& p, const toml::table& t) {
     };
 
     if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16)
-        configure(p.addStage<LorenzoStage<float, uint16_t>>());
+        configure(p.addStage<LorenzoQuantizerStage<float, uint16_t>>());
     else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16)
-        configure(p.addStage<LorenzoStage<double, uint16_t>>());
+        configure(p.addStage<LorenzoQuantizerStage<double, uint16_t>>());
     else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8)
-        configure(p.addStage<LorenzoStage<float, uint8_t>>());
+        configure(p.addStage<LorenzoQuantizerStage<float, uint8_t>>());
     else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32)
-        configure(p.addStage<LorenzoStage<double, uint32_t>>());
+        configure(p.addStage<LorenzoQuantizerStage<double, uint32_t>>());
     else
         throw std::runtime_error(
             "loadConfig: unsupported Lorenzo type combination input_type=\""
@@ -328,8 +328,8 @@ void Pipeline::loadConfig(const std::string& path) {
 
         Stage* s = nullptr;
 
-        if (type == "Lorenzo1D" || type == "Lorenzo2D" || type == "Lorenzo3D") {
-            s = addLorenzoStage(*this, *t);
+        if (type == "Lorenzo") {
+            s = addLorenzoQuantizerStage(*this, *t);
         } else if (type == "Quantizer") {
             s = addQuantizerStage(*this, *t);
         } else if (type == "Bitshuffle") {
@@ -442,9 +442,7 @@ void Pipeline::saveConfig(const std::string& path) const {
 
         // Per-type parameters — write human-readable keys
         switch (stype) {
-            case StageType::LORENZO_1D:
-            case StageType::LORENZO_2D:
-            case StageType::LORENZO_3D: {
+            case StageType::LORENZO: {
                 // Use serializeHeader to read back the LorenzoConfig struct,
                 // which gives us the canonical type IDs. Then use public getters
                 // for the user-facing parameters (error_bound, eb_mode, etc.),
@@ -476,22 +474,22 @@ void Pipeline::saveConfig(const std::string& path) const {
                 bool  zz  = false;
 
                 if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) {
-                    auto* lrz = static_cast<LorenzoStage<float, uint16_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantizerStage<float, uint16_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
                 } else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16) {
-                    auto* lrz = static_cast<LorenzoStage<double, uint16_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantizerStage<double, uint16_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
                 } else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8) {
-                    auto* lrz = static_cast<LorenzoStage<float, uint8_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantizerStage<float, uint8_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
                 } else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32) {
-                    auto* lrz = static_cast<LorenzoStage<double, uint32_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantizerStage<double, uint32_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();

@@ -433,7 +433,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
 
     for (const std::string& name : stage_list) {
         if (name == "lorenzo") {
-            auto* lrz = pipeline->addStage<LorenzoStage<T, uint16_t>>();
+            auto* lrz = pipeline->addStage<LorenzoQuantizerStage<T, uint16_t>>();
             lrz->setErrorBound(s.error_bound);
             lrz->setErrorBoundMode(s.error_mode);
             lrz->setQuantRadius(s.quant_radius);

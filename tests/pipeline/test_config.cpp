@@ -94,7 +94,7 @@ memory_strategy = "MINIMAL"
 
 [[stage]]
 name             = "lrz"
-type             = "Lorenzo1D"
+type             = "Lorenzo"
 input_type       = "float32"
 code_type        = "uint16"
 error_bound      = 0.01
@@ -130,7 +130,7 @@ num_streams      = 1
 
 [[stage]]
 name             = "lrz"
-type             = "Lorenzo1D"
+type             = "Lorenzo"
 input_type       = "float32"
 code_type        = "uint16"
 error_bound      = 0.01
@@ -177,7 +177,7 @@ memory_strategy  = "MINIMAL"
 
 [[stage]]
 name             = "lrz"
-type             = "Lorenzo1D"
+type             = "Lorenzo"
 input_type       = "float32"
 code_type        = "uint16"
 error_bound      = 0.01
@@ -219,7 +219,7 @@ TEST(ConfigSave, RoundTrip) {
 
     // ── Build & save ──────────────────────────────────────────────────────────
     Pipeline p1(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p1.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = p1.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.15f);
@@ -257,7 +257,7 @@ TEST(ConfigSave, PreservesParams) {
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 5.0f);
     p.setNumStreams(2);
 
-    auto* lrz = p.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(QR);
     lrz->setOutlierCapacity(OUTCAP);
@@ -295,7 +295,7 @@ TEST(ConfigSave, PreservesParams) {
 
     // Stage 0: Lorenzo
     auto& s0 = *(*stages)[0].as_table();
-    EXPECT_EQ(s0["type"].value_or<std::string>(""), "Lorenzo1D");
+    EXPECT_EQ(s0["type"].value_or<std::string>(""), "Lorenzo");
     EXPECT_NEAR(s0["error_bound"].value_or<double>(0.0), static_cast<double>(EB), 1e-6);
     EXPECT_EQ(s0["quant_radius"].value_or<int64_t>(0), QR);
     EXPECT_NEAR(s0["outlier_capacity"].value_or<double>(0.0), static_cast<double>(OUTCAP), 1e-4);
@@ -318,7 +318,7 @@ TEST(ConfigSave, PreservesParams) {
     EXPECT_EQ(s2["levels"].value_or<int64_t>(0), static_cast<int64_t>(LEVELS));
     ASSERT_TRUE(s2.contains("inputs"));
 
-    // Bitshuffle inputs: from="Lorenzo1D" (or whatever getName() returns), port="codes"
+    // Bitshuffle inputs: from="Lorenzo" (getName() return value), port="codes"
     auto* bs_inputs = s1["inputs"].as_array();
     ASSERT_NE(bs_inputs, nullptr);
     ASSERT_GE(bs_inputs->size(), 1u);
@@ -330,7 +330,7 @@ TEST(ConfigSave, PreservesParams) {
 
 TEST(ConfigSave, RequiresFinalized) {
     Pipeline p;
-    p.addStage<LorenzoStage<float, uint16_t>>();
+    p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     // Not finalized — saveConfig must throw.
     EXPECT_THROW(p.saveConfig("/tmp/fzgmod_should_not_write.toml"), std::runtime_error);
 }
@@ -344,14 +344,14 @@ TEST(ConfigLoad, AlreadyFinalized) {
 [pipeline]
 [[stage]]
 name = "lrz"
-type = "Lorenzo1D"
+type = "Lorenzo"
 input_type = "float32"
 code_type  = "uint16"
 error_bound = 0.01
 )");
 
     Pipeline p;
-    p.addStage<LorenzoStage<float, uint16_t>>();
+    p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     p.setPoolManagedDecompOutput(false);
     p.finalize();
 
@@ -382,7 +382,7 @@ TEST(ConfigLoad, BadWiringRef) {
 [pipeline]
 [[stage]]
 name = "lrz"
-type = "Lorenzo1D"
+type = "Lorenzo"
 input_type = "float32"
 code_type  = "uint16"
 error_bound = 0.01
@@ -403,7 +403,7 @@ TEST(ConfigLoad, DuplicateStageName) {
 [pipeline]
 [[stage]]
 name = "lrz"
-type = "Lorenzo1D"
+type = "Lorenzo"
 input_type = "float32"
 code_type  = "uint16"
 error_bound = 0.01
@@ -430,7 +430,7 @@ TEST(ConfigLoad, AllSupportedStageTypes) {
 
     Pipeline p1(in_bytes, MemoryStrategy::MINIMAL);
 
-    auto* lrz  = p1.addStage<LorenzoStage<float, uint16_t>>();
+    auto* lrz  = p1.addStage<LorenzoQuantizerStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
 
     // codes branch: Diff → RLE → Bitshuffle → RZE

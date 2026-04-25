@@ -137,7 +137,7 @@ TEST(CLI, DecompressCommandRoundTripsKnownGoodFile) {
         stream.sync();
 
         Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-        auto* lrz = pipeline.addStage<LorenzoStage<float, uint16_t>>();
+        auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
         auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
         lrz->setErrorBound(kEb);
         lrz->setQuantRadius(512);
@@ -188,7 +188,7 @@ TEST(CLI, PipelineFromConfigWorksWithOverride) {
         cfg << "memory_strategy = \"MINIMAL\"\n";
         cfg << "[[stage]]\n";
         cfg << "name = \"lrz\"\n";
-        cfg << "type = \"Lorenzo1D\"\n";
+        cfg << "type = \"Lorenzo\"\n";
         cfg << "input_type = \"float32\"\n";
         cfg << "code_type = \"uint16\"\n";
         cfg << "error_bound = 1e-3\n";

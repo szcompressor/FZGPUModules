@@ -14,7 +14,7 @@ memory_strategy = "PREALLOCATE"
 
 [[stage]]
 name = "lrz"
-type = "Lorenzo1D"
+type = "Lorenzo"
 input_type = "float32"
 code_type = "uint16"
 error_bound = 1e-3

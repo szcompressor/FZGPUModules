@@ -75,7 +75,7 @@ constexpr size_t FZM_MAX_SOURCES      = 4;    ///< Maximum source stages per pip
  */
 enum class StageType : uint16_t {
     UNKNOWN    = 0,
-    LORENZO_1D = 1,   ///< LorenzoStage — 1-D predictor
+    LORENZO    = 1,   ///< LorenzoQuantizerStage — ndim stored in LorenzoConfig
     DIFFERENCE = 2,   ///< DifferenceStage — first-order differencing
     SCALE      = 3,   ///< ScaleStage (test utility)
     PASSTHROUGH= 4,   ///< PassThroughStage (test utility)
@@ -84,8 +84,6 @@ enum class StageType : uint16_t {
     BITPACK    = 7,   ///< Reserved (not yet implemented)
     SPLIT      = 10,  ///< SplitStage (test utility)
     MERGE      = 11,  ///< MergeStage (test utility)
-    LORENZO_2D = 12,  ///< LorenzoStage — 2-D predictor
-    LORENZO_3D = 13,  ///< LorenzoStage — 3-D predictor
     QUANTIZER  = 14,  ///< QuantizerStage — direct-value quantization
     ZIGZAG     = 15,  ///< ZigzagStage — zigzag encode/decode
     NEGABINARY = 16,  ///< NegabinaryStage — negabinary encode/decode
@@ -302,12 +300,10 @@ inline std::string dataTypeToString(DataType type) {
     }
 }
 
-/** Returns a human-readable string for the given StageType (e.g. "Lorenzo1D"). */
+/** Returns a human-readable string for the given StageType (e.g. "Lorenzo"). */
 inline std::string stageTypeToString(StageType type) {
     switch (type) {
-        case StageType::LORENZO_1D:  return "Lorenzo1D";
-        case StageType::LORENZO_2D:  return "Lorenzo2D";
-        case StageType::LORENZO_3D:  return "Lorenzo3D";
+        case StageType::LORENZO:     return "Lorenzo";
         case StageType::DIFFERENCE:  return "Difference";
         case StageType::SCALE:       return "Scale";
         case StageType::PASSTHROUGH: return "PassThrough";

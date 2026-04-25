@@ -63,7 +63,7 @@ public:
 
     /**
      * Dataset spatial dimensions. Controls which Lorenzo variant is selected by
-     * addLorenzo() and is forwarded to LorenzoStage at finalize().
+     * addLorenzo() and is forwarded to LorenzoQuantizerStage at finalize().
      * Default: 1-D ({n, 1, 1}).
      */
     void setDims(size_t x, size_t y = 1, size_t z = 1) { dims_ = {x, y, z}; }
@@ -382,7 +382,7 @@ public:
      * then calls finalize() internally. The pipeline must not be finalized
      * before this call.
      *
-     * Recognized stage types: Lorenzo1D/2D/3D, Bitshuffle, RZE, RLE,
+     * Recognized stage types: Lorenzo, Bitshuffle, RZE, RLE,
      * Difference, Zigzag, Negabinary.
      *
      * @throws std::runtime_error  File not found, parse error, unknown stage
