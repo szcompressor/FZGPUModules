@@ -49,7 +49,7 @@ static std::vector<float> make_smooth(size_t n) {
 static std::unique_ptr<Pipeline> build_linear3(size_t in_bytes, MemoryStrategy strategy) {
     auto p = std::make_unique<Pipeline>(in_bytes, strategy, 5.0f);
 
-    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -262,7 +262,7 @@ TEST(Liveness, LivenessApiConsistentUnderGraphMode) {
     // Build a 2-stage PREALLOCATE + graph-mode pipeline.
     auto p = std::make_unique<Pipeline>(in_bytes, MemoryStrategy::PREALLOCATE, 5.0f);
 
-    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

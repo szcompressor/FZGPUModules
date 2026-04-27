@@ -533,7 +533,7 @@ TEST(BitshuffleStage, PipelineIntegration) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

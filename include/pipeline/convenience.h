@@ -8,12 +8,15 @@
  * @code
  *   #include "pipeline/convenience.h"
  *   pipeline.setDims(nx, ny);
- *   auto* lrz = addLorenzo(pipeline, 1e-4f);
+ *   auto* lrz = addLorenzoQuant(pipeline, 1e-4f);
  * @endcode
+ *
+ * Note: LorenzoStage does not need a convenience wrapper — it defaults to 1-D
+ * when setDims() is not called, matching the behaviour of all other stages.
  */
 
 #include "pipeline/compressor.h"
-#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
 
 namespace fz {
 
@@ -31,18 +34,18 @@ namespace fz {
  * @return Pointer to the created stage (owned by the pipeline).
  */
 template <typename TInput = float, typename TCode = uint16_t>
-inline LorenzoQuantizerStage<TInput, TCode>* addLorenzo(
+inline LorenzoQuantStage<TInput, TCode>* addLorenzoQuant(
     Pipeline& pipeline,
     float     error_bound,
     int       quant_radius     = 32768,
     float     outlier_capacity = 0.2f
 ) {
-    typename LorenzoQuantizerStage<TInput, TCode>::Config cfg;
+    typename LorenzoQuantStage<TInput, TCode>::Config cfg;
     cfg.error_bound      = error_bound;
     cfg.quant_radius     = quant_radius;
     cfg.outlier_capacity = outlier_capacity;
     cfg.dims             = pipeline.getDims();
-    return pipeline.addStage<LorenzoQuantizerStage<TInput, TCode>>(cfg);
+    return pipeline.addStage<LorenzoQuantStage<TInput, TCode>>(cfg);
 }
 
 } // namespace fz

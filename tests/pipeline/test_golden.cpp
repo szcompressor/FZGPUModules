@@ -34,7 +34,7 @@
 #include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
 #include "fzm_format.h"
-#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
 
 #include <cmath>
@@ -78,7 +78,7 @@ static std::vector<float> make_input() {
 #define MAKE_REFERENCE_PIPELINE(name)                                    \
     Pipeline name(N * sizeof(float), MemoryStrategy::MINIMAL);          \
     do {                                                                  \
-        auto* _lrz = name.addStage<LorenzoQuantizerStage<float, uint16_t>>();    \
+        auto* _lrz = name.addStage<LorenzoQuantStage<float, uint16_t>>();    \
         _lrz->setErrorBound(EB);                                         \
         _lrz->setQuantRadius(QRAD);                                      \
         _lrz->setOutlierCapacity(OUTLIER_CAP);                           \

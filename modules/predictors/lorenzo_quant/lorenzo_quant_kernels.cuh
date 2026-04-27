@@ -1,9 +1,9 @@
 #pragma once
 /**
- * predictors/lorenzo/lorenzo_kernels.cuh
+ * predictors/lorenzo_quant/lorenzo_quant_kernels.cuh
  *
  * Internal CUDA device/global kernel primitives shared between
- * lorenzo.cu (1-D) and lorenzo_nd.cu (2-D / 3-D).
+ * lorenzo.cu (1-D) and lorenzo_quant_nd.cu (2-D / 3-D).
  *
  * Not part of the public API — include only from .cu files in this directory.
  */

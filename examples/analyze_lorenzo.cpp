@@ -3,7 +3,7 @@
  *
  * Standalone Lorenzo code-distribution analyser.
  *
- * Reads a raw-binary float32 file, runs LorenzoQuantizerStage directly (no pipeline),
+ * Reads a raw-binary float32 file, runs LorenzoQuantStage directly (no pipeline),
  * and prints statistics + a histogram of the quantisation codes.
  *
  * Usage:
@@ -24,7 +24,7 @@
  * Build:  appears automatically in the CMake build as target "analyze_lorenzo"
  */
 
-#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
 #include "mem/mempool.h"
 
 #include <cuda_runtime.h>
@@ -286,7 +286,7 @@ int main(int argc, char** argv) {
               << " MB)\n";
 
     // ── 2. Configure stage ───────────────────────────────────────────────────
-    fz::LorenzoQuantizerStage<float, uint16_t>::Config cfg;
+    fz::LorenzoQuantStage<float, uint16_t>::Config cfg;
     cfg.error_bound = a.eb;
     cfg.quant_radius = a.radius;
     cfg.dims = {a.dim_x, a.dim_y, a.dim_z};
@@ -301,7 +301,7 @@ int main(int argc, char** argv) {
         return "?";
     };
 
-    std::cout << "\nLorenzoQuantizerStage config:\n"
+    std::cout << "\nLorenzoQuantStage config:\n"
               << "  eb = " << a.eb << "  (" << eb_mode_str() << ")\n"
               << "  radius = " << a.radius << "\n"
               << "  dims = " << cfg.dims[0] << " x " << cfg.dims[1]
@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
               << "  (dim_x=" << cfg.dims[0] << " is the FAST/column axis; "
               << "for row-major NxM use --dims M N)\n";
 
-    fz::LorenzoQuantizerStage<float, uint16_t> stage(cfg);
+    fz::LorenzoQuantStage<float, uint16_t> stage(cfg);
 
     // ── 3. Allocate device memory ────────────────────────────────────────────
     cudaStream_t stream;

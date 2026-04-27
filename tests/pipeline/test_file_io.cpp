@@ -84,7 +84,7 @@ TEST(FileIO, LorenzoDiffRoundTrip) {
 
     // ── Compress ────────────────────────────────────────────────────────────
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz  = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz  = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     auto* diff = pipeline.addStage<DifferenceStage<uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
@@ -140,7 +140,7 @@ TEST(FileIO, CompressedFileSmallerThanRaw) {
     const std::string tmp = "/tmp/fzgmod_test_filesize.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -183,7 +183,7 @@ TEST(FileIO, ReadHeaderCounts) {
 
     // Single-stage Lorenzo pipeline
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -233,7 +233,7 @@ TEST(FileIO, DecompressCorruptMagicThrows) {
 
     {
         Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-        auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
@@ -304,7 +304,7 @@ TEST(FileIO, DecompressWrongMajorVersionThrows) {
 
     {
         Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-        auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setOutlierCapacity(0.2f);
         pipeline.setPoolManagedDecompOutput(false);
@@ -353,7 +353,7 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
 
     {
         Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-        auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setOutlierCapacity(0.2f);
         pipeline.setPoolManagedDecompOutput(false);
@@ -419,7 +419,7 @@ TEST(FileIO, WriteToFileBeforeCompressThrows) {
     const size_t in_bytes = N * sizeof(float);
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -441,7 +441,7 @@ TEST(FileIO, BuildHeaderBeforeCompressThrows) {
     const size_t in_bytes = N * sizeof(float);
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -476,7 +476,7 @@ TEST(FileIO, StageConfigPreservedThroughFile) {
 
     // Build: Lorenzo → Bitshuffle (two stages; Bitshuffle has serializable block+width)
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 5.0f);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(256);
     lrz->setOutlierCapacity(0.15f);
@@ -519,9 +519,9 @@ TEST(FileIO, StageConfigPreservedThroughFile) {
     // Find the Lorenzo buffer entry and verify quant_radius
     bool found_lrz = false;
     for (const auto& be : hdr.buffers) {
-        if (be.stage_type == StageType::LORENZO && be.config_size >= sizeof(LorenzoConfig)) {
-            LorenzoConfig lc;
-            std::memcpy(&lc, be.stage_config, sizeof(LorenzoConfig));
+        if (be.stage_type == StageType::LORENZO_QUANT && be.config_size >= sizeof(LorenzoQuantConfig)) {
+            LorenzoQuantConfig lc;
+            std::memcpy(&lc, be.stage_config, sizeof(LorenzoQuantConfig));
             EXPECT_EQ(lc.quant_radius, 256u)
                 << "Lorenzo quant_radius must survive writeToFile/readHeader";
             found_lrz = true;
@@ -554,7 +554,7 @@ TEST(FileIO, CreateStageReconstructsCorrectConfig) {
 
     // Build a Lorenzo pipeline with non-default settings
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(1024);
     lrz->setOutlierCapacity(0.1f);
@@ -572,7 +572,7 @@ TEST(FileIO, CreateStageReconstructsCorrectConfig) {
 
     // Reconstruct the Lorenzo stage via createStage()
     const auto& si = hdr.stages[0];
-    ASSERT_EQ(si.stage_type, StageType::LORENZO)
+    ASSERT_EQ(si.stage_type, StageType::LORENZO_QUANT)
         << "First stage must be Lorenzo";
 
     std::unique_ptr<Stage> reconstructed(
@@ -582,9 +582,9 @@ TEST(FileIO, CreateStageReconstructsCorrectConfig) {
         << "createStage() must return a valid stage";
 
     // Cast to access Lorenzo-specific config
-    auto* recon_lrz = dynamic_cast<LorenzoQuantizerStage<float, uint16_t>*>(reconstructed.get());
+    auto* recon_lrz = dynamic_cast<LorenzoQuantStage<float, uint16_t>*>(reconstructed.get());
     ASSERT_NE(recon_lrz, nullptr)
-        << "createStage() for LORENZO must return LorenzoQuantizerStage<float,uint16_t>";
+        << "createStage() for LORENZO must return LorenzoQuantStage<float,uint16_t>";
 
     EXPECT_EQ(recon_lrz->getQuantRadius(), static_cast<uint16_t>(1024))
         << "Reconstructed Lorenzo quant_radius mismatch";
@@ -613,7 +613,7 @@ TEST(FileIO, LorenzoRLERoundTripThroughFile) {
     const std::string tmp = "/tmp/fzgmod_test_lorenzorle.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -668,7 +668,7 @@ TEST(FileIO, DecompressFromFilePerfOutPopulated) {
     const std::string tmp = "/tmp/fzgmod_test_perf.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -737,7 +737,7 @@ TEST(FileIO, WrittenFileHasChecksums) {
     const std::string tmp = "/tmp/fzgmod_test_checksums.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -786,7 +786,7 @@ TEST(FileIO, CorruptedDataPayloadThrows) {
 
     {
         Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-        auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(EB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
@@ -831,7 +831,7 @@ TEST(FileIO, CorruptedDataPayloadThrows) {
 //
 // Compress a 64×64 float array with setDims(64, 64), write to file, and
 // decompress from file.  Verifies that:
-//   (a) dim_x / dim_y are embedded in the serialized LorenzoConfig in the header
+//   (a) dim_x / dim_y are embedded in the serialized LorenzoQuantConfig in the header
 //   (b) decompressFromFile produces correct output (dims were restored via
 //       deserializeHeader — if they weren't, the 2D kernel uses wrong strides
 //       and produces garbage that fails the error-bound check).
@@ -854,7 +854,7 @@ TEST(FileIO, LorenzoDimsSerializedThroughFile) {
     // Compress with explicit 2D dims
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
     pipeline.setDims(DIM_X, DIM_Y);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -869,14 +869,14 @@ TEST(FileIO, LorenzoDimsSerializedThroughFile) {
     pipeline.writeToFile(tmp, stream);
 
     // (a) Verify dim_x / dim_y are in the serialized header.
-    //     ndim is stored inside LorenzoConfig, not encoded in the StageType.
+    //     ndim is stored inside LorenzoQuantConfig, not encoded in the StageType.
     auto hdr = Pipeline::readHeader(tmp);
     bool found_2d = false;
     for (const auto& be : hdr.buffers) {
-        const bool is_lorenzo = (be.stage_type == StageType::LORENZO);
-        if (is_lorenzo && be.config_size >= sizeof(LorenzoConfig)) {
-            LorenzoConfig lc;
-            std::memcpy(&lc, be.stage_config, sizeof(LorenzoConfig));
+        const bool is_lorenzo = (be.stage_type == StageType::LORENZO_QUANT);
+        if (is_lorenzo && be.config_size >= sizeof(LorenzoQuantConfig)) {
+            LorenzoQuantConfig lc;
+            std::memcpy(&lc, be.stage_config, sizeof(LorenzoQuantConfig));
             if (lc.dim_x == DIM_X && lc.dim_y == DIM_Y) {
                 found_2d = true;
                 break;
@@ -885,7 +885,7 @@ TEST(FileIO, LorenzoDimsSerializedThroughFile) {
     }
     EXPECT_TRUE(found_2d)
         << "Lorenzo dim_x=" << DIM_X << " dim_y=" << DIM_Y
-        << " must be stored in the file header LorenzoConfig";
+        << " must be stored in the file header LorenzoQuantConfig";
 
     // (b) Decompress from file and verify correctness
     void*  d_dec  = nullptr;
@@ -930,7 +930,7 @@ TEST(FileIO, PoolOverrideBytesWorks) {
     const std::string tmp = "/tmp/fzgmod_test_pool_override.fzm";
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

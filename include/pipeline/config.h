@@ -8,6 +8,12 @@
  * Pipeline::saveConfig().  This header contains no toml++ types — the
  * dependency is an implementation detail confined to config.cpp.
  *
+ * Supported stage `type` values:
+ *   LorenzoQuant  — fused float predictor+quantizer (cuSZ-style)
+ *   Lorenzo       — plain integer delta predictor (lossless, use after Quantizer)
+ *   Quantizer     — standalone float-to-integer quantizer
+ *   Bitshuffle, RZE, RLE, Bitpack, Difference, Zigzag, Negabinary
+ *
  * File format: human-readable TOML v1.0
  *
  * Minimal example:
@@ -18,7 +24,7 @@
  *
  *   [[stage]]
  *   name            = "lorenzo"
- *   type            = "Lorenzo"
+ *   type            = "LorenzoQuant"
  *   input_type      = "float32"
  *   code_type       = "uint16"
  *   error_bound     = 1e-4

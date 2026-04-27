@@ -51,7 +51,7 @@ static std::vector<float> make_test_data() {
 static std::unique_ptr<Pipeline> make_lorenzo_pipeline(bool disable_coloring) {
     auto p = std::make_unique<Pipeline>(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
     if (disable_coloring) p->setColoringEnabled(false);
-    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -93,7 +93,7 @@ TEST(BufferColoring, AppliedByDefaultForPreallocate) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, NotAppliedForMinimal) {
     Pipeline p(kNBytes, MemoryStrategy::MINIMAL, 4.0f);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -146,7 +146,7 @@ TEST(BufferColoring, ColoredAndUncoloredMatchExactly) {
 TEST(BufferColoring, RegionCountPositiveAndBounded) {
     Pipeline p(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
 
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -182,7 +182,7 @@ TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
     // Colored pipeline
     Pipeline p_col(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
     {
-        auto* lrz = p_col.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = p_col.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(kEB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
@@ -197,7 +197,7 @@ TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
     Pipeline p_uncol(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
     p_uncol.setColoringEnabled(false);
     {
-        auto* lrz = p_uncol.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = p_uncol.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(kEB);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
@@ -274,7 +274,7 @@ TEST(BufferColoring, ColoredBuffersStableAcrossGraphReplays) {
 
     // PREALLOCATE + coloring enabled (default) + graph mode
     Pipeline p(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -334,7 +334,7 @@ TEST(BufferColoring, MultiStageLinearPipelineRoundTrip) {
 
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
 
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(kEB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

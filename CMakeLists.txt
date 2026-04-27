@@ -231,8 +231,9 @@ add_library(FZGMOD::encoders ALIAS fzgmod_encoders)
 
 #### Predictors Module
 add_library(fzgmod_predictors
-  modules/predictors/lorenzo/lorenzo.cu
-  modules/predictors/lorenzo/lorenzo_nd.cu
+  modules/predictors/lorenzo_quant/lorenzo_quant.cu
+  modules/predictors/lorenzo_quant/lorenzo_quant_nd.cu
+  modules/predictors/lorenzo/lorenzo_stage.cu
   modules/predictors/quantizer/quantizer.cu
 )
 target_link_libraries(fzgmod_predictors

@@ -71,13 +71,13 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, AddStageAfterFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
 
     EXPECT_THROW(
-        (p.addStage<LorenzoQuantizerStage<float, uint16_t>>()),
+        (p.addStage<LorenzoQuantStage<float, uint16_t>>()),
         std::runtime_error
     );
 }
@@ -91,7 +91,7 @@ TEST(PipelineErrors, AddStageAfterFinalize) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, ConnectAfterFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz  = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz  = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     auto* diff = p.addStage<DifferenceStage<uint16_t>>();
     lrz->setErrorBound(1e-2f);
     // Finalize with two unconnected stages (both become independent sources)
@@ -109,7 +109,7 @@ TEST(PipelineErrors, ConnectAfterFinalize) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, FinalizeTwice) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -122,7 +122,7 @@ TEST(PipelineErrors, FinalizeTwice) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, SetStrategyAfterFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -138,7 +138,7 @@ TEST(PipelineErrors, SetStrategyAfterFinalize) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, CompressBeforeFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     // Deliberately NOT calling p.finalize()
 
@@ -164,7 +164,7 @@ TEST(PipelineErrors, CompressBeforeFinalize) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, DecompressBeforeCompress) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -183,11 +183,11 @@ TEST(PipelineErrors, DecompressBeforeCompress) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, ConnectWithInvalidOutputName) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz  = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz  = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     auto* diff = p.addStage<DifferenceStage<uint16_t>>();
 
-    // "nonexistent" is not a valid output of LorenzoQuantizerStage
+    // "nonexistent" is not a valid output of LorenzoQuantStage
     EXPECT_THROW(
         (p.connect(diff, lrz, "nonexistent")),
         std::runtime_error
@@ -200,7 +200,7 @@ TEST(PipelineErrors, ConnectWithInvalidOutputName) {
 TEST(PipelineErrors, ValidPipelineDoesNotThrow) {
     auto build = []() {
         Pipeline p(4096 * sizeof(float), MemoryStrategy::MINIMAL);
-        auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(1e-2f);
         lrz->setQuantRadius(512);
         p.setPoolManagedDecompOutput(false);
@@ -240,9 +240,9 @@ TEST(PipelineErrors, CyclicConnectionThrows) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, DisconnectedStageThrows) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz    = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz    = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     auto* diff   = p.addStage<DifferenceStage<uint16_t>>();
-    auto* orphan = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();  // never connected
+    auto* orphan = p.addStage<LorenzoQuantStage<float, uint16_t>>();  // never connected
     lrz->setErrorBound(1e-2f);
     orphan->setErrorBound(1e-2f);
     p.connect(diff, lrz, "codes");  // lrz and diff are connected; orphan is not
@@ -259,7 +259,7 @@ TEST(PipelineErrors, DisconnectedStageThrows) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, WriteToFileBeforeCompressThrows) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -293,7 +293,7 @@ TEST(PipelineErrors, CompressDecompressCompressNoReset) {
     stream.sync();
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -347,7 +347,7 @@ TEST(PipelineErrors, NullInputPointerThrows) {
     const size_t     in_bytes = N * sizeof(float);
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -376,7 +376,7 @@ TEST(PipelineErrors, InputSizeExceedsHintThrows) {
     constexpr size_t LARGE_BYTES = 4096 * sizeof(float);
 
     Pipeline p(HINT_BYTES, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -406,7 +406,7 @@ TEST(PipelineErrors, InputSizeExceedsHintThrows) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(PipelineErrors, GraphModeWithMinimalStrategyThrows) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.enableGraphMode(true);
 
@@ -428,7 +428,7 @@ TEST(PipelineErrors, PipelineUsableAfterCompressThrow) {
     const size_t     in_bytes = N * sizeof(float);
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -486,7 +486,7 @@ TEST(PipelineErrors, NoMemoryLeakAfterCompressThrow) {
     const size_t     in_bytes = N * sizeof(float);
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -578,7 +578,7 @@ TEST(PipelineErrors, PipelineUsableAfterDecompressThrow) {
     auto h_in = make_random_floats(N, 99);
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -640,7 +640,7 @@ TEST(PipelineErrors, PipelineUsableAfterCompressThrowPreallocate) {
     const size_t     in_bytes = N * sizeof(float);
 
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -697,7 +697,7 @@ TEST(PipelineErrors, NoLeakAfterMultipleConsecutiveCompressThrows) {
     const size_t     in_bytes = N * sizeof(float);
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     p.setPoolManagedDecompOutput(false);
     p.finalize();
@@ -751,7 +751,7 @@ TEST(PipelineErrors, NoLeakAfterMultipleConsecutiveCompressThrows) {
 TEST(PipelineErrors, TypeMismatchAtFinalize) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
 
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.1f);
@@ -773,7 +773,7 @@ TEST(PipelineErrors, TypeMismatchAtFinalize) {
 TEST(PipelineErrors, TypeMatchAtFinalizeSucceeds) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
 
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.1f);

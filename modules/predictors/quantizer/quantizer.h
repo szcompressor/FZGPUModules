@@ -7,7 +7,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include "predictors/lorenzo/lorenzo.h"  // for ErrorBoundMode
+#include "predictors/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
 #include <cuda_runtime.h>
 #include <array>
 #include <cmath>
@@ -51,7 +51,7 @@ static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
 /**
  * Direct-value quantizer with error-bounded coding and lossless outlier fallback.
  *
- * Unlike LorenzoQuantizerStage (which quantizes prediction *differences*), this stage
+ * Unlike LorenzoQuantStage (which quantizes prediction *differences*), this stage
  * quantizes the input *values* directly.  It supports all three error-bound
  * modes:
  *

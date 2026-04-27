@@ -49,7 +49,7 @@ static std::vector<float> roundtrip_with_strategy(
     stream.sync();
 
     Pipeline pipeline(in_bytes, strategy, pool_multiplier);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -146,7 +146,7 @@ TEST(MemoryStrategy, ChangeStrategyBeforeFinalize) {
     // to the correct DAG, so the strategy change must come first.
     ASSERT_NO_THROW(pipeline.setMemoryStrategy(MemoryStrategy::PREALLOCATE));
 
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -194,7 +194,7 @@ TEST(MemoryPool, ZeroInputSizeHint) {
 
     // input_data_size = 0 → MemoryPool falls back to 1 GB
     Pipeline pipeline(0, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -240,7 +240,7 @@ TEST(MemoryPool, PeakUsageNonZeroAfterCompress) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -276,7 +276,7 @@ TEST(MemoryStrategies, PoolResetReleasesAllocations) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -317,7 +317,7 @@ TEST(MemoryStrategies, MinimalTopoPoolSizeLEPreallocate) {
 
     auto build_topo_size = [&](MemoryStrategy strategy) -> size_t {
         Pipeline p(in_bytes, strategy);
-        auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+        auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
         lrz->setErrorBound(1e-2f);
         lrz->setQuantRadius(512);
         lrz->setOutlierCapacity(0.2f);
@@ -359,7 +359,7 @@ TEST(MemoryStrategies, RepeatedCompressResetStableMemory) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -396,7 +396,7 @@ TEST(MemoryStrategies, ColoringAppliedInPreallocateMode) {
 
     // Multi-stage pipeline to create enough buffers for coloring to matter.
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -432,7 +432,7 @@ TEST(MemoryStrategies, DisabledColoringRoundTrip) {
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
     pipeline.setColoringEnabled(false);
 
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -482,7 +482,7 @@ TEST(MemoryStrategies, PersistentBufferSurvivesReset) {
 
     // MINIMAL so buffers are normally freed after reset()
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -550,7 +550,7 @@ TEST(MemoryStrategies, RLEScratchReusedAcrossCalls) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -614,7 +614,7 @@ TEST(MemoryStrategies, CurrentUsageZeroAfterResetMinimal) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -653,7 +653,7 @@ TEST(MemoryPool, PoolThresholdAtLeastInputSize) {
     const size_t in_bytes = N * sizeof(float);
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 3.0f);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     // Query threshold BEFORE finalize() — after finalize() the CUDA pool release
     // threshold is pinned to UINT64_MAX (keeps pages warm) which would overflow
@@ -686,7 +686,7 @@ TEST(MemoryStrategies, SetExternalPointerReflectsInGetBuffer) {
 
     // PREALLOCATE so all buffers are allocated at finalize() and accessible
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -757,7 +757,7 @@ TEST(MemoryStrategies, SetExternalPointerEndToEnd) {
 
     // PREALLOCATE so buffer sizes are known and IDs are stable after finalize().
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -850,7 +850,7 @@ TEST(MemoryStrategies, PreallocateCurrentUsageNonZeroAfterReset) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -897,7 +897,7 @@ TEST(MemoryStrategies, MinimalCurrentUsageZeroAfterEachReset) {
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 3.0f);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

@@ -35,8 +35,8 @@ with stream-ordered memory management.
 // 1. Build a pipeline
 fz::Pipeline pipeline(fz::MemoryPoolConfig(input_bytes));
 
-auto* lrz = pipeline.addStage<fz::LorenzoQuantizerStage<float, uint16_t>>(
-    fz::LorenzoQuantizerStage<float, uint16_t>::Config{1e-4f});
+auto* lrz = pipeline.addStage<fz::LorenzoQuantStage<float, uint16_t>>(
+    fz::LorenzoQuantStage<float, uint16_t>::Config{1e-4f});
 auto* rle = pipeline.addStage<fz::RLEStage<uint16_t>>();
 
 pipeline.connect(rle, lrz, "codes");
@@ -202,7 +202,7 @@ All targets: `FZGMOD::fzgmod`, `FZGMOD::fzgmod_mem`, `FZGMOD::fzgmod_encoders`,
 
 | Stage | Description |
 |---|---|
-| `LorenzoQuantizerStage<TInput, TCode>` | 1-D/2-D/3-D Lorenzo predictor |
+| `LorenzoQuantStage<TInput, TCode>` | 1-D/2-D/3-D Lorenzo predictor |
 | `QuantizerStage<TInput, TCode>` | Direct-value quantizer (ABS/REL/NOA error modes) |
 | `RLEStage<T>` | Run-length encoding |
 | `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |

@@ -12,7 +12,8 @@
 #include "pipeline/compressor.h"
 
 // All stage types supported by loadConfig / saveConfig
-#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "predictors/lorenzo/lorenzo_stage.h"
 #include "predictors/quantizer/quantizer.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
 #include "transforms/rze/rze_stage.h"
@@ -96,8 +97,29 @@ static bool optBool(const toml::table& t, std::string_view key, bool def = false
     return def;
 }
 
-// Add a Lorenzo stage (dispatches on input_type / code_type strings).
-static Stage* addLorenzoQuantizerStage(Pipeline& p, const toml::table& t) {
+// Add a plain integer Lorenzo predictor stage (dispatches on data_type string).
+static Stage* addLorenzoStage(Pipeline& p, const toml::table& t) {
+    std::string dt_str = optStr(t, "data_type", "int32");
+    DataType dt = dataTypeFromString(dt_str);
+
+    Stage* s = nullptr;
+    auto configure = [&](auto* lrz) {
+        s = lrz;
+    };
+
+    if      (dt == DataType::INT8)  configure(p.addStage<LorenzoStage<int8_t>>());
+    else if (dt == DataType::INT16) configure(p.addStage<LorenzoStage<int16_t>>());
+    else if (dt == DataType::INT32) configure(p.addStage<LorenzoStage<int32_t>>());
+    else if (dt == DataType::INT64) configure(p.addStage<LorenzoStage<int64_t>>());
+    else
+        throw std::runtime_error(
+            "loadConfig: unsupported Lorenzo data_type \"" + dt_str + "\"");
+
+    return s;
+}
+
+// Add a LorenzoQuant stage (dispatches on input_type / code_type strings).
+static Stage* addLorenzoQuantStage(Pipeline& p, const toml::table& t) {
     std::string in_type   = optStr(t, "input_type", "float32");
     std::string code_type = optStr(t, "code_type",  "uint16");
 
@@ -116,13 +138,13 @@ static Stage* addLorenzoQuantizerStage(Pipeline& p, const toml::table& t) {
     };
 
     if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16)
-        configure(p.addStage<LorenzoQuantizerStage<float, uint16_t>>());
+        configure(p.addStage<LorenzoQuantStage<float, uint16_t>>());
     else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16)
-        configure(p.addStage<LorenzoQuantizerStage<double, uint16_t>>());
+        configure(p.addStage<LorenzoQuantStage<double, uint16_t>>());
     else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8)
-        configure(p.addStage<LorenzoQuantizerStage<float, uint8_t>>());
+        configure(p.addStage<LorenzoQuantStage<float, uint8_t>>());
     else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32)
-        configure(p.addStage<LorenzoQuantizerStage<double, uint32_t>>());
+        configure(p.addStage<LorenzoQuantStage<double, uint32_t>>());
     else
         throw std::runtime_error(
             "loadConfig: unsupported Lorenzo type combination input_type=\""
@@ -329,7 +351,9 @@ void Pipeline::loadConfig(const std::string& path) {
         Stage* s = nullptr;
 
         if (type == "Lorenzo") {
-            s = addLorenzoQuantizerStage(*this, *t);
+            s = addLorenzoStage(*this, *t);
+        } else if (type == "LorenzoQuant") {
+            s = addLorenzoQuantStage(*this, *t);
         } else if (type == "Quantizer") {
             s = addQuantizerStage(*this, *t);
         } else if (type == "Bitshuffle") {
@@ -442,8 +466,8 @@ void Pipeline::saveConfig(const std::string& path) const {
 
         // Per-type parameters — write human-readable keys
         switch (stype) {
-            case StageType::LORENZO: {
-                // Use serializeHeader to read back the LorenzoConfig struct,
+            case StageType::LORENZO_QUANT: {
+                // Use serializeHeader to read back the LorenzoQuantConfig struct,
                 // which gives us the canonical type IDs. Then use public getters
                 // for the user-facing parameters (error_bound, eb_mode, etc.),
                 // since those are always valid post-finalize regardless of whether
@@ -456,9 +480,9 @@ void Pipeline::saveConfig(const std::string& path) const {
                 DataType in_dt   = static_cast<DataType>(s->getInputDataType(0));
                 DataType code_dt = static_cast<DataType>(s->getOutputDataType(0)); // codes port
 
-                if (sz >= sizeof(LorenzoConfig)) {
-                    LorenzoConfig lc;
-                    std::memcpy(&lc, buf, sizeof(LorenzoConfig));
+                if (sz >= sizeof(LorenzoQuantConfig)) {
+                    LorenzoQuantConfig lc;
+                    std::memcpy(&lc, buf, sizeof(LorenzoQuantConfig));
                     in_dt   = lc.input_type;
                     code_dt = lc.code_type;
                 }
@@ -474,22 +498,22 @@ void Pipeline::saveConfig(const std::string& path) const {
                 bool  zz  = false;
 
                 if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) {
-                    auto* lrz = static_cast<LorenzoQuantizerStage<float, uint16_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantStage<float, uint16_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
                 } else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16) {
-                    auto* lrz = static_cast<LorenzoQuantizerStage<double, uint16_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantStage<double, uint16_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
                 } else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8) {
-                    auto* lrz = static_cast<LorenzoQuantizerStage<float, uint8_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantStage<float, uint8_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
                 } else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32) {
-                    auto* lrz = static_cast<LorenzoQuantizerStage<double, uint32_t>*>(s);
+                    auto* lrz = static_cast<LorenzoQuantStage<double, uint32_t>*>(s);
                     eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
                     qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
                     zz = lrz->getZigzagCodes();
@@ -553,6 +577,12 @@ void Pipeline::saveConfig(const std::string& path) const {
                 uint8_t nbits = (sz >= 2) ? buf[1] : 16;
                 st.insert("input_type", dataTypeToString(dt));
                 st.insert("nbits", static_cast<int64_t>(nbits));
+                break;
+            }
+            case StageType::LORENZO: {
+                // data_type is encoded in getOutputDataType(0)
+                DataType dt = static_cast<DataType>(s->getOutputDataType(0));
+                st.insert("data_type", dataTypeToString(dt));
                 break;
             }
             default:

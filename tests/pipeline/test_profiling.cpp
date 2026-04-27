@@ -48,7 +48,7 @@ static std::vector<float> make_smooth(size_t n) {
 static std::unique_ptr<Pipeline> build_lorenzo(size_t in_bytes,
                                                 MemoryStrategy strategy = MemoryStrategy::MINIMAL) {
     auto p = std::make_unique<Pipeline>(in_bytes, strategy, 3.0f);
-    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);
@@ -61,7 +61,7 @@ static std::unique_ptr<Pipeline> build_lorenzo(size_t in_bytes,
 static std::unique_ptr<Pipeline> build_lorenzo_rle(size_t in_bytes,
                                                     MemoryStrategy strategy = MemoryStrategy::MINIMAL) {
     auto p = std::make_unique<Pipeline>(in_bytes, strategy, 5.0f);
-    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     lrz->setQuantRadius(512);
     lrz->setOutlierCapacity(0.2f);

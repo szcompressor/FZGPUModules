@@ -63,7 +63,7 @@ public:
 
     /**
      * Dataset spatial dimensions. Controls which Lorenzo variant is selected by
-     * addLorenzo() and is forwarded to LorenzoQuantizerStage at finalize().
+     * addLorenzoQuant() and is forwarded to LorenzoQuantStage at finalize().
      * Default: 1-D ({n, 1, 1}).
      */
     void setDims(size_t x, size_t y = 1, size_t z = 1) { dims_ = {x, y, z}; }
@@ -382,8 +382,8 @@ public:
      * then calls finalize() internally. The pipeline must not be finalized
      * before this call.
      *
-     * Recognized stage types: Lorenzo, Bitshuffle, RZE, RLE,
-     * Difference, Zigzag, Negabinary.
+     * Recognized stage types: LorenzoQuant, Lorenzo, Quantizer,
+     * Bitshuffle, RZE, RLE, Bitpack, Difference, Zigzag, Negabinary.
      *
      * @throws std::runtime_error  File not found, parse error, unknown stage
      *                             type, bad wiring reference, or already finalized.
@@ -562,7 +562,7 @@ private:
     size_t input_size_hint_;
     float  pool_multiplier_;
 
-    // Dataset dimensions (x=fast, y, z). Used by convenience.h addLorenzo() to
+    // Dataset dimensions (x=fast, y, z). Used by convenience.h addLorenzoQuant() to
     // select 1-D/2-D/3-D automatically. Default {0,1,1} = 1-D, infer x from input.
     std::array<size_t, 3> dims_;
 

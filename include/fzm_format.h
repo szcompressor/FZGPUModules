@@ -75,7 +75,7 @@ constexpr size_t FZM_MAX_SOURCES      = 4;    ///< Maximum source stages per pip
  */
 enum class StageType : uint16_t {
     UNKNOWN    = 0,
-    LORENZO    = 1,   ///< LorenzoQuantizerStage — ndim stored in LorenzoConfig
+    LORENZO_QUANT = 1,   ///< LorenzoQuantStage — fused predictor+quantizer; ndim stored in LorenzoQuantConfig
     DIFFERENCE = 2,   ///< DifferenceStage — first-order differencing
     SCALE      = 3,   ///< ScaleStage (test utility)
     PASSTHROUGH= 4,   ///< PassThroughStage (test utility)
@@ -84,6 +84,7 @@ enum class StageType : uint16_t {
     BITPACK    = 7,   ///< Reserved (not yet implemented)
     SPLIT      = 10,  ///< SplitStage (test utility)
     MERGE      = 11,  ///< MergeStage (test utility)
+    LORENZO    = 12,  ///< LorenzoStage — plain integer delta predictor; ndim stored in config
     QUANTIZER  = 14,  ///< QuantizerStage — direct-value quantization
     ZIGZAG     = 15,  ///< ZigzagStage — zigzag encode/decode
     NEGABINARY = 16,  ///< NegabinaryStage — negabinary encode/decode
@@ -124,7 +125,7 @@ constexpr size_t FZM_MAX_STAGE_OUTPUTS = 8;
  * Used by decompressFromFile() to reconstruct the pipeline execution order.
  *
  * stage_config holds the output of Stage::serializeHeader() — a stage-defined
- * POD struct (e.g. LorenzoConfig, QuantizerConfig) packed into the 128-byte slot.
+ * POD struct (e.g. LorenzoQuantConfig, QuantizerConfig) packed into the 128-byte slot.
  */
 struct FZMStageInfo {
     StageType stage_type;     ///< Stage type (2B)
@@ -300,10 +301,10 @@ inline std::string dataTypeToString(DataType type) {
     }
 }
 
-/** Returns a human-readable string for the given StageType (e.g. "Lorenzo"). */
+/** Returns a human-readable string for the given StageType (e.g. "LorenzoQuant"). */
 inline std::string stageTypeToString(StageType type) {
     switch (type) {
-        case StageType::LORENZO:     return "Lorenzo";
+        case StageType::LORENZO_QUANT:  return "LorenzoQuant";
         case StageType::DIFFERENCE:  return "Difference";
         case StageType::SCALE:       return "Scale";
         case StageType::PASSTHROUGH: return "PassThrough";
@@ -317,6 +318,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::NEGABINARY:  return "Negabinary";
         case StageType::BITSHUFFLE:  return "Bitshuffle";
         case StageType::RZE:         return "RZE";
+        case StageType::LORENZO:     return "Lorenzo";
         default:                     return "Unknown";
     }
 }

@@ -36,7 +36,7 @@ enum class ErrorBoundMode : uint8_t {
  * `deserializeHeader()` to reconstruct decompressor state. Fits within the
  * 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
-struct LorenzoConfig {
+struct LorenzoQuantConfig {
     float    error_bound;   ///< Absolute bound after mode conversion (used by decompressor).
     uint32_t quant_radius;  ///< Quantization radius.
     uint32_t num_elements;  ///< Total element count.
@@ -55,13 +55,13 @@ struct LorenzoConfig {
 
     // Total: 44 bytes (fits easily in 128B stage_config)
 
-    LorenzoConfig()
+    LorenzoQuantConfig()
         : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           ndim(1), eb_mode(0), dim_x(0), dim_y(1), dim_z(1),
           user_eb(0.0f), value_base(0.0f), zigzag_codes(0), reserved{0, 0, 0} {}
 };
-static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig must fit in FZM_STAGE_CONFIG_SIZE");
+static_assert(sizeof(LorenzoQuantConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoQuantConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
 /**
  * Lorenzo predictor with error-bounded quantization (1-D, 2-D, 3-D).
@@ -79,7 +79,7 @@ static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoConfig mus
  * @tparam TCode   Quantization code type (`uint8_t`, `uint16_t`, `uint32_t`).
  */
 template<typename TInput = float, typename TCode = uint16_t>
-class LorenzoQuantizerStage : public Stage {
+class LorenzoQuantStage : public Stage {
 public:
     /** Construction parameters. */
     struct Config {
@@ -104,7 +104,7 @@ public:
               dims(d) {}
     };
     
-    explicit LorenzoQuantizerStage(const Config& config = Config());
+    explicit LorenzoQuantStage(const Config& config = Config());
 
     void execute(
         cudaStream_t stream,
@@ -121,7 +121,7 @@ public:
      */
     void postStreamSync(cudaStream_t stream) override;
     
-    std::string getName() const override { return "Lorenzo"; }
+    std::string getName() const override { return "LorenzoQuant"; }
     size_t getNumInputs()  const override { return is_inverse_ ? 4 : 1; }
     size_t getNumOutputs() const override { return is_inverse_ ? 1 : 4; }
     
@@ -186,7 +186,7 @@ public:
     // ── Serialization ─────────────────────────────────────────────────────────
     
     uint16_t getStageTypeId() const override {
-        return static_cast<uint16_t>(StageType::LORENZO);
+        return static_cast<uint16_t>(StageType::LORENZO_QUANT);
     }
     
     uint8_t getOutputDataType(size_t output_index) const override {
@@ -206,11 +206,11 @@ public:
     size_t serializeHeader(size_t output_index, uint8_t* header_buffer, size_t max_size) const override {
         (void)output_index;  // Lorenzo uses same header for all outputs
 
-        if (max_size < sizeof(LorenzoConfig)) {
+        if (max_size < sizeof(LorenzoQuantConfig)) {
             throw std::runtime_error("Insufficient buffer for Lorenzo config");
         }
 
-        LorenzoConfig config;
+        LorenzoQuantConfig config;
         config.error_bound   = static_cast<float>(computed_abs_eb_);  // abs bound used by decompressor
         config.quant_radius  = static_cast<uint32_t>(config_.quant_radius);
         config.num_elements  = static_cast<uint32_t>(num_elements_);
@@ -227,13 +227,13 @@ public:
         config.zigzag_codes  = config_.zigzag_codes ? uint8_t{1} : uint8_t{0};
         config.reserved[0]   = 0; config.reserved[1] = 0; config.reserved[2] = 0;
 
-        std::memcpy(header_buffer, &config, sizeof(LorenzoConfig));
-        return sizeof(LorenzoConfig);
+        std::memcpy(header_buffer, &config, sizeof(LorenzoQuantConfig));
+        return sizeof(LorenzoQuantConfig);
     }
     
     size_t getMaxHeaderSize(size_t output_index) const override {
         (void)output_index;
-        return sizeof(LorenzoConfig);
+        return sizeof(LorenzoQuantConfig);
     }
     
     void deserializeHeader(const uint8_t* header_buffer, size_t size) override {
@@ -243,8 +243,8 @@ public:
             throw std::runtime_error("Invalid Lorenzo config size");
         }
 
-        LorenzoConfig config;
-        std::memcpy(&config, header_buffer, std::min(size, sizeof(LorenzoConfig)));
+        LorenzoQuantConfig config;
+        std::memcpy(&config, header_buffer, std::min(size, sizeof(LorenzoQuantConfig)));
 
         // error_bound in the header is always the absolute bound used at compression.
         config_.error_bound  = config.error_bound;
@@ -264,7 +264,7 @@ public:
             computed_value_base_           = 0.0f;
         }
         // zigzag_codes field added in v2 (≥44B).
-        if (size >= sizeof(LorenzoConfig)) {
+        if (size >= sizeof(LorenzoQuantConfig)) {
             config_.zigzag_codes = (config.zigzag_codes != 0);
         } else {
             config_.zigzag_codes = false;
@@ -329,10 +329,10 @@ private:
     }
 };
 
-extern template class LorenzoQuantizerStage<float, uint16_t>;
-extern template class LorenzoQuantizerStage<float, uint8_t>;
-extern template class LorenzoQuantizerStage<double, uint16_t>;
-extern template class LorenzoQuantizerStage<double, uint32_t>;
+extern template class LorenzoQuantStage<float, uint16_t>;
+extern template class LorenzoQuantStage<float, uint8_t>;
+extern template class LorenzoQuantStage<double, uint16_t>;
+extern template class LorenzoQuantStage<double, uint32_t>;
 
 // Kernel launcher declarations — defined in lorenzo.cu.
 

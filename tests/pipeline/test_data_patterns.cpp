@@ -45,7 +45,7 @@ static float run_pattern(
     stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(error_bound);
     lrz->setQuantRadius(quant_radius);
     lrz->setOutlierCapacity(outlier_capacity);
@@ -246,7 +246,7 @@ TEST(DataPatterns, ZeroOutlierCapacityNoCrash) {
     stream.sync();
 
     Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setOutlierCapacity(0.0f);  // intentionally drop all outliers
     p.setPoolManagedDecompOutput(false);

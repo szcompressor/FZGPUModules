@@ -1,0 +1,38 @@
+[pipeline]
+# Quantizer → Lorenzo → Bitpack  (cuSZp-style)
+#
+# Separates quantization from prediction: the Quantizer maps floats to signed
+# integer codes, Lorenzo then delta-codes the integers (prediction residuals
+# cluster near zero), and Bitpack packs the small deltas to nbits per element.
+#
+# This differs from the fused LorenzoQuant path: quantization and prediction
+# are independent stages and can be tuned separately.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/quantizer_lorenzo_bitpack.toml \
+#              -i data/field.f32 -l 100x500x500 -b --report
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "NOA"
+quant_radius = 512
+outlier_capacity = 0.05
+zigzag_codes = false
+
+[[stage]]
+name = "lrz"
+type = "Lorenzo"
+data_type = "int32"
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "pack"
+type = "Bitpack"
+input_type = "uint32"
+nbits = 12
+inputs = [{from = "lrz", port = "output"}]

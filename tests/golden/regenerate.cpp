@@ -19,7 +19,7 @@
 
 #include "fzgpumodules.h"
 #include "fzm_format.h"
-#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
 
 #include <cassert>
@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
 
     // ── Build pipeline: Lorenzo<float,uint16> → Bitshuffle ──────────────────
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
-    auto* lrz = pipeline.addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(QRAD);
     lrz->setOutlierCapacity(OUTLIER_CAP);

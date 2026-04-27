@@ -9,7 +9,8 @@
 #include "fzm_format.h"
 #include "encoders/diff/diff.h"
 #include "encoders/RLE/rle.h"
-#include "predictors/lorenzo/lorenzo.h"
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "predictors/lorenzo/lorenzo_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "transforms/bitshuffle/bitshuffle_stage.h"
@@ -35,17 +36,17 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
     Stage* stage = nullptr;
 
     switch (type) {
-        case StageType::LORENZO: {
+        case StageType::LORENZO_QUANT: {
             // Dims are restored by deserializeHeader(); template types come from stored fields.
-            if (config_size >= sizeof(LorenzoConfig)) {
-                LorenzoConfig lc;
-                std::memcpy(&lc, config, sizeof(LorenzoConfig));
+            if (config_size >= sizeof(LorenzoQuantConfig)) {
+                LorenzoQuantConfig lc;
+                std::memcpy(&lc, config, sizeof(LorenzoQuantConfig));
                 if (lc.input_type == DataType::FLOAT32 && lc.code_type == DataType::UINT16) {
-                    auto* s = new LorenzoQuantizerStage<float, uint16_t>();
+                    auto* s = new LorenzoQuantStage<float, uint16_t>();
                     s->deserializeHeader(config, config_size);
                     stage = s;
                 } else if (lc.input_type == DataType::FLOAT64 && lc.code_type == DataType::UINT16) {
-                    auto* s = new LorenzoQuantizerStage<double, uint16_t>();
+                    auto* s = new LorenzoQuantStage<double, uint16_t>();
                     s->deserializeHeader(config, config_size);
                     stage = s;
                 } else {
@@ -204,6 +205,21 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             auto* s = new RZEStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+            break;
+        }
+
+        case StageType::LORENZO: {
+            DataType dt = (config_size >= sizeof(LorenzoConfig))
+                ? static_cast<DataType>(config[0])
+                : DataType::INT32;
+            if      (dt == DataType::INT8)  stage = new LorenzoStage<int8_t>();
+            else if (dt == DataType::INT16) stage = new LorenzoStage<int16_t>();
+            else if (dt == DataType::INT32) stage = new LorenzoStage<int32_t>();
+            else if (dt == DataType::INT64) stage = new LorenzoStage<int64_t>();
+            else throw std::runtime_error(
+                    "Unsupported LorenzoStage DataType: "
+                    + std::to_string(static_cast<int>(dt)));
+            stage->deserializeHeader(config, config_size);
             break;
         }
 

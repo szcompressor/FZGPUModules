@@ -54,7 +54,7 @@ static std::unique_ptr<Pipeline> make_pipeline(
     bool pool_managed_decomp = false)
 {
     auto p = std::make_unique<Pipeline>(n_floats * sizeof(float), strategy);
-    auto* lrz = p->addStage<LorenzoQuantizerStage<float, uint16_t>>();
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(1e-2f);
     if (pool_managed_decomp) p->setPoolManagedDecompOutput(true);
     p->finalize();

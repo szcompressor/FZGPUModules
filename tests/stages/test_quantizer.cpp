@@ -4,7 +4,7 @@
  * Unit tests for QuantizerStage<float, uint16_t> (ABS and NOA modes)
  * and QuantizerStage<float, uint32_t> (REL mode).
  *
- * QuantizerStage quantises input *values* directly (unlike LorenzoQuantizerStage which
+ * QuantizerStage quantises input *values* directly (unlike LorenzoQuantStage which
  * quantises prediction residuals).  Values that would exceed the code range
  * are stored losslessly as outliers.
  *
@@ -22,7 +22,7 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "predictors/quantizer/quantizer.h"
-#include "predictors/lorenzo/lorenzo.h"   // for ErrorBoundMode
+#include "predictors/lorenzo_quant/lorenzo_quant.h"   // for ErrorBoundMode
 #include "fzgpumodules.h"
 
 #include <algorithm>

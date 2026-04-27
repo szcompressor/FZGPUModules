@@ -36,8 +36,8 @@ with stream-ordered memory management.
 // 1. Build a pipeline
 fz::Pipeline pipeline(fz::MemoryPoolConfig(input_bytes));
 
-auto* lrz = pipeline.addStage<fz::LorenzoQuantizerStage<float, uint16_t>>(
-    fz::LorenzoQuantizerStage<float, uint16_t>::Config{1e-4f});
+auto* lrz = pipeline.addStage<fz::LorenzoQuantStage<float, uint16_t>>(
+    fz::LorenzoQuantStage<float, uint16_t>::Config{1e-4f});
 auto* rle = pipeline.addStage<fz::RLEStage<uint16_t>>();
 
 pipeline.connect(rle, lrz, "codes");
@@ -116,7 +116,7 @@ pipeline.warmup(stream);         // JIT-compiles all kernels once
 
 | Stage | Header | Description |
 |---|---|---|
-| `LorenzoQuantizerStage<TInput, TCode>` | `predictors/lorenzo/lorenzo.h` | 1-D/2-D/3-D Lorenzo predictor |
+| `LorenzoQuantStage<TInput, TCode>` | `predictors/lorenzo_quant/lorenzo_quant.h` | 1-D/2-D/3-D Lorenzo predictor |
 | `QuantizerStage<TInput, TCode>` | `predictors/quantizer/quantizer.h` | Direct-value quantizer (ABS/REL/NOA) |
 | `RLEStage<T>` | `encoders/RLE/rle.h` | Run-length encoding |
 | `DifferenceStage<T, TOut>` | `encoders/diff/diff.h` | First-order difference / cumulative-sum coding |
