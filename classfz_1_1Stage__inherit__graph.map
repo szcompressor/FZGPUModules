@@ -1,0 +1,23 @@
+<map id="fz::Stage" name="fz::Stage">
+<area shape="rect" id="Node000001" title=" " alt="" coords="5,263,84,288"/>
+<area shape="rect" id="Node000002" href="$classfz_1_1BitpackStage.html" title=" " alt="" coords="133,5,300,31"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="45,249,52,204,67,148,92,90,109,63,130,40,147,29,150,33,134,44,113,67,96,93,72,149,58,205,51,249"/>
+<area shape="rect" id="Node000003" href="$classfz_1_1BitshuffleStage.html" title=" " alt="" coords="146,55,287,80"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="49,249,58,213,74,171,98,128,130,91,151,78,154,82,134,95,102,131,79,173,63,215,54,250"/>
+<area shape="rect" id="Node000004" href="$classfz_1_1DifferenceStage.html" title=" " alt="" coords="143,105,290,145"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="56,249,86,202,107,176,130,155,150,142,153,147,134,159,110,180,90,205,61,252"/>
+<area shape="rect" id="Node000005" href="$classfz_1_1LorenzoQuantStage.html" title=" " alt="" coords="132,169,301,209"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="74,252,131,218,158,206,160,211,133,223,77,257"/>
+<area shape="rect" id="Node000006" href="$classfz_1_1LorenzoStage.html" title=" " alt="" coords="133,233,301,259"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="97,264,142,256,143,261,98,269"/>
+<area shape="rect" id="Node000007" href="$classfz_1_1NegabinaryStage.html" title=" " alt="" coords="139,283,294,323"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="98,281,140,288,139,293,97,286"/>
+<area shape="rect" id="Node000008" href="$classfz_1_1QuantizerStage.html" title=" " alt="" coords="145,347,288,387"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="74,294,133,333,159,345,156,350,131,338,71,299"/>
+<area shape="rect" id="Node000009" href="$classfz_1_1RLEStage.html" title=" " alt="" coords="146,412,287,437"/>
+<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="60,299,89,349,109,375,134,397,157,410,154,414,130,402,105,379,84,352,55,302"/>
+<area shape="rect" id="Node000010" href="$classfz_1_1RZEStage.html" title=" " alt="" coords="164,461,269,487"/>
+<area shape="poly" id="edge9_Node000001_Node000010" title=" " alt="" coords="55,301,65,334,81,374,104,413,134,447,165,463,163,468,130,451,99,416,76,376,60,336,49,302"/>
+<area shape="rect" id="Node000011" href="$classfz_1_1ZigzagStage.html" title=" " alt="" coords="135,511,298,551"/>
+<area shape="poly" id="edge10_Node000001_Node000011" title=" " alt="" coords="52,301,60,343,75,395,99,449,115,474,134,496,151,509,148,513,130,500,111,477,95,452,70,397,55,345,47,302"/>
+</map>

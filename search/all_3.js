@@ -1,0 +1,25 @@
+var searchData=
+[
+  ['calculatestatistics_0',['calculateStatistics',['../namespacefz.html#a1e378f0769aaa07fee908c8a2b52a370',1,'fz']]],
+  ['caller_20allocated_20output_20with_20size_20query_1',['Caller-Allocated Output (With Size Query)',['../index.html#autotoc_md6',1,'']]],
+  ['capturegraph_2',['captureGraph',['../classfz_1_1Pipeline.html#ae6fcaa9d197469e28e520897a1a91a0e',1,'fz::Pipeline']]],
+  ['citation_3',['Citation',['../index.html#autotoc_md22',1,'']]],
+  ['classes_4',['Key API Classes',['../index.html#autotoc_md16',1,'']]],
+  ['code_5ftype_5',['code_type',['../structfz_1_1LorenzoQuantConfig.html#abe1a985065f5f4e45738258ca38a9045',1,'fz::LorenzoQuantConfig::code_type'],['../structfz_1_1QuantizerConfig.html#a6cab689ae14f2b4966cdcb70532e21fa',1,'fz::QuantizerConfig::code_type']]],
+  ['collecttimings_6',['collectTimings',['../classfz_1_1CompressionDAG.html#abd7628c59cd50a130de2e8c7cd54c6cf',1,'fz::CompressionDAG']]],
+  ['command_20line_20interface_7',['Command Line Interface',['../index.html#autotoc_md18',1,'']]],
+  ['compress_8',['compress',['../classfz_1_1Pipeline.html#afdf84d64278967a1e4943e321c6663d7',1,'fz::Pipeline::compress(const void *d_input, size_t input_size, void **d_output, size_t *output_size, cudaStream_t stream=0)'],['../classfz_1_1Pipeline.html#a5a9cde773f23ccc6958304539f3adf66',1,'fz::Pipeline::compress(const void *d_input, size_t input_size, void *d_output_buf, size_t output_buf_capacity, size_t *actual_output_size, cudaStream_t stream=0)']]],
+  ['compressed_5fsize_9',['compressed_size',['../structfz_1_1FZMHeaderCore.html#a9c4c297b17531e51966df22f5b3b93bb',1,'fz::FZMHeaderCore']]],
+  ['compressiondag_10',['CompressionDAG',['../classfz_1_1CompressionDAG.html',1,'fz']]],
+  ['computeheadersize_11',['computeHeaderSize',['../structfz_1_1FZMHeaderCore.html#a16cf12a6e8d91fd9ec385fc6fe6bfaff',1,'fz::FZMHeaderCore']]],
+  ['computetopopoolsize_12',['computeTopoPoolSize',['../classfz_1_1CompressionDAG.html#a453300d012b4f20a7d75d11e4b6c4ba5',1,'fz::CompressionDAG']]],
+  ['config_13',['config',['../structfz_1_1QuantizerStage_1_1Config.html',1,'fz::QuantizerStage&lt; TInput, TCode &gt;::Config'],['../structfz_1_1LorenzoQuantStage_1_1Config.html',1,'fz::LorenzoQuantStage&lt; TInput, TCode &gt;::Config']]],
+  ['config_2eh_14',['config.h',['../config_8h.html',1,'']]],
+  ['config_5fsize_15',['config_size',['../structfz_1_1FZMBufferEntry.html#a8f103769a3e7b1f0c8be631ed7af84bc',1,'fz::FZMBufferEntry::config_size'],['../structfz_1_1FZMStageInfo.html#ac9bc5ceeb7c54ada7c97a89a28bd358f',1,'fz::FZMStageInfo::config_size']]],
+  ['configurestreams_16',['configureStreams',['../classfz_1_1CompressionDAG.html#ac1d4d81f4fd43307c83f65053bc1eb67',1,'fz::CompressionDAG']]],
+  ['connect_17',['connect',['../classfz_1_1Pipeline.html#a9c6db9510443efd2999b5af3405d1b78',1,'fz::Pipeline::connect(Stage *dependent, Stage *producer, const std::string &amp;output_name=&quot;output&quot;)'],['../classfz_1_1Pipeline.html#a1a61b6d5245b7a9ab2446fbea8c77880',1,'fz::Pipeline::connect(Stage *dependent, const std::vector&lt; Stage * &gt; &amp;producers)']]],
+  ['connectexistingoutput_18',['connectExistingOutput',['../classfz_1_1CompressionDAG.html#ae413809eef19637aa3256a1d583ee339',1,'fz::CompressionDAG']]],
+  ['convenience_2eh_19',['convenience.h',['../convenience_8h.html',1,'']]],
+  ['createstage_20',['createStage',['../namespacefz.html#a0e37a3291dc2265bfc9fbbb449dea787',1,'fz']]],
+  ['cuda_20graph_20support_21',['CUDA Graph Support',['../index.html#autotoc_md8',1,'']]]
+];
