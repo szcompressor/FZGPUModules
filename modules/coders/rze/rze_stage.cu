@@ -1,5 +1,5 @@
 /**
- * modules/transforms/rze/rze_stage.cu
+ * modules/coders/rze/rze_stage.cu
  *
  * GPU implementation of RZEStage — Recursive Zero-byte Elimination.
  *
@@ -13,7 +13,7 @@
  *   rze.h             — reference composite encode/decode wrapper
  */
 
-#include "transforms/rze/rze_stage.h"
+#include "coders/rze/rze_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 

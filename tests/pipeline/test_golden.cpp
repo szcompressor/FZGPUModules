@@ -34,8 +34,8 @@
 #include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
 #include "fzm_format.h"
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
-#include "transforms/bitshuffle/bitshuffle_stage.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
 
 #include <cmath>
 #include <cstdio>

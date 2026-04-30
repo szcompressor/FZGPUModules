@@ -12,16 +12,16 @@
 #include "pipeline/compressor.h"
 
 // All stage types supported by loadConfig / saveConfig
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/lorenzo/lorenzo_stage.h"
-#include "predictors/quantizer/quantizer.h"
-#include "transforms/bitshuffle/bitshuffle_stage.h"
-#include "transforms/rze/rze_stage.h"
+#include "quantizers/quantizer/quantizer.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
+#include "coders/rze/rze_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
-#include "transforms/bitpack/bitpack_stage.h"
-#include "encoders/RLE/rle.h"
-#include "encoders/diff/diff.h"
+#include "coders/bitpack/bitpack_stage.h"
+#include "coders/rle/rle.h"
+#include "predictors/diff/diff.h"
 
 #include <fstream>
 #include <sstream>

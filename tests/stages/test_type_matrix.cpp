@@ -21,8 +21,8 @@
 
 #include <gtest/gtest.h>
 #include "helpers/stage_harness.h"
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
-#include "predictors/quantizer/quantizer.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
+#include "quantizers/quantizer/quantizer.h"
 #include "fzgpumodules.h"
 
 #include <cmath>

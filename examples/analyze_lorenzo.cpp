@@ -24,7 +24,7 @@
  * Build:  appears automatically in the CMake build as target "analyze_lorenzo"
  */
 
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "mem/mempool.h"
 
 #include <cuda_runtime.h>

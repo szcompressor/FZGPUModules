@@ -25,7 +25,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "transforms/bitshuffle/bitshuffle_stage.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "fzgpumodules.h"
 
 #include <cmath>

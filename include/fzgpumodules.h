@@ -18,12 +18,12 @@
 
 #include "log.h"
 
-#include "encoders/diff/diff.h"
-#include "encoders/RLE/rle.h"
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
-#include "predictors/quantizer/quantizer.h"
+#include "predictors/diff/diff.h"
+#include "coders/rle/rle.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
+#include "quantizers/quantizer/quantizer.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary.h"
 #include "transforms/negabinary/negabinary_stage.h"
-#include "transforms/bitshuffle/bitshuffle_stage.h"
-#include "transforms/rze/rze_stage.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
+#include "coders/rze/rze_stage.h"

@@ -7,15 +7,15 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include "encoders/diff/diff.h"
-#include "encoders/RLE/rle.h"
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "predictors/diff/diff.h"
+#include "coders/rle/rle.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
-#include "transforms/bitshuffle/bitshuffle_stage.h"
-#include "transforms/rze/rze_stage.h"
-#include "transforms/bitpack/bitpack_stage.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
+#include "coders/rze/rze_stage.h"
+#include "coders/bitpack/bitpack_stage.h"
 
 #include <memory>
 #include <stdexcept>

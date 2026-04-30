@@ -26,7 +26,7 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "helpers/stage_harness.h"
-#include "transforms/bitpack/bitpack_stage.h"
+#include "coders/bitpack/bitpack_stage.h"
 #include "fzgpumodules.h"
 
 #include <cstdint>

@@ -212,36 +212,26 @@ target_link_libraries(fzgmod_mem
   fzgmod_compile_settings
 )
 
-#### Encoders Module
-add_library(fzgmod_encoders
-  modules/encoders/diff/diff.cu
-  modules/encoders/RLE/rle.cu
+#### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
+add_library(fzgmod_modules
+  modules/predictors/diff/diff.cu
+  modules/predictors/lorenzo/lorenzo_stage.cu
   modules/transforms/zigzag/zigzag_stage.cu
   modules/transforms/negabinary/negabinary_stage.cu
-  modules/transforms/bitshuffle/bitshuffle_stage.cu
-  modules/transforms/rze/rze_stage.cu
-  modules/transforms/bitpack/bitpack_stage.cu
+  modules/quantizers/quantizer/quantizer.cu
+  modules/coders/rle/rle.cu
+  modules/coders/rze/rze_stage.cu
+  modules/coders/bitpack/bitpack_stage.cu
+  modules/shufflers/bitshuffle/bitshuffle_stage.cu
+  modules/fused/lorenzo_quant/lorenzo_quant.cu
+  modules/fused/lorenzo_quant/lorenzo_quant_nd.cu
 )
-target_link_libraries(fzgmod_encoders
+target_link_libraries(fzgmod_modules
   PUBLIC
   fzgmod_compile_settings
   CUDA::cudart
 )
-add_library(FZGMOD::encoders ALIAS fzgmod_encoders)
-
-#### Predictors Module
-add_library(fzgmod_predictors
-  modules/predictors/lorenzo_quant/lorenzo_quant.cu
-  modules/predictors/lorenzo_quant/lorenzo_quant_nd.cu
-  modules/predictors/lorenzo/lorenzo_stage.cu
-  modules/predictors/quantizer/quantizer.cu
-)
-target_link_libraries(fzgmod_predictors
-  PUBLIC
-  fzgmod_compile_settings
-  CUDA::cudart
-)
-add_library(FZGMOD::predictors ALIAS fzgmod_predictors)
+add_library(FZGMOD::modules ALIAS fzgmod_modules)
 
 add_library(fzgmod_pipeline
   src/pipeline/compressor.cpp
@@ -260,8 +250,7 @@ target_link_libraries(fzgmod_pipeline
   PUBLIC
   fzgmod_compile_settings
   fzgmod_mem
-  fzgmod_encoders
-  fzgmod_predictors
+  fzgmod_modules
   CUDA::cudart
 )
 add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
@@ -274,8 +263,7 @@ target_link_libraries(fzgmod
   PUBLIC
   fzgmod_compile_settings
   fzgmod_mem
-  fzgmod_encoders
-  fzgmod_predictors
+  fzgmod_modules
   fzgmod_pipeline
   CUDA::cudart
 )
@@ -284,7 +272,7 @@ add_library(FZGMOD::fzgmod ALIAS fzgmod)
 # Shared library versioning — creates libfzgmod.so.2 → libfzgmod.so.2.0.0
 # SOVERSION (ABI version) = major only; bump on any breaking API/ABI change.
 # VERSION   (full version) = PROJECT_VERSION, updated every release.
-foreach(_lib fzgmod fzgmod_mem fzgmod_encoders fzgmod_predictors fzgmod_pipeline)
+foreach(_lib fzgmod fzgmod_mem fzgmod_modules fzgmod_pipeline)
   set_target_properties(${_lib} PROPERTIES
     VERSION   ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
@@ -316,12 +304,11 @@ add_subdirectory(profiling)
 ####################
 
 install(TARGETS fzgmod_compile_settings EXPORT FZGPUModulesTargets)
-install(TARGETS 
+install(TARGETS
   fzgmod_mem
-  fzgmod_encoders
-  fzgmod_predictors
+  fzgmod_modules
   fzgmod_pipeline
-  fzgmod 
+  fzgmod
   EXPORT FZGPUModulesTargets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -376,7 +363,7 @@ install(DIRECTORY
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
-# modules/ headers are included with relative paths (e.g. "encoders/diff/diff.h")
+# modules/ headers are included with relative paths (e.g. "predictors/diff/diff.h")
 # so they must be installed into the same fzgmod include root
 install(DIRECTORY
   modules/

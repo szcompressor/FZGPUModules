@@ -35,7 +35,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "transforms/rze/rze_stage.h"
+#include "coders/rze/rze_stage.h"
 #include "fzgpumodules.h"
 
 #include <cmath>

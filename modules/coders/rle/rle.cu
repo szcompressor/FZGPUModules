@@ -1,4 +1,4 @@
-#include "encoders/RLE/rle.h"
+#include "coders/rle/rle.h"
 #include "log.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>

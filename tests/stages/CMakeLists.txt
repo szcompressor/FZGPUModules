@@ -12,8 +12,8 @@
 # Adding a new stage test:
 #   1. Create test_<stage_name>.cpp in this directory.
 #   2. Add an fz_add_test() entry below with LABELS stages gpu.
-#   3. Link the minimal set of libraries needed (prefer fzgmod_encoders or
-#      fzgmod_predictors + fzgmod_mem over the full fzgmod to keep link times
+#   3. Link the minimal set of libraries needed (prefer fzgmod_modules or
+#      fzgmod_modules + fzgmod_mem over the full fzgmod to keep link times
 #      short and the test scope honest).
 ###############################################################################
 
@@ -24,7 +24,7 @@ set(FZ_TEST_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 fz_add_test(
     NAME    test_difference
     SOURCES test_difference.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
+    LIBS    fzgmod_modules fzgmod_mem
     LABELS  stages gpu
 )
 
@@ -32,7 +32,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_rle
     SOURCES test_rle.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
+    LIBS    fzgmod_modules fzgmod_mem
     LABELS  stages gpu
 )
 
@@ -48,7 +48,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_zigzag_stage
     SOURCES test_zigzag_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
+    LIBS    fzgmod_modules fzgmod_mem
     LABELS  stages gpu
 )
 
@@ -64,7 +64,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_negabinary_stage
     SOURCES test_negabinary_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem
+    LIBS    fzgmod_modules fzgmod_mem
     LABELS  stages gpu
 )
 
@@ -72,7 +72,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_bitshuffle_stage
     SOURCES test_bitshuffle_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
 
@@ -80,7 +80,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_rze_stage
     SOURCES test_rze_stage.cpp
-    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
 
@@ -88,7 +88,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_bitpack
     SOURCES test_bitpack.cpp
-    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
 
@@ -96,7 +96,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_lorenzo
     SOURCES test_lorenzo.cpp
-    LIBS    fzgmod_predictors fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
 
@@ -104,7 +104,7 @@ fz_add_test(
 fz_add_test(
     NAME    test_quantizer
     SOURCES test_quantizer.cpp
-    LIBS    fzgmod_predictors fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
 
@@ -115,6 +115,6 @@ fz_add_test(
 fz_add_test(
     NAME    test_type_matrix
     SOURCES test_type_matrix.cpp
-    LIBS    fzgmod_predictors fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )

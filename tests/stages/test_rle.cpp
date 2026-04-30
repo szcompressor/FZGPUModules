@@ -16,7 +16,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "encoders/RLE/rle.h"
+#include "coders/rle/rle.h"
 #include "fzgpumodules.h"
 
 #include <algorithm>

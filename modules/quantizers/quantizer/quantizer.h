@@ -7,7 +7,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include "predictors/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
+#include "fused/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
 #include <cuda_runtime.h>
 #include <array>
 #include <cmath>

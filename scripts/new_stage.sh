@@ -5,12 +5,20 @@
 #   scripts/new_stage.sh <StageName> <category> [StageTypeId]
 #
 #   StageName   : PascalCase name, e.g. "MyEncoder"
-#   category    : "transforms", "encoders", or "predictors"
+#   category    : "predictors", "transforms", "quantizers", "coders", "shufflers", or "fused"
 #   StageTypeId : integer for the StageType enum (optional — auto-detected if omitted)
 #
+# Categories:
+#   predictors  — model-based decorrelation producing residuals (Lorenzo, Diff, interpolation)
+#   transforms  — invertible basis changes (zigzag, negabinary)
+#   quantizers  — lossy discrete mapping
+#   coders      — symbol-to-bitstream encoding (Huffman, RLE, RZE, bitpack, dictionary)
+#   shufflers   — lossless data restructuring for better compressibility (bitshuffle)
+#   fused       — combined multi-operation kernels (e.g. predictor+quantizer)
+#
 # Examples:
-#   scripts/new_stage.sh MyEncoder encoders       # ID auto-assigned
-#   scripts/new_stage.sh MyEncoder encoders 42    # ID explicitly pinned
+#   scripts/new_stage.sh MyEncoder coders         # ID auto-assigned
+#   scripts/new_stage.sh MyEncoder coders 42      # ID explicitly pinned
 #
 # What it creates/modifies automatically:
 #   modules/<category>/<lower>/
@@ -18,7 +26,7 @@
 #     <lower>_stage.cu
 #   tests/stages/test_<lower>.cpp
 #   include/fzm_format.h         — StageType enum entry + stageTypeToString() case
-#   CMakeLists.txt               — .cu added to fzgmod_encoders/predictors/transforms target
+#   CMakeLists.txt               — .cu added to fzgmod_modules target
 #   tests/stages/CMakeLists.txt  — fz_add_test() entry
 #
 # What still needs manual attention (printed at the end):
@@ -30,7 +38,7 @@ set -euo pipefail
 # ── Args ───────────────────────────────────────────────────────────────────────
 if [[ $# -lt 2 ]]; then
     echo "Usage: $0 <StageName> <category> [StageTypeId]"
-    echo "  category: transforms | encoders | predictors"
+    echo "  category: predictors | transforms | quantizers | coders | shufflers | fused"
     echo "  StageTypeId: optional integer — lowest unused value is auto-selected if omitted"
     exit 1
 fi
@@ -72,8 +80,9 @@ CMAKELISTS="${REPO_ROOT}/CMakeLists.txt"
 TESTS_CMAKELISTS="${REPO_ROOT}/tests/stages/CMakeLists.txt"
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────
-if [[ "$CATEGORY" != "transforms" && "$CATEGORY" != "encoders" && "$CATEGORY" != "predictors" ]]; then
-    echo "Error: category must be one of: transforms, encoders, predictors"
+if [[ "$CATEGORY" != "predictors" && "$CATEGORY" != "transforms" && "$CATEGORY" != "quantizers" && \
+      "$CATEGORY" != "coders" && "$CATEGORY" != "shufflers" && "$CATEGORY" != "fused" ]]; then
+    echo "Error: category must be one of: predictors, transforms, quantizers, coders, shufflers, fused"
     exit 1
 fi
 
@@ -90,8 +99,7 @@ if grep -q "= ${TYPE_ID}," "$FZM_FORMAT_H" || grep -q "= ${TYPE_ID}$" "$FZM_FORM
 fi
 
 # ── Determine which CMake library target to add the .cu to ────────────────────
-# All three categories currently go into fzgmod_encoders; adjust if that changes.
-CMAKE_TARGET="fzgmod_encoders"
+CMAKE_TARGET="fzgmod_modules"
 
 # ── Create module directory ────────────────────────────────────────────────────
 mkdir -p "$MODULE_DIR"
@@ -446,7 +454,7 @@ target    = sys.argv[3]
 
 text = open(path).read()
 
-# Find the add_library(fzgmod_encoders ...) block and insert the .cu before the closing paren.
+# Find the add_library(fzgmod_modules ...) block and insert the .cu before the closing paren.
 # We look for the last existing modules/ line inside that block and insert after it.
 import re
 
@@ -474,7 +482,7 @@ else
 fz_add_test(
     NAME    test_${LOWER}
     SOURCES test_${LOWER}.cpp
-    LIBS    fzgmod_encoders fzgmod_mem fzgmod
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
 CMTEST

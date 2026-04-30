@@ -1,4 +1,4 @@
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
 #include <cuda_runtime.h>
@@ -8,7 +8,7 @@
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
-#include "predictors/lorenzo_quant/lorenzo_quant_kernels.cuh"
+#include "fused/lorenzo_quant/lorenzo_quant_kernels.cuh"
 
 namespace fz {
 

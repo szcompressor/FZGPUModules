@@ -1,13 +1,13 @@
 /**
- * predictors/lorenzo_quant/lorenzo_quant_nd.cu
+ * fused/lorenzo_quant/lorenzo_quant_nd.cu
  *
  * 2-D and 3-D Lorenzo prediction kernels and their launchers.
  * Split from lorenzo.cu to keep per-file size manageable.
  * The LorenzoQuantStage class implementation remains in lorenzo.cu.
  */
 
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
-#include "predictors/lorenzo_quant/lorenzo_quant_kernels.cuh"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
+#include "fused/lorenzo_quant/lorenzo_quant_kernels.cuh"
 #include "transforms/zigzag/zigzag.h"
 #include <cuda_runtime.h>
 #include <cstdint>

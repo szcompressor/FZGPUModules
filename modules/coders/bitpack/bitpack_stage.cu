@@ -1,4 +1,4 @@
-#include "transforms/bitpack/bitpack_stage.h"
+#include "coders/bitpack/bitpack_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include <cuda_runtime.h>

@@ -21,8 +21,8 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "predictors/quantizer/quantizer.h"
-#include "predictors/lorenzo_quant/lorenzo_quant.h"   // for ErrorBoundMode
+#include "quantizers/quantizer/quantizer.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"   // for ErrorBoundMode
 #include "fzgpumodules.h"
 
 #include <algorithm>

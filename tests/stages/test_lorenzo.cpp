@@ -124,7 +124,7 @@ TEST(LorenzoStage, Int16RoundTrip) {
 // LorenzoQuantStage pipelines compress the same data and produce element-wise
 // identical reconstructions.  This guards against non-deterministic GPU
 // behaviour (e.g. atomic ordering) that would cause silent quality divergence.
-#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "helpers/stage_harness.h"
 
 TEST(LorenzoQuantStage, DeterministicReconstruction) {
@@ -161,7 +161,7 @@ TEST(LorenzoQuantStage, DeterministicReconstruction) {
 }
 
 // ── Quantizer → Lorenzo round-trip (cuSZp-style, no entropy coding) ──────────
-#include "predictors/quantizer/quantizer.h"
+#include "quantizers/quantizer/quantizer.h"
 
 TEST(LorenzoStage, QuantizerLorenzoPipelineRoundTrip) {
     // Verifies that LorenzoStage can be chained after QuantizerStage.

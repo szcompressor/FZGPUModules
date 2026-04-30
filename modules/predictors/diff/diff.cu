@@ -1,4 +1,4 @@
-#include "encoders/diff/diff.h"
+#include "predictors/diff/diff.h"
 #include "transforms/negabinary/negabinary.h"
 #include "log.h"
 #include <cuda_runtime.h>

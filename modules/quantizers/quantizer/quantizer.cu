@@ -1,4 +1,4 @@
-#include "predictors/quantizer/quantizer.h"
+#include "quantizers/quantizer/quantizer.h"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
 #include <cuda_runtime.h>

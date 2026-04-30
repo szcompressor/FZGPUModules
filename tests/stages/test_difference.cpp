@@ -19,7 +19,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "encoders/diff/diff.h"
+#include "predictors/diff/diff.h"
 #include "transforms/negabinary/negabinary.h"
 
 #include <cmath>

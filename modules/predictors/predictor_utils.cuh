@@ -16,7 +16,7 @@
 #include <cuda_runtime.h>
 #include <vector>
 #include <algorithm>
-#include "predictors/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
+#include "fused/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
 #include "mem/mempool.h"
 #include "cuda_check.h"
 

@@ -1,5 +1,5 @@
 /**
- * modules/transforms/bitshuffle/bitshuffle_stage.cu
+ * modules/shufflers/bitshuffle/bitshuffle_stage.cu
  *
  * GPU implementation of BitshuffleStage using the butterfly (warp-shuffle)
  * algorithm from the LC framework (Burtscher et al., BSD-3 licensed).
@@ -41,7 +41,7 @@
  * has full warps for the __shfl_xor_sync calls.
  */
 
-#include "transforms/bitshuffle/bitshuffle_stage.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
