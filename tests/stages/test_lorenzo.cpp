@@ -119,6 +119,47 @@ TEST(LorenzoStage, Int16RoundTrip) {
     EXPECT_EQ(res.max_error, 0.0f);
 }
 
+// ── LorenzoQuantStage determinism: two independent pipelines, same input ──────
+// Verifies that the fused kernel is deterministic: two separately constructed
+// LorenzoQuantStage pipelines compress the same data and produce element-wise
+// identical reconstructions.  This guards against non-deterministic GPU
+// behaviour (e.g. atomic ordering) that would cause silent quality divergence.
+#include "predictors/lorenzo_quant/lorenzo_quant.h"
+#include "helpers/stage_harness.h"
+
+TEST(LorenzoQuantStage, DeterministicReconstruction) {
+    const size_t N  = 4096;
+    const float  EB = 1e-2f;
+    auto h_input = make_smooth_data<float>(N);
+
+    auto make_pipeline = [&]() {
+        auto p = std::make_unique<Pipeline>(N * sizeof(float), MemoryStrategy::PREALLOCATE);
+        auto* lq = p->addStage<LorenzoQuantStage<float, uint16_t>>();
+        lq->setErrorBound(EB);
+        lq->setQuantRadius(512);
+        lq->setOutlierCapacity(0.2f);
+        lq->setDims(N);
+        p->finalize();
+        return p;
+    };
+
+    CudaStream cs;
+    auto p1 = make_pipeline();
+    auto p2 = make_pipeline();
+
+    auto res1 = pipeline_round_trip<float>(*p1, h_input, cs.stream);
+    auto res2 = pipeline_round_trip<float>(*p2, h_input, cs.stream);
+
+    ASSERT_EQ(res1.data.size(), N);
+    ASSERT_EQ(res2.data.size(), N);
+
+    for (size_t i = 0; i < N; i++) {
+        EXPECT_EQ(res1.data[i], res2.data[i])
+            << "Mismatch at element " << i;
+    }
+    EXPECT_LE(res1.max_error, EB * 1.01);
+}
+
 // ── Quantizer → Lorenzo round-trip (cuSZp-style, no entropy coding) ──────────
 #include "predictors/quantizer/quantizer.h"
 

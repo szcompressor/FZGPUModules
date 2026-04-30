@@ -11,6 +11,15 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+**Stages**
+- `BitpackStage` — sub-byte and multi-byte integer bit-packing; supports `uint8`/`uint16`/`uint32`, all power-of-two `nbits` values; graph-compatible; registered in `StageFactory`; 14 tests in `test_bitpack.cpp`
+- `LorenzoStage<T>` — plain integer delta predictor (lossless, non-fused); accepts `int8_t`/`int16_t`/`int32_t`/`int64_t`; supports 1-D/2-D/3-D via `setDims()`; distinct from the fused `LorenzoQuantStage`
+- Renamed `LorenzoStage` → `LorenzoQuantStage` to make the fused quantizer/predictor nature explicit; all callsites, headers, TOML configs, and tests updated
+
+**Build & configuration**
+- `examples/presets/quantizer_lorenzo_bitpack.toml` — new TOML preset for `QuantizerStage → LorenzoStage → BitpackStage` (cuSZp-style) pipeline
+- `examples/presets/lorenzo_bitpack.toml` — new TOML preset for `LorenzoQuantStage → BitpackStage` pipeline
+
 **Pipeline features**
 - Multi-source pipeline support: `InputSpec` API, `compress(std::vector<InputSpec>)`, `decompressMulti()`, `setInputSizeHint()` per source
 - `Pipeline::warmup(stream)` — forces PTX→SASS JIT compilation before timing-sensitive work
@@ -56,6 +65,10 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 **Testing**
 - Comprehensive test suite: 20 test binaries covering pipeline, stages, file I/O, memory strategies, buffer coloring, CUDA Graphs, bounds checking, and error handling
 - All tests pass under CUDA Compute Sanitizer (memcheck, initcheck, racecheck, synccheck) and host ASan+UBSan
+- `LorenzoQuantStage.DeterministicReconstruction` — verifies the fused kernel produces element-wise identical output across two independently constructed pipelines on the same input
+
+### Removed
+- `LorenzoStage` (the old fused predictor+quantizer) removed and replaced by `LorenzoQuantStage`; `LorenzoStage` now refers exclusively to the plain integer delta predictor
 
 ### Fixed
 - Race condition in `CompressionDAG::execute()` for multi-source pipelines: internal per-branch streams now have a GPU-side happens-before edge into the caller stream via `cudaStreamWaitEvent`
