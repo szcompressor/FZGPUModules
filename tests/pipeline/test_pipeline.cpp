@@ -15,7 +15,6 @@
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
-#include "pipeline/convenience.h"
 
 #include <cmath>
 #include <cstdio>
@@ -600,39 +599,45 @@ TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DIM4: addLorenzoQuant() correctly forwards pipeline dims_ to stage config.
+// DIM4: setDims() before addStage() immediately gives the correct ndim().
 //
-// Verifies that setDims() + addLorenzoQuant() produces the same ndim() as manually
-// calling setDims() on a LorenzoQuantStage directly.
+// addStage() now calls stage->setDims(dims_) before returning, so the stage
+// reflects the pipeline's current dimensions without any helper wrapper.
 // ─────────────────────────────────────────────────────────────────────────────
-TEST(Pipeline, AddLorenzoForwardsDims) {
+TEST(Pipeline, AddStageForwardsDims) {
     // 1D: default (no setDims call)
     {
         Pipeline p1(256 * sizeof(float), MemoryStrategy::MINIMAL);
-        auto* lrz1 = addLorenzoQuant<float, uint16_t>(p1, 1e-2f);
+        LorenzoQuantStage<float, uint16_t>::Config cfg1;
+        cfg1.error_bound = 1e-2f;
+        auto* lrz1 = p1.addStage<LorenzoQuantStage<float, uint16_t>>(cfg1);
         EXPECT_EQ(lrz1->ndim(), 1) << "Default should be 1D";
     }
 
-    // 2D: setDims(nx, ny) before addLorenzoQuant
+    // 2D: setDims(nx, ny) before addStage
     {
         constexpr size_t NX = 32, NY = 32;
         Pipeline p2(NX * NY * sizeof(float), MemoryStrategy::MINIMAL);
         p2.setDims(NX, NY);
-        auto* lrz2 = addLorenzoQuant<float, uint16_t>(p2, 1e-2f);
-        EXPECT_EQ(lrz2->ndim(), 2) << "setDims(nx,ny) should give 2D via addLorenzoQuant()";
+        LorenzoQuantStage<float, uint16_t>::Config cfg2;
+        cfg2.error_bound = 1e-2f;
+        auto* lrz2 = p2.addStage<LorenzoQuantStage<float, uint16_t>>(cfg2);
+        EXPECT_EQ(lrz2->ndim(), 2) << "setDims(nx,ny) before addStage should give 2D";
         auto dims2 = lrz2->getDims();
         EXPECT_EQ(dims2[0], NX);
         EXPECT_EQ(dims2[1], NY);
         EXPECT_EQ(dims2[2], 1u);
     }
 
-    // 3D: setDims(nx, ny, nz) before addLorenzoQuant
+    // 3D: setDims(nx, ny, nz) before addStage
     {
         constexpr size_t NX = 16, NY = 16, NZ = 16;
         Pipeline p3(NX * NY * NZ * sizeof(float), MemoryStrategy::MINIMAL);
         p3.setDims(NX, NY, NZ);
-        auto* lrz3 = addLorenzoQuant<float, uint16_t>(p3, 1e-2f);
-        EXPECT_EQ(lrz3->ndim(), 3) << "setDims(nx,ny,nz) should give 3D via addLorenzoQuant()";
+        LorenzoQuantStage<float, uint16_t>::Config cfg3;
+        cfg3.error_bound = 1e-2f;
+        auto* lrz3 = p3.addStage<LorenzoQuantStage<float, uint16_t>>(cfg3);
+        EXPECT_EQ(lrz3->ndim(), 3) << "setDims(nx,ny,nz) before addStage should give 3D";
     }
 }
 

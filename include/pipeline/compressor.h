@@ -62,9 +62,10 @@ public:
     void setNumStreams(int num_streams);
 
     /**
-     * Dataset spatial dimensions. Controls which Lorenzo variant is selected by
-     * addLorenzoQuant() and is forwarded to LorenzoQuantStage at finalize().
-     * Default: 1-D ({n, 1, 1}).
+     * Dataset spatial dimensions. Forwarded to every stage immediately on addStage()
+     * and again at finalize(). Call setDims() before addStage() so that dimension-
+     * aware stages (e.g. LorenzoQuantStage) have the correct ndim() from the moment
+     * they are added. Default: 1-D ({n, 1, 1}).
      */
     void setDims(size_t x, size_t y = 1, size_t z = 1) { dims_ = {x, y, z}; }
     void setDims(std::array<size_t, 3> dims)             { dims_ = dims; }
@@ -562,8 +563,8 @@ private:
     size_t input_size_hint_;
     float  pool_multiplier_;
 
-    // Dataset dimensions (x=fast, y, z). Used by convenience.h addLorenzoQuant() to
-    // select 1-D/2-D/3-D automatically. Default {0,1,1} = 1-D, infer x from input.
+    // Dataset dimensions (x=fast, y, z). Pushed to each stage on addStage() and
+    // again at finalize(). Default {0,1,1} = 1-D, infer x from input size.
     std::array<size_t, 3> dims_;
 
     /**
@@ -614,6 +615,8 @@ StageT* Pipeline::addStage(Args&&... args) {
 
     auto stage_ptr = std::make_unique<StageT>(std::forward<Args>(args)...);
     StageT* stage  = stage_ptr.get();
+
+    stage->setDims(dims_);
 
     DAGNode* node        = dag_->addStage(stage, stage->getName());
     size_t   num_outputs = stage->getNumOutputs();
