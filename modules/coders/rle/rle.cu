@@ -224,7 +224,7 @@ void RLEStage<T>::execute(
             d_run_offsets = static_cast<uint32_t*>(
                 pool->allocate(num_runs * sizeof(uint32_t), stream, "rle_run_offsets"));
         } else {
-            FZ_CUDA_CHECK(cudaMallocAsync(&d_run_offsets, num_runs * sizeof(uint32_t), stream));
+            FZ_CUDA_CHECK(cudaMalloc(&d_run_offsets, num_runs * sizeof(uint32_t)));
         }
 
         void*  d_temp  = nullptr;
@@ -233,7 +233,7 @@ void RLEStage<T>::execute(
                                       run_lengths, d_run_offsets, num_runs, stream);
         d_temp = pool ? pool->allocate(tmp_sz, stream, "rle_cub_decomp_temp")
                       : nullptr;
-        if (!pool) FZ_CUDA_CHECK(cudaMallocAsync(&d_temp, tmp_sz, stream));
+        if (!pool) FZ_CUDA_CHECK(cudaMalloc(&d_temp, tmp_sz));
         cub::DeviceScan::InclusiveSum(d_temp, tmp_sz,
                                       run_lengths, d_run_offsets, num_runs, stream);
 
@@ -251,8 +251,8 @@ void RLEStage<T>::execute(
             pool->free(d_run_offsets, stream);
             pool->free(d_temp, stream);
         } else {
-            FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_run_offsets, stream));
-            FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_temp, stream));
+            FZ_CUDA_CHECK_WARN(cudaFree(d_run_offsets));
+            FZ_CUDA_CHECK_WARN(cudaFree(d_temp));
         }
 
         actual_output_sizes_ = {total_output_size * sizeof(T)};
@@ -337,12 +337,12 @@ void RLEStage<T>::execute(
                                           static_cast<int>(n), stream);
             d_tmp = pool ? pool->allocate(tmp_sz, stream, "rle_cub_scan_tmp")
                          : nullptr;
-            if (!pool) FZ_CUDA_CHECK(cudaMallocAsync(&d_tmp, tmp_sz, stream));
+            if (!pool) FZ_CUDA_CHECK(cudaMalloc(&d_tmp, tmp_sz));
             cub::DeviceScan::InclusiveSum(d_tmp, tmp_sz,
                                           d_is_boundary_, d_boundary_scan_,
                                           static_cast<int>(n), stream);
             if (pool && d_tmp) pool->free(d_tmp, stream);
-            else if (d_tmp)    FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_tmp, stream));
+            else if (d_tmp)    FZ_CUDA_CHECK_WARN(cudaFree(d_tmp));
         }
 
         // d_num_runs_ptr points into d_boundary_scan_ — no D2H needed

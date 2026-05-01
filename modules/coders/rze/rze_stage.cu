@@ -805,14 +805,14 @@ void RZEStage::execute(
                 ? pool->allocate(scan_tmp_bytes, stream, "rze_cub_scan_tmp")
                 : nullptr;
             if (!d_scan_tmp && scan_tmp_bytes > 0)
-                FZ_CUDA_CHECK(cudaMallocAsync(&d_scan_tmp, scan_tmp_bytes, stream));
+                FZ_CUDA_CHECK(cudaMalloc(&d_scan_tmp, scan_tmp_bytes));
             cub::DeviceScan::ExclusiveSum(d_scan_tmp, scan_tmp_bytes,
                                           d_clean_dev_, d_dst_off_dev_,
                                           static_cast<int>(n_chunks), stream);
             if (pool && d_scan_tmp)
                 pool->free(d_scan_tmp, stream);
             else if (d_scan_tmp)
-                FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_scan_tmp, stream));
+                FZ_CUDA_CHECK_WARN(cudaFree(d_scan_tmp));
         }
 
         // ── (5) Convert payload-relative offsets to absolute output offsets.

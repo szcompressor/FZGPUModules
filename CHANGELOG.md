@@ -76,6 +76,8 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - `LorenzoStage` (the old fused predictor+quantizer) removed and replaced by `LorenzoQuantStage`; `LorenzoStage` now refers exclusively to the plain integer delta predictor
 
 ### Fixed
+- vGPU compatibility: added fallback from `cudaMallocAsync`/`cudaFreeAsync` to `cudaMalloc`/`cudaFree` when memory pools are unavailable; `MemoryPool` gracefully degrades to regular malloc mode with warning log; fixes "operation not supported" errors on virtualized GPUs (e.g., Jetstream NVIDIA Virtual Compute Server)
+- Direct async allocations in `DifferenceStage`, `RLEStage`, and `RZEStage` replaced with regular `cudaMalloc`/`cudaFree` when pool is unavailable (avoids unsupported vGPU operations)
 - Race condition in `CompressionDAG::execute()` for multi-source pipelines: internal per-branch streams now have a GPU-side happens-before edge into the caller stream via `cudaStreamWaitEvent`
 - `DifferenceStage` inverse: replaced `cub::DeviceScan` with a custom `cumsumChunkedKernel` that uses only shared memory (no device temp allocation, sanitizer-clean)
 - `decompressFromFile` cleanup frees use `stream=0` to avoid pool-destructor race with `cudaMemPoolDestroy`

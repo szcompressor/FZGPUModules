@@ -1,21 +1,69 @@
+# Project-specific
 .notes/
-*build/
-build*/
-build-compute/
-.vscode/
 data/
-settings.json
 temp/
-*.log
-*.fzm
-*.tmp
-*.fzmodules
-docs/doxygen/
-*.nsys-rep
-load-env
-a.out
 memory/
 .claude/
 Testing/
 .github/agents/
 CLAUDE.md
+settings.json
+load-env
+
+# Build outputs
+/build/
+build-*
+build-compute
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CMakeLists.txt.user
+compile_commands.json
+
+# Compiled objects and libraries
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+*.out
+a.out
+
+# CUDA intermediates
+*.cubin
+*.ptx
+*.fatbin
+
+# Debug/profiling
+*.log
+*.gch
+*.pch
+*.dSYM/
+*.su
+*.gch
+*.gcda
+*.gcno
+*.gcov
+*.prof
+
+# Project artifacts
+*.fzm
+*.tmp
+*.fzmodules
+*.nsys-rep
+docs/doxygen/
+
+# Dependency files
+*.d
+.deps/

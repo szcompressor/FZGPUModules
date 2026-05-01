@@ -198,8 +198,8 @@ void DifferenceStage<T, TOut>::execute(
                 d_decoded = static_cast<T*>(
                     pool->allocate(n * sizeof(T), stream, "diff_nb_decode_tmp"));
             } else {
-                FZ_CUDA_CHECK(cudaMallocAsync(
-                    reinterpret_cast<void**>(&d_decoded), n * sizeof(T), stream));
+                FZ_CUDA_CHECK(cudaMalloc(
+                    reinterpret_cast<void**>(&d_decoded), n * sizeof(T)));
             }
 
             {
@@ -224,7 +224,7 @@ void DifferenceStage<T, TOut>::execute(
             if (pool) {
                 pool->free(d_decoded, stream);
             } else {
-                FZ_CUDA_CHECK_WARN(cudaFreeAsync(d_decoded, stream));
+                FZ_CUDA_CHECK_WARN(cudaFree(d_decoded));
             }
         } else {
             // No negabinary — TOut == T.
