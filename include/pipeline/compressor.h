@@ -134,6 +134,29 @@ public:
      */
     size_t getMaxCompressedSize(size_t input_bytes) const;
 
+    /**
+     * Return the uncompressed byte count from the most recent compress() call.
+     *
+     * Returns the original (pre-padding) input size so the value always matches
+     * what the caller passed in, even when the pipeline transparently padded the
+     * input for alignment. Returns 0 if compress() has never been called.
+     *
+     * Useful for pre-allocating a decompression output buffer without needing
+     * out-of-band metadata:
+     * @code
+     *   pipeline.compress(d_in, in_bytes, &d_comp, &comp_sz, stream);
+     *   size_t decomp_bytes = pipeline.getLastUncompressedSize();
+     *   // allocate d_out of size decomp_bytes, then:
+     *   pipeline.decompress(d_comp, comp_sz, d_out, decomp_bytes, &actual, stream);
+     * @endcode
+     *
+     * The value persists across reset() — reset() invalidates the compressed
+     * output pointer but the size remains meaningful for planning the next call.
+     */
+    size_t getLastUncompressedSize() const {
+        return original_input_size_ > 0 ? original_input_size_ : input_size_;
+    }
+
     // ── Execution ─────────────────────────────────────────────────────────────
 
     /**

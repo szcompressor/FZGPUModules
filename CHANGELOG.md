@@ -25,6 +25,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - `examples/presets/lorenzo_bitpack.toml` — new TOML preset for `LorenzoQuantStage → BitpackStage` pipeline
 
 **Pipeline features**
+- `Pipeline::getLastUncompressedSize()` — returns the original input byte count from the most recent `compress()` call (0 before first call); useful for sizing a decompression output buffer without out-of-band metadata; persists across `reset()`
 - Multi-source pipeline support: `InputSpec` API, `compress(std::vector<InputSpec>)`, `decompressMulti()`, `setInputSizeHint()` per source
 - `Pipeline::warmup(stream)` — forces PTX→SASS JIT compilation before timing-sensitive work
 - `Pipeline::enableBoundsCheck(bool)` — runtime toggle for buffer overwrite detection (always on in Debug builds)

@@ -32,6 +32,8 @@
  *   OW9  Zero-size compress round-trips without crash (edge case)
  *   OW11 Pool-managed decompress pool usage stays bounded across 5 calls
  *          (previous output freed before next is allocated; no monotonic growth)
+ *   OW12 getLastUncompressedSize() returns 0 before compress, then the exact
+ *          input byte count; updates across calls; persists across reset()
  */
 
 #include <gtest/gtest.h>
@@ -416,6 +418,67 @@ TEST(Ownership, ZeroSizeCompressRoundTrip) {
 }
 
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OW12: getLastUncompressedSize() returns 0 before compress, then the exact
+//       input byte count; updates across calls; persists across reset().
+//
+// Also verifies the value equals the original pre-padding size by using it
+// directly to size a caller-provided decompress output buffer.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Ownership, GetLastUncompressedSizeCorrect) {
+    constexpr size_t N1 = 2048;
+    constexpr size_t N2 = 1024;
+    constexpr float  EB = 1e-2f;
+
+    auto p = make_pipeline(N1);
+
+    // Before any compress(): must return 0.
+    EXPECT_EQ(p->getLastUncompressedSize(), 0u)
+        << "getLastUncompressedSize() must return 0 before any compress() call";
+
+    CudaStream stream;
+    CudaBuffer<float> d_in1(N1), d_in2(N2);
+    auto h_in1 = make_random_floats(N1, 100);
+    d_in1.upload(h_in1, stream);
+    d_in2.upload(make_random_floats(N2, 101), stream);
+    stream.sync();
+
+    // After first compress().
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(p->compress(d_in1.void_ptr(), N1 * sizeof(float), &d_comp, &comp_sz, stream));
+    stream.sync();
+
+    EXPECT_EQ(p->getLastUncompressedSize(), N1 * sizeof(float))
+        << "getLastUncompressedSize() must equal the input byte count after compress()";
+
+    // Verify it can actually be used to size the decompress output buffer.
+    const size_t decomp_bytes = p->getLastUncompressedSize();
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(p->decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream));
+    ASSERT_NE(d_dec, nullptr);
+    EXPECT_EQ(dec_sz, decomp_bytes)
+        << "decompress() output size must match getLastUncompressedSize()";
+
+    std::vector<float> h_recon(N1);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, decomp_bytes, cudaMemcpyDeviceToHost));
+    EXPECT_LE(max_abs_error(h_in1, h_recon), EB * 1.01f);
+    cudaFree(d_dec);
+
+    // Value persists across reset().
+    p->reset(stream);
+    EXPECT_EQ(p->getLastUncompressedSize(), N1 * sizeof(float))
+        << "getLastUncompressedSize() must persist across reset()";
+
+    // Updates after a second compress() with a different size.
+    ASSERT_NO_THROW(p->compress(d_in2.void_ptr(), N2 * sizeof(float), &d_comp, &comp_sz, stream));
+    stream.sync();
+
+    EXPECT_EQ(p->getLastUncompressedSize(), N2 * sizeof(float))
+        << "getLastUncompressedSize() must update after a second compress()";
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OW11: Pool-managed decompress pool usage stays bounded across 5 calls.
