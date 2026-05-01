@@ -48,24 +48,35 @@ MemoryPool::MemoryPool(const MemoryPoolConfig& config)
 MemoryPool::~MemoryPool() {
     if (!initialized_) return;
 
-    // Free any remaining stream-ordered allocations with cudaFreeAsync before
-    // destroying the pool.  cudaMemPoolDestroy hangs if live allocations exist.
-    // Use stream 0 and synchronize so all frees complete before the pool is torn down.
-    for (auto& [ptr, info] : allocations_) {
-        cudaFreeAsync(ptr, /*stream=*/0);
-    }
-    allocations_.clear();
-
-    for (auto& [ptr, info] : graph_allocations_) {
-        cudaFreeAsync(ptr, /*stream=*/0);
-    }
-    graph_allocations_.clear();
-
-    cudaDeviceSynchronize();  // drain stream 0 before pool destruction
-
-    // Destroy memory pool
     if (mem_pool_) {
+        // Free any remaining stream-ordered allocations with cudaFreeAsync before
+        // destroying the pool.  cudaMemPoolDestroy hangs if live allocations exist.
+        // Use stream 0 and synchronize so all frees complete before the pool is torn down.
+        for (auto& [ptr, info] : allocations_) {
+            cudaFreeAsync(ptr, /*stream=*/0);
+        }
+        allocations_.clear();
+
+        for (auto& [ptr, info] : graph_allocations_) {
+            cudaFreeAsync(ptr, /*stream=*/0);
+        }
+        graph_allocations_.clear();
+
+        cudaDeviceSynchronize();  // drain stream 0 before pool destruction
+
+        // Destroy memory pool
         cudaMemPoolDestroy(mem_pool_);
+    } else {
+        // Fallback mode: free with cudaFree
+        for (auto& [ptr, info] : allocations_) {
+            cudaFree(ptr);
+        }
+        allocations_.clear();
+
+        for (auto& [ptr, info] : graph_allocations_) {
+            cudaFree(ptr);
+        }
+        graph_allocations_.clear();
     }
 }
 
@@ -76,12 +87,15 @@ void MemoryPool::initializeMemPool() {
     pool_props.handleTypes = cudaMemHandleTypeNone;
     pool_props.location.type = cudaMemLocationTypeDevice;
     pool_props.location.id = config_.device_id;
-    
+
     // Create memory pool
     cudaError_t err = cudaMemPoolCreate(&mem_pool_, &pool_props);
     if (err != cudaSuccess) {
-        throw std::runtime_error("Failed to create CUDA memory pool: " + 
-                                std::string(cudaGetErrorString(err)));
+        // Fall back to nullptr (regular cudaMalloc mode) for vGPU or unsupported environments
+        FZ_LOG(WARN, "CUDA memory pool not available (%s), falling back to cudaMalloc",
+               cudaGetErrorString(err));
+        mem_pool_ = nullptr;
+        return;
     }
     
     // Set pool attributes for performance
@@ -127,10 +141,17 @@ void MemoryPool::initializeMemPool() {
 
 void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& tag, bool persistent) {
     if (size == 0) return nullptr;
-    
+
     void* ptr = nullptr;
-    cudaError_t err = cudaMallocFromPoolAsync(&ptr, size, mem_pool_, stream);
-    
+    cudaError_t err;
+
+    if (mem_pool_) {
+        err = cudaMallocFromPoolAsync(&ptr, size, mem_pool_, stream);
+    } else {
+        // Fallback: use regular cudaMalloc when memory pools are unavailable
+        err = cudaMalloc(&ptr, size);
+    }
+
     if (err != cudaSuccess) {
         FZ_LOG(WARN, "MemoryPool::allocate failed for size %zu bytes (tag: %s): %s",
                size, tag.c_str(), cudaGetErrorString(err));
@@ -163,27 +184,35 @@ void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& 
 
 void MemoryPool::free(void* ptr, cudaStream_t stream) {
     if (!ptr) return;
-    
+
     // Check stream allocations first
     auto it = allocations_.find(ptr);
     if (it != allocations_.end()) {
         current_allocated_bytes_ -= it->second.size;
-        FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
+        if (mem_pool_) {
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
+        } else {
+            FZ_CUDA_CHECK_WARN(cudaFree(ptr));
+        }
         allocations_.erase(it);
         total_frees_++;
         return;
     }
-    
+
     // Check graph allocations
     auto git = graph_allocations_.find(ptr);
     if (git != graph_allocations_.end()) {
         current_allocated_bytes_ -= git->second.size;
-        FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
+        if (mem_pool_) {
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
+        } else {
+            FZ_CUDA_CHECK_WARN(cudaFree(ptr));
+        }
         graph_allocations_.erase(git);
         total_frees_++;
         return;
     }
-    
+
     FZ_LOG(WARN, "MemoryPool::free - pointer not found in allocations");
 }
 
@@ -191,7 +220,11 @@ void MemoryPool::reset(cudaStream_t stream) {
     // Free all non-graph allocations
     for (auto& pair : allocations_) {
         current_allocated_bytes_ -= pair.second.size;
-        FZ_CUDA_CHECK_WARN(cudaFreeAsync(pair.first, stream));
+        if (mem_pool_) {
+            FZ_CUDA_CHECK_WARN(cudaFreeAsync(pair.first, stream));
+        } else {
+            FZ_CUDA_CHECK_WARN(cudaFree(pair.first));
+        }
         total_frees_++;
     }
     allocations_.clear();
@@ -203,9 +236,11 @@ void MemoryPool::reset(cudaStream_t stream) {
     // Reset the CUDA high-water mark so getPeakUsage() reflects only the *next* run.
     // This is a write of 0 to cudaMemPoolAttrUsedMemHigh; the driver supports it since
     // CUDA 11.2.  Non-fatal if unsupported on older runtimes.
-    uint64_t zero = 0;
-    cudaError_t err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &zero);
-    if (err != cudaSuccess) cudaGetLastError(); // clear, non-fatal
+    if (mem_pool_) {
+        uint64_t zero = 0;
+        cudaError_t err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &zero);
+        if (err != cudaSuccess) cudaGetLastError(); // clear, non-fatal
+    }
 }
 
 void MemoryPool::trim() {

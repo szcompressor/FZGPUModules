@@ -1,6 +1,6 @@
 .notes/
 *build/
-build-*/
+build*/
 build-compute/
 .vscode/
 data/
