@@ -245,11 +245,12 @@ void MemoryPool::reset(cudaStream_t stream) {
 }
 
 void MemoryPool::trim() {
-    // Trim pool - release memory back to OS
+    if (!mem_pool_) return;
     cudaMemPoolTrimTo(mem_pool_, 0);
 }
 
 void MemoryPool::setReleaseThreshold(size_t bytes) {
+    if (!mem_pool_) return;
     uint64_t threshold = static_cast<uint64_t>(bytes);
     cudaError_t err = cudaMemPoolSetAttribute(
         mem_pool_, cudaMemPoolAttrReleaseThreshold, &threshold);
@@ -274,11 +275,15 @@ void MemoryPool::printStats() const {
     uint64_t reserved_mem_current = 0, reserved_mem_high = 0;
     uint64_t used_mem_current = 0,     used_mem_high = 0;
     uint64_t release_threshold = 0;
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemCurrent, &reserved_mem_current);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemHigh,    &reserved_mem_high);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent,     &used_mem_current);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh,        &used_mem_high);
-    cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReleaseThreshold,   &release_threshold);
+    if (mem_pool_) {
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemCurrent, &reserved_mem_current);
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReservedMemHigh,    &reserved_mem_high);
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent,     &used_mem_current);
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh,        &used_mem_high);
+        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrReleaseThreshold,   &release_threshold);
+    } else {
+        used_mem_current = static_cast<uint64_t>(current_allocated_bytes_);
+    }
 
     FZ_PRINT("========== Memory Pool Statistics ==========");
     FZ_PRINT("Device ID: %d", config_.device_id);

@@ -110,6 +110,7 @@ public:
 
     /** Current live bytes (queries `cudaMemPoolAttrUsedMemCurrent`). */
     size_t getCurrentUsage() const {
+        if (!mem_pool_) return current_allocated_bytes_;
         uint64_t used = 0;
         cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent, &used);
         return static_cast<size_t>(used);
@@ -117,6 +118,7 @@ public:
 
     /** Peak live bytes since last reset (queries `cudaMemPoolAttrUsedMemHigh`). */
     size_t getPeakUsage() const {
+        if (!mem_pool_) return current_allocated_bytes_;
         uint64_t high = 0;
         cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &high);
         return static_cast<size_t>(high);
