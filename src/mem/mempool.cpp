@@ -95,6 +95,7 @@ void MemoryPool::initializeMemPool() {
         FZ_LOG(WARN, "CUDA memory pool not available (%s), falling back to cudaMalloc",
                cudaGetErrorString(err));
         mem_pool_ = nullptr;
+        cudaGetLastError(); // clear the sticky error so callers' cudaGetLastError() checks are clean
         return;
     }
     
