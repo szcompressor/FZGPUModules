@@ -193,6 +193,9 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
         if (mem_pool_) {
             FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         } else {
+            // Fallback mode: cudaFree is synchronous, so sync the stream first
+            // to ensure kernels are done using this pointer
+            FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(ptr));
         }
         allocations_.erase(it);
@@ -207,6 +210,8 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
         if (mem_pool_) {
             FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         } else {
+            // Fallback mode: sync stream before cudaFree
+            FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(ptr));
         }
         graph_allocations_.erase(git);
@@ -218,6 +223,11 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
 }
 
 void MemoryPool::reset(cudaStream_t stream) {
+    // In fallback mode, sync stream once before freeing all allocations
+    if (!mem_pool_) {
+        FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
+    }
+
     // Free all non-graph allocations
     for (auto& pair : allocations_) {
         current_allocated_bytes_ -= pair.second.size;
