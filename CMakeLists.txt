@@ -164,6 +164,8 @@ target_compile_options(
   fzgmod_compile_settings
   INTERFACE
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-lineinfo>
+    # Suppress toml++ warnings about side-effects in __builtin_assume (third-party library)
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wno-assume-expression-discarded>
 )
 
 target_compile_features(fzgmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
