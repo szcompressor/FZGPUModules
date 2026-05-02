@@ -709,24 +709,31 @@ void RZEStage::execute(
     // synchronous but rare; for steady-state repeated calls the branches are
     // not taken and the GPU pipeline is fully asynchronous.
     if (n_chunks > scratch_capacity_) {
+        // Helper: free with stream sync for fallback mode
+        auto fwd_free = [&](void* p) {
+            if (!p) return;
+            if (scratch_from_pool_ && scratch_pool_owner_)
+                scratch_pool_owner_->free(p, stream);
+            else {
+                FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
+                cudaFree(p);
+            }
+        };
+
         if (d_scratch_) {
-            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_scratch_, stream);
-            else cudaFree(d_scratch_);
+            fwd_free(d_scratch_);
             d_scratch_ = nullptr;
         }
         if (d_sizes_dev_) {
-            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_sizes_dev_, stream);
-            else cudaFree(d_sizes_dev_);
+            fwd_free(d_sizes_dev_);
             d_sizes_dev_ = nullptr;
         }
         if (d_clean_dev_) {
-            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_clean_dev_, stream);
-            else cudaFree(d_clean_dev_);
+            fwd_free(d_clean_dev_);
             d_clean_dev_ = nullptr;
         }
         if (d_dst_off_dev_) {
-            if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(d_dst_off_dev_, stream);
-            else cudaFree(d_dst_off_dev_);
+            fwd_free(d_dst_off_dev_);
             d_dst_off_dev_ = nullptr;
         }
 
@@ -811,8 +818,10 @@ void RZEStage::execute(
                                           static_cast<int>(n_chunks), stream);
             if (pool && d_scan_tmp)
                 pool->free(d_scan_tmp, stream);
-            else if (d_scan_tmp)
+            else if (d_scan_tmp) {
+                FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
                 FZ_CUDA_CHECK_WARN(cudaFree(d_scan_tmp));
+            }
         }
 
         // ── (5) Convert payload-relative offsets to absolute output offsets.
@@ -892,24 +901,31 @@ void RZEStage::execute(
 
         // ── Grow inverse decode-table scratch if needed ───────────────────
         if (num_chunks > inv_capacity_) {
+            // Helper: free with stream sync for fallback mode
+            auto inv_free = [&](void* p) {
+                if (!p) return;
+                if (inv_from_pool_ && inv_pool_owner_)
+                    inv_pool_owner_->free(p, stream);
+                else {
+                    FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
+                    cudaFree(p);
+                }
+            };
+
             if (d_inv_in_off_) {
-                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_in_off_, stream);
-                else cudaFree(d_inv_in_off_);
+                inv_free(d_inv_in_off_);
                 d_inv_in_off_ = nullptr;
             }
             if (d_inv_comp_sz_) {
-                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_comp_sz_, stream);
-                else cudaFree(d_inv_comp_sz_);
+                inv_free(d_inv_comp_sz_);
                 d_inv_comp_sz_ = nullptr;
             }
             if (d_inv_out_off_) {
-                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_out_off_, stream);
-                else cudaFree(d_inv_out_off_);
+                inv_free(d_inv_out_off_);
                 d_inv_out_off_ = nullptr;
             }
             if (d_inv_orig_sz_) {
-                if (inv_from_pool_ && inv_pool_owner_) inv_pool_owner_->free(d_inv_orig_sz_, stream);
-                else cudaFree(d_inv_orig_sz_);
+                inv_free(d_inv_orig_sz_);
                 d_inv_orig_sz_ = nullptr;
             }
 

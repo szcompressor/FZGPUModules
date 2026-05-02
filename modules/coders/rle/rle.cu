@@ -251,6 +251,7 @@ void RLEStage<T>::execute(
             pool->free(d_run_offsets, stream);
             pool->free(d_temp, stream);
         } else {
+            FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(d_run_offsets));
             FZ_CUDA_CHECK_WARN(cudaFree(d_temp));
         }
@@ -279,7 +280,10 @@ void RLEStage<T>::execute(
             auto dev_free = [&](void* p) {
                 if (!p) return;
                 if (fwd_from_pool_ && fwd_scratch_pool_) fwd_scratch_pool_->free(p, 0);
-                else cudaFree(p);
+                else {
+                    FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
+                    cudaFree(p);
+                }
             };
             dev_free(d_is_boundary_);      d_is_boundary_       = nullptr;
             dev_free(d_boundary_scan_);    d_boundary_scan_     = nullptr;
@@ -342,7 +346,10 @@ void RLEStage<T>::execute(
                                           d_is_boundary_, d_boundary_scan_,
                                           static_cast<int>(n), stream);
             if (pool && d_tmp) pool->free(d_tmp, stream);
-            else if (d_tmp)    FZ_CUDA_CHECK_WARN(cudaFree(d_tmp));
+            else if (d_tmp) {
+                FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
+                FZ_CUDA_CHECK_WARN(cudaFree(d_tmp));
+            }
         }
 
         // d_num_runs_ptr points into d_boundary_scan_ — no D2H needed

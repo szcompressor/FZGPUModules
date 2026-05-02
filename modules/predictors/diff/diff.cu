@@ -224,6 +224,7 @@ void DifferenceStage<T, TOut>::execute(
             if (pool) {
                 pool->free(d_decoded, stream);
             } else {
+                FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
                 FZ_CUDA_CHECK_WARN(cudaFree(d_decoded));
             }
         } else {
