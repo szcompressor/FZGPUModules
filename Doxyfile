@@ -15,7 +15,8 @@ OUTPUT_DIRECTORY       = docs/doxygen
 #---------------------------------------------------------------------------
 INPUT                  = include/ \
                          modules/ \
-                         docs/mainpage.md
+                         docs/mainpage.md \
+                         docs/stages/
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md

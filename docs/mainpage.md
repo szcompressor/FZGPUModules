@@ -112,7 +112,12 @@ pipeline.warmup(stream);         // JIT-compiles all kernels once
 
 ---
 
-## Available Stages
+## Available Stages {#mainpage_stages}
+
+For detailed per-stage documentation — constraints, behavioral rules, and extended
+usage notes — see the \ref stages_overview "Stage Reference".
+
+
 
 | Stage | Header | Description |
 |---|---|---|
