@@ -34,6 +34,17 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Show CUDA + driver info
+        shell: bash
+        run: |
+          echo "=== PATH ==="
+          echo "$PATH"
+          echo "=== nvcc ==="
+          which nvcc || true
+          nvcc --version || true
+          echo "=== nvidia-smi ==="
+          nvidia-smi || true
+
       - name: Configure (Release)
         run: |
           cmake -S . -B build/ci \
@@ -45,6 +56,11 @@ jobs:
 
       - name: Build
         run: cmake --build build/ci --parallel
+
+      - name: Show linked CUDA runtime
+        shell: bash
+        run: |
+          ldd build/tests/test_cli | grep -E 'cudart|cuda' || true
 
       - name: Run tests
         working-directory: build/ci
