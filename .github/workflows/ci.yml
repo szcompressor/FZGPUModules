@@ -34,6 +34,18 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Load CUDA module (no Spack)
+        shell: bash
+        run: |
+          export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/spack/' | paste -sd:)
+          source /etc/profile.d/lmod.sh
+          module purge
+          module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          echo "PATH=$PATH"
+          which nvcc
+          nvcc --version
+          nvidia-smi
+
       - name: Show CUDA + driver info
         shell: bash
         run: |
@@ -47,6 +59,9 @@ jobs:
 
       - name: Configure (Release)
         run: |
+          source /etc/profile.d/lmod.sh
+          module purge
+          module load nvhpc/23.11/nvhpc-hpcx-cuda12
           cmake -S . -B build/ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
@@ -60,7 +75,7 @@ jobs:
       - name: Show linked CUDA runtime
         shell: bash
         run: |
-          ldd build/tests/test_cli | grep -E 'cudart|cuda' || true
+          ldd build/ci/tests/test_cli | grep -E 'cudart|cuda' || true
 
       - name: Run tests
         working-directory: build/ci
