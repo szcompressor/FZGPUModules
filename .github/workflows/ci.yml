@@ -38,11 +38,22 @@ jobs:
         shell: bash
         run: |
           export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '/spack/' | paste -sd:)
-          source /etc/profile.d/lmod.sh
-          module purge
-          module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          if [[ -f /etc/profile.d/lmod.sh ]]; then
+            source /etc/profile.d/lmod.sh
+          else
+            echo "lmod not found; skipping module setup"
+          fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          else
+            echo "module command not available; using existing CUDA on PATH"
+          fi
           echo "PATH=$PATH"
-          which nvcc
+          if ! command -v nvcc >/dev/null 2>&1; then
+            echo "nvcc not found on PATH"
+            exit 1
+          fi
           nvcc --version
           nvidia-smi
 
@@ -59,9 +70,13 @@ jobs:
 
       - name: Configure (Release)
         run: |
-          source /etc/profile.d/lmod.sh
-          module purge
-          module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          if [[ -f /etc/profile.d/lmod.sh ]]; then
+            source /etc/profile.d/lmod.sh
+          fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          fi
           cmake -S . -B build/ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
