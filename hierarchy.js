@@ -1,0 +1,35 @@
+var hierarchy =
+[
+    [ "fz::AllocationInfo", "structfz_1_1AllocationInfo.html", null ],
+    [ "fz::BufferInfo", "structfz_1_1BufferInfo.html", null ],
+    [ "fz::CompressionDAG", "classfz_1_1CompressionDAG.html", null ],
+    [ "fz::LorenzoQuantStage< TInput, TCode >::Config", "structfz_1_1LorenzoQuantStage_1_1Config.html", null ],
+    [ "fz::QuantizerStage< TInput, TCode >::Config", "structfz_1_1QuantizerStage_1_1Config.html", null ],
+    [ "fz::DAGNode", "structfz_1_1DAGNode.html", null ],
+    [ "fz::FZMBufferEntry", "structfz_1_1FZMBufferEntry.html", null ],
+    [ "fz::Pipeline::FZMFileHeader", "structfz_1_1Pipeline_1_1FZMFileHeader.html", null ],
+    [ "fz::FZMHeaderCore", "structfz_1_1FZMHeaderCore.html", null ],
+    [ "fz::FZMStageInfo", "structfz_1_1FZMStageInfo.html", null ],
+    [ "fz::LevelTimingResult", "structfz_1_1LevelTimingResult.html", null ],
+    [ "fz::LorenzoConfig", "structfz_1_1LorenzoConfig.html", null ],
+    [ "fz::LorenzoQuantConfig", "structfz_1_1LorenzoQuantConfig.html", null ],
+    [ "fz::MemoryPool", "classfz_1_1MemoryPool.html", null ],
+    [ "fz::MemoryPoolConfig", "structfz_1_1MemoryPoolConfig.html", null ],
+    [ "fz::Pipeline", "classfz_1_1Pipeline.html", null ],
+    [ "fz::PipelinePerfResult", "structfz_1_1PipelinePerfResult.html", null ],
+    [ "fz::QuantizerConfig", "structfz_1_1QuantizerConfig.html", null ],
+    [ "fz::ReconstructionStats", "structfz_1_1ReconstructionStats.html", null ],
+    [ "fz::Stage", "classfz_1_1Stage.html", [
+      [ "fz::BitpackStage< T >", "classfz_1_1BitpackStage.html", null ],
+      [ "fz::BitshuffleStage", "classfz_1_1BitshuffleStage.html", null ],
+      [ "fz::DifferenceStage< T, TOut >", "classfz_1_1DifferenceStage.html", null ],
+      [ "fz::LorenzoQuantStage< TInput, TCode >", "classfz_1_1LorenzoQuantStage.html", null ],
+      [ "fz::LorenzoStage< T >", "classfz_1_1LorenzoStage.html", null ],
+      [ "fz::NegabinaryStage< TIn, TOut >", "classfz_1_1NegabinaryStage.html", null ],
+      [ "fz::QuantizerStage< TInput, TCode >", "classfz_1_1QuantizerStage.html", null ],
+      [ "fz::RLEStage< T >", "classfz_1_1RLEStage.html", null ],
+      [ "fz::RZEStage", "classfz_1_1RZEStage.html", null ],
+      [ "fz::ZigzagStage< TIn, TOut >", "classfz_1_1ZigzagStage.html", null ]
+    ] ],
+    [ "fz::StageTimingResult", "structfz_1_1StageTimingResult.html", null ]
+];
