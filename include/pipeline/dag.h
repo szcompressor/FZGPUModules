@@ -93,7 +93,7 @@ public:
     // ── Construction ──────────────────────────────────────────────────────────
 
     /** Add a stage and return its node for wiring dependencies. */
-    DAGNode* addStage(Stage* stage, const std::string& name = "");
+    DAGNode* addStage(Stage* stage, std::string name = "");
 
     /**
      * Add a dependency between two nodes, creating an intermediate buffer.

@@ -117,13 +117,28 @@ jobs:
           submodules: recursive
 
       - name: Configure (ASan preset)
-        run: cmake --preset asan
+        run: |
+          if [[ -f /etc/profile.d/lmod.sh ]]; then
+            source /etc/profile.d/lmod.sh
+          fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          fi
+          cmake --preset asan
 
       - name: Build
         run: cmake --build --preset asan --parallel
 
       - name: Run tests (ASan)
         run: |
+          if [[ -f /etc/profile.d/lmod.sh ]]; then
+            source /etc/profile.d/lmod.sh
+          fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          fi
           # ASan is baked into the shared libraries. The dynamic linker does not
           # guarantee it initializes before main(), so we must preload it first.
           # Without this, every test fails with:

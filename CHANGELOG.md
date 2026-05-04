@@ -84,6 +84,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - `LorenzoStage` (the old fused predictor+quantizer) removed and replaced by `LorenzoQuantStage`; `LorenzoStage` now refers exclusively to the plain integer delta predictor
 
 ### Fixed
+- ASan: avoid a use-after-free in `CompressionDAG::addStage` by taking the stage name by value
 - CI: make CUDA module loading optional when lmod/module are unavailable so non-Jetstream runners do not fail early
 - vGPU compatibility: added fallback from `cudaMallocAsync`/`cudaFreeAsync` to `cudaMalloc`/`cudaFree` when memory pools are unavailable; `MemoryPool` gracefully degrades to regular malloc mode with warning log; fixes "operation not supported" errors on virtualized GPUs (e.g., Jetstream NVIDIA Virtual Compute Server)
 - vGPU stream synchronization: fallback code paths in `MemoryPool`, `DifferenceStage`, `RLEStage`, and `RZEStage` now synchronize streams before calling `cudaFree()` to prevent use-after-free race conditions when kernels are still using freed memory

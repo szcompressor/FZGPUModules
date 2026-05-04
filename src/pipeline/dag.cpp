@@ -76,7 +76,7 @@ CompressionDAG::~CompressionDAG() {
     }
 }
 
-DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
+DAGNode* CompressionDAG::addStage(Stage* stage, std::string name) {
     if (is_finalized_) {
         throw std::runtime_error("Cannot modify DAG after finalization");
     }
@@ -90,7 +90,11 @@ DAGNode* CompressionDAG::addStage(Stage* stage, const std::string& name) {
     
     auto* node = new DAGNode(stage);
     node->id = static_cast<int>(nodes_.size());
-    node->name = name.empty() ? "stage_" + std::to_string(node->id) : name;
+    if (name.empty()) {
+        node->name = "stage_" + std::to_string(node->id);
+    } else {
+        node->name = std::move(name);
+    }
     
     cudaError_t err = cudaEventCreate(&node->completion_event);
     if (err != cudaSuccess) {
