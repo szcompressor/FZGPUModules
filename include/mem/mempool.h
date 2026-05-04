@@ -33,15 +33,19 @@ struct MemoryPoolConfig {
     int    device_id;            ///< CUDA device index.
     bool   enable_reuse;         ///< Enable opportunistic buffer reuse.
 
+    bool force_fallback;          ///< Skip pool creation and use cudaMalloc; for vGPU or testing.
+
     MemoryPoolConfig(
-        size_t input_size = 0,
-        float  multiplier = 3.0f,
-        int    device     = 0,
-        bool   reuse      = true)
+        size_t input_size    = 0,
+        float  multiplier    = 3.0f,
+        int    device        = 0,
+        bool   reuse         = true,
+        bool   force_fallback = false)
         : input_data_size(input_size),
           pool_size_multiplier(multiplier),
           device_id(device),
-          enable_reuse(reuse) {}
+          enable_reuse(reuse),
+          force_fallback(force_fallback) {}
 
     /** Returns `input_data_size × multiplier`, or 1 GiB if input_data_size is zero. */
     size_t getPoolSize() const {
@@ -137,6 +141,9 @@ public:
 
     /** Raw `cudaMemPool_t` handle for advanced usage. */
     cudaMemPool_t getMemPool() const { return mem_pool_; }
+
+    /** Returns true if operating in cudaMalloc fallback mode (pool creation failed or was forced). */
+    bool isFallbackMode() const { return mem_pool_ == nullptr; }
 
     int getDeviceId() const { return config_.device_id; }
 

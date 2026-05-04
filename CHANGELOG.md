@@ -39,6 +39,10 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - Logging system: `FZ_LOG(LEVEL, ...)` with compile-time gating; `FZ_LOG_MIN_LEVEL` CMake option (0=TRACE … 255=SILENT); `Logger::setLogCallback()` for custom sinks
 
 **Memory & DAG**
+- `MemoryPool` cudaMalloc fallback: when `cudaMemPoolCreate()` fails (e.g. vGPU), the pool transparently falls back to `cudaMalloc`/`cudaFree` with stream synchronization; same for `MemoryPoolConfig::force_fallback` or the `FZ_FORCE_MEMPOOL_FALLBACK` env var — allows running the full test suite in fallback mode on any GPU
+- `Pipeline::isMemPoolFallbackMode()` — query whether the internal pool is running in fallback mode
+- `MemoryPool::isFallbackMode()` — low-level query on the pool handle directly
+- `test_mempool_fallback.cpp` — 11 tests covering `isMemPoolFallbackMode()` detection, MINIMAL/PREALLOCATE round-trips, Lorenzo→RLE, Lorenzo→Bitshuffle→RZE (exercises stage-level scratch), usage tracking, no-leak across 5 compress+reset cycles, RLE scratch reuse, and file IO; all in forced fallback mode
 - Buffer coloring: non-overlapping buffers in PREALLOCATE mode are aliased to reduce peak GPU memory
 - Pinned concat header buffer: reduces H2D API calls from `1+N` to 1 per `compress()` call
 - Custom gather kernel (`launch_gather_kernel`) for D2D segment copies: replaces N individual `cudaMemcpyAsync` calls with a single kernel dispatch

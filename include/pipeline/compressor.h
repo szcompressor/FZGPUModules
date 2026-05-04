@@ -286,6 +286,17 @@ public:
     size_t getPoolThreshold() const;
 
     /**
+     * Returns true if the internal memory pool is running in cudaMalloc fallback mode.
+     *
+     * Fallback mode is active when pool creation failed at construction time (e.g. vGPU
+     * environments), when `FZ_FORCE_MEMPOOL_FALLBACK` is set in the environment, or when
+     * `MemoryPoolConfig::force_fallback` was passed to the Pipeline constructor.
+     * In fallback mode all allocations use `cudaMalloc`/`cudaFree` with explicit stream
+     * synchronization rather than stream-ordered pool allocations.
+     */
+    bool isMemPoolFallbackMode() const;
+
+    /**
      * Enable runtime buffer-overwrite detection.
      * After each stage executes, checks that actual output size ≤ allocated capacity.
      * Always active in debug builds regardless of this flag.

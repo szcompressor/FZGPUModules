@@ -585,6 +585,10 @@ size_t Pipeline::getPoolThreshold() const {
     return mem_pool_ ? mem_pool_->getConfiguredSize() : 0;
 }
 
+bool Pipeline::isMemPoolFallbackMode() const {
+    return mem_pool_ && mem_pool_->isFallbackMode();
+}
+
 size_t Pipeline::getCurrentMemoryUsage() const {
     return dag_ ? dag_->getCurrentMemoryUsage() : 0;
 }

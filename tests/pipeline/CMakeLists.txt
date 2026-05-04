@@ -96,6 +96,14 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── MemoryPool cudaMalloc fallback (vGPU / forced via env var) ──────────────
+fz_add_test(
+    NAME    test_mempool_fallback
+    SOURCES test_mempool_fallback.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
 # ─── Profiling API (enableProfiling, getLastPerfResult, printDAG) ─────────────
 fz_add_test(
     NAME    test_profiling

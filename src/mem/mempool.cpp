@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <stdexcept>
@@ -81,6 +82,17 @@ MemoryPool::~MemoryPool() {
 }
 
 void MemoryPool::initializeMemPool() {
+    // Honor explicit force_fallback flag or the FZ_FORCE_MEMPOOL_FALLBACK env var.
+    // Both are escape hatches for vGPU systems where cudaMemPoolCreate() either fails
+    // or succeeds but produces broken behavior, and for testing the fallback path on
+    // normal hardware without needing a vGPU.
+    if (config_.force_fallback || std::getenv("FZ_FORCE_MEMPOOL_FALLBACK") != nullptr) {
+        FZ_LOG(WARN, "MemoryPool: using cudaMalloc fallback mode (forced via %s)",
+               config_.force_fallback ? "MemoryPoolConfig::force_fallback"
+                                      : "FZ_FORCE_MEMPOOL_FALLBACK env var");
+        return;  // mem_pool_ stays nullptr
+    }
+
     // Get default mempool for device
     cudaMemPoolProps pool_props = {};
     pool_props.allocType = cudaMemAllocationTypePinned;
