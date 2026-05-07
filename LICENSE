@@ -2,7 +2,7 @@ Copyright (c) 2026, UChicago Argonne, LLC, and Indiana University
 
 All Rights Reserved
 
-Software Name: FZGPUModules: A GPU-accelerated Module Library for Graph Based Compressor Composition
+Software Name: FZGPUModules: GPU-accelerated graph composable compression pipeline builder for analytical workflows.
 
 OPEN SOURCE LICENSE
 

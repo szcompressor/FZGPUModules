@@ -1,0 +1,18 @@
+# Build artifacts
+build/
+
+# Git history 
+.git/
+
+# Test dependency
+third_party/googletest/
+
+# Documentation and working docs
+docs/
+memory/
+
+# Scripts not needed for build
+scripts/
+
+# Misc
+*.md

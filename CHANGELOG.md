@@ -15,6 +15,11 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+**Docker**
+- Added Dockerfile with FZGPUModules pre-built and installed to `/usr/local` (headers, libs, CMake package config); supports local dev, CI/CD, and distribution from a single image
+- Added `.dockerignore` to exclude build artifacts, git history, and test dependencies from the build context
+- Added `docs/docker.md` covering image build, pre-installed library usage (`find_package` + `nvcc`), local source development, CI/CD patterns, and troubleshooting
+
 **Documentation**
 - Added `docs/stages/` — per-stage Doxygen pages covering constraints, behavioral rules, mode details, and usage examples for all eight stages (`LorenzoQuantStage`, `LorenzoStage`, `QuantizerStage`, `DifferenceStage`, `BitshuffleStage`, `RZEStage`, `RLEStage`, `BitpackStage`)
 - Updated `Doxyfile` to include `docs/stages/` in `INPUT`; added `\ref stages_overview` link from the mainpage

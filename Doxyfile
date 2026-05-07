@@ -16,35 +16,31 @@ OUTPUT_DIRECTORY       = docs/doxygen
 INPUT                  = include/ \
                          modules/ \
                          docs/mainpage.md \
-                         docs/cli.md \
                          docs/building.md \
+                         docs/stages/ \
                          docs/config_file.md \
-                         docs/fzm_format.md \
-                         docs/architecture.md \
+                         docs/cli.md \
                          docs/api_reference.md \
+                         docs/architecture.md \
                          docs/how_to_add_a_stage.md \
-                         docs/stages/
+                         docs/fzm_format.md \
+                         docs/docker.md
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
 
-# Strip the repo root from displayed paths so paths look like include/pipeline/dag.h
 STRIP_FROM_PATH        = .
 
 #---------------------------------------------------------------------------
 # What to extract
 #---------------------------------------------------------------------------
-# Only show symbols that have a /** */ doc block.
-# This keeps the output clean — undocumented internals stay hidden.
+# Only show symbols that have a /** */ doc block
 EXTRACT_ALL            = NO
 EXTRACT_PRIVATE        = NO
 EXTRACT_STATIC         = NO
 EXTRACT_ANON_NSPACES   = NO
 HIDE_UNDOC_MEMBERS     = YES
 HIDE_UNDOC_CLASSES     = YES
-
-# Show @internal-marked items in output (they're in public headers;
-# developers may still want to read them). Set to YES to hide them.
 INTERNAL_DOCS          = YES
 
 #---------------------------------------------------------------------------
@@ -57,14 +53,14 @@ GENERATE_XML           = NO
 
 HTML_OUTPUT            = html
 HTML_DYNAMIC_SECTIONS  = YES
-GENERATE_TREEVIEW      = YES      # Left-hand navigation panel
+GENERATE_TREEVIEW      = YES
 DISABLE_INDEX          = NO
 FULL_SIDEBAR           = NO
 
 #---------------------------------------------------------------------------
 # Source browsing
 #---------------------------------------------------------------------------
-SOURCE_BROWSER         = NO       # Don't embed raw source — keep docs focused
+SOURCE_BROWSER         = NO
 INLINE_SOURCES         = NO
 REFERENCED_BY_RELATION = NO
 REFERENCES_RELATION    = NO
@@ -74,21 +70,20 @@ REFERENCES_RELATION    = NO
 #---------------------------------------------------------------------------
 HAVE_DOT               = YES
 DOT_NUM_THREADS        = 4
-CLASS_GRAPH            = YES      # Inheritance diagrams
-COLLABORATION_GRAPH    = NO       # Too noisy for this codebase
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = NO
 INCLUDE_GRAPH          = NO
 INCLUDED_BY_GRAPH      = NO
 CALL_GRAPH             = NO
 CALLER_GRAPH           = NO
-DOT_IMAGE_FORMAT       = svg      # SVG scales cleanly on retina displays
+DOT_IMAGE_FORMAT       = svg
 INTERACTIVE_SVG        = YES
 MAX_DOT_GRAPH_DEPTH    = 3
 
 #---------------------------------------------------------------------------
 # Preprocessing
 #---------------------------------------------------------------------------
-# Doxygen doesn't understand CUDA, so suppress CUDA-specific keywords
-# so they don't appear in the rendered output.
+# Doxygen doesn't understand CUDA
 ENABLE_PREPROCESSING   = YES
 MACRO_EXPANSION        = YES
 EXPAND_ONLY_PREDEF     = YES
@@ -104,17 +99,17 @@ PREDEFINED             = __host__= \
 #---------------------------------------------------------------------------
 QUIET                  = NO
 WARNINGS               = YES
-WARN_IF_UNDOCUMENTED   = NO       # Don't warn for intentionally undocumented items
+WARN_IF_UNDOCUMENTED   = NO
 WARN_IF_DOC_ERROR      = YES
 WARN_NO_PARAMDOC       = NO
 
 #---------------------------------------------------------------------------
 # Miscellaneous
 #---------------------------------------------------------------------------
-SORT_MEMBER_DOCS       = NO       # Keep declaration order — it's intentional
+SORT_MEMBER_DOCS       = NO 
 SORT_BRIEF_DOCS        = NO
-ALPHABETICAL_INDEX     = YES
+ALPHABETICAL_INDEX     = NO
 SHOW_USED_FILES        = NO
 SHOW_FILES             = YES
-SHOW_NAMESPACES        = YES
+SHOW_NAMESPACES        = NO
 TYPEDEF_HIDES_STRUCT   = NO
