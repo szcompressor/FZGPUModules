@@ -22,6 +22,8 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+COPY data/ /data/
+
 # Pre-build and install FZGPUModules to /usr/local.
 # After this step: headers at /usr/local/include/fzgmod/, libraries at /usr/local/lib/,
 # and CMake package config at /usr/local/lib/cmake/FZGPUModules/ (find_package ready).

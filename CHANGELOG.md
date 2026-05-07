@@ -15,6 +15,10 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+**CI**
+- Added `docker-publish.yml` — builds and pushes the FZGPUModules image to GHCR (`ghcr.io/szcompressor/fzgpumodules`) on every push to main
+- Updated `build-check.yml` to use the GHCR image instead of the upstream NVIDIA base, removing the inline `apt-get install` step
+
 **Docker**
 - Added Dockerfile with FZGPUModules pre-built and installed to `/usr/local` (headers, libs, CMake package config); supports local dev, CI/CD, and distribution from a single image
 - Added `.dockerignore` to exclude build artifacts, git history, and test dependencies from the build context

@@ -19,18 +19,15 @@ jobs:
   compile-only:
     name: Compile (CPU-only)
     runs-on: ubuntu-24.04
-    container: nvcr.io/nvidia/cuda:12.6.0-devel-ubuntu24.04
+    # Uses the published FZGPUModules image (cmake, ninja, git already installed).
+    # The package must be set to Public in GitHub: Packages → fzgpumodules → Package settings.
+    container: ghcr.io/szcompressor/fzgpumodules:latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Install CMake
-        run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends cmake ninja-build git
 
       - name: Configure
         run: |
