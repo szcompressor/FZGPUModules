@@ -23,12 +23,43 @@ to separate `outlier_errors` and `outlier_indices` buffers.
 
 ## Template parameters
 
-| Parameter | Constraint | Typical value |
-|---|---|---|
-| `TInput` | `float` or `double` | `float` |
-| `TCode` | `uint8_t`, `uint16_t`, `uint32_t` | `uint16_t` |
+| Parameter | Constraint |
+|---|---|
+| `TInput` | `float` or `double` |
+| `TCode` | Unsigned integer (see available instantiations below) |
 
-Common instantiation: `LorenzoQuantStage<float, uint16_t>`.
+## Available instantiations
+
+Only these combinations are compiled and linked:
+- `LorenzoQuantStage<float, uint8_t>`
+- `LorenzoQuantStage<float, uint16_t>`
+- `LorenzoQuantStage<double, uint16_t>`
+- `LorenzoQuantStage<double, uint32_t>`
+
+Using any other combination will result in a linker error. Most common: `LorenzoQuantStage<float, uint16_t>` (cuSZ-style pipelines).
+
+---
+
+## Stage settings
+
+| Setting | Purpose | Notes |
+|---|---|---|
+| `setErrorBound(eb)` | User error bound | Interpreted by `setErrorBoundMode()` |
+| `setErrorBoundMode(mode)` | ABS / NOA / REL | REL is a global approximation (see below) |
+| `setQuantRadius(r)` | Quantization radius | Must fit in `TCode` range |
+| `setOutlierCapacity(f)` | Outlier reserve fraction | 0.0-1.0x of element count |
+| `setZigzagCodes(enable)` | Zigzag-encode codes | Can improve compressibility |
+| `setValueBase(v)` | Precomputed scale | NOA: `(max - min)`, REL: `abs(max)`; optional |
+
+```cpp
+lorenzo->setErrorBound(1e-4f);
+lorenzo->setErrorBoundMode(ErrorBoundMode::ABS);
+lorenzo->setQuantRadius(32768);          // must fit in TCode range
+lorenzo->setOutlierCapacity(0.10f);      // fraction of N reserved for outliers
+lorenzo->setZigzagCodes(true);           // zigzag-encode codes for better compressibility
+lorenzo->setValueBase(vmax - vmin);      // NOA: skip internal data scan
+lorenzo->setValueBase(max_abs);          // REL: skip internal data scan
+```
 
 ---
 
@@ -53,26 +84,13 @@ p.connect(next_stage, lorenzo, "codes");
 
 | Mode | Interpretation | Note |
 |---|---|---|
-| `ABS` | `\|error\| <= eb` | Default |
-| `NOA` | `abs_eb = eb × (max - min)` | Scans data once; use `setValueBase()` to skip |
-| `REL` | `abs_eb = eb × max(\|data\|)` | Global approximation — not exact per-element |
+| `ABS` | `abs(error) <= eb` | Default |
+| `NOA` | `abs_eb = eb × (max - min)` | Uses value range; can be precomputed via `setValueBase()` |
+| `REL` | `abs_eb = eb × max(abs(data))` | Global approximation (not exact per-element) |
 
-For exact pointwise relative bounds, use `QuantizerStage` with `ErrorBoundMode::REL`
-instead.
-
----
-
-## Key setters
-
-```cpp
-lorenzo->setErrorBound(1e-4f);
-lorenzo->setErrorBoundMode(ErrorBoundMode::ABS);
-lorenzo->setQuantRadius(32768);          // must fit in TCode range
-lorenzo->setOutlierCapacity(0.10f);      // fraction of N reserved for outliers
-lorenzo->setZigzagCodes(true);           // zigzag-encode codes for better compressibility
-lorenzo->setValueBase(vmax - vmin);      // NOA: skip internal data scan
-lorenzo->setValueBase(max_abs);          // REL: skip internal data scan
-```
+REL is supported, but because it uses a single global scale (`max(abs(x))`), small
+values can exceed the per-element relative bound. For exact pointwise REL bounds,
+use `QuantizerStage` with `ErrorBoundMode::REL`.
 
 ---
 
@@ -98,12 +116,16 @@ p.setDims(nx, ny);      // too late; addStage already ran
 
 ---
 
-## CUDA Graph capture and NOA/REL modes
+## Value base and CUDA Graph capture
 
-NOA and REL modes perform an internal `cudaStreamSynchronize` + D2H copy to
-determine the value range.  This is illegal during graph capture.
+NOA and REL modes need a data-dependent scale:
 
-**Fix:** call `setValueBase()` with a host-computed value before `captureGraph()`.
+- NOA: `value_base = max - min`
+- REL: `value_base = max(|x|)`
+
+If `setValueBase()` is not called, the stage scans the data to compute the
+value base internally. For CUDA Graph capture, you must provide the value base
+up front to avoid a device sync and D2H read.
 
 ```cpp
 // NOA

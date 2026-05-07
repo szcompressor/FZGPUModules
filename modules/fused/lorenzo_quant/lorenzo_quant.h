@@ -1,3 +1,7 @@
+/**
+ * @file modules/fused/lorenzo_quant/lorenzo_quant.h
+ * @brief Fused Lorenzo predictor and quantizer stage.
+ */
 #pragma once
 
 #include "stage/stage.h"

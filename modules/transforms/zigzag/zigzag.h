@@ -1,9 +1,10 @@
 #pragma once
 
 /**
- * modules/transforms/zigzag/zigzag.h
+ * @file modules/transforms/zigzag/zigzag.h
+ * @brief Zigzag (two's complement to magnitude-sign) encoding helpers.
  *
- * Zigzag (TCMS — Two's Complement to Magnitude-Sign) encoding.
+ * Zigzag (TCMS - Two's Complement to Magnitude-Sign) encoding.
  *
  * Maps signed integers to unsigned integers so that small-magnitude values
  * (both positive and negative) map to small non-negative integers:

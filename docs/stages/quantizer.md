@@ -18,10 +18,46 @@ Three error-bound modes are supported: ABS, NOA, and REL.
 
 ## Template parameters
 
-| Parameter | Constraint | Typical value |
+| Parameter | Constraint |
+|---|---|
+| `TInput` | `float` or `double` |
+| `TCode` | Unsigned integer (see available instantiations below) |
+
+## Available instantiations
+
+Only these combinations are compiled and linked:
+- `QuantizerStage<float, uint16_t>`
+- `QuantizerStage<float, uint32_t>`
+- `QuantizerStage<double, uint16_t>`
+- `QuantizerStage<double, uint32_t>`
+
+Using any other combination will result in a linker error. Most common: `QuantizerStage<float, uint16_t>`.
+
+---
+
+## Stage settings
+
+| Setting | Purpose | Notes |
 |---|---|---|
-| `TInput` | `float` or `double` | `float` |
-| `TCode` | `uint8_t`, `uint16_t`, `uint32_t` | `uint16_t` or `uint32_t` |
+| `setErrorBound(eb)` | User error bound | Interpreted by `setErrorBoundMode()` |
+| `setErrorBoundMode(mode)` | ABS / NOA / REL | REL is exact pointwise relative (log-space) |
+| `setQuantRadius(r)` | Quantization radius | Used by ABS/NOA modes |
+| `setOutlierCapacity(f)` | Outlier reserve fraction | 0.0-1.0 of element count |
+| `setZigzagCodes(enable)` | Zigzag-encode codes | ABS/NOA only; improves compressibility |
+| `setOutlierThreshold(t)` | Force outliers | ABS/NOA only; `|x| >= t` -> outlier |
+| `setInplaceOutliers(enable)` | Embed outliers in codes | ABS/NOA only; see constraints below |
+| `setValueBase(v)` | Precomputed value range | NOA only; optional, see below |
+
+```cpp
+quant->setErrorBound(1e-4f);
+quant->setErrorBoundMode(ErrorBoundMode::ABS);
+quant->setQuantRadius(32768);
+quant->setOutlierCapacity(0.05f);      // fraction of N reserved for outliers
+quant->setZigzagCodes(true);           // improves compressibility (ABS/NOA only)
+quant->setOutlierThreshold(threshold); // |x| >= threshold -> forced outlier
+quant->setInplaceOutliers(true);       // ABS/NOA: embed outliers in codes array
+quant->setValueBase(range);            // NOA: skip internal data scan
+```
 
 ---
 
@@ -52,40 +88,25 @@ exists; the three outlier scatter ports are absent.
 
 ## Error bound modes
 
-| Mode | Formula | `TCode` requirement |
+| Mode | Formula | Notes |
 |---|---|---|
-| `ABS` | `\|x - x̂\| <= eb` | Any |
-| `NOA` | `abs_eb = eb × (max - min)` | Any |
-| `REL` | `\|x - x̂\| / \|x\| <= eb` (exact per-element) | 4-byte recommended (`uint32_t`) |
+| `ABS` | `\|x - x̂\| <= eb` | Uniform quantization with step `2 * eb` |
+| `NOA` | `abs_eb = eb × (max - min)` | Scales ABS by the data range |
+| `REL` | `\|x - x̂\| / \|x\| <= eb` | Exact per-element, log2-space quantization |
 
-**REL mode notes:**
-- Uses log₂-space quantization; zeros, denormals, inf, and NaN become outliers.
-- A `uint16_t` code type is sufficient for `eb >= 0.01` with `float32` inputs
-  in practice (max `|log_bin|` ≈ 4460 << 16383), but `uint32_t` is safe for
-  all cases.
-- Inplace outlier mode (`setInplaceOutliers`) is **not** compatible with REL
-  mode and will be silently ignored.
+**REL mode details:**
+- Encodes magnitude in log2 space (PFPL), then reconstructs `x_hat` from the log bin.
+- Zeros, denormals, infinities, and NaNs are stored as outliers to preserve exact values.
+- Uses a packed sign + log-bin representation. `uint32_t` is safe for all cases;
+  `uint16_t` works for `eb >= 0.01` with `float32` in practice.
 
 ---
 
-## Key setters
-
-```cpp
-quant->setErrorBound(1e-4f);
-quant->setErrorBoundMode(ErrorBoundMode::ABS);
-quant->setQuantRadius(32768);
-quant->setOutlierCapacity(0.05f);      // fraction of N reserved for outliers
-quant->setZigzagCodes(true);           // improves compressibility (ABS/NOA only)
-quant->setOutlierThreshold(threshold); // |x| >= threshold → forced outlier (default: ∞)
-quant->setInplaceOutliers(true);       // ABS/NOA: embed outliers in codes array
-quant->setValueBase(range_or_maxabs);  // NOA/REL: skip internal data scan
-```
-
 ---
 
-## Inplace outlier mode constraints
+## Inplace outlier constraints (ABS/NOA only)
 
-Both of the following are **required** when `setInplaceOutliers(true)` is set.
+Both of the following are required when `setInplaceOutliers(true)` is set.
 Violations throw at runtime during the first `compress()` call.
 
 ### 1. Zigzag encoding must be enabled
@@ -102,7 +123,7 @@ codes are in `[0, 2 × quant_radius)`.  Normal float bit patterns are always
 (<= 2²²), making the sentinel check unambiguous.  Without zigzag, signed
 two's-complement codes overlap with float bit patterns and the sentinel fails.
 
-### 2. `sizeof(TCode) == sizeof(TInput)`
+### 2. sizeof(TCode) == sizeof(TInput)
 
 ```cpp
 // Correct: float (4B) paired with uint32_t (4B)
@@ -117,24 +138,28 @@ quant->setInplaceOutliers(true);  // runtime error
 **Why:** the inplace kernel stores outlier raw bits with `__builtin_memcpy(&raw, &x, sizeof(TCode))`.
 If the sizes differ the copy is truncated or out-of-bounds.
 
+### Why REL does not support inplace outliers
+
+REL mode packs sign + log-bin into the code word and uses a sentinel value for
+outliers. There is no unused range large enough to safely embed raw IEEE-754
+bit patterns without collisions, and REL already needs the scatter buffers to
+preserve special values (zero, denormals, inf, NaN) exactly. For REL, outliers
+must remain in the explicit scatter buffers.
+
 ---
 
-## CUDA Graph capture and NOA/REL modes
+## Value base and CUDA Graph capture
 
-NOA and REL modes perform an internal data scan that requires a device sync.
-This is illegal during graph capture.  Provide a precomputed value with
-`setValueBase()` before `captureGraph()`:
+Only NOA needs a data-dependent value base (`max - min`). If `setValueBase()` is
+not called, the stage scans the data once to compute it. For CUDA Graph capture,
+provide the precomputed value base to avoid a device sync:
 
 ```cpp
-// NOA: pass value_range = max - min
-quant->setValueBase(vmax - vmin);
-// REL: pass max absolute value
-quant->setValueBase(std::max(std::abs(vmin), std::abs(vmax)));
-
+quant->setValueBase(vmax - vmin);  // NOA only
 pipeline.captureGraph(stream);
 ```
 
-ABS mode needs no `setValueBase()` call.
+ABS and REL modes do not require `setValueBase()`.
 
 ---
 
@@ -157,7 +182,7 @@ p.connect(rze,   bshuf);
 p.finalize();
 ```
 
-### Inplace outlier mode
+### Inplace outlier pipeline
 
 ```cpp
 auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();

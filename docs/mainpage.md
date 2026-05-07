@@ -1,13 +1,13 @@
 # FZGPUModules {#mainpage}
 
-GPU-accelerated modular lossy compression pipeline for scientific floating-point data.
+GPU-accelerated graph composable compression pipeline builder for analytical workflows.
 
 ## Overview
 
 FZGPUModules is a CUDA library for building composable, high-throughput compression
-pipelines. Each pipeline is a directed acyclic graph (DAG) of stages — predictors,
-quantizers, encoders, and transforms — connected and executed entirely on the GPU
-with stream-ordered memory management.
+pipelines. Each pipeline is a directed acyclic graph (DAG) of stages - coders,
+predictors, quantizers, shufflers, transforms, fused stages, and external stages -
+connected and executed entirely on the GPU with stream-ordered memory management.
 
 **Key properties:**
 - **Modular** — mix and match stages (Lorenzo, Quantizer, RLE, RZE, Bitshuffle, …)
@@ -17,7 +17,7 @@ with stream-ordered memory management.
 
 ---
 
-## Requirements
+### Requirements
 
 | Requirement | Minimum |
 |---|---|
@@ -30,11 +30,25 @@ with stream-ordered memory management.
 
 ## Quick Start
 
+### Building from Source
+
+For full build options (presets, examples/tests, install), see
+the \ref building_from_source "Building from Source" page.
+
+```bash
+git clone https://github.com/szcompressor/FZGPUModules.git
+git submodule update --init --recursive
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+### C++ API Usage
+
 ```cpp
 #include "fzgpumodules.h"
 
 // 1. Build a pipeline
-fz::Pipeline pipeline(fz::MemoryPoolConfig(input_bytes));
+fz::Pipeline pipeline(input_bytes);
 
 auto* lrz = pipeline.addStage<fz::LorenzoQuantStage<float, uint16_t>>(
     fz::LorenzoQuantStage<float, uint16_t>::Config{1e-4f});
@@ -53,8 +67,8 @@ void* d_output = nullptr;
 size_t output_size = 0;
 pipeline.decompress(d_compressed, compressed_size, &d_output, &output_size, stream);
 cudaStreamSynchronize(stream);
-// d_output is caller-owned — call cudaFree() when done.
-cudaFree(d_output);
+// d_output is pool-owned by default; do not cudaFree it.
+// Call pipeline.setPoolManagedDecompOutput(false) for caller-owned output.
 ```
 
 See `examples/` for more usage patterns including multi-branch pipelines, CUDA Graph
@@ -62,25 +76,60 @@ capture, and the low-level DAG API.
 
 ---
 
-## Caller-Allocated Output (With Size Query)
+### Available Stages {#mainpage_stages}
 
-If you want full memory control, use the caller-allocated `compress` and `decompress`
-overloads and ask the pipeline for max output sizes before allocating:
+For detailed per-stage documentation — constraints, behavioral rules, and extended
+usage notes — see the \ref stages_overview "Stage Reference".
+
+
+| Stage                              | Header                                             | Description                                    |
+| ---------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
+| `LorenzoQuantStage<TInput, TCode>` | `modules/fused/lorenzo_quant/lorenzo_quant.h`      | Fused float predictor + quantizer (lossy)      |
+| `LorenzoStage<T>`                  | `modules/predictors/lorenzo/lorenzo_stage.h`       | Plain integer Lorenzo predictor (lossless)     |
+| `QuantizerStage<TInput, TCode>`    | `modules/quantizers/quantizer/quantizer.h`         | Direct-value quantizer (ABS/REL/NOA)           |
+| `RLEStage<T>`                      | `modules/coders/rle/rle.h`                         | Run-length encoding                            |
+| `DifferenceStage<T, TOut>`         | `modules/predictors/diff/diff.h`                   | First-order difference / cumulative-sum coding |
+| `BitshuffleStage`                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
+| `RZEStage`                         | `modules/coders/rze/rze_stage.h`                   | Recursive zero-byte elimination                |
+| `ZigzagStage<TIn, TOut>`           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
+| `NegabinaryStage<TIn, TOut>`       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
+| `BitpackStage<T>`                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
+
+### Memory Strategies
+
+| Strategy      | Description                                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `MINIMAL`     | Allocate on demand, free at last consumer. Lowest peak GPU memory.                                                        |
+| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring for efficient buffer reuse. |
+
+
+---
+
+### Caller-Allocated Output
+
+If you want full memory control, use the caller-allocated overloads. This mirrors
+nvcomp-style APIs: you pre-allocate an output buffer and pass its capacity; the
+API returns the actual size.
 
 ```cpp
 // After finalize()
 size_t comp_capacity = pipeline.getMaxCompressedSize(input_bytes);
-size_t decomp_capacity = input_bytes; // decompressed size equals input
-
 void* d_comp_user = nullptr;
-void* d_decomp_user = nullptr;
 cudaMalloc(&d_comp_user, comp_capacity);
-cudaMalloc(&d_decomp_user, decomp_capacity);
 
 size_t comp_size = 0;
 pipeline.compress(d_input, input_bytes,
                   d_comp_user, comp_capacity,
                   &comp_size, stream);
+```
+
+For decompression, size the output from the original input or from the FZM header:
+```cpp
+auto header = fz::Pipeline::readHeader("output.fzm");
+size_t decomp_capacity = header.core.uncompressed_size;
+
+void* d_decomp_user = nullptr;
+cudaMalloc(&d_decomp_user, decomp_capacity);
 
 size_t decomp_size = 0;
 pipeline.decompress(d_comp_user, comp_size,
@@ -88,17 +137,11 @@ pipeline.decompress(d_comp_user, comp_size,
                     &decomp_size, stream);
 ```
 
-For `.fzm` files, query the exact decompressed size from the header before allocating:
-```cpp
-auto header = fz::Pipeline::readHeader("output.fzm");
-size_t decomp_capacity = header.core.uncompressed_size;
-```
-
-See `examples/caller_allocated_output.cpp` for a minimal end-to-end example.
+See `examples/ownership_example.cpp` for a minimal end-to-end example.
 
 ---
 
-## CUDA Graph Support
+### CUDA Graph Support
 
 For throughput-critical workloads, enable CUDA Graph capture to eliminate
 CPU-side kernel launch overhead on repeated compress calls:
@@ -112,37 +155,21 @@ pipeline.warmup(stream);         // JIT-compiles all kernels once
 
 ---
 
-## Available Stages {#mainpage_stages}
+### Compressor Config File 
 
-For detailed per-stage documentation — constraints, behavioral rules, and extended
-usage notes — see the \ref stages_overview "Stage Reference".
+For complex pipelines, you can also load the stage graph from a TOML config file:
 
+```bash
+fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --report
+```
 
+You can also use the `Pipeline::loadFromConfig()` API to load a config file from C++. The config schema supports arbitrary DAGs.
 
-| Stage | Header | Description |
-|---|---|---|
-| `LorenzoQuantStage<TInput, TCode>` | `predictors/lorenzo_quant/lorenzo_quant.h` | 1-D/2-D/3-D Lorenzo predictor |
-| `QuantizerStage<TInput, TCode>` | `predictors/quantizer/quantizer.h` | Direct-value quantizer (ABS/REL/NOA) |
-| `RLEStage<T>` | `encoders/RLE/rle.h` | Run-length encoding |
-| `DifferenceStage<T, TOut>` | `encoders/diff/diff.h` | First-order difference / cumulative-sum coding |
-| `BitshuffleStage` | `transforms/bitshuffle/bitshuffle_stage.h` | GPU bit-matrix transpose |
-| `RZEStage` | `transforms/rze/rze_stage.h` | Recursive zero-byte elimination |
-| `ZigzagStage<TIn, TOut>` | `transforms/zigzag/zigzag_stage.h` | Zigzag encode/decode |
-| `NegabinaryStage<TIn, TOut>` | `transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode |
-| `BitpackStage<T>` | `encoders/bitpack/bitpack.h` | Pack/unpack power-of-two value streams |
+See `examples/presets/` for reference and pre-built pipeline configurations and the \ref config_file_overview "Config File Reference" for the full config schema.
 
 ---
 
-## Memory Strategies
-
-| Strategy | Description |
-|---|---|
-| `MINIMAL` | Allocate on demand, free at last consumer. Lowest peak GPU memory. |
-| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring. |
-
----
-
-## File I/O
+### File I/O
 
 ```cpp
 // Write to file after compressing
@@ -157,110 +184,47 @@ cudaFree(d_out);
 ```
 
 FZM files embed the full stage configuration and compressed payload with CRC32
-checksums. See `include/fzm_format.h` for the format specification.
+checksums. See the \ref fzm_format "FZM File Format" page for the full specification.
 
 ---
 
-## Key API Classes
+### Thread Safety
 
-| Class | Header | Description |
-|---|---|---|
-| `fz::Pipeline` | `pipeline/compressor.h` | High-level builder and executor |
-| `fz::Stage` | `stage/stage.h` | Base class for all compression stages |
-| `fz::CompressionDAG` | `pipeline/dag.h` | Low-level DAG wiring and execution |
-| `fz::MemoryPool` | `mem/mempool.h` | Stream-ordered CUDA memory pool |
-| `fz::PipelinePerfResult` | `pipeline/perf.h` | Per-stage profiling results |
+Each `Pipeline` must be used from a single host thread. There is no internal locking.
 
----
+**Safe** — run one independent pipeline per thread:
 
-## Command Line Interface
-
-FZGPUModules provides a fully-featured CLI (`fzgmod-cli`) for testing, comparing,
-and benchmarking pipelines without writing C++ code.
-
-**Dynamic linear pipelines** — chain stages with `--stages` and `->` separators
-*(always quote the stage list to prevent shell redirection)*:
-```bash
-# Lorenzo -> Bitshuffle -> RZE
-fzgmod-cli -z -i data.f32 -o compressed.fzm --stages "lorenzo->bitshuffle->rze" -m rel -e 1e-3
-
-# Four-stage pipeline
-fzgmod-cli -z -i data.f32 --stages "lorenzo->diff->bitshuffle->rze" -e 1e-4
+```cpp
+std::thread t1([&] {
+    fz::Pipeline p1(input_size);
+    // build, finalize, compress, decompress ...
+});
+std::thread t2([&] {
+    fz::Pipeline p2(input_size);
+    // build, finalize, compress, decompress ...
+});
+t1.join(); t2.join();
 ```
 
-**Decompress, compare, and report:**
-```bash
-fzgmod-cli -x -i compressed.fzm -o decompressed.f32 --compare data.f32 --report
-# Prints: Output size, Time, Throughput, Value Range, Max Abs Error, PSNR, NRMSE
+**Not safe** — two threads sharing one pipeline:
+
+```cpp
+fz::Pipeline shared;
+std::thread t1([&] { shared.compress(...); });  // data race
+std::thread t2([&] { shared.compress(...); });  // data race
 ```
 
-**Branched pipelines via TOML config:**
-```bash
-fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --report
-```
-
-**Benchmarking:**
-```bash
-fzgmod-cli -b -i data.f32 --stages "lorenzo->bitshuffle->rze" -m rel -e 1e-3 --runs 10
-```
-
-**Key flags:**
-
-| Flag | Description |
-|---|---|
-| `-z` / `-x` / `-b` | Compress / Decompress / Benchmark mode |
-| `-i <file>` | Input file |
-| `-o <file>` | Output file |
-| `-c <file.toml>` | Load pipeline from TOML config |
-| `--stages <s1->s2->...>` | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze, diff, rle) |
-| `-t <f32\|f64>` | Data type (default: f32) |
-| `-m <rel\|abs\|noa>` | Error bound mode (default: rel) |
-| `-e <val>` | Error bound value (default: 1e-3) |
-| `-r <val>` | Quantization radius (default: 32768) |
-| `-l <x>x<y>x<z>` | Dimensions (inferred if omitted) |
-| `-R` / `--report` | Print compression ratio and throughput |
-| `--compare <file>` | Compare decompressed vs original (MaxErr, PSNR, NRMSE) |
-| `--runs <n>` | Benchmark iteration count (default: 10) |
-
----
-
-## Building from Source
-
-```bash
-git clone https://github.com/szcompressor/FZGPUModules.git
-git submodule update --init --recursive
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-**CMake options:**
-
-| Option | Default | Description |
-|---|---|---|
-| `BUILD_SHARED_LIBS` | `ON` | Build shared libraries |
-| `BUILD_EXAMPLES` | `OFF` | Build example programs |
-| `BUILD_PROFILING` | `OFF` | Build profiling programs |
-| `BUILD_TESTING` | `OFF` | Build test suite |
-| `FZ_LOG_MIN_LEVEL` | `2` (INFO) | 0=TRACE 1=DEBUG 2=INFO 3=WARN 255=SILENT |
-
-**Installing:**
-```bash
-cmake --install build --prefix /your/install/prefix
-```
-
-This installs headers, shared libraries with versioned symlinks, and CMake package
-config files.
-
-```cmake
-find_package(FZGPUModules REQUIRED)
-target_link_libraries(my_target PRIVATE FZGMOD::fzgmod)
-```
+The library has no global mutable state. The `FZ_LOG` logger singleton is set once
+at startup; do not change log level or callback while pipelines are running on other threads.
 
 ---
 
 ## Citation
 
 If you reference this work, please cite:
+
+Note: this paper describes the 1.0 release of the library; the 2.0 API and
+documentation may differ.
 
 > **[DRBSD-11]** FZModules: A Heterogeneous Computing Framework for Customizable Scientific Data Compression Pipelines
 

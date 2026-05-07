@@ -14,45 +14,17 @@ Recursive Zero-byte Elimination.  Operates on raw byte streams (typically
 - **Level 1 (ZE):** compact non-zero bytes; emit an N/8-byte zero bitmap.
 - **Levels 2–4 (RE):** compact non-repeated bytes of the previous bitmap.
 
-Because bit-shuffled scientific data has many zero byte-planes, RZE can compress
+Because bit-shuffled scientific data can have many zero byte-planes, RZE can compress
 those planes very aggressively.
 
 ---
 
-## Output stream layout
-
-```
-[uint32_t: original byte count]
-[uint32_t: num_chunks]
-[uint32_t × num_chunks: per-chunk compressed sizes (high bit set → chunk stored raw)]
-[compressed chunk data ...]
-```
-
----
-
-## Key setters
+## Stage settings
 
 ```cpp
 rze->setChunkSize(16384);   // bytes; must be a multiple of 4096 (default 16384)
 rze->setLevels(4);          // recursion depth 1–4 (default 4)
 ```
-
----
-
-## CUDA Graph compatibility
-
-| Pass | Graph-compatible? |
-|---|---|
-| Compression (forward) | Yes |
-| Decompression (inverse) | **No** |
-
-The inverse path reads the stream header with two blocking D2H `cudaMemcpy` calls
-before it can compute per-chunk decode offsets.  This is intentional: graph-captured
-decompression of the same buffer every iteration has no practical use case, while
-graph-captured compression (new data each iteration) provides meaningful latency savings.
-
-Do not include `RZEStage` in a pipeline with `enableGraphMode(true)` if the
-pipeline will be used for decompression.
 
 ---
 
@@ -74,4 +46,15 @@ rze->setLevels(4);
 
 p.connect(rze, bshuf);
 p.finalize();
+```
+
+---
+
+## Stream layout (forward output)
+
+```
+[uint32_t: original byte count]
+[uint32_t: num_chunks]
+[uint32_t x num_chunks: per-chunk compressed sizes (high bit set -> chunk stored raw)]
+[compressed chunk data ...]
 ```

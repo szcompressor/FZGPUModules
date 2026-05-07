@@ -23,9 +23,24 @@ the quantization codes rather than raw floating-point data.
 
 | Parameter | Constraint |
 |---|---|
-| `T` | Signed integer: `int8_t`, `int16_t`, `int32_t`, `int64_t` |
+| `T` | Signed integer (see available instantiations below) |
 
-Common instantiation: `LorenzoStage<int32_t>`.
+## Available instantiations
+
+Only these types are compiled and linked:
+- `LorenzoStage<int8_t>`
+- `LorenzoStage<int16_t>`
+- `LorenzoStage<int32_t>`
+- `LorenzoStage<int64_t>`
+
+Using any other type will result in a linker error. Common choice: `LorenzoStage<int32_t>` (to match quantizer code width).
+
+---
+
+## Stage settings
+
+No stage-specific setters. Spatial dimensions are supplied via `Pipeline::setDims()`
+or by calling `stage->setDims()` directly after `addStage()`.
 
 ---
 

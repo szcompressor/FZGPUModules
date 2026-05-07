@@ -1,3 +1,7 @@
+/**
+ * @file include/stage/stage.h
+ * @brief Base class interface for all compression stages.
+ */
 #pragma once
 
 #include "fzm_format.h"

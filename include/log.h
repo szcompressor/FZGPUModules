@@ -1,7 +1,10 @@
 #pragma once
 
 /**
- * include/log.h — FZGPUModules logging infrastructure
+ * @file include/log.h
+ * @brief Logging infrastructure and macros.
+ *
+ * FZGPUModules logging infrastructure
  *
  * Design goals:
  *   1. Zero overhead when disabled — FZ_LOG calls below the compile-time

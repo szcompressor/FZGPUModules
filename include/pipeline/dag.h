@@ -1,3 +1,7 @@
+/**
+ * @file include/pipeline/dag.h
+ * @brief Compression DAG wiring, execution, and memory strategy types.
+ */
 #pragma once
 
 #include "pipeline/perf.h"

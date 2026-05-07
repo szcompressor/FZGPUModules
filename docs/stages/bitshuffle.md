@@ -18,7 +18,7 @@ Output is the same byte size as input (size-preserving transform).
 
 ---
 
-## Key setters
+## Stage settings
 
 ```cpp
 bshuf->setBlockSize(16384);          // chunk size in bytes (default 16384)

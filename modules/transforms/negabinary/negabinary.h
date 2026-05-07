@@ -1,9 +1,10 @@
 #pragma once
 
 /**
- * modules/transforms/negabinary/negabinary.h
+ * @file modules/transforms/negabinary/negabinary.h
+ * @brief Negabinary (base -2) integer encoding helpers.
  *
- * Negabinary (base −2) encoding.
+ * Negabinary (base -2) encoding.
  *
  * Maps a signed two's-complement integer to an unsigned negabinary
  * representation using the compact XOR-mask formula:

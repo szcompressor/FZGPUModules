@@ -7,7 +7,8 @@
 #include "log.h"
 
 /**
- * CUDA API error-checking macros
+ * @file include/cuda_check.h
+ * @brief CUDA API error-checking macros.
  *
  * FZ_CUDA_CHECK(call)
  *   Evaluates a CUDA API call and throws std::runtime_error on failure.

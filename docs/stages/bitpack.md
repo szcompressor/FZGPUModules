@@ -22,17 +22,32 @@ bits of representation.
 
 | Parameter | Constraint |
 |---|---|
-| `T` | `uint8_t`, `uint16_t`, or `uint32_t` |
+| `T` | Unsigned integer type (see available instantiations below) |
+
+## Available instantiations
+
+Only these types are compiled and linked:
+- `BitpackStage<uint8_t>`
+- `BitpackStage<uint16_t>`
+- `BitpackStage<uint32_t>`
+
+Using any other type will result in a linker error. Most common: `BitpackStage<uint32_t>` (to match typical quantizer code width).
 
 ---
 
-## Key setter
+## Stage settings
+
+| Setting | Purpose | Notes |
+|---|---|---|
+| `setNBits(nbits)` | Bits per element | Power of two, 1..`8 * sizeof(T)` |
 
 ```cpp
 pack->setNBits(nbits);
 ```
 
-`nbits` must be a power of two in `[1, 8 × sizeof(T)]`.
+`nbits` must be a power of two in `[1, 8 x sizeof(T)]`.
+Default is `8 * sizeof(T)` (identity, no compression). There is no automatic
+bit-width selection; choose a value that matches your code range.
 
 | `T` | Allowed `nbits` |
 |---|---|
@@ -44,13 +59,7 @@ Violations throw `std::invalid_argument` at `setNBits()` time.
 
 ---
 
-## CUDA Graph compatibility
-
-`BitpackStage` is fully CUDA Graph compatible on both forward and inverse paths.
-
----
-
-## Typical pipeline (cuSZp-style)
+## Typical pipeline
 
 ```cpp
 p.setDims(nx);

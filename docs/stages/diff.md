@@ -12,9 +12,10 @@
   `output[0] = input[0]`.
 - **Inverse (decompression):** cumulative sum.
 
-When `TOut != T`, negabinary encoding is fused into the final write of the forward
-kernel, and negabinary decoding is the first step of the inverse kernel.  This avoids
-a separate `ZigzagStage` or `NegabinaryStage` in the pipeline.
+When `TOut != T`, the stage writes the forward deltas in negabinary form into the
+unsigned output type, and the inverse path decodes negabinary before the prefix sum.
+This is equivalent to `DifferenceStage<T>` followed by a `NegabinaryStage`, but
+fused into one kernel.
 
 Output is the same byte size as input (`sizeof(T) == sizeof(TOut)` is enforced).
 
@@ -24,11 +25,39 @@ Output is the same byte size as input (`sizeof(T) == sizeof(TOut)` is enforced).
 
 | Parameter | Constraint |
 |---|---|
-| `T` | Any numeric type (input / output when `TOut == T`) |
-| `TOut` | Defaults to `T`. When different: must be the unsigned counterpart of a signed `T` of the same width (negabinary fusion). |
+| `T` | Numeric type (input / output when `TOut == T`, see available instantiations) |
+| `TOut` | Defaults to `T`. When different: unsigned counterpart of signed `T` (negabinary fusion) |
 
-Valid negabinary-fused pairs: `<int8_t, uint8_t>`, `<int16_t, uint16_t>`,
-`<int32_t, uint32_t>`, `<int64_t, uint64_t>`.
+## Available instantiations
+
+Single-parameter (no negabinary fusion):
+- `DifferenceStage<float>`
+- `DifferenceStage<double>`
+- `DifferenceStage<uint8_t>`
+- `DifferenceStage<uint16_t>`
+- `DifferenceStage<uint32_t>`
+- `DifferenceStage<int32_t>`
+- `DifferenceStage<int64_t>`
+
+Negabinary-fused pairs (`<signed, unsigned>`):
+- `DifferenceStage<int8_t, uint8_t>`
+- `DifferenceStage<int16_t, uint16_t>`
+- `DifferenceStage<int32_t, uint32_t>`
+- `DifferenceStage<int64_t, uint64_t>`
+
+Using any other combination will result in a linker error. Common choices: `DifferenceStage<int32_t, uint32_t>` (after quantizer codes), or `DifferenceStage<int32_t>` (plain delta coding).
+
+---
+
+## Stage settings
+
+| Setting | Purpose | Notes |
+|---|---|---|
+| `setChunkSize(bytes)` | Reset delta at chunk boundaries | 0 = no chunking |
+
+```cpp
+diff->setChunkSize(16384);   // bytes; 0 = no chunking
+```
 
 ---
 
@@ -42,15 +71,6 @@ This is required for the PFPL pipeline where 16 KB chunks flow independently
 through `BitshuffleStage` and `RZEStage`.  Chunk size must be a positive multiple
 of `sizeof(T)`.  Default is 0 (no chunking — whole array is one context).
 
----
-
-## Key setters
-
-```cpp
-diff->setChunkSize(16384);   // bytes; 0 = no chunking
-```
-
----
 
 ## Common instantiations
 

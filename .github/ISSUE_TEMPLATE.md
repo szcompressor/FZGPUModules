@@ -1,32 +1,41 @@
-# Description
+---
+name: Bug report
+about: Report a bug or unexpected behavior
+---
 
-A short human-readable description of the bug.
+## Description
 
-# Versions and Configuration
+A clear description of the bug and what you expected to happen instead.
 
-Contents of `/etc/os-release`:
+## Environment
 
-Output of `cmake -L <build_dir>`:
+**OS** (`cat /etc/os-release` or `uname -a`):
 
-Output of `git log -n 1 --oneline`:
+**GPU** (`nvidia-smi -L`):
 
-GPU and CUDA:
+**CUDA version** (`nvcc --version`):
 
-Output of `nvidia-smi -L`:
+**Compiler** (`gcc --version` or `clang --version`):
 
-Output of `nvcc --version` (or CUDA runtime version):
+**CMake version** (`cmake --version`):
 
-Please include the version information for the following dependencies if installed.
+**FZGPUModules version / commit** (`git log -n 1 --oneline`):
 
-+ compiler (either `gcc` or `clang`)
-+ cmake
-+ Doxygen
+**CMake configuration** (`cmake -L <build_dir>` or the preset and flags you used):
 
-# Steps to Reproduce the Bug
+## Steps to Reproduce
 
-Please provide both:
+1. 
+2. 
+3. 
 
-+ a high level description of how to reproduce the bug including expected vs actual behavior
-+ a short script or Dockerfile to reproduce the bug starting at installing FZGPUModules and its dependencies where possible
+**Expected behavior:**
 
-# Additional Information [Optional]
+**Actual behavior:**
+
+A minimal self-contained reproducer (C++ snippet, test name, or script) is very helpful.
+
+## Additional Context
+
+Logs, stack traces, sanitizer output, or anything else relevant. If you ran under
+AddressSanitizer or Compute Sanitizer, include that output here.

@@ -1,3 +1,7 @@
+/**
+ * @file include/pipeline/compressor.h
+ * @brief Pipeline builder and execution API.
+ */
 #pragma once
 
 #include "pipeline/dag.h"
@@ -24,8 +28,8 @@ namespace fz {
  * Ownership:
  *  - compress() output is pool-owned — do NOT cudaFree it. Valid until the
  *    next compress()/reset() or Pipeline destruction.
- *  - decompress() output is caller-owned by default (freshly cudaMalloc'd).
- *    Set setPoolManagedDecompOutput(true) to receive a pool-owned pointer instead.
+ *  - decompress() output is pool-owned by default - do NOT cudaFree it.
+ *    Call setPoolManagedDecompOutput(false) to receive a caller-owned pointer instead.
  *
  * @note Not thread-safe. Use one Pipeline per host thread.
  */

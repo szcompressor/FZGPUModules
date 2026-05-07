@@ -20,34 +20,26 @@ Worst-case output is `sizeof(uint32_t) + 2 × input_bytes` (all elements are uni
 
 | Parameter | Constraint |
 |---|---|
-| `T` | Element type: `uint8_t`, `uint16_t`, `uint32_t`, `int32_t` |
+| `T` | Element type (see available instantiations below) |
 
-**`RLEStage` is a class template — the type parameter is required.**
+## Available instantiations
 
-```cpp
-// Correct
-auto* rle = p.addStage<RLEStage<uint16_t>>();
+Only these types are compiled and linked:
+- `RLEStage<uint8_t>`
+- `RLEStage<uint16_t>`
+- `RLEStage<uint32_t>`
+- `RLEStage<int32_t>`
 
-// Wrong — does not compile
-auto* rle = p.addStage<RLEStage>();
-```
-
----
-
-## Wire format
-
-```
-[uint32_t: num_runs]
-[T × num_runs: run values  (4-byte aligned)]
-[uint32_t × num_runs: run lengths]
-```
+Using any other type will result in a linker error. Common choice: `RLEStage<uint16_t>` (after quantizer codes).
 
 ---
 
-## No chunk size setter
+## Stage settings
 
-`RLEStage` does not expose `setChunkSize()`.  Run detection and output packing are
-managed internally.
+`RLEStage` does not expose `setChunkSize()` or other tuning knobs. Run detection
+and output packing are managed internally.
+
+---
 
 ---
 
@@ -59,4 +51,14 @@ auto* rle  = p.addStage<RLEStage<uint16_t>>();
 
 p.connect(rle, lrz, "codes");
 p.finalize();
+```
+
+---
+
+## Stream layout (forward output)
+
+```
+[uint32_t: num_runs]
+[T x num_runs: run values (4-byte aligned)]
+[uint32_t x num_runs: run lengths]
 ```
