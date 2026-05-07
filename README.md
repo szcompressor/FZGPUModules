@@ -4,10 +4,9 @@ GPU-accelerated composable compression pipeline library for scientific floating-
 
 ## Overview
 
-FZGPUModules is a CUDA library for building high-throughput compression pipelines.
-Each pipeline is a directed acyclic graph (DAG) of stages — predictors, quantizers,
-coders, and transforms — connected and executed entirely on the GPU with stream-ordered
-memory management.
+FZGPUModules is a CUDA library for building composable, high-throughput compression pipelines. Each pipeline is a directed acyclic graph (DAG) of stages - coders, predictors, quantizers, shufflers, transforms, fused stages, and external stages - connected and executed entirely on the GPU with stream-ordered memory management.
+
+
 
 **Key properties:**
 - **Modular** — mix and match stages (Lorenzo, Quantizer, RLE, RZE, Bitshuffle, …)
