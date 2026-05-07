@@ -1,6 +1,6 @@
 # FZGPUModules
 
-GPU-accelerated composable compression pipeline library for scientific floating-point data.
+GPU-accelerated graph composable compression pipeline builder for analytical workflows.
 
 ## Overview
 
