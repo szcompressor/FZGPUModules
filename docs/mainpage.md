@@ -26,7 +26,7 @@ connected and executed entirely on the GPU with stream-ordered memory management
 | CMake | 3.24+ |
 | Host byte order | Little-endian |
 
-**Note:** using a vGPU will result in the CUDA mempool creation to fail, resulting in an automatic fallback allocation using `cudaMalloc`. This will work correctly but without the performance benefits of the stream-ordered allocator. For perfomance critical workloads avoid vGPU setups. Otherwise this should not cause any issues.
+**Note:** using a vGPU will result in the CUDA mempool creation to fail, resulting in an automatic fallback allocation using `cudaMalloc`. This will work correctly but without the performance benefits of the stream-ordered allocator. For perfomance critical workloads avoid vGPU setups. The lack of stream-ordered allocator support also prevents CUDA Graph capture on vGPUs so this feature is unavailable in those environments.
 
 ---
 
