@@ -5,13 +5,25 @@
  * toml++ is only included here — it never leaks into public headers.
  */
 
-// nvc++ presents as Clang (__clang__ is defined) so toml++ picks the Clang
-// TOML_ASSUME path and expands TOML_ASSERT_ASSUME to __builtin_assume(expr).
-// nvc++'s Release optimizer then uses those assumptions to eliminate null and
-// end-of-buffer guards, producing UB → segfault during TOML parsing.
-// Override TOML_ASSUME to a no-op before the include to prevent this.
+// nvc++ defines __clang__ (it's LLVM-based), so toml++ enables Clang-specific
+// attributes in Release/NDEBUG builds that nvc++'s optimizer mishandles:
+//
+//   TOML_PURE  = __attribute__((pure))   — applied to key::operator< and all
+//                key comparison operators; nvc++ with -fast may cache/elide the
+//                string reads, leaving one operand uninitialized → segfault in
+//                std::string::compare during std::map BST traversal.
+//   TOML_CONST = __attribute__((const))  — even stronger; same risk.
+//   TOML_ALWAYS_INLINE = __attribute__((__always_inline__)) — amplifies the above
+//                by forcing inlining of the broken comparison path.
+//   TOML_ASSUME(expr) = __builtin_assume(expr) — nvc++ optimizer uses the hint
+//                to eliminate null/bounds guards → UB → segfault in parser.
+//
+// Override all four to safe no-ops before the toml++ include.
 #if defined(__NVCOMPILER)
-#  define TOML_ASSUME(expr) static_cast<void>(0)
+#  define TOML_ASSUME(expr)   static_cast<void>(0)
+#  define TOML_PURE
+#  define TOML_CONST
+#  define TOML_ALWAYS_INLINE  inline
 #endif
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
