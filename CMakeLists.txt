@@ -19,7 +19,7 @@ endif()
 set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)  # use build-tree paths during build
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE) # append any extra link dirs automatically
 
-# FZM file format uses little-endian byte order throughout — reject big-endian hosts.
+# FZM file format uses little-endian byte order
 include(TestBigEndian)
 test_big_endian(FZGMOD_IS_BIG_ENDIAN)
 if(FZGMOD_IS_BIG_ENDIAN)
@@ -94,11 +94,9 @@ if(BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
 
-    # ── generate_golden_files target ─────────────────────────────────────────
-    # Builds and runs the golden-file generator so that tests/golden/ contains
-    # fresh reference files matching the current FZM format version.
-    # EXCLUDE_FROM_ALL keeps cluster/head-node default builds GPU-free.
-    # Usage: cmake --build <build-dir> --target generate_golden_files
+    # generate_golden_files target 
+    # Builds and runs the golden-file generator
+    # EXCLUDE_FROM_ALL keeps cluster/head-node default builds GPU-free
     add_executable(generate_golden_files EXCLUDE_FROM_ALL
         tests/golden/regenerate.cpp
     )
@@ -106,7 +104,6 @@ if(BUILD_TESTING)
     target_include_directories(generate_golden_files PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
     )
-    # After the binary is built, immediately run it to write the reference files.
     add_custom_command(TARGET generate_golden_files POST_BUILD
       COMMAND $<TARGET_FILE:generate_golden_files>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
@@ -164,14 +161,14 @@ target_compile_options(
   fzgmod_compile_settings
   INTERFACE
     $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-lineinfo>
-    # Suppress toml++ warnings about side-effects in __builtin_assume (third-party library)
+    # Suppress toml++ warnings about side-effects in __builtin_assume
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wno-assume-expression-discarded>
 )
 
 target_compile_features(fzgmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
 target_link_libraries(fzgmod_compile_settings INTERFACE CUDA::cudart)
 
-# ── Logging level ─────────────────────────────────────────────────────────────
+# ── Logging level
 # Controls which FZ_LOG() call sites are compiled into the binary.
 # Calls below the threshold are compiled out entirely — arguments are never
 # evaluated, giving zero overhead even for expensive log expressions.
@@ -365,15 +362,13 @@ install(DIRECTORY
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
-# modules/ headers are included with relative paths (e.g. "predictors/diff/diff.h")
-# so they must be installed into the same fzgmod include root
+
 install(DIRECTORY
   modules/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzgmod
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
-# src/ headers are also an include root at build time (e.g. "mem/mempool.h")
 install(DIRECTORY
   src/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fzgmod
@@ -400,6 +395,10 @@ if(DOXYGEN_FOUND)
 else()
     message(STATUS "Doxygen not found — 'docs' target not available (install doxygen to enable)")
 endif()
+
+###############
+### WRAP UP ###
+###############
 
 message(STATUS "FZGPUModules configuration complete")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
