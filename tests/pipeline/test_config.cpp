@@ -22,7 +22,13 @@
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
 
-// toml++ in header-only mode for reading back saved configs in assertions
+// nvc++ attribute misoptimization — see config.cpp for full explanation.
+#if defined(__NVCOMPILER)
+#  define TOML_ASSUME(expr)   static_cast<void>(0)
+#  define TOML_PURE
+#  define TOML_CONST
+#  define TOML_ALWAYS_INLINE  inline
+#endif
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
 
