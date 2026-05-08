@@ -220,12 +220,14 @@ fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE);
 pipeline.enableGraphMode(true);
 pipeline.finalize();
 
-pipeline.captureGraph(stream);   // record once
 pipeline.warmup(stream);         // JIT-compile kernels
+pipeline.captureGraph(stream);   // record once
 
 // Subsequent compress() calls replay the graph
 pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
 ```
+
+Call `compress()` only after `captureGraph()`; use the same stream for capture and replay.
 
 Requirements: `PREALLOCATE` strategy, non-zero input size at construction, all stages
 graph-compatible, single-source pipeline. Incompatible with the caller-owned `compress()` overload.

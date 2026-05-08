@@ -134,6 +134,8 @@ float value_base = vmax - vmin;
 float value_base = std::max(std::abs(vmin), std::abs(vmax));
 
 lorenzo->setValueBase(value_base);
+// after enableGraphMode(true) + finalize()
+pipeline.warmup(stream);
 pipeline.captureGraph(stream);
 ```
 

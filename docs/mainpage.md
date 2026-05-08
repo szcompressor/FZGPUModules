@@ -149,11 +149,18 @@ For throughput-critical workloads, enable CUDA Graph capture to eliminate
 CPU-side kernel launch overhead on repeated compress calls:
 
 ```cpp
-pipeline.setCaptureMode(true);   // requires PREALLOCATE strategy
+fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE, 2.0f);
+// ... addStage, connect ...
+pipeline.enableGraphMode(true);
 pipeline.finalize();
-pipeline.warmup(stream);         // JIT-compiles all kernels once
+pipeline.warmup(stream);      // JIT-compiles all kernels once
+pipeline.captureGraph(stream);
+
 // subsequent compress() calls replay the captured graph
+pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
 ```
+
+Call `compress()` only after `captureGraph()`; use the same stream for capture and replay.
 
 ---
 

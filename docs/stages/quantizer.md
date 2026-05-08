@@ -156,6 +156,8 @@ provide the precomputed value base to avoid a device sync:
 
 ```cpp
 quant->setValueBase(vmax - vmin);  // NOA only
+// after enableGraphMode(true) + finalize()
+pipeline.warmup(stream);
 pipeline.captureGraph(stream);
 ```
 
