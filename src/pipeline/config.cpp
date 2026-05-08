@@ -5,7 +5,14 @@
  * toml++ is only included here — it never leaks into public headers.
  */
 
-// toml++ in header-only mode
+// nvc++ presents as Clang (__clang__ is defined) so toml++ picks the Clang
+// TOML_ASSUME path and expands TOML_ASSERT_ASSUME to __builtin_assume(expr).
+// nvc++'s Release optimizer then uses those assumptions to eliminate null and
+// end-of-buffer guards, producing UB → segfault during TOML parsing.
+// Override TOML_ASSUME to a no-op before the include to prevent this.
+#if defined(__NVCOMPILER)
+#  define TOML_ASSUME(expr) static_cast<void>(0)
+#endif
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
 

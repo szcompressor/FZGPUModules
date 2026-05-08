@@ -22,7 +22,10 @@
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
 
-// toml++ in header-only mode for reading back saved configs in assertions
+// nvc++ presents as Clang so toml++ uses __builtin_assume; see config.cpp.
+#if defined(__NVCOMPILER)
+#  define TOML_ASSUME(expr) static_cast<void>(0)
+#endif
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
 
