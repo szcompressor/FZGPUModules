@@ -56,6 +56,11 @@ jobs:
           fi
           nvcc --version
           nvidia-smi
+          # Persist the spack-filtered PATH and any module-set library paths to
+          # all subsequent steps. Without this each step reverts to the runner's
+          # default PATH, which puts spack's CUDA 13.1 ahead of nvhpc 12.3.
+          echo "PATH=$PATH" >> "$GITHUB_ENV"
+          [[ -n "$LD_LIBRARY_PATH" ]] && echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV" || true
 
       - name: Show CUDA + driver info
         shell: bash
@@ -81,11 +86,18 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
             -DBUILD_EXAMPLES=ON \
-            -DCMAKE_CUDA_ARCHITECTURES=native \
+            -DCMAKE_CUDA_ARCHITECTURES=80 \
             -DCMAKE_INSTALL_PREFIX=./build/ci/install
 
       - name: Build
-        run: cmake --build build/ci --parallel
+        shell: bash
+        run: |
+          if [[ -f /etc/profile.d/lmod.sh ]]; then source /etc/profile.d/lmod.sh; fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          fi
+          cmake --build build/ci --parallel
 
       - name: Show linked CUDA runtime
         shell: bash
@@ -93,8 +105,15 @@ jobs:
           ldd build/ci/tests/test_cli | grep -E 'cudart|cuda' || true
 
       - name: Run tests
+        shell: bash
         working-directory: build/ci
-        run: ctest --output-on-failure
+        run: |
+          if [[ -f /etc/profile.d/lmod.sh ]]; then source /etc/profile.d/lmod.sh; fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          fi
+          ctest --output-on-failure
 
       - name: Upload test results
         if: failure()
