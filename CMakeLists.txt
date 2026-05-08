@@ -126,12 +126,23 @@ set_property(CACHE USE_SANITIZER PROPERTY STRINGS "" "ASanUbsan" "TSan" "Compute
 option(COMPUTE_SANITIZER_DEVICE_DEBUG "Build CUDA with -G for Compute Sanitizer (slower, deeper debug)" OFF)
 
 if (USE_SANITIZER STREQUAL "ASanUbsan")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
+    message(FATAL_ERROR
+      "ASan/UBSan is not supported by nvc++ (NVHPC). "
+      "Configure with CC=gcc CXX=g++ to use a GCC-based sanitizer build: "
+      "  CC=gcc CXX=g++ cmake --preset asan")
+  endif()
   message(STATUS "Compiling with Address+Undefined Sanitizers")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address,undefined -fno-omit-frame-pointer")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address,undefined -fno-omit-frame-pointer")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address,undefined")
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address,undefined")
 elseif (USE_SANITIZER STREQUAL "TSan")
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "NVHPC")
+    message(FATAL_ERROR
+      "TSan is not supported by nvc++ (NVHPC). "
+      "Configure with CC=gcc CXX=g++ to use a GCC-based sanitizer build.")
+  endif()
   message(STATUS "Compiling with Thread Sanitizer")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread -fno-omit-frame-pointer")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread -fno-omit-frame-pointer")

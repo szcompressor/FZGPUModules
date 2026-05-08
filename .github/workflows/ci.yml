@@ -86,7 +86,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
             -DBUILD_EXAMPLES=ON \
-            -DCMAKE_CUDA_ARCHITECTURES=80 \
+            -DCMAKE_CUDA_ARCHITECTURES=native \
             -DCMAKE_INSTALL_PREFIX=./build/ci/install
 
       - name: Build
@@ -98,11 +98,6 @@ jobs:
             module load nvhpc/23.11/nvhpc-hpcx-cuda12
           fi
           cmake --build build/ci --parallel
-
-      - name: Show linked CUDA runtime
-        shell: bash
-        run: |
-          ldd build/ci/tests/test_cli | grep -E 'cudart|cuda' || true
 
       - name: Run tests
         shell: bash
@@ -144,7 +139,9 @@ jobs:
             module purge
             module load nvhpc/23.11/nvhpc-hpcx-cuda12
           fi
-          cmake --preset asan
+          # nvc++ does not support -fsanitize; use GCC for the sanitizer build.
+          # nvcc (from the nvhpc module above) is still used for CUDA sources.
+          CC=gcc CXX=g++ cmake --preset asan
 
       - name: Build
         run: cmake --build --preset asan --parallel
