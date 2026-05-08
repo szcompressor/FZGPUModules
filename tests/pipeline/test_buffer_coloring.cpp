@@ -265,6 +265,12 @@ TEST(BufferColoring, RepeatedCompressStaysCorrect) {
 //       (PREALLOCATE + coloring enabled + graph mode; 5 compress replays)
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, ColoredBuffersStableAcrossGraphReplays) {
+    {
+        Pipeline probe(kNBytes, MemoryStrategy::PREALLOCATE, 1.0f);
+        if (probe.isMemPoolFallbackMode()) {
+            GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+        }
+    }
     auto h_input = make_test_data();
 
     CudaStream stream;
