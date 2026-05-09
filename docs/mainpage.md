@@ -19,12 +19,13 @@ connected and executed entirely on the GPU with stream-ordered memory management
 
 ### Requirements
 
-| Requirement | Minimum |
-|---|---|
-| CUDA Toolkit | 11.2+ (stream-ordered allocator) |
-| C++ Standard | C++17 |
-| CMake | 3.24+ |
-| Host byte order | Little-endian |
+| Requirement | Minimum | Notes |
+|---|---|---|
+| CUDA Toolkit | 11.2+ | Stream-ordered allocator required |
+| Host Compiler | GCC 7+ or Clang 5+ | Upper bound set by CUDA version — see [NVIDIA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/); NVHPC 23.11 tested in CI |
+| C++ Standard | C++17 | |
+| CMake | 3.24+ | |
+| Host byte order | Little-endian | |
 
 **Note:** using a vGPU will result in the CUDA mempool creation to fail, resulting in an automatic fallback allocation using `cudaMalloc`. This will work correctly but without the performance benefits of the stream-ordered allocator. For perfomance critical workloads avoid vGPU setups. The lack of stream-ordered allocator support also prevents CUDA Graph capture on vGPUs so this feature is unavailable in those environments.
 

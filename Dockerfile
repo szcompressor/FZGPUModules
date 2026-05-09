@@ -22,6 +22,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+# copy over test data
 COPY data/ /data/
 
 # Pre-build and install FZGPUModules to /usr/local.

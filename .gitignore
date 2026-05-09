@@ -11,7 +11,7 @@ load-env
 
 # Build outputs
 /build/
-build-*
+build*
 build-compute
 
 # IDE

@@ -1,0 +1,92 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug and what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: "## Environment"
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: "`cat /etc/os-release` or `uname -a`"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: "`nvidia-smi -L`"
+    validations:
+      required: true
+
+  - type: input
+    id: cuda
+    attributes:
+      label: CUDA version
+      description: "`nvcc --version`"
+    validations:
+      required: true
+
+  - type: input
+    id: compiler
+    attributes:
+      label: Compiler
+      description: "`gcc --version`, `clang --version`, or `nvc++ --version`"
+    validations:
+      required: true
+
+  - type: input
+    id: cmake
+    attributes:
+      label: CMake version
+      description: "`cmake --version`"
+    validations:
+      required: true
+
+  - type: input
+    id: fzgm_version
+    attributes:
+      label: FZGPUModules version / commit
+      description: "`git log -n 1 --oneline`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: cmake_config
+    attributes:
+      label: CMake configuration
+      description: "`cmake -L <build_dir>` or the preset and flags you used"
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      value: |
+        1.
+        2.
+        3.
+
+        **Expected behavior:**
+
+        **Actual behavior:**
+
+        A minimal self-contained reproducer (C++ snippet, test name, or script) is very helpful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Logs, stack traces, sanitizer output, or anything else relevant. If you ran under AddressSanitizer or Compute Sanitizer, include that output here.
