@@ -259,6 +259,13 @@ TEST(Liveness, LivenessApiConsistentUnderGraphMode) {
     constexpr size_t N = 1 << 12;
     const size_t in_bytes = N * sizeof(float);
 
+    {
+        Pipeline probe(in_bytes, MemoryStrategy::PREALLOCATE, 1.0f);
+        if (probe.isMemPoolFallbackMode()) {
+            GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+        }
+    }
+
     // Build a 2-stage PREALLOCATE + graph-mode pipeline.
     auto p = std::make_unique<Pipeline>(in_bytes, MemoryStrategy::PREALLOCATE, 5.0f);
 

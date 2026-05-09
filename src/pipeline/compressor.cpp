@@ -345,6 +345,12 @@ void Pipeline::finalize() {
                 "Graph mode requires PREALLOCATE memory strategy. "
                 "Call setMemoryStrategy(MemoryStrategy::PREALLOCATE) before finalize().");
         }
+        if (mem_pool_ && mem_pool_->isFallbackMode()) {
+            throw std::runtime_error(
+                "Graph mode is not supported when the CUDA memory pool is unavailable "
+                "(cudaMalloc fallback mode; common on vGPU or when FZ_FORCE_MEMPOOL_FALLBACK is set). "
+                "Disable graph mode or use a GPU that supports cudaMemPool.");
+        }
         if (input_size_hint_ == 0) {
             throw std::runtime_error(
                 "Graph mode requires a non-zero input size hint. "

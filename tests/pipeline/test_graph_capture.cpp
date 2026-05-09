@@ -15,6 +15,11 @@
  *   GC9  - isGraphCompatible() false for RZE inverse, true for all forward stages
  *   GC10 - graph mode with coloring disabled still produces correct output
  *   GC11 - warmup() before captureGraph() does not break subsequent graph compress
+ *   GC12 - graph mode with mempool fallback throws at finalize()
+ *   GC13 - captureGraph() without enableGraphMode() throws
+ *   GC14 - captureGraph() after compress() throws
+ *   GC15 - enableGraphMode() after finalize() throws
+ *   GC16 - graph capture works with a Lorenzo -> RLE pipeline
  */
 
 #include <gtest/gtest.h>
@@ -22,6 +27,8 @@
 #include "fzgpumodules.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 using namespace fz;
@@ -39,6 +46,29 @@ static std::vector<float> make_smooth(size_t n) {
     return v;
 }
 
+struct ScopedEnvVar {
+    std::string name;
+    bool had_old = false;
+    std::string old_value;
+
+    ScopedEnvVar(const char* var_name, const char* value) : name(var_name) {
+        const char* old = std::getenv(var_name);
+        if (old) {
+            had_old = true;
+            old_value = old;
+        }
+        setenv(var_name, value, /*overwrite=*/1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_old) {
+            setenv(name.c_str(), old_value.c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv(name.c_str());
+        }
+    }
+};
+
 // Build a finalized graph-mode pipeline with a single Lorenzo stage.
 // Caller owns the pipeline; the graph stream must be non-default.
 static std::unique_ptr<Pipeline> make_graph_pipeline(size_t in_bytes, bool disable_coloring = false) {
@@ -54,10 +84,34 @@ static std::unique_ptr<Pipeline> make_graph_pipeline(size_t in_bytes, bool disab
     return p;
 }
 
+static bool is_graph_supported() {
+    Pipeline p(1024, MemoryStrategy::PREALLOCATE, 1.0f);
+    return !p.isMemPoolFallbackMode();
+}
+
+static std::unique_ptr<Pipeline> make_graph_pipeline_with_rle(size_t in_bytes) {
+    auto p = std::make_unique<Pipeline>(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+
+    auto* rle = p->addStage<RLEStage<uint16_t>>();
+    p->connect(rle, lrz, "codes");
+
+    p->enableGraphMode(true);
+    p->setPoolManagedDecompOutput(false);
+    p->finalize();
+    return p;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GC1: captureGraph() produces correct compressed + decompressed output
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, CorrectOutput) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
@@ -105,6 +159,9 @@ TEST(GraphCapture, CorrectOutput) {
 // semantically meaningful invariant is data correctness, not byte identity.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, ReplayCorrect) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
     constexpr size_t N     = 1 << 14;
     constexpr float  EB    = 1e-2f;
     constexpr int    ITERS = 12;
@@ -151,6 +208,9 @@ TEST(GraphCapture, ReplayCorrect) {
 // filler may differ.  The meaningful invariant is data correctness.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, MatchesPreallocate) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
@@ -268,6 +328,9 @@ TEST(GraphCapture, CaptureBeforeFinalizeThrows) {
 // kernels.  The pipeline must handle this gracefully and produce valid output.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, CompressBeforeCaptureSucceeds) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
@@ -380,6 +443,9 @@ TEST(GraphCapture, IsGraphCompatiblePerStage) {
 // GC10: Graph mode with buffer coloring disabled still produces correct output
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, ColoringDisabledCorrectOutput) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
@@ -426,6 +492,9 @@ TEST(GraphCapture, ColoringDisabledCorrectOutput) {
 // still succeed and compress must produce correct output.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GraphCapture, WarmupBeforeCaptureWorks) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
@@ -465,4 +534,128 @@ TEST(GraphCapture, WarmupBeforeCaptureWorks) {
 
     EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f)
         << "GC11: warmup→capture round-trip error exceeds bound";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC12: Graph mode must throw when mempool fallback is active (vGPU / forced)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GraphCapture, MempoolFallbackThrowsAtFinalize) {
+    ScopedEnvVar force_fallback("FZ_FORCE_MEMPOOL_FALLBACK", "1");
+    constexpr size_t N = 1024;
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    p.enableGraphMode(true);
+
+    EXPECT_THROW(p.finalize(), std::runtime_error)
+        << "GC12: graph mode must be rejected when mempool fallback is active";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC13: captureGraph() without enableGraphMode() throws
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GraphCapture, CaptureWithoutEnableThrows) {
+    constexpr size_t N = 1024;
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    p.finalize();
+
+    CudaStream stream;
+    EXPECT_THROW(p.captureGraph(stream), std::runtime_error)
+        << "GC13: captureGraph() without enableGraphMode() must throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC14: captureGraph() after compress() throws (must capture before first run)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GraphCapture, CaptureAfterCompressThrows) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
+    constexpr size_t N  = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto h_input = make_smooth(N);
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    auto p = make_graph_pipeline(in_bytes);
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    EXPECT_THROW(p->captureGraph(stream), std::runtime_error)
+        << "GC14: captureGraph() after compress() must throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC15: enableGraphMode() after finalize() throws
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GraphCapture, EnableAfterFinalizeThrows) {
+    constexpr size_t N = 1024;
+    Pipeline p(N * sizeof(float), MemoryStrategy::PREALLOCATE, 4.0f);
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    p.finalize();
+
+    EXPECT_THROW(p.enableGraphMode(true), std::runtime_error)
+        << "GC15: enableGraphMode() after finalize() must throw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC16: Graph capture works for a Lorenzo → RLE pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GraphCapture, RlePipelineCorrectOutput) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto h_input = make_smooth(N);
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    auto p = make_graph_pipeline_with_rle(in_bytes);
+
+    // Warmup to pre-allocate stage scratch and host buffers outside the capture window.
+    p->warmup(stream);
+    stream.sync();
+
+    p->captureGraph(stream);
+    ASSERT_TRUE(p->isGraphCaptured());
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    p->decompress(nullptr, 0, &d_dec, &dec_sz, stream);
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "GC16: Lorenzo->RLE graph round-trip max_err=" << max_err;
 }
