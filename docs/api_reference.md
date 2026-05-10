@@ -37,11 +37,11 @@ Defined in `include/pipeline/dag.h`.
 ### fz::ErrorBoundMode
 Defined in `modules/fused/lorenzo_quant/lorenzo_quant.h`. Used by `LorenzoQuantStage` and `QuantizerStage`.
 
-| Value | Meaning |
-|-------|---------|
-| `ABS` | Absolute error — `abs(x_orig - x_recon) ≤ eb` |
-| `REL` | Global approximate point-wise relative — `abs(error) / abs(x_orig) ≤ eb` (approximately) |
-| `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute) |
+| Value | Meaning | Notes |
+|-------|---------|-------|
+| `ABS` | Absolute error — `abs(x_orig - x_recon) ≤ eb` | Useful when data is homogenous in magnitude (preserve big picture) |
+| `REL` | Global approximate point-wise relative — `abs(error) / abs(x_orig) ≤ eb` (approximately) | High level detail close to zero, but higher error with larger values |
+| `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute) | Useful for single bounds over multiple datasets |
 
 ---
 

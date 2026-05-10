@@ -8,28 +8,7 @@ file can reconstruct an identical pipeline without writing any C++ code.
 
 ---
 
-## Relationship to .fzm Files
-
-| Artifact | Format | Purpose | When used |
-|---|---|---|---|
-| .toml config | Human-readable text | Define the pipeline setup | Authoring and CI reproducibility |
-| .fzm binary | Binary | Store compressed data | Runtime output of compress() / writeToFile() |
-
-The two formats are complementary and independent. A .toml config describes
-how to build the compressor; a .fzm file is what the compressor produced.
-Loading a config file does not load compressed data, and writing a compressed
-file does not save pipeline parameters.
-
----
-
 ## API
-
-### Header
-
-```cpp
-#include "pipeline/config.h"   // pulled in automatically via compressor.h
-#include "pipeline/compressor.h"
-```
 
 ### Methods
 
@@ -288,25 +267,6 @@ bytes -- smaller than the input when nbits < 8*sizeof(T). nbits must be a power 
 
 ---
 
-## Data Type Strings
-
-Used in input_type, output_type, code_type, and data_type keys:
-
-| String | C type |
-|---|---|
-| "float32" | float |
-| "float64" | double |
-| "uint8" | uint8_t |
-| "uint16" | uint16_t |
-| "uint32" | uint32_t |
-| "uint64" | uint64_t |
-| "int8" | int8_t |
-| "int16" | int16_t |
-| "int32" | int32_t |
-| "int64" | int64_t |
-
----
-
 ## Complete Examples
 
 ### Lorenzo-based pipeline (ABS error)
@@ -406,78 +366,6 @@ fzgmod-cli -b -c examples/presets/pfpl.toml -i data.f32
 
 ---
 
-## Behavior and Guarantees
-
-### loadConfig() sequence
-
-1. Parse the TOML file. Throws on any syntax error.
-2. Apply [pipeline] settings (input size, dims, strategy, etc.).
-3. Stage construction pass -- iterate [[stage]] entries in file order, call
-   the appropriate addStage<T>() and configure the stage via public setters.
-   Collect a name -> Stage* map.
-4. Wiring pass -- for each stage with an inputs array, call connect() using
-   the resolved Stage* pointers. Throws if a from name is not found.
-5. Call finalize(). The pipeline is ready to compress on return.
-
-### saveConfig() sequence
-
-1. Throw if not finalized.
-2. Build a Stage* -> name map using getName() with numeric suffixes for
-   duplicate names (e.g. "Lorenzo1D", "Lorenzo1D1").
-3. For each stage, emit a [[stage]] table with type string and per-type
-   parameters read via public getters.
-4. For each stage, emit an inputs array by scanning connections_ for entries
-   where that stage is the dependent.
-5. Write the TOML document to the file.
-
-### Invariants
-
-- loadConfig() throws if the pipeline is already finalized (is_finalized_ == true).
-- saveConfig() throws if the pipeline is not yet finalized.
-- finalize() is always called internally by loadConfig(); callers must not call it separately.
-- A pipeline built with loadConfig() is semantically equivalent to one built with
-  the corresponding manual addStage() / connect() / finalize() calls.
-- The error_bound stored in the config is always the user-specified value
-  (not the converted absolute bound used internally for REL/NOA modes), so
-  reloading preserves the original user intent.
-
----
-
-## Error Handling
-
-All errors are reported as std::runtime_error with a descriptive message.
-
-| Condition | Error message prefix |
-|---|---|
-| File not found / unreadable | "loadConfig: failed to parse \"...\"" |
-| TOML syntax error | "loadConfig: failed to parse \"...\": ..." |
-| No [[stage]] entries | "loadConfig: no [[stage]] entries found in \"...\"" |
-| Stage missing name or type | "loadConfig: each [[stage]] must have 'name' and 'type'" |
-| Duplicate stage name | "loadConfig: duplicate stage name \"...\"" |
-| Unknown type string | "loadConfig: unknown stage type \"...\"" |
-| Unknown type combination | "loadConfig: unsupported ... type combination" |
-| from reference not found | "loadConfig: stage \"...\" references unknown stage \"...\"" |
-| Called on finalized pipeline | "loadConfig: pipeline is already finalized" |
-| saveConfig before finalize | "saveConfig: pipeline must be finalized first" |
-| Output file unwritable | "saveConfig: cannot open \"...\" for writing" |
-
----
-
-## Dependency
-
-Toml++ v3.4.0 (vendored, header-only). It is included only in
-src/pipeline/config.cpp and never leaks into public headers. Users of
-fzgpumodules.h do not need to know it exists.
-
-```
-third_party/tomlplusplus/include/toml++/toml.hpp
-```
-
-The include path is added to fzgmod_compile_settings in CMakeLists.txt.
-No additional linking step is required.
-
----
-
 ## Limitations
 
 - No post-load parameter editing. Because loadConfig() calls finalize()
@@ -491,31 +379,3 @@ No additional linking step is required.
 - Single-source pipelines only. The [pipeline] table has one input_size and
   one dims triple. Multi-source pipelines are not currently representable in
   the config format and must be constructed manually.
-- Not thread-safe. Consistent with Pipeline; all config I/O must happen on the
-  host thread that owns the pipeline.
-
----
-
-## Testing
-
-tests/pipeline/test_config.cpp -- label config.
-
-```bash
-ctest --test-dir build -L config --output-on-failure
-```
-
-| Test | What it verifies |
-|---|---|
-| ConfigLoad/LorenzoOnly | Minimal 1-stage config round-trips within error bound |
-| ConfigLoad/FullPipeline | 3-stage Lorenzo->Bitshuffle->RZE, PREALLOCATE, round-trips |
-| ConfigLoad/ConstructorOverload | Pipeline(path) == Pipeline() + loadConfig(path) |
-| ConfigLoad/AlreadyFinalized | Throws on already-finalized pipeline |
-| ConfigLoad/MissingFile | Throws on nonexistent path |
-| ConfigLoad/BadStageType | Throws on unknown type string |
-| ConfigLoad/BadWiringRef | Throws when from name not found |
-| ConfigLoad/DuplicateStageName | Throws on two stages with same name |
-| ConfigLoad/AllSupportedStageTypes | All supported stage types in one chain, save+load |
-| ConfigLoad/ZigzagAndNegabinary | Zigzag and Negabinary type-pair variants |
-| ConfigSave/RoundTrip | Programmatic build -> save -> load -> compress within EB |
-| ConfigSave/PreservesParams | Saved TOML contains correct EB, QR, block sizes, etc. |
-| ConfigSave/RequiresFinalized | Throws when pipeline not yet finalized |

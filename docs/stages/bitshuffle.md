@@ -1,8 +1,13 @@
 # BitshuffleStage {#stage_bitshuffle}
 
 **Header:** `modules/shufflers/bitshuffle/bitshuffle_stage.h`  
-**Class:** `fz::BitshuffleStage`  
+**Class:** `fz::BitshuffleStage` — no template parameters  
 **Category:** Transform / shuffler (lossless)
+
+**Common instantiation:**
+```cpp
+auto* bshuf = p.addStage<fz::BitshuffleStage>();
+```
 
 ---
 

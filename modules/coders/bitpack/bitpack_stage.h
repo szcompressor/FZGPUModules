@@ -68,6 +68,8 @@ public:
      *   uint8_t  : 1, 2, 4, 8
      *   uint16_t : 1, 2, 4, 8, 16
      *   uint32_t : 1, 2, 4, 8, 16, 32
+     *
+     * Ignored during forward execute when setAutoDetect(true) is active.
      */
     void setNBits(uint8_t nbits) {
         if (nbits == 0 || nbits > 8 * sizeof(T) || (nbits & (nbits - 1)) != 0)
@@ -78,6 +80,22 @@ public:
         nbits_ = nbits;
     }
     uint8_t getNBits() const { return nbits_; }
+
+    /**
+     * Enable automatic bit-width detection.
+     *
+     * When true, forward execute scans the input for its maximum value and
+     * selects the smallest valid power-of-two nbits that covers it.  The
+     * chosen nbits is stored in the serialized header so the inverse pass
+     * can unpack correctly.
+     *
+     * After compress(), getNBits() reflects the detected value.
+     *
+     * Incompatible with CUDA Graph capture: isGraphCompatible() returns false
+     * while auto-detect is enabled.
+     */
+    void setAutoDetect(bool enable) { auto_detect_ = enable; }
+    bool isAutoDetect() const { return auto_detect_; }
 
     // ── Execution ──────────────────────────────────────────────────────────────
     void execute(
@@ -98,6 +116,11 @@ public:
     ) const override {
         if (input_sizes.empty()) return {0};
         if (!is_inverse_) {
+            if (auto_detect_) {
+                // nbits is unknown until execute() scans the data; return worst
+                // case (full-width, no compression) so PREALLOCATE has enough room.
+                return {input_sizes[0]};
+            }
             // Forward: packed output is ceil(n * nbits / 8) bytes.
             const size_t n = input_sizes[0] / sizeof(T);
             return {(n * nbits_ + 7) / 8};
@@ -168,10 +191,13 @@ public:
         actual_output_size_  = saved_output_size_;
     }
 
-    bool isGraphCompatible() const override { return true; }
+    // Auto-detect requires a D2H sync to read the scanned max, so it cannot
+    // be recorded inside a CUDA Graph.
+    bool isGraphCompatible() const override { return !auto_detect_; }
 
 private:
     bool     is_inverse_        = false;
+    bool     auto_detect_       = false;
     uint8_t  nbits_             = 8 * sizeof(T);   // default: keep all bits (identity)
     uint64_t num_elements_      = 0;               // set by forward execute; used by inverse
     size_t   actual_output_size_ = 0;

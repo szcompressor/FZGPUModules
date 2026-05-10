@@ -1,11 +1,34 @@
 /**
- * tests/test_file_io.cpp
+ * tests/pipeline/test_file_io.cpp
  *
  * Tests for the FZM file format: writing, reading, round-trip correctness,
  * header integrity, and robust rejection of malformed or missing files.
  *
  * Also includes static-assertion style struct-size tests for format structs
  * (H2, H3) that require no GPU work.
+ *
+ *   H2   FZMFormat/BufferEntrySize                  — sizeof(FZMBufferEntry) == 256
+ *   H3   FZMFormat/HeaderCoreSize                   — sizeof(FZMHeaderCore) == 80
+ *   H5   FZMFormat/HeaderCoreMagic                  — default-constructed header has correct magic
+ *   F2   FileIO/LorenzoDiffRoundTrip                — Lorenzo→Diff writeToFile → decompressFromFile
+ *   F3   FileIO/CompressedFileSmallerThanRaw         — compressed file < raw input for smooth data
+ *   F4   FileIO/ReadHeaderCounts                     — readHeader() returns expected stage/buffer counts
+ *   FE2  FileIO/DecompressEmptyFileThrows            — decompressFromFile() on empty file throws
+ *   FE3  FileIO/DecompressCorruptMagicThrows         — decompressFromFile() on corrupt magic throws
+ *   FE4  FileIO/DecompressTruncatedFileThrows        — decompressFromFile() on truncated file throws
+ *   FE5a FileIO/DecompressWrongMajorVersionThrows    — wrong major version throws
+ *   FE5b FileIO/DecompressWrongMinorVersionSucceeds  — wrong minor version warns but succeeds
+ *   FE6  FileIO/DecompressNonexistentPathThrows      — decompressFromFile() on missing path throws
+ *   FC1  FileIO/WriteToFileBeforeCompressThrows      — writeToFile() before compress() throws
+ *   FC2  FileIO/BuildHeaderBeforeCompressThrows      — buildHeader() before compress() throws
+ *   FC3  FileIO/StageConfigPreservedThroughFile      — stage config survives writeToFile/readHeader
+ *   FC4  FileIO/CreateStageReconstructsCorrectConfig — createStage() from file header has correct params
+ *   FC5  FileIO/LorenzoRLERoundTripThroughFile       — Lorenzo→RLE file round-trip
+ *   FC6  FileIO/DecompressFromFilePerfOutPopulated   — decompressFromFile() populates valid perf data
+ *   CK1  FileIO/WrittenFileHasChecksums              — written file has both checksum flags set
+ *   CK2  FileIO/CorruptedDataPayloadThrows           — corrupted data payload throws checksum error
+ *   DI1  FileIO/LorenzoDimsSerializedThroughFile     — 2D dims survive writeToFile → decompressFromFile
+ *   PS1  FileIO/PoolOverrideBytesWorks               — pool_override_bytes escape hatch works
  */
 
 #include <gtest/gtest.h>
@@ -13,7 +36,6 @@
 #include "fzgpumodules.h"
 #include "fzm_format.h"
 
-#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <stdexcept>
@@ -26,14 +48,6 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static std::vector<float> make_smooth(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // H2: sizeof(FZMBufferEntry) == 256
@@ -74,7 +88,7 @@ TEST(FileIO, LorenzoDiffRoundTrip) {
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
     size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -131,7 +145,7 @@ TEST(FileIO, CompressedFileSmallerThanRaw) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
     size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -173,7 +187,7 @@ TEST(FileIO, ReadHeaderCounts) {
     constexpr size_t N  = 1 << 12;
     constexpr float  EB = 1e-2f;
     size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -225,7 +239,7 @@ TEST(FileIO, DecompressCorruptMagicThrows) {
     const std::string tmp = "/tmp/fzgmod_test_corrupt_magic.fzm";
 
     // Build a valid compressed file first
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -296,7 +310,7 @@ TEST(FileIO, DecompressWrongMajorVersionThrows) {
     constexpr float  EB     = 1e-2f;
     const std::string tmp   = "/tmp/fzgmod_test_wrong_major.fzm";
     size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -345,7 +359,7 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
     constexpr float  EB     = 1e-2f;
     const std::string tmp   = "/tmp/fzgmod_test_wrong_minor.fzm";
     size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -395,6 +409,8 @@ TEST(FileIO, DecompressWrongMinorVersionSucceeds) {
     std::remove(tmp.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FE6: FileIO/DecompressNonexistentPathThrows — decompressFromFile() on missing path throws
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(FileIO, DecompressNonexistentPathThrows) {
     void*  d_out  = nullptr;
@@ -466,7 +482,7 @@ TEST(FileIO, StageConfigPreservedThroughFile) {
     constexpr size_t N  = 1 << 12;
     constexpr float  EB = 2e-3f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -544,7 +560,7 @@ TEST(FileIO, CreateStageReconstructsCorrectConfig) {
     constexpr size_t N  = 1 << 12;
     constexpr float  EB = 5e-3f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -604,7 +620,7 @@ TEST(FileIO, LorenzoRLERoundTripThroughFile) {
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -659,7 +675,7 @@ TEST(FileIO, DecompressFromFilePerfOutPopulated) {
     constexpr size_t N  = 1 << 12;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -728,7 +744,7 @@ TEST(FileIO, WrittenFileHasChecksums) {
     constexpr size_t N  = 1 << 12;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -776,7 +792,7 @@ TEST(FileIO, CorruptedDataPayloadThrows) {
     constexpr size_t N  = 1 << 12;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -843,7 +859,7 @@ TEST(FileIO, LorenzoDimsSerializedThroughFile) {
     constexpr size_t N     = DIM_X * DIM_Y;
     constexpr float  EB    = 1e-2f;
     const size_t in_bytes  = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -921,7 +937,7 @@ TEST(FileIO, PoolOverrideBytesWorks) {
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);

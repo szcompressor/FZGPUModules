@@ -38,6 +38,18 @@
 
 namespace fz {
 
+/**
+ * Zigzag (two's-complement to magnitude-sign) encoding helper.
+ *
+ * Maps signed integers to unsigned integers such that small-magnitude values
+ * (positive and negative) produce small non-negative codes — ideal before
+ * entropy coding or bitshuffle.  Encode and decode are both O(1) bitwise ops.
+ *
+ * All functions are `__host__ __device__` — callable from CUDA kernels and
+ * host code.  Used internally by ZigzagStage<TIn, TOut>.
+ *
+ * @tparam T  Signed integer type (`int8_t`, `int16_t`, `int32_t`, `int64_t`).
+ */
 template <typename T>
 struct Zigzag {
     static_assert(std::is_integral<T>::value && std::is_signed<T>::value,

@@ -11,16 +11,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Header / compilation smoke test (no GPU required) ──────────────────────
-  # This job uses a free GitHub-hosted runner with an official NVIDIA Docker container.
-  # The container provides the CUDA compiler (nvcc) and headers, allowing us to
-  # compile all library and CLI targets to catch API breakage and CMake errors
-  # without needing a real GPU.
   compile-only:
     name: Compile (CPU-only)
     runs-on: ubuntu-24.04
-    # Uses the published FZGPUModules image (cmake, ninja, git already installed).
-    # The package must be set to Public in GitHub: Packages → fzgpumodules → Package settings.
+    # Uses the published FZGPUModules image
     container: ghcr.io/szcompressor/fzgpumodules:latest
 
     steps:
@@ -37,7 +31,7 @@ jobs:
             -DBUILD_TESTING=OFF \
             -DBUILD_EXAMPLES=OFF \
             -DBUILD_PROFILING=OFF \
-            -DCMAKE_CUDA_ARCHITECTURES=86
+            -DCMAKE_CUDA_ARCHITECTURES=native
 
       - name: Build (library + CLI only)
         run: cmake --build build/check --target fzgmod fzgmod-cli

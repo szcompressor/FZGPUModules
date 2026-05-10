@@ -1,20 +1,30 @@
 /**
- * tests/test_difference.cpp
+ * tests/stages/test_difference.cpp
  *
- * Unit tests for DifferenceStage  (forward + inverse round-trip).
+ * Unit tests for DifferenceStage<TIn[, TOut]> (forward + inverse round-trip).
  *
  * The Difference stage is a lossless transform:
  *   Forward : output[0] = input[0];  output[i] = input[i] - input[i-1]
  *   Inverse : output[0] = input[0];  output[i] = input[i] + output[i-1]
  *
- * Key properties verified here:
- *   1. Forward transform changes values (not a no-op).
- *   2. Forward followed by Inverse reconstructs the original exactly.
- *   3. Output size equals input size (lossless / size-preserving).
- *   4. Chunked mode: diffs reset at chunk boundaries.
- *   5. Negabinary output (DifferenceStage<T, UnsignedT>): encode+decode round-trip.
- *   6. Chunked + negabinary combined.
- *   7. Header serialization preserves chunk_size across serialize/deserialize.
+ *   DD1   DifferenceStage/FloatRoundTrip                — float fwd+inv, spot-checks diffs
+ *   DD2   DifferenceStage/Uint16RoundTrip               — uint16 fwd+inv, exact reconstruction
+ *   DD3   DifferenceStage/ConstantInput                 — constant input → all-zero diffs (≥i=1)
+ *   DD4   DifferenceStage/SingleElement                 — N=1 passthrough; inv also exact
+ *   DD5   DifferenceStage/Uint16WrappingArithmetic      — modular subtraction/addition round-trips
+ *   DD6   DifferenceStage/LargeRoundTrip                — 64 K floats, max error < 1e-3
+ *   DD7   DifferenceStage/OneMillion                    — 1 M floats, correctness at scale
+ *   DD8   DifferenceStage/ChunkBoundariesAreIndependent — chunk starts stored as-is (no carry)
+ *   DD9   DifferenceStage/ChunkedInt32RoundTrip         — int32 with 512-element chunks
+ *   DD10  DifferenceStage/ChunkedUint16RoundTrip        — uint16 with 1024-element chunks
+ *   DD11  DifferenceStage/ChunksAreIndependentContexts  — chunk N never carries from chunk N-1
+ *   DD12  DifferenceStage/NegabinaryFusedInt32RoundTrip — int32→uint32 negabinary-fused round-trip
+ *   DD13  DifferenceStage/NegabinaryFusedInt16RoundTrip — int16→uint16 negabinary-fused round-trip
+ *   DD14  DifferenceStage/NegabinaryConstantInput       — constant diffs encode to 0
+ *   DD15  DifferenceStage/NegabinaryChunkedRoundTrip    — negabinary + chunking combined (PFPL path)
+ *   DD16  DifferenceStage/HeaderSerializationPreservesChunkSize — chunk_size survives header bytes
+ *   DD17  DifferenceStage/DoubleRoundTrip               — double-precision exact reconstruction
+ *   DD18  DifferenceStage/LegacyFloatHeaderCompatible   — vanilla float header is 6 bytes, chunk_size=0
  */
 
 #include <gtest/gtest.h>
@@ -73,7 +83,7 @@ static std::vector<T> run_diff_stage(Stage& stage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: float round-trip
+// DD1: FloatRoundTrip — float forward pass changes values; inverse restores exactly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, FloatRoundTrip) {
     CudaStream stream;
@@ -107,7 +117,7 @@ TEST(DifferenceStage, FloatRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: uint16_t round-trip (typical after Lorenzo quantization codes)
+// DD2: Uint16RoundTrip — uint16 ramp forward+inverse, exact reconstruction
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, Uint16RoundTrip) {
     CudaStream stream;
@@ -133,7 +143,7 @@ TEST(DifferenceStage, Uint16RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: constant input → differences are all zero after first element
+// DD3: ConstantInput — constant float input → diffs[1..N-1] are all zero
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, ConstantInput) {
     CudaStream stream;
@@ -152,7 +162,7 @@ TEST(DifferenceStage, ConstantInput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: single-element input (no neighbour → passthrough)
+// DD4: SingleElement — N=1 passthrough; inverse also exact
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, SingleElement) {
     CudaStream stream;
@@ -173,16 +183,7 @@ TEST(DifferenceStage, SingleElement) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: uint16_t alternating max / min — exercises unsigned wrap-around
-//
-// For uint16_t, subtraction is modular:
-//   diff[0] = 0
-//   diff[1] = 65535 - 0     = 65535
-//   diff[2] = 0 - 65535     = 1     (wraps)
-//   diff[3] = 65535 - 0     = 65535
-//   ...
-// The inverse (prefix-sum) must also use modular addition to recover the
-// original sequence exactly.
+// DD5: Uint16WrappingArithmetic — alternating max/min exercises modular subtraction/addition
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, Uint16WrappingArithmetic) {
     CudaStream stream;
@@ -207,7 +208,7 @@ TEST(DifferenceStage, Uint16WrappingArithmetic) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: large random-ish data round-trip
+// DD6: LargeRoundTrip — 64 K floats; float32 prefix-sum error < 1e-3
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, LargeRoundTrip) {
     CudaStream stream;
@@ -236,7 +237,7 @@ TEST(DifferenceStage, LargeRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: 1 M float elements — correctness at scale, no OOM
+// DD7: OneMillion — 1 M floats, correctness at scale, max error < 0.1
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, OneMillion) {
     CudaStream stream;
@@ -261,10 +262,6 @@ TEST(DifferenceStage, OneMillion) {
         max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
     EXPECT_LT(max_err, 0.1f) << "1M element max reconstruction error: " << max_err;
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  Chunked difference tests
-// ═════════════════════════════════════════════════════════════════════════════
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: run typed DifferenceStage<TIn, TOut> forward pass; return TOut vector.
@@ -317,10 +314,7 @@ static std::vector<TIn> run_diff_inv(DifferenceStage<TIn, TOut>& stage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Chunking: forward boundaries
-//
-// Verifies that the first element of each chunk is stored as-is (no diff),
-// while elements within a chunk are differenced from their predecessor.
+// DD8: ChunkBoundariesAreIndependent — first element of each chunk stored as-is
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, ChunkBoundariesAreIndependent) {
     CudaStream stream;
@@ -354,7 +348,7 @@ TEST(DifferenceStage, ChunkBoundariesAreIndependent) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Chunking: round-trip (int32)
+// DD9: ChunkedInt32RoundTrip — int32 with 512-element chunks, exact reconstruction
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, ChunkedInt32RoundTrip) {
     CudaStream stream;
@@ -383,7 +377,7 @@ TEST(DifferenceStage, ChunkedInt32RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Chunking: uint16 round-trip (typical Lorenzo code path)
+// DD10: ChunkedUint16RoundTrip — uint16 with 1024-element chunks, exact reconstruction
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, ChunkedUint16RoundTrip) {
     CudaStream stream;
@@ -412,10 +406,7 @@ TEST(DifferenceStage, ChunkedUint16RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Chunking: chunk-start elements are NOT affected by previous chunks
-//
-// Verifies independence by checking that the reconstruction of chunk N does
-// not diverge due to carry from chunk N-1.
+// DD11: ChunksAreIndependentContexts — chunk N never carries from chunk N-1
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, ChunksAreIndependentContexts) {
     CudaStream stream;
@@ -443,12 +434,8 @@ TEST(DifferenceStage, ChunksAreIndependentContexts) {
         EXPECT_EQ(h_recon[i], h_input[i]) << "Mismatch at index " << i;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  Negabinary-fused tests  (DifferenceStage<T, UnsignedT>)
-// ═════════════════════════════════════════════════════════════════════════════
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Negabinary opt-in: basic int32 round-trip
+// DD12: NegabinaryFusedInt32RoundTrip — int32→uint32 negabinary encoding, round-trip exact
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, NegabinaryFusedInt32RoundTrip) {
     CudaStream stream;
@@ -480,7 +467,7 @@ TEST(DifferenceStage, NegabinaryFusedInt32RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Negabinary opt-in: int16 round-trip
+// DD13: NegabinaryFusedInt16RoundTrip — int16→uint16 negabinary encoding, round-trip exact
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, NegabinaryFusedInt16RoundTrip) {
     CudaStream stream;
@@ -505,7 +492,7 @@ TEST(DifferenceStage, NegabinaryFusedInt16RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Negabinary: constant input → all diffs are 0 → encoded as 0 → decoded back to 0
+// DD14: NegabinaryConstantInput — constant diffs = 0, negabinary-encodes to 0
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, NegabinaryConstantInput) {
     CudaStream stream;
@@ -525,7 +512,7 @@ TEST(DifferenceStage, NegabinaryConstantInput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Negabinary + chunking: combined round-trip  (the primary PFPL code path)
+// DD15: NegabinaryChunkedRoundTrip — negabinary + chunking combined (primary PFPL path)
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, NegabinaryChunkedRoundTrip) {
     CudaStream stream;
@@ -567,8 +554,7 @@ TEST(DifferenceStage, NegabinaryChunkedRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Header serialization: chunk_size and TOut survive a serialize/deserialize
-// round-trip for DifferenceStage<int32_t, uint32_t>.
+// DD16: HeaderSerializationPreservesChunkSize — chunk_size survives serialize/deserialize
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, HeaderSerializationPreservesChunkSize) {
     using Stage = DifferenceStage<int32_t, uint32_t>;
@@ -586,12 +572,7 @@ TEST(DifferenceStage, HeaderSerializationPreservesChunkSize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DifferenceStage<double> round-trip
-//
-// Verifies that the double-precision specialisation is instantiated and correct:
-//   - forward(double input) produces exact differences
-//   - inverse(double diffs) reconstructs the original without any precision loss
-//     (DifferenceStage is a lossless transform; no approximation tolerance needed)
+// DD17: DoubleRoundTrip — double-precision forward+inverse, exact reconstruction
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, DoubleRoundTrip) {
     CudaStream stream;
@@ -627,8 +608,7 @@ TEST(DifferenceStage, DoubleRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Header serialization: vanilla DifferenceStage<float> (TOut = T) still produces
-// a valid 6-byte header with chunk_size 0.
+// DD18: LegacyFloatHeaderCompatible — vanilla float stage produces 6-byte header, chunk_size=0
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(DifferenceStage, LegacyFloatHeaderCompatible) {
     DifferenceStage<float> stage;

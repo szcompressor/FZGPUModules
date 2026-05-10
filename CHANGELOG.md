@@ -10,12 +10,24 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Added Doxygen class-level descriptions to `Logger`, `Zigzag<T>`, and `Negabinary<T>` which were previously undocumented
+- Added "no template parameters" note and common instantiation snippet to `BitshuffleStage` and `RZEStage` stage docs
 - Expanded requirements table in README and docs mainpage to include host compiler guidance (GCC 7+ / Clang 5+, upper bound set by CUDA version; NVHPC 23.11 tested in CI)
 - Migrated `.github/ISSUE_TEMPLATE.md` to `.github/ISSUE_TEMPLATE/bug_report.yml` (modern GitHub Forms format)
 - Reorganized `modules/` into six semantic categories: `predictors/` (Lorenzo, Diff/delta, interpolation), `transforms/` (zigzag, negabinary), `quantizers/` (quantizer), `coders/` (RLE, RZE, bitpack), `shufflers/` (bitshuffle), `fused/` (lorenzo_quant); all include paths and CMake source lists updated accordingly — this is a **breaking change** for any code that includes stage headers directly (e.g. `"encoders/diff/diff.h"` → `"predictors/diff/diff.h"`)
 - Merged `fzgmod_encoders` and `fzgmod_predictors` CMake targets into a single `fzgmod_modules` target; downstream CMakeLists linking either old target must switch to `fzgmod_modules`
 
 ### Added
+
+**Stages**
+- `BitpackStage`: added `setAutoDetect(bool)` — when enabled, forward execute scans the input for its maximum value via CUB `DeviceReduce::Max` and selects the tightest valid power-of-two `nbits` automatically; sets `isGraphCompatible()` to `false` while active
+
+**Tests**
+- Added 9 auto-detect test cases to `test_bitpack.cpp` covering graph incompatibility, worst-case size estimate, nbits selection for uint16_t and uint32_t, all-zero input, full-width fallback, and pipeline integration
+- Unified stage test suite: standardized all 12 stage test files with file-level docstrings listing every test by short ID (ZZ, NB, ZS, NS, RL, DD, LZ, BP, TM, RZ, QZ, QD), full-width section dividers, and ID-prefixed headers before each `TEST`/`TYPED_TEST` block
+- Added `RLEStage/HeaderSerialization` (RL7) to `test_rle.cpp` — RLE was the only stage without a `serializeHeader`/`deserializeHeader` round-trip test
+- Replaced inline sine/cosine data generators in `test_bitshuffle_stage.cpp` (BS16 PipelineIntegration), `test_rze_stage.cpp` (RZ19 PipelineIntegration), and `test_quantizer.cpp` (QD1, QD2) with shared `make_smooth_data<T>()` helper
+- Corrected `test_rze_stage.cpp` docstring: file has 20 tests (RZ1–RZ20), not 18; added RZ19 (`PipelineIntegration`) and RZ20 (`PipelineCompressionRatio`) entries
 
 **CI**
 - Added `docker-publish.yml` — builds and pushes the FZGPUModules image to GHCR (`ghcr.io/szcompressor/fzgpumodules`) on every push to main
@@ -93,6 +105,10 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ### Removed
 - `LorenzoStage` (the old fused predictor+quantizer) removed and replaced by `LorenzoQuantStage`; `LorenzoStage` now refers exclusively to the plain integer delta predictor
+
+### Changed
+- `BitpackStage` auto-detect: scratch buffers (`d_max`, CUB temp) now allocated through the pipeline `MemoryPool` (with transparent `cudaMalloc` fallback when the pool returns null) so all device memory remains tracked by the pipeline; prior implementation allocated directly via `cudaMalloc` outside the pool
+- Refactored all pipeline test files to remove duplicate local data-generator functions (`make_smooth`, `make_smooth_data`, `make_test_data`) in favor of shared `make_smooth_data<T>()` from `fz_test_utils.h`; replaced manual compress/decompress boilerplate in `test_data_patterns.cpp`, `test_memory_strategies.cpp`, and `test_mempool_fallback.cpp` with `pipeline_round_trip<T>()` from `stage_harness.h`; added P15 (`Lorenzo2DRoundTrip`) and P16 (`Lorenzo3DRoundTrip`) tests to `test_pipeline.cpp`; unified comment structure (file-level docstrings with test IDs, section divider lines) across all pipeline test files
 
 ### Fixed
 - ASan: avoid a use-after-free in `CompressionDAG::addStage` by taking the stage name by value

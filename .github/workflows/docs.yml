@@ -6,7 +6,6 @@ on:
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
 
-# Only one docs deploy at a time — cancel any in-progress run on the same branch
 concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
@@ -16,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # needed to push to gh-pages
+      contents: write   # Needed for pushing to gh-pages
 
     steps:
       - name: Checkout
@@ -38,6 +37,4 @@ jobs:
           publish_dir: docs/doxygen/html
           # Keep the gh-pages branch history lean
           force_orphan: true
-          # Optional: add a .nojekyll file so GitHub Pages serves files
-          # starting with _ (Doxygen uses _static etc.)
           enable_jekyll: false

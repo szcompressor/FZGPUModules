@@ -1,17 +1,20 @@
 /**
- * tests/test_negabinary.cpp
+ * tests/stages/test_negabinary.cpp
  *
- * Unit tests for fz::Negabinary<T> (transforms/negabinary/negabinary.h).
+ * Host-only unit tests for fz::Negabinary<T> (transforms/negabinary/negabinary.h).
+ * No CUDA device required — encode/decode are __host__ __device__ functions.
  *
- * All tests run host-side only; no CUDA device is required.
- *
- * Properties verified:
- *   1. encode/decode are bijections (round-trip identity).
- *   2. Known test vectors for int32_t.
- *   3. decode(encode(x)) == x exhaustively for 8-bit and 16-bit.
- *   4. Sampled round-trip for 32-bit and 64-bit.
- *   5. Zero encodes to zero.
- *   6. Convenience aliases compile and agree with the primary template.
+ *   NB1   NegabinaryKnownVectors/Int32Zero      — encode(0)==0, decode(0)==0
+ *   NB2   NegabinaryKnownVectors/Int32One        — encode(1)==1 (base -2 identity)
+ *   NB3   NegabinaryKnownVectors/Int32NegOne     — encode(-1)==3 (known bit pattern)
+ *   NB4   NegabinaryKnownVectors/Int32Two        — encode(2)==6
+ *   NB5   NegabinaryKnownVectors/Int32NegTwo     — encode(-2)==2
+ *   NB6   NegabinaryRoundTrip/Exhaustive8Bit     — decode(encode(x))==x for all int8
+ *   NB7   NegabinaryRoundTrip/Exhaustive16Bit    — decode(encode(x))==x for all int16
+ *   NB8   NegabinaryRoundTrip/Sampled32Bit       — sampled round-trip for int32
+ *   NB9   NegabinaryRoundTrip/Sampled64Bit       — sampled round-trip for int64 extremes
+ *   NB10  NegabinaryProperties/ZeroMapsToZero    — encode(0)==0 for all widths
+ *   NB11  NegabinaryAliases/AgreePrimaryTemplate — Negabinary8/16/32/64 match primary template
  */
 
 #include <gtest/gtest.h>
@@ -24,14 +27,8 @@
 using namespace fz;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Known test vectors (int32_t)
-//    Reference: https://en.wikipedia.org/wiki/Negative_base#Calculation
-//    The formula (n + 0xAAAAAAAA) ^ 0xAAAAAAAA maps:
-//       0  → 0x00000000
-//       1  → 0x00000001
-//      -1  → 0xAAAAAAAA ^ (0xAAAAAAAA - 1) = ...
-//    A concise way to verify: encode then decode must recover n, and
-//    some spot values from the 32-bit reference table.
+// NB1-NB5: KnownVectors — spot values verified against the negabinary formula
+//   (n + 0xAAAAAAAA) ^ 0xAAAAAAAA for int32_t; encode then decode recovers n.
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(NegabinaryKnownVectors, Int32Zero) {
@@ -73,7 +70,7 @@ TEST(NegabinaryKnownVectors, Int32NegTwo) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Round-trip: exhaustive for 8-bit and 16-bit
+// NB6: RoundTrip/Exhaustive8Bit — decode(encode(x))==x for all int8 values
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(NegabinaryRoundTrip, Exhaustive8Bit) {
@@ -86,6 +83,9 @@ TEST(NegabinaryRoundTrip, Exhaustive8Bit) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NB7: RoundTrip/Exhaustive16Bit — decode(encode(x))==x for all int16 values
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryRoundTrip, Exhaustive16Bit) {
     using NB = Negabinary<int16_t>;
     for (int i = std::numeric_limits<int16_t>::min();
@@ -96,6 +96,9 @@ TEST(NegabinaryRoundTrip, Exhaustive16Bit) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NB8: RoundTrip/Sampled32Bit — decode(encode(x))==x sampled across int32 range
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryRoundTrip, Sampled32Bit) {
     using NB = Negabinary<int32_t>;
 
@@ -120,6 +123,9 @@ TEST(NegabinaryRoundTrip, Sampled32Bit) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NB9: RoundTrip/Sampled64Bit — decode(encode(x))==x for int64 extremes and samples
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryRoundTrip, Sampled64Bit) {
     using NB = Negabinary<int64_t>;
 
@@ -140,7 +146,7 @@ TEST(NegabinaryRoundTrip, Sampled64Bit) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Zero always encodes to zero
+// NB10: Properties/ZeroMapsToZero — encode(0)==0 for all integer widths
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(NegabinaryProperties, ZeroMapsToZero) {
@@ -151,7 +157,7 @@ TEST(NegabinaryProperties, ZeroMapsToZero) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Convenience aliases agree with the primary template
+// NB11: Aliases/AgreePrimaryTemplate — Negabinary8/16/32/64 match primary template
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(NegabinaryAliases, AgreePrimaryTemplate) {

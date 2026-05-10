@@ -1,19 +1,33 @@
 /**
- * tests/test_pipeline.cpp
+ * tests/pipeline/test_pipeline.cpp
  *
  * Integration tests for the full compression pipeline.
  *
  * These tests build real Pipeline objects, run compress() and decompress(),
  * and verify the reconstructed data is within the configured error bound.
  *
- * Topologies tested:
- *   1. Minimal: Lorenzo only (1 stage).
- *   2. Standard: Lorenzo → DifferenceStage<uint16_t> (codes branch).
- *   3. Round-trip via file: writeToFile() → decompressFromFile().
+ * Tests:
+ *   P1   LorenzoOnlyRoundTrip           — Lorenzo-only pipeline, in-memory round-trip
+ *   P2   LorenzoThenDiffRoundTrip       — Lorenzo → DifferenceStage round-trip
+ *   P3   FileRoundTrip                  — write to file, reload, decompress
+ *   P4   RepeatCompressDifferentData    — repeated compress+decompress with different data each iter
+ *   P5   LorenzoPlusRLERoundTrip        — Lorenzo → RLE codes branch round-trip
+ *   P6   LorenzoDiffRLERoundTrip        — Lorenzo → Difference → RLE (3-stage)
+ *   P7   RepeatCompress                 — compress, reset, compress again — state resets cleanly
+ *   P8   RepeatedCompressPreallocateSameData   — PREALLOCATE reused across multiple calls, same data
+ *   P9   RepeatedCompressDecompressStableOutput — repeated compress+decompress produces identical output
+ *   P10  RepeatedCompressPreallocateDifferentData — PREALLOCATE reused with different data each call
+ *   P11  AddStageForwardsDims           — setDims() before addStage() immediately gives correct ndim()
+ *   P12  ExplicitResetThenCompress      — explicit reset() between compress cycles
+ *   P13  VaryingInputSizesAcrossCalls   — compress() with varying input sizes across calls
+ *   P14  LargeScaleRoundTrip            — large-scale compress + decompress (~100 MB)
+ *   P15  Lorenzo2DRoundTrip             — 2D Lorenzo round-trip (64×64 grid)
+ *   P16  Lorenzo3DRoundTrip             — 3D Lorenzo round-trip (16×16×16 grid)
  */
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
+#include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
 
 #include <cmath>
@@ -25,25 +39,14 @@ using namespace fz;
 using namespace fz_test;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Utility: generate smooth test data of N floats
-// ─────────────────────────────────────────────────────────────────────────────
-static std::vector<float> make_smooth_data(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Test: Lorenzo-only pipeline, in-memory round-trip
+// P1: Lorenzo-only pipeline, in-memory round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, LorenzoOnlyRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 14;  // 16 K floats
     constexpr float  EB = 1e-2f;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     // Upload input
@@ -92,14 +95,14 @@ TEST(Pipeline, LorenzoOnlyRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: Lorenzo → Difference pipeline, in-memory round-trip
+// P2: Lorenzo → Difference pipeline, in-memory round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, LorenzoThenDiffRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -145,14 +148,14 @@ TEST(Pipeline, LorenzoThenDiffRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: write to file, reload, decompress — file-format round-trip
+// P3: write to file, reload, decompress — file-format round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, FileRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 13;  // 8 K floats — faster for file I/O test
     constexpr float  EB = 1e-2f;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -210,7 +213,7 @@ TEST(Pipeline, FileRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: repeated compress+decompress with *different* data each iteration.
+// P4: repeated compress+decompress with different data each iteration.
 // Verifies that pipeline state from a previous run never bleeds into the next.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, RepeatCompressDifferentData) {
@@ -228,9 +231,9 @@ TEST(Pipeline, RepeatCompressDifferentData) {
 
     // Three datasets with different characteristics
     std::vector<std::vector<float>> datasets = {
-        make_smooth_data(N),
+        make_smooth_data<float>(N),
         std::vector<float>(N, 3.14f),   // constant
-        [&]{ auto v = make_smooth_data(N); for (auto& x:v) x *= 0.01f; return v; }(),  // small range
+        [&]{ auto v = make_smooth_data<float>(N); for (auto& x:v) x *= 0.01f; return v; }(),  // small range
     };
 
     for (int iter = 0; iter < 3; iter++) {
@@ -264,14 +267,14 @@ TEST(Pipeline, RepeatCompressDifferentData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// I4: Lorenzo → RLE — codes branch fed into RLE encoder
+// P5: Lorenzo → RLE — codes branch fed into RLE encoder
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, LorenzoPlusRLERoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 14;  // 16 K floats
     constexpr float  EB = 1e-2f;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -315,14 +318,14 @@ TEST(Pipeline, LorenzoPlusRLERoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// I5: Lorenzo → Difference → RLE (3-stage pipeline)
+// P6: Lorenzo → Difference → RLE (3-stage pipeline)
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, LorenzoDiffRLERoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -369,14 +372,14 @@ TEST(Pipeline, LorenzoDiffRLERoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: compress, pipeline reset, compress again — state resets cleanly
+// P7: compress, pipeline reset, compress again — state resets cleanly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, RepeatCompress) {
     CudaStream stream;
     constexpr size_t N  = 4096;
     constexpr float  EB = 1e-2f;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -408,7 +411,7 @@ TEST(Pipeline, RepeatCompress) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: PREALLOCATE pipeline reused across multiple compress+decompress calls
+// P8: PREALLOCATE pipeline reused across multiple compress+decompress calls
 // without reset() between iterations.
 //
 // This mirrors ARM A of the repeated-profiling example (profile_repeat.cpp),
@@ -421,7 +424,7 @@ TEST(Pipeline, RepeatedCompressPreallocateSameData) {
     constexpr float  EB     = 1e-2f;
     constexpr int    N_RUNS = 5;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -469,7 +472,7 @@ TEST(Pipeline, RepeatedCompressPreallocateSameData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: repeated compress+decompress on the same input produces identical
+// P9: repeated compress+decompress on the same input produces identical
 // reconstructed output across runs.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(Pipeline, RepeatedCompressDecompressStableOutput) {
@@ -478,7 +481,7 @@ TEST(Pipeline, RepeatedCompressDecompressStableOutput) {
     constexpr float  EB     = 1e-2f;
     constexpr int    N_RUNS = 3;
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaBuffer<float> d_in(N);
@@ -536,7 +539,7 @@ TEST(Pipeline, RepeatedCompressDecompressStableOutput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: PREALLOCATE pipeline reused with different data on each call.
+// P10: PREALLOCATE pipeline reused with different data on each call.
 //
 // Ensures that no stale compressed state from one iteration bleeds into the
 // next decompression when the pipeline is reused without reset().
@@ -561,10 +564,10 @@ TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
     pipeline.finalize();
 
     std::vector<std::vector<float>> datasets = {
-        make_smooth_data(N),
+        make_smooth_data<float>(N),
         std::vector<float>(N, 3.14f),   // constant
-        [&] { auto v = make_smooth_data(N); for (auto& x : v) x *= 0.5f;    return v; }(),
-        [&] { auto v = make_smooth_data(N); for (auto& x : v) x += 100.0f;  return v; }(),
+        [&] { auto v = make_smooth_data<float>(N); for (auto& x : v) x *= 0.5f;    return v; }(),
+        [&] { auto v = make_smooth_data<float>(N); for (auto& x : v) x += 100.0f;  return v; }(),
         std::vector<float>(N, 0.0f),    // all zeros
     };
 
@@ -599,7 +602,7 @@ TEST(Pipeline, RepeatedCompressPreallocateDifferentData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DIM4: setDims() before addStage() immediately gives the correct ndim().
+// P11: setDims() before addStage() immediately gives the correct ndim().
 //
 // addStage() now calls stage->setDims(dims_) before returning, so the stage
 // reflects the pipeline's current dimensions without any helper wrapper.
@@ -641,10 +644,8 @@ TEST(Pipeline, AddStageForwardsDims) {
     }
 }
 
-
-
 // ─────────────────────────────────────────────────────────────────────────────
-// RS1: Explicit reset() between compress cycles.
+// P12: Explicit reset() between compress cycles.
 //
 // After an explicit pipeline.reset(), was_compressed_ is cleared.  The next
 // compress() must not auto-reset (which would cause a double-reset) and must
@@ -657,7 +658,7 @@ TEST(Pipeline, ExplicitResetThenCompress) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -714,7 +715,7 @@ TEST(Pipeline, ExplicitResetThenCompress) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VP1: compress() with varying input sizes across calls produces correct output
+// P13: compress() with varying input sizes across calls produces correct output
 //
 // Buffer estimates are made at finalize() using the hint (N floats).  The
 // pipeline must correctly handle successive compress() calls where the input
@@ -726,8 +727,8 @@ TEST(Pipeline, VaryingInputSizesAcrossCalls) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_large  = make_smooth_data(N);
-    auto h_small  = make_smooth_data(N / 2);
+    auto h_large  = make_smooth_data<float>(N);
+    auto h_small  = make_smooth_data<float>(N / 2);
 
     CudaBuffer<float> d_large(N);
     CudaBuffer<float> d_small(N / 2);
@@ -784,7 +785,7 @@ TEST(Pipeline, VaryingInputSizesAcrossCalls) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LD1: Large-scale compress + decompress (~100 MB)
+// P14: Large-scale compress + decompress (~100 MB)
 //
 // Exercises the pool sizing heuristics, buffer coloring, and multi-stage
 // round-trip at a scale where small-N tests cannot surface memory pressure
@@ -865,6 +866,89 @@ TEST(Pipeline, LargeScaleRoundTrip) {
         max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
 
     EXPECT_LE(max_err, EB * 1.01f)
-        << "LD1: large-scale round-trip max_err=" << max_err
+        << "P14: large-scale round-trip max_err=" << max_err
+        << " exceeds bound " << EB;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P15: 2D Lorenzo round-trip (64×64 grid)
+//
+// Verifies that setDims(NX, NY) before addStage correctly configures the
+// Lorenzo stage for 2D prediction, and that compress+decompress produces
+// data within the error bound.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, Lorenzo2DRoundTrip) {
+    constexpr size_t NX = 64, NY = 64;  // 4096 floats, 2D
+    constexpr size_t N  = NX * NY;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+
+    // Generate smooth 2D data laid out row-major: element at (i,j) uses
+    // sin(i*0.05)*30 + cos(j*0.07)*20
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < NX; i++)
+        for (size_t j = 0; j < NY; j++)
+            h_input[i * NY + j] = std::sin(static_cast<float>(i) * 0.05f) * 30.0f
+                                 + std::cos(static_cast<float>(j) * 0.07f) * 20.0f;
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    pipeline.setDims(NX, NY);
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
+
+    auto res = pipeline_round_trip<float>(pipeline, h_input, stream);
+
+    ASSERT_EQ(res.data.size(), N);
+    EXPECT_LE(static_cast<float>(res.max_error), EB * 1.01f)
+        << "P15: 2D Lorenzo round-trip max_error=" << res.max_error
+        << " exceeds bound " << EB;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P16: 3D Lorenzo round-trip (16×16×16 grid)
+//
+// Verifies that setDims(NX, NY, NZ) before addStage correctly configures the
+// Lorenzo stage for 3D prediction, and that compress+decompress produces
+// data within the error bound.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Pipeline, Lorenzo3DRoundTrip) {
+    constexpr size_t NX = 16, NY = 16, NZ = 16;  // 4096 floats, 3D
+    constexpr size_t N  = NX * NY * NZ;
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+
+    // Generate smooth 3D data laid out row-major: element at (i,j,k) uses
+    // sin(i*0.1)*20 + cos(j*0.07)*15 + sin(k*0.05)*10
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < NX; i++)
+        for (size_t j = 0; j < NY; j++)
+            for (size_t k = 0; k < NZ; k++)
+                h_input[i * NY * NZ + j * NZ + k] =
+                    std::sin(static_cast<float>(i) * 0.1f)  * 20.0f
+                  + std::cos(static_cast<float>(j) * 0.07f) * 15.0f
+                  + std::sin(static_cast<float>(k) * 0.05f) * 10.0f;
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
+    pipeline.setDims(NX, NY, NZ);
+    auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
+
+    auto res = pipeline_round_trip<float>(pipeline, h_input, stream);
+
+    ASSERT_EQ(res.data.size(), N);
+    EXPECT_LE(static_cast<float>(res.max_error), EB * 1.01f)
+        << "P16: 3D Lorenzo round-trip max_error=" << res.max_error
         << " exceeds bound " << EB;
 }

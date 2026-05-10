@@ -9,9 +9,7 @@
 ## What it does
 
 Element-wise negabinary encoding (base -2). Converts a signed integer stream
-into unsigned integers of the same width. Compared to zigzag, negabinary tends
-to push more high-order zeros after differencing, which can help bitshuffle +
-byte-oriented coders.
+into unsigned integers of the same width. 
 
 - Forward: signed -> unsigned negabinary codes
 - Inverse: unsigned negabinary codes -> signed values

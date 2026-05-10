@@ -1,17 +1,15 @@
 /**
- * tests/test_zigzag_stage.cpp
+ * tests/stages/test_zigzag_stage.cpp
  *
- * Unit tests for ZigzagStage<TIn, TOut> — GPU round-trip and correctness.
- *
+ * GPU unit tests for ZigzagStage<TIn, TOut> — round-trip, size, and correctness.
  * Requires a CUDA-capable device (CUDA_VISIBLE_DEVICES=0 set by CTest).
  *
- * Properties verified:
- *   1. encode → decode round-trip restores original data exactly (int16, int32).
- *   2. decode → encode round-trip also works (inverse-first path).
- *   3. Output byte size equals input byte size (size-preserving).
- *   4. Zero maps to zero (GPU result matches host expectation).
- *   5. Known spot value: encode(-1 as int32) → 1 on GPU.
- *   6. Large array correctness with a smooth ramp.
+ *   ZS1  ZigzagStage/Int16RoundTrip         — encode→decode round-trip for int16 values
+ *   ZS2  ZigzagStage/Int32RoundTrip         — encode→decode round-trip for int32 ramp
+ *   ZS3  ZigzagStage/SizePreserving         — estimateOutputSizes returns same byte count as input
+ *   ZS4  ZigzagStage/ZeroMapsToZero         — encode(0)==0 on GPU for all elements
+ *   ZS5  ZigzagStage/KnownValue_NegOne      — encode(-1 as int32) produces 1 on GPU
+ *   ZS6  ZigzagStage/MatchesCPUReference_Int16 — GPU encode matches host Zigzag<T>::encode
  */
 
 #include <gtest/gtest.h>
@@ -79,7 +77,7 @@ static std::vector<TIn> run_decode(ZigzagStage<TIn, TOut>& stage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. int16_t round-trip
+// ZS1: ZigzagStage/Int16RoundTrip — encode→decode round-trip for int16 values
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagStage, Int16RoundTrip) {
@@ -105,7 +103,7 @@ TEST(ZigzagStage, Int16RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. int32_t round-trip (large ramp)
+// ZS2: ZigzagStage/Int32RoundTrip — encode→decode round-trip for int32 ramp
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagStage, Int32RoundTrip) {
@@ -131,7 +129,7 @@ TEST(ZigzagStage, Int32RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Size-preserving property
+// ZS3: ZigzagStage/SizePreserving — estimateOutputSizes returns same byte count as input
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagStage, SizePreserving) {
@@ -142,7 +140,7 @@ TEST(ZigzagStage, SizePreserving) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Zero maps to zero on GPU
+// ZS4: ZigzagStage/ZeroMapsToZero — encode(0)==0 on GPU for all elements
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagStage, ZeroMapsToZero) {
@@ -159,7 +157,7 @@ TEST(ZigzagStage, ZeroMapsToZero) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Known value: encode(-1 as int32) → 1
+// ZS5: ZigzagStage/KnownValue_NegOne — encode(-1 as int32) produces 1 on GPU
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagStage, KnownValue_NegOne) {
@@ -176,7 +174,7 @@ TEST(ZigzagStage, KnownValue_NegOne) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. GPU encode result matches CPU reference for all values
+// ZS6: ZigzagStage/MatchesCPUReference_Int16 — GPU encode matches host Zigzag<T>::encode
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagStage, MatchesCPUReference_Int16) {

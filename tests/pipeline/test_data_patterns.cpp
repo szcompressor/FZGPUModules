@@ -1,5 +1,5 @@
 /**
- * tests/test_data_patterns.cpp
+ * tests/pipeline/test_data_patterns.cpp
  *
  * Correctness tests for a variety of input data patterns run through a
  * full Lorenzo-only compress → decompress pipeline.
@@ -11,10 +11,24 @@
  *   - The pipeline does not crash.
  *   - The decompressed data has max absolute error ≤ error_bound.
  *   - (Where noted) additional properties like compression ratio.
+ *
+ *   DP1  DataPatterns/AllZeros                    — all-zero input reconstructs exactly, compresses small
+ *   DP2  DataPatterns/AllSameConstant              — constant non-zero input reconstructs within EB
+ *   DP3  DataPatterns/LinearRamp                   — linear ramp: Lorenzo predicts constant differences
+ *   DP5  DataPatterns/WhiteNoise                   — white noise: all outliers; round-trip still within EB
+ *   DP7  DataPatterns/SingleElement                — N=1 edge case, must not crash
+ *   DP8  DataPatterns/TwoElements                  — N=2 boundary case
+ *        DataPatterns/ThreeElements                — N=3 boundary case
+ *        DataPatterns/FourElements                 — N=4 boundary case
+ *   DP9  DataPatterns/FourMillionFloats            — 4M floats (16 MB): correctness at scale
+ *   DP10 DataPatterns/TightErrorBound             — EB=1e-5, smooth data in [-1,1]
+ *   DP11 DataPatterns/LooseErrorBound             — EB=10, loose bound compresses no worse than tight
+ *        DataPatterns/ZeroOutlierCapacityNoCrash  — capacity=0 drops outliers silently, must not crash
  */
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
+#include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
 
 #include <algorithm>
@@ -36,13 +50,9 @@ static float run_pattern(
     float                     outlier_capacity = 0.25f,
     size_t*                   comp_sz_out      = nullptr)
 {
-    const size_t N       = h_input.size();
-    const size_t in_bytes = N * sizeof(float);
+    const size_t in_bytes = h_input.size() * sizeof(float);
 
     CudaStream stream;
-    CudaBuffer<float> d_in(N);
-    d_in.upload(h_input, stream);
-    stream.sync();
 
     Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL);
     auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
@@ -52,25 +62,9 @@ static float run_pattern(
     pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
-    void*  d_comp = nullptr;
-    size_t comp_sz = 0;
-    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
-    EXPECT_GT(comp_sz, 0u) << "Compressed output is empty";
-    if (comp_sz_out) *comp_sz_out = comp_sz;
-
-    void*  d_dec = nullptr;
-    size_t dec_sz = 0;
-    pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream);
-
-    EXPECT_NE(d_dec, nullptr) << "Decompressed pointer is null";
-    EXPECT_EQ(dec_sz, in_bytes)  << "Decompressed size mismatch";
-
-    std::vector<float> h_recon(N, 0.0f);
-    if (d_dec && dec_sz == in_bytes)
-        cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
-    if (d_dec) cudaFree(d_dec);
-
-    return max_abs_error(h_input, h_recon);
+    auto res = pipeline_round_trip<float>(pipeline, h_input, stream);
+    if (comp_sz_out) *comp_sz_out = res.compressed_bytes;
+    return static_cast<float>(res.max_error);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

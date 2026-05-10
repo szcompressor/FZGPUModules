@@ -90,12 +90,12 @@ exists; the three outlier scatter ports are absent.
 
 | Mode | Formula | Notes |
 |---|---|---|
-| `ABS` | `\|x - x̂\| <= eb` | Uniform quantization with step `2 * eb` |
-| `NOA` | `abs_eb = eb × (max - min)` | Scales ABS by the data range |
-| `REL` | `\|x - x̂\| / \|x\| <= eb` | Exact per-element, log2-space quantization |
+| `ABS` | `abs(x_orig - x_recon) ≤ eb` | Uniform quantization with step `2 * eb` |
+| `NOA` | `abs(error) / value_range ≤ eb` | Scales ABS by the data range |
+| `REL` | `abs(error) / abs(x_orig) ≤ eb` | Ratio of error to original value |
 
 **REL mode details:**
-- Encodes magnitude in log2 space (PFPL), then reconstructs `x_hat` from the log bin.
+<!-- - Encodes magnitude in log2 space (PFPL), then reconstructs `x_hat` from the log bin. -->
 - Zeros, denormals, infinities, and NaNs are stored as outliers to preserve exact values.
 - Uses a packed sign + log-bin representation. `uint32_t` is safe for all cases;
   `uint16_t` works for `eb >= 0.01` with `float32` in practice.

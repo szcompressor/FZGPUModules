@@ -26,7 +26,6 @@
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
 
-#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -37,14 +36,6 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static std::vector<float> make_smooth(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 struct ScopedEnvVar {
     std::string name;
@@ -116,7 +107,7 @@ TEST(GraphCapture, CorrectOutput) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -167,7 +158,7 @@ TEST(GraphCapture, ReplayCorrect) {
     constexpr int    ITERS = 12;
     const size_t in_bytes  = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -215,7 +206,7 @@ TEST(GraphCapture, MatchesPreallocate) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -335,7 +326,7 @@ TEST(GraphCapture, CompressBeforeCaptureSucceeds) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -450,7 +441,7 @@ TEST(GraphCapture, ColoringDisabledCorrectOutput) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -499,7 +490,7 @@ TEST(GraphCapture, WarmupBeforeCaptureWorks) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -580,7 +571,7 @@ TEST(GraphCapture, CaptureAfterCompressThrows) {
     constexpr size_t N  = 1 << 12;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -623,7 +614,7 @@ TEST(GraphCapture, RlePipelineCorrectOutput) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaStream stream;
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);

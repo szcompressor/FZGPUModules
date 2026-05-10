@@ -1,5 +1,5 @@
 /**
- * tests/test_memory_strategies.cpp
+ * tests/pipeline/test_memory_strategies.cpp
  *
  * Tests that verify all MemoryStrategy modes produce correct results
  * and that pool-size configuration options work as expected.
@@ -9,13 +9,36 @@
  *   PREALLOCATE  – sizes everything up-front via estimateOutputSizes()
  *
  * Both must produce identical decompressed data for the same input.
+ *
+ * Tests:
+ *   M2   MinimalRoundTrip                  — MINIMAL strategy Lorenzo-only round-trip
+ *   M3   PreallocateRoundTrip              — PREALLOCATE strategy Lorenzo-only round-trip
+ *   M4   AllStrategiesProduceSameResult    — both strategies produce identical output
+ *   M6   ChangeStrategyBeforeFinalize      — setMemoryStrategy() can be changed before finalize()
+ *   P1   DefaultMultiplier                 — default pool multiplier (3.0×) — no OOM
+ *   P3   ZeroInputSizeHint                 — zero input_data_size hint — falls back to 1 GB default
+ *   P4   LargeMultiplier                   — very large multiplier (10×) — no error
+ *   P6   PeakUsageNonZeroAfterCompress     — getPeakMemoryUsage() > 0 after compress()
+ *   ML4  PoolResetReleasesAllocations      — MemoryPool::reset() releases all tracked allocations
+ *   ML5  MinimalTopoPoolSizeLEPreallocate  — MINIMAL computeTopoPoolSize() ≤ PREALLOCATE total
+ *   ML6  RepeatedCompressResetStableMemory — repeated compress+reset cycles do not accumulate memory
+ *   CO1  ColoringAppliedInPreallocateMode  — buffer coloring applied by default in PREALLOCATE
+ *   CO2  DisabledColoringRoundTrip         — disabled coloring still produces correct results
+ *   BP1  PersistentBufferSurvivesReset     — setBufferPersistent() survives reset()
+ *   SC1  RLEScratchReusedAcrossCalls       — RLE persistent scratch reused across compress() calls
+ *   CU1  CurrentUsageZeroAfterResetMinimal — getCurrentMemoryUsage() returns 0 after reset() in MINIMAL
+ *   PT1  PoolThresholdAtLeastInputSize     — getPoolThreshold() >= input data size before finalize()
+ *   EP1  SetExternalPointerReflectsInGetBuffer — setExternalPointer() on a DAG buffer
+ *   EP2  SetExternalPointerEndToEnd        — setExternalPointer() end-to-end correctness
+ *   MM1  PreallocateCurrentUsageNonZeroAfterReset — PREALLOCATE usage stays non-zero after reset()
+ *   MM2  MinimalCurrentUsageZeroAfterEachReset   — MINIMAL usage is zero after each reset()
  */
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
+#include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
 
-#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -25,14 +48,6 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static std::vector<float> make_smooth(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 // Compress+decompress with the given strategy; return the reconstructed data.
 static std::vector<float> roundtrip_with_strategy(
@@ -44,9 +59,6 @@ static std::vector<float> roundtrip_with_strategy(
     size_t in_bytes = h_input.size() * sizeof(float);
 
     CudaStream stream;
-    CudaBuffer<float> d_in(h_input.size());
-    d_in.upload(h_input, stream);
-    stream.sync();
 
     Pipeline pipeline(in_bytes, strategy, pool_multiplier);
     auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
@@ -56,21 +68,8 @@ static std::vector<float> roundtrip_with_strategy(
     pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
-    void*  d_comp = nullptr;
-    size_t comp_sz = 0;
-    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
-    EXPECT_GT(comp_sz, 0u) << "Compressed output is empty";
-
-    void*  d_dec = nullptr;
-    size_t dec_sz = 0;
-    pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream);
-
-    std::vector<float> h_recon(h_input.size());
-    if (d_dec && dec_sz == in_bytes) {
-        cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
-    }
-    if (d_dec) cudaFree(d_dec);
-    return h_recon;
+    auto res = pipeline_round_trip<float>(pipeline, h_input, stream);
+    return res.data;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,7 +78,7 @@ static std::vector<float> roundtrip_with_strategy(
 TEST(MemoryStrategy, MinimalRoundTrip) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     auto h_recon = roundtrip_with_strategy(h_input, MemoryStrategy::MINIMAL);
 
@@ -95,7 +94,7 @@ TEST(MemoryStrategy, MinimalRoundTrip) {
 TEST(MemoryStrategy, PreallocateRoundTrip) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     auto h_recon = roundtrip_with_strategy(h_input, MemoryStrategy::PREALLOCATE);
 
@@ -110,7 +109,7 @@ TEST(MemoryStrategy, PreallocateRoundTrip) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(MemoryStrategy, AllStrategiesProduceSameResult) {
     constexpr size_t N = 1 << 13;  // 8 K — small enough for fast test
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     auto recon_minimal     = roundtrip_with_strategy(h_input, MemoryStrategy::MINIMAL);
     auto recon_preallocate = roundtrip_with_strategy(h_input, MemoryStrategy::PREALLOCATE);
@@ -132,7 +131,7 @@ TEST(MemoryStrategy, AllStrategiesProduceSameResult) {
 TEST(MemoryStrategy, ChangeStrategyBeforeFinalize) {
     constexpr size_t N  = 4096;
     constexpr float  EB = 1e-2f;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
@@ -172,7 +171,7 @@ TEST(MemoryStrategy, ChangeStrategyBeforeFinalize) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(MemoryPool, DefaultMultiplier) {
     constexpr size_t N = 1 << 14;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     // roundtrip_with_strategy uses 3.0× by default
     auto h_recon = roundtrip_with_strategy(h_input, MemoryStrategy::MINIMAL, 3.0f);
     EXPECT_EQ(h_recon.size(), N);
@@ -184,7 +183,7 @@ TEST(MemoryPool, DefaultMultiplier) {
 TEST(MemoryPool, ZeroInputSizeHint) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
@@ -219,7 +218,7 @@ TEST(MemoryPool, ZeroInputSizeHint) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(MemoryPool, LargeMultiplier) {
     constexpr size_t N = 1 << 13;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     auto h_recon = roundtrip_with_strategy(h_input, MemoryStrategy::MINIMAL, 10.0f);
     EXPECT_EQ(h_recon.size(), N);
 }
@@ -232,7 +231,7 @@ TEST(MemoryPool, PeakUsageNonZeroAfterCompress) {
     constexpr float  EB = 1e-2f;
     size_t in_bytes = N * sizeof(float);
 
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaStream stream;
     CudaBuffer<float> d_in(N);
@@ -270,7 +269,7 @@ TEST(MemoryStrategies, PoolResetReleasesAllocations) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -324,7 +323,7 @@ TEST(MemoryStrategies, MinimalTopoPoolSizeLEPreallocate) {
         auto* rle = p.addStage<RLEStage<uint16_t>>();
         p.connect(rle, lrz, "codes");
         p.setPoolManagedDecompOutput(false);
-    p.finalize();
+        p.finalize();
         return p.getDAG()->computeTopoPoolSize();
     };
 
@@ -353,7 +352,7 @@ TEST(MemoryStrategies, RepeatedCompressResetStableMemory) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -424,7 +423,7 @@ TEST(MemoryStrategies, DisabledColoringRoundTrip) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -475,7 +474,7 @@ TEST(MemoryStrategies, PersistentBufferSurvivesReset) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -544,7 +543,7 @@ TEST(MemoryStrategies, RLEScratchReusedAcrossCalls) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -608,7 +607,7 @@ TEST(MemoryStrategies, CurrentUsageZeroAfterResetMinimal) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -679,7 +678,7 @@ TEST(MemoryStrategies, SetExternalPointerReflectsInGetBuffer) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -750,7 +749,7 @@ TEST(MemoryStrategies, SetExternalPointerEndToEnd) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -844,7 +843,7 @@ TEST(MemoryStrategies, PreallocateCurrentUsageNonZeroAfterReset) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -891,7 +890,7 @@ TEST(MemoryStrategies, MinimalCurrentUsageZeroAfterEachReset) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();

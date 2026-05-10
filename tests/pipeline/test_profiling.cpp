@@ -25,7 +25,6 @@
 #include "helpers/fz_test_utils.h"
 #include "fzgpumodules.h"
 
-#include <cmath>
 #include <sstream>
 #include <vector>
 
@@ -35,14 +34,6 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static std::vector<float> make_smooth(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 // Build a single-stage Lorenzo pipeline with the given strategy.
 static std::unique_ptr<Pipeline> build_lorenzo(size_t in_bytes,
@@ -80,7 +71,7 @@ TEST(Profiling, DisabledByDefault) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -106,7 +97,7 @@ TEST(Profiling, SingleStageEntryCount) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -134,7 +125,7 @@ TEST(Profiling, StageElapsedPositive) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -164,7 +155,7 @@ TEST(Profiling, StageNameAndLevel) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -192,7 +183,7 @@ TEST(Profiling, StageIOBytesNonZero) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -222,7 +213,7 @@ TEST(Profiling, ThroughputPositive) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -255,7 +246,7 @@ TEST(Profiling, ResultRefreshesEachCall) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -286,7 +277,7 @@ TEST(Profiling, DecompressIsCompressFlagFalse) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -325,7 +316,7 @@ TEST(Profiling, MultiStagePipelineEntries) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();
@@ -375,7 +366,7 @@ TEST(Profiling, DisableAfterEnableRetainsLastResult) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();

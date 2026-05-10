@@ -11,13 +11,25 @@
  *
  * To run the entire test suite in fallback mode without recompiling:
  *   FZ_FORCE_MEMPOOL_FALLBACK=1 ctest --preset default
+ *
+ *   FB1  MemPoolFallbackTest/IsMemPoolFallbackModeTrue   — isMemPoolFallbackMode() returns true when forced
+ *   FB2  MemPoolFallbackTest/MinimalRoundTrip             — MINIMAL strategy round-trip in fallback mode
+ *   FB3  MemPoolFallbackTest/PreallocateRoundTrip         — PREALLOCATE strategy round-trip in fallback mode
+ *   FB4  MemPoolFallbackTest/MinimalAndPreallocateProduceSameResult — both strategies produce identical output
+ *   FB5  MemPoolFallbackTest/LorenzoRleRoundTrip          — Lorenzo→RLE round-trip in fallback mode
+ *   FB6  MemPoolFallbackTest/LorenzoBitshuffleRzeRoundTrip — Lorenzo→Bitshuffle→RZE in fallback mode
+ *   FB7  MemPoolFallbackTest/CurrentUsageTrackingMinimal  — getCurrentUsage() tracks correctly in fallback
+ *   FB8  MemPoolFallbackTest/RepeatedCompressResetNoLeak  — repeated compress+reset cycles do not leak
+ *   FB9  MemPoolFallbackTest/RleScratchReusedAcrossCalls  — RLE scratch reused across compress() calls
+ *   FB10 MemPoolFallbackTest/FileIoRoundTrip              — file IO round-trip in fallback mode
+ *        MemPoolFallbackSanity/FallbackFalseWithoutEnvVar — isMemPoolFallbackMode() false without env var
  */
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
+#include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
 
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -39,16 +51,9 @@ protected:
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-static std::vector<float> make_smooth(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
-
 // Build a minimal Lorenzo-only pipeline, compress+decompress, return reconstruction.
-// Pool ownership is off (caller cudaFree's decomp output) for simplicity.
+// The Pipeline is constructed inside this function so the FZ_FORCE_MEMPOOL_FALLBACK
+// env var (set by the test fixture) is active during pool creation.
 static std::vector<float> fallback_roundtrip(
     const std::vector<float>& h_input,
     MemoryStrategy             strategy,
@@ -58,9 +63,6 @@ static std::vector<float> fallback_roundtrip(
     size_t in_bytes = h_input.size() * sizeof(float);
 
     CudaStream stream;
-    CudaBuffer<float> d_in(h_input.size());
-    d_in.upload(h_input, stream);
-    stream.sync();
 
     Pipeline pipeline(in_bytes, strategy, pool_mult);
     auto* lrz = pipeline.addStage<LorenzoQuantStage<float, uint16_t>>();
@@ -70,17 +72,8 @@ static std::vector<float> fallback_roundtrip(
     pipeline.setPoolManagedDecompOutput(false);
     pipeline.finalize();
 
-    void*  d_comp = nullptr; size_t comp_sz = 0;
-    pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
-
-    void*  d_dec = nullptr; size_t dec_sz = 0;
-    pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream);
-
-    std::vector<float> h_recon(h_input.size());
-    if (d_dec && dec_sz == in_bytes)
-        cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
-    if (d_dec) cudaFree(d_dec);
-    return h_recon;
+    auto res = pipeline_round_trip<float>(pipeline, h_input, stream);
+    return res.data;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +98,7 @@ TEST_F(MemPoolFallbackTest, IsMemPoolFallbackModeTrue) {
 TEST_F(MemPoolFallbackTest, MinimalRoundTrip) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
-    auto h_input  = make_smooth(N);
+    auto h_input  = make_smooth_data<float>(N);
     auto h_recon  = fallback_roundtrip(h_input, MemoryStrategy::MINIMAL);
 
     ASSERT_EQ(h_recon.size(), N);
@@ -119,7 +112,7 @@ TEST_F(MemPoolFallbackTest, MinimalRoundTrip) {
 TEST_F(MemPoolFallbackTest, PreallocateRoundTrip) {
     constexpr size_t N  = 1 << 14;
     constexpr float  EB = 1e-2f;
-    auto h_input  = make_smooth(N);
+    auto h_input  = make_smooth_data<float>(N);
     auto h_recon  = fallback_roundtrip(h_input, MemoryStrategy::PREALLOCATE);
 
     ASSERT_EQ(h_recon.size(), N);
@@ -132,7 +125,7 @@ TEST_F(MemPoolFallbackTest, PreallocateRoundTrip) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST_F(MemPoolFallbackTest, MinimalAndPreallocateProduceSameResult) {
     constexpr size_t N = 1 << 13;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     auto recon_min  = fallback_roundtrip(h_input, MemoryStrategy::MINIMAL);
     auto recon_pre  = fallback_roundtrip(h_input, MemoryStrategy::PREALLOCATE);
@@ -154,7 +147,7 @@ TEST_F(MemPoolFallbackTest, LorenzoRleRoundTrip) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -199,7 +192,7 @@ TEST_F(MemPoolFallbackTest, LorenzoBitshuffleRzeRoundTrip) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -244,7 +237,7 @@ TEST_F(MemPoolFallbackTest, CurrentUsageTrackingMinimal) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -284,7 +277,7 @@ TEST_F(MemPoolFallbackTest, RepeatedCompressResetNoLeak) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -322,7 +315,7 @@ TEST_F(MemPoolFallbackTest, RleScratchReusedAcrossCalls) {
     const size_t in_bytes = N * sizeof(float);
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();
@@ -375,7 +368,7 @@ TEST_F(MemPoolFallbackTest, FileIoRoundTrip) {
     const char* tmp_path = "/tmp/fz_fallback_test.fzm";
 
     CudaStream stream;
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
     stream.sync();

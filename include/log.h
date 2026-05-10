@@ -56,6 +56,18 @@ enum class LogLevel : int {
 
 // ── Logger ───────────────────────────────────────────────────────────────────
 
+/**
+ * Singleton logging interface for FZGPUModules.
+ *
+ * Routes all log messages through a single user-supplied callback, enabling
+ * redirection to stderr, a file, or a test buffer without recompilation.
+ * Log calls below the compile-time `FZ_LOG_MIN_LEVEL` threshold expand to
+ * `((void)0)` and have zero runtime cost.
+ *
+ * @note The callback and minimum level are global state. Set them once at
+ * startup before launching any pipelines; do not change them while pipelines
+ * are running on other threads.
+ */
 class Logger {
 public:
     using Callback = void(*)(LogLevel level, const char* msg);

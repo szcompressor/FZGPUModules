@@ -1,23 +1,23 @@
 /**
- * tests/test_buffer_coloring.cpp
+ * tests/pipeline/test_buffer_coloring.cpp
  *
  * Tests for the buffer coloring feature in PREALLOCATE mode.
  *
  * Buffer coloring reduces peak pool memory by aliasing buffers whose live
  * ranges do not overlap onto shared memory regions.  These tests verify:
  *
- *   BC1  Coloring fires by default for PREALLOCATE on a linear pipeline
- *   BC2  Coloring does NOT fire for MINIMAL mode
- *   BC3  setColoringEnabled(false) prevents coloring even in PREALLOCATE mode
- *   BC4  A colored pipeline produces the same decompressed output as an
- *        uncolored pipeline (correctness of aliased pointer assignment)
- *   BC5  Region count is strictly less than buffer count for a multi-stage
- *        linear pipeline (the coloring actually merged something)
- *   BC6  Peak memory with coloring is <= peak memory without coloring
- *   BC7  getColorRegionCount() returns 0 when coloring is disabled
- *   BC8  Repeated compress() calls on a colored pipeline stay correct
- *   BC9  A multi-stage linear pipeline (Lorenzo→Diff→Bitshuffle) roundtrip
- *        is correct with coloring enabled
+ *   BC1   Coloring fires by default for PREALLOCATE on a linear pipeline
+ *   BC2   Coloring does NOT fire for MINIMAL mode
+ *   BC3   setColoringEnabled(false) prevents coloring even in PREALLOCATE mode
+ *   BC4   A colored pipeline produces the same decompressed output as an
+ *         uncolored pipeline (correctness of aliased pointer assignment)
+ *   BC5   Region count is positive and bounded for a multi-stage linear pipeline
+ *   BC6   Peak memory with coloring is <= peak memory without coloring
+ *   BC7   getColorRegionCount() returns 0 when coloring is disabled
+ *   BC8   Repeated compress() calls on a colored pipeline stay correct
+ *   BC10  Colored (aliased) buffers remain stable across CUDA graph replays
+ *   BC9   A multi-stage linear pipeline (Lorenzo→Diff→Bitshuffle) roundtrip
+ *         is correct with coloring enabled
  */
 
 #include <gtest/gtest.h>
@@ -37,14 +37,6 @@ using namespace fz_test;
 static constexpr size_t kN       = 1 << 14;  // 16 K floats (fast)
 static constexpr float  kEB      = 1e-2f;
 static constexpr size_t kNBytes  = kN * sizeof(float);
-
-static std::vector<float> make_test_data() {
-    std::vector<float> v(kN);
-    for (size_t i = 0; i < kN; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 // Build a single-stage Lorenzo PREALLOCATE pipeline.
 // Sets coloring_disabled according to the argument before finalize().
@@ -117,7 +109,7 @@ TEST(BufferColoring, DisabledWhenRequested) {
 // BC4: A colored pipeline produces identical output to an uncolored one
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, ColoredAndUncoloredMatchExactly) {
-    auto h_input = make_test_data();
+    auto h_input = make_smooth_data<float>(kN);
     CudaBuffer<float> d_in(kN);
     d_in.upload(h_input);
     cudaDeviceSynchronize();
@@ -174,7 +166,7 @@ TEST(BufferColoring, RegionCountPositiveAndBounded) {
 // BC6: Peak memory with coloring is <= peak memory without coloring
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, PeakMemoryNoHigherWithColoring) {
-    auto h_input = make_test_data();
+    auto h_input = make_smooth_data<float>(kN);
     CudaBuffer<float> d_in(kN);
     d_in.upload(h_input);
     cudaDeviceSynchronize();
@@ -240,7 +232,7 @@ TEST(BufferColoring, RegionCountZeroWhenDisabled) {
 //      (verifies that reset() does not free or corrupt the aliased regions)
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, RepeatedCompressStaysCorrect) {
-    auto h_input = make_test_data();
+    auto h_input = make_smooth_data<float>(kN);
     CudaBuffer<float> d_in(kN);
     d_in.upload(h_input);
     cudaDeviceSynchronize();
@@ -271,7 +263,7 @@ TEST(BufferColoring, ColoredBuffersStableAcrossGraphReplays) {
             GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
         }
     }
-    auto h_input = make_test_data();
+    auto h_input = make_smooth_data<float>(kN);
 
     CudaStream stream;
     CudaBuffer<float> d_in(kN);

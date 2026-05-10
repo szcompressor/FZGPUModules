@@ -174,19 +174,48 @@ position within the payload.
 Minimum steps to parse an `.fzm` file in Python:
 
 ```python
-import struct, zlib
+import struct, zlib, sys
 
-with open("output.fzm", "rb") as f:
+STAGE_TYPES = {
+    0: "Unknown", 1: "LorenzoQuant", 2: "Difference", 3: "Scale",
+    4: "PassThrough", 5: "RLE", 6: "Huffman", 7: "BitPack",
+    10: "Split", 11: "Merge", 12: "Lorenzo", 14: "Quantizer",
+    15: "Zigzag", 16: "Negabinary", 17: "Bitshuffle", 18: "RZE",
+}
+DATA_TYPES = {
+    0: "uint8", 1: "uint16", 2: "uint32", 3: "uint64",
+    4: "int8", 5: "int16", 6: "int32", 7: "int64",
+    8: "float32", 9: "float64", 0xFF: "unknown",
+}
+
+filename = sys.argv[1] if len(sys.argv) > 1 else "output.fzm"
+print(f"Parsing: {filename}\n")
+
+with open(filename, "rb") as f:
     # 1. Read and validate the header core
     core = f.read(80)
     magic, version, num_buffers = struct.unpack_from("<IHH", core, 0)
-    assert magic == 0x464D5A32, "Not an FZM file"
+    assert magic == 0x464D5A32, f"Bad magic: 0x{magic:08X}"
     major = (version >> 8) if version > 0xFF else version
+    minor = (version & 0xFF) if version > 0xFF else 0
     assert major == 3, f"Unsupported major version {major}"
 
     uncomp_size, comp_size, header_size = struct.unpack_from("<QQQ", core, 8)
     num_stages, num_sources, flags      = struct.unpack_from("<IHH", core, 32)
     data_crc, hdr_crc = struct.unpack_from("<II", core, 72)
+
+    print(f"=== Header ===")
+    print(f"  magic:            0x{magic:08X} (FZM2)")
+    print(f"  version:          {major}.{minor}")
+    print(f"  num_stages:       {num_stages}")
+    print(f"  num_buffers:      {num_buffers}")
+    print(f"  num_sources:      {num_sources}")
+    print(f"  uncompressed:     {uncomp_size:,} bytes")
+    print(f"  compressed:       {comp_size:,} bytes")
+    print(f"  header_size:      {header_size:,} bytes")
+    print(f"  flags:            0x{flags:04X}  (data_crc={'yes' if flags&1 else 'no'}, hdr_crc={'yes' if flags&2 else 'no'})")
+    if uncomp_size:
+        print(f"  compression ratio: {uncomp_size/comp_size:.3f}x")
 
     # 2. Read stage and buffer arrays
     stage_array  = f.read(num_stages  * 256)
@@ -196,7 +225,11 @@ with open("output.fzm", "rb") as f:
     if flags & 0x0002:
         full_header = bytearray(core) + stage_array + buffer_array
         full_header[76:80] = b'\x00\x00\x00\x00'  # zero header_checksum before computing
-        assert zlib.crc32(full_header) & 0xFFFFFFFF == hdr_crc, "Header checksum mismatch"
+        computed = zlib.crc32(full_header) & 0xFFFFFFFF
+        assert computed == hdr_crc, f"Header CRC mismatch: computed 0x{computed:08X}, stored 0x{hdr_crc:08X}"
+        print(f"\n  header CRC:  PASS (0x{hdr_crc:08X})")
+    else:
+        print(f"\n  header CRC:  skipped (flag not set)")
 
     # 4. Read the compressed payload
     f.seek(header_size)
@@ -204,15 +237,90 @@ with open("output.fzm", "rb") as f:
 
     # 5. Verify data checksum (v3.1+)
     if flags & 0x0001:
-        assert zlib.crc32(payload) & 0xFFFFFFFF == data_crc, "Payload checksum mismatch"
+        computed = zlib.crc32(payload) & 0xFFFFFFFF
+        assert computed == data_crc, f"Payload CRC mismatch: computed 0x{computed:08X}, stored 0x{data_crc:08X}"
+        print(f"  payload CRC: PASS (0x{data_crc:08X})")
+    else:
+        print(f"  payload CRC: skipped (flag not set)")
 
-    # 6. Extract individual buffer segments
+    # 6. Decode stage info
+    print(f"\n=== Stages ({num_stages}) ===")
+    for i in range(num_stages):
+        entry = stage_array[i*256 : (i+1)*256]
+        stage_type_id, stage_ver, num_in, num_out = struct.unpack_from("<HHBB", entry, 0)
+        # input/output buffer IDs: 8 x uint16 each, starting at offset 8 and 24
+        in_ids  = [struct.unpack_from("<H", entry, 8  + j*2)[0] for j in range(num_in)]
+        out_ids = [struct.unpack_from("<H", entry, 24 + j*2)[0] for j in range(num_out)]
+        in_str  = ", ".join(str(x) for x in in_ids)  if in_ids  else "-"
+        out_str = ", ".join(str(x) for x in out_ids) if out_ids else "-"
+        sname = STAGE_TYPES.get(stage_type_id, f"type#{stage_type_id}")
+        print(f"  stage[{i}]: {sname} v{stage_ver}  inputs=[{in_str}]  outputs=[{out_str}]")
+
+    # 7. Decode buffer entries and extract segments
+    print(f"\n=== Buffers ({num_buffers}) ===")
+    segments = []
     for i in range(num_buffers):
         entry = buffer_array[i*256 : (i+1)*256]
-        data_size  = struct.unpack_from("<Q", entry, 72)[0]  # offset 72
-        byte_offset = struct.unpack_from("<Q", entry, 96)[0] # offset 96
+        stage_type_id, stage_ver  = struct.unpack_from("<HH", entry, 0)
+        data_type_id, prod_out_idx = struct.unpack_from("<BB", entry, 4)
+        dag_buf_id                 = struct.unpack_from("<H",  entry, 6)[0]
+        name = entry[8:72].rstrip(b'\x00').decode("utf-8", errors="replace")
+
+        data_size        = struct.unpack_from("<Q", entry, 72)[0]
+        allocated_size   = struct.unpack_from("<Q", entry, 80)[0]
+        uncompressed_size= struct.unpack_from("<Q", entry, 88)[0]
+        byte_offset      = struct.unpack_from("<Q", entry, 96)[0]
+
+        sname = STAGE_TYPES.get(stage_type_id, f"type#{stage_type_id}")
+        dtype = DATA_TYPES.get(data_type_id, f"dtype#{data_type_id}")
+
+        print(f"  buf[{i}]: '{name}'  stage={sname}  dtype={dtype}  "
+              f"data_size={data_size:,}  uncomp={uncompressed_size:,}  offset={byte_offset:,}")
+
         segment = payload[byte_offset : byte_offset + data_size]
-        # segment is the compressed output for buffer i
+        if len(segment) != data_size:
+            print(f"    WARNING: expected {data_size} bytes but got {len(segment)}")
+        segments.append(segment)
+
+    print(f"\nPayload size: {len(payload):,} bytes")
+    print(f"Total segment bytes: {sum(len(s) for s in segments):,}")
+    print(f"\nParsed OK.")
+```
+
+This produces output like the following example:
+
+```txt
+Parsing: output.fzm
+
+=== Header ===
+  magic:            0x464D5A32 (FZM2)
+  version:          3.1
+  num_stages:       2
+  num_buffers:      4
+  num_sources:      1
+  uncompressed:     262,144 bytes
+  compressed:       250,280 bytes
+  header_size:      1,616 bytes
+  flags:            0x0003  (data_crc=yes, hdr_crc=yes)
+  compression ratio: 1.047x
+
+  header CRC:  PASS (0xF02D1EA0)
+  payload CRC: PASS (0x5ECF8D8B)
+
+=== Stages (2) ===
+  stage[0]: LorenzoQuant v1  inputs=[5]  outputs=[0, 1, 2, 3]
+  stage[1]: RLE v1  inputs=[0]  outputs=[4]
+
+=== Buffers (4) ===
+  buf[0]: 'output'  stage=RLE  dtype=uint16  data_size=250,276  uncomp=250,276  offset=0
+  buf[1]: 'outlier_errors'  stage=LorenzoQuant  dtype=float32  data_size=0  uncomp=0  offset=250,276
+  buf[2]: 'outlier_indices'  stage=LorenzoQuant  dtype=uint32  data_size=0  uncomp=0  offset=250,276
+  buf[3]: 'outlier_count'  stage=LorenzoQuant  dtype=uint32  data_size=4  uncomp=4  offset=250,276
+
+Payload size: 250,280 bytes
+Total segment bytes: 250,280
+
+Parsed OK.
 ```
 
 ---

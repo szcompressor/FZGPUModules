@@ -1,22 +1,17 @@
 /**
- * tests/test_liveness.cpp
+ * tests/pipeline/test_liveness.cpp
  *
  * Tests for buffer liveness analysis, execution-level structure, and
  * topology-aware pool-size estimation.
  *
- * Covers:
- *   LV1  printBufferLifetimes() runs without crash on a linear pipeline
- *   LV2  Linear 3-stage pipeline has 3 levels, each with exactly 1 node
- *   LV3  Diamond-shaped DAG (Split→[PT,PT]→Merge) produces 3 levels;
- *         level 1 holds 2 parallel nodes (correct parallelism detection)
- *   LV4  Diamond DAG compress() produces output of the expected size
- *         (MergeStage concatenates two equal-size copies → 2× input)
- *   LV5  MINIMAL computeTopoPoolSize() ≤ PREALLOCATE for a 3-stage linear
- *         pipeline — liveness frees the intermediate codes buffer so the
- *         peak live-set is smaller than the sum-of-all-buffers
- *   LV6  PREALLOCATE observed peak memory ≥ MINIMAL observed peak for the
- *         same pipeline — PREALLOCATE allocates all buffers upfront so its
- *         pool peak is set at finalize time, not reduced by early frees
+ *   LV1  Liveness/PrintBufferLifetimesNoCrash          — printBufferLifetimes() runs without crash
+ *   LV2  Liveness/LinearPipelineLevelStructure          — linear 3-stage pipeline has 3 levels, 1 node each
+ *   LV3  Liveness/DiamondTopologyLevelStructure         — diamond DAG produces 3 levels; level 1 has 2 nodes
+ *   LV4  Liveness/DiamondDagCompressOutputSize          — diamond compress() output is 2× input size
+ *   LV5  Liveness/MinimalTopoPoolLEPreallocateThreeStages — MINIMAL topo pool ≤ PREALLOCATE for 3-stage chain
+ *   LV6  Liveness/PreallocatePeakGEMinimalPeak          — PREALLOCATE observed peak ≥ MINIMAL observed peak
+ *   LV7  Liveness/LivenessApiConsistentUnderGraphMode   — liveness API stable before/after graph capture
+ *   LV8  Liveness/PrintDAGNoCrash                       — printDAG() does not throw on linear pipelines
  */
 
 #include <gtest/gtest.h>
@@ -24,7 +19,6 @@
 #include "helpers/test_stages.h"
 #include "fzgpumodules.h"
 
-#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -34,14 +28,6 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static std::vector<float> make_smooth(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 // Build a 3-stage linear pipeline: Lorenzo → DifferenceStage → RLEStage.
 // Lorenzo produces codes (consumed by Diff) and outliers (pipeline output).
@@ -215,7 +201,7 @@ TEST(Liveness, MinimalTopoPoolLEPreallocateThreeStages) {
 TEST(Liveness, PreallocatePeakGEMinimalPeak) {
     constexpr size_t N = 1 << 14;
     const size_t in_bytes = N * sizeof(float);
-    auto h_input = make_smooth(N);
+    auto h_input = make_smooth_data<float>(N);
 
     CudaStream stream;
     CudaBuffer<float> d_in(N);
@@ -334,7 +320,7 @@ TEST(Liveness, PrintDAGNoCrash) {
         << "LV8: printDAG() must not throw on a linear pipeline before compress()";
 
     CudaStream stream;
-    auto h_in = make_smooth(N);
+    auto h_in = make_smooth_data<float>(N);
     CudaBuffer<float> d_in(N);
     d_in.upload(h_in, stream);
     stream.sync();

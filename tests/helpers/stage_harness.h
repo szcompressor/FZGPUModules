@@ -14,10 +14,6 @@
  *   pipeline_file_round_trip<T>(pipeline, input, stream, path)
  *     — compress → writeToFile → decompressFromFile, return reconstructed data.
  *
- * These replace ~30 lines of upload/compress/decompress/download boilerplate
- * with a single call.  Stage setup (addStage, connect, finalize) is left to
- * the caller so it remains explicit and readable in each test.
- *
  * Also provides:
  *
  *   max_abs_error_typed<T>()   — double-precision max absolute error for

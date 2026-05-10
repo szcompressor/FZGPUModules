@@ -1,22 +1,20 @@
 /**
  * tests/stages/test_type_matrix.cpp
  *
- * Parametric type-matrix tests for stages that support multiple
- * <TInput, TCode> combinations.  Uses Google Test's TYPED_TEST_SUITE to
- * drive a single test body over every supported type pair, so adding a new
- * instantiation to a stage automatically inherits full coverage.
+ * Parametric type-matrix tests for LorenzoQuantStage and QuantizerStage across
+ * all supported <TInput, TCode> combinations.  Each TYPED_TEST runs once per
+ * type pair, so adding a new instantiation inherits full coverage automatically.
  *
- * Current coverage:
- *   LorenzoTypeMatrix   — <float,uint16_t>, <float,uint8_t>,
- *                         <double,uint16_t>, <double,uint32_t>
- *   QuantizerTypeMatrix — <float,uint16_t>, <float,uint32_t>,
- *                         <double,uint16_t>, <double,uint32_t>
+ * LorenzoTypeMatrix — <float,uint16_t>, <float,uint8_t>, <double,uint16_t>, <double,uint32_t>
+ *   TM1  LorenzoTypeMatrix/RoundTripAbs          — ABS mode compress+decompress in memory
+ *   TM2  LorenzoTypeMatrix/FileSerialization      — ABS mode writeToFile/decompressFromFile cycle
+ *   TM3  LorenzoTypeMatrix/ConstantInputExact     — constant array → zero residuals, within error bound
+ *   TM4  LorenzoTypeMatrix/SerializeDeserialize   — serializeHeader/deserializeHeader config round-trip
  *
- * Each type pair gets the same set of tests:
- *   RoundTripAbs        — ABS error-bound mode, compress+decompress in memory
- *   FileSerialization   — ABS mode, full writeToFile/decompressFromFile cycle
- *   ConstantInput       — constant array → zero prediction error, no outliers
- *   SerializeDeserialize— stage config round-trip via serializeHeader/deserializeHeader
+ * QuantizerTypeMatrix — <float,uint16_t>, <float,uint32_t>, <double,uint16_t>, <double,uint32_t>
+ *   TM5  QuantizerTypeMatrix/RoundTripAbs         — ABS mode compress+decompress in memory
+ *   TM6  QuantizerTypeMatrix/FileSerialization    — file round-trip (skipped: not in StageFactory)
+ *   TM7  QuantizerTypeMatrix/SerializeDeserialize — serializeHeader/deserializeHeader config round-trip
  */
 
 #include <gtest/gtest.h>
@@ -71,7 +69,9 @@ template <typename P>
 class LorenzoTypeMatrix : public ::testing::Test {};
 TYPED_TEST_SUITE(LorenzoTypeMatrix, LorenzoTypes);
 
-// ── ABS round-trip ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// TM1: LorenzoTypeMatrix/RoundTripAbs — ABS mode compress+decompress in memory
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(LorenzoTypeMatrix, RoundTripAbs) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;
@@ -106,9 +106,10 @@ TYPED_TEST(LorenzoTypeMatrix, RoundTripAbs) {
     EXPECT_GT(res.compressed_bytes, 0u);
 }
 
-// ── File serialization round-trip ─────────────────────────────────────────
-// Skipped for type pairs not supported by StageFactory (float/uint8,
-// double/uint32) because decompressFromFile cannot reconstruct those stages.
+// ─────────────────────────────────────────────────────────────────────────────
+// TM2: LorenzoTypeMatrix/FileSerialization — ABS mode writeToFile/decompressFromFile cycle
+// Skipped for type pairs not in StageFactory (float/uint8, double/uint32).
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(LorenzoTypeMatrix, FileSerialization) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;
@@ -145,7 +146,9 @@ TYPED_TEST(LorenzoTypeMatrix, FileSerialization) {
         << sizeof(TC)*8 << "b code> file round-trip exceeded error bound";
 }
 
-// ── Constant input → exact round-trip ─────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// TM3: LorenzoTypeMatrix/ConstantInputExact — constant array → zero residuals, within error bound
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(LorenzoTypeMatrix, ConstantInputExact) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;
@@ -178,7 +181,9 @@ TYPED_TEST(LorenzoTypeMatrix, ConstantInputExact) {
         << "b> constant input exceeded error bound";
 }
 
-// ── serializeHeader / deserializeHeader preserves error_bound + quant_radius
+// ─────────────────────────────────────────────────────────────────────────────
+// TM4: LorenzoTypeMatrix/SerializeDeserialize — serializeHeader/deserializeHeader config round-trip
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(LorenzoTypeMatrix, SerializeDeserialize) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;
@@ -217,7 +222,9 @@ template <typename P>
 class QuantizerTypeMatrix : public ::testing::Test {};
 TYPED_TEST_SUITE(QuantizerTypeMatrix, QuantizerTypes);
 
-// ── ABS round-trip ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// TM5: QuantizerTypeMatrix/RoundTripAbs — ABS mode compress+decompress in memory
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(QuantizerTypeMatrix, RoundTripAbs) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;
@@ -244,9 +251,9 @@ TYPED_TEST(QuantizerTypeMatrix, RoundTripAbs) {
     EXPECT_GT(res.compressed_bytes, 0u);
 }
 
-// ── File serialization round-trip ─────────────────────────────────────────
-// Skipped for all type pairs: Quantizer (StageType=14) is absent from
-// StageFactory::createStage(), so decompressFromFile cannot reconstruct it.
+// ─────────────────────────────────────────────────────────────────────────────
+// TM6: QuantizerTypeMatrix/FileSerialization — file round-trip (skipped: not in StageFactory)
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(QuantizerTypeMatrix, FileSerialization) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;
@@ -282,7 +289,9 @@ TYPED_TEST(QuantizerTypeMatrix, FileSerialization) {
         << sizeof(TC)*8 << "b code> file round-trip exceeded error bound";
 }
 
-// ── serializeHeader / deserializeHeader preserves quant_radius ───────────
+// ─────────────────────────────────────────────────────────────────────────────
+// TM7: QuantizerTypeMatrix/SerializeDeserialize — serializeHeader/deserializeHeader config round-trip
+// ─────────────────────────────────────────────────────────────────────────────
 TYPED_TEST(QuantizerTypeMatrix, SerializeDeserialize) {
     using TIn = typename TypeParam::Input;
     using TC  = typename TypeParam::Code;

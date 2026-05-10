@@ -46,6 +46,19 @@
 
 namespace fz {
 
+/**
+ * Negabinary (base -2) encoding helper.
+ *
+ * Maps signed integers to unsigned negabinary representations using a compact
+ * XOR-mask formula.  After differencing smooth data the high-order bits vanish
+ * faster than zigzag, producing denser zero runs at high bit-planes when
+ * followed by bitshuffle + RZE.  Encode and decode are both O(1) bitwise ops.
+ *
+ * All functions are `__host__ __device__` — callable from CUDA kernels and
+ * host code.  Used internally by NegabinaryStage<TIn, TOut>.
+ *
+ * @tparam T  Signed integer type (`int8_t`, `int16_t`, `int32_t`, `int64_t`).
+ */
 template <typename T>
 struct Negabinary {
     static_assert(std::is_integral<T>::value && std::is_signed<T>::value,

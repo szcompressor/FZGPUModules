@@ -1,31 +1,18 @@
 name: CI
 
-# GPU jobs run on a local workstation self-hosted runner.
-# To avoid burning allocation on every PR — and to protect against
-# untrusted fork PRs executing arbitrary code on the runner — GPU CI
-# only fires on:
-#   1. A push to main (i.e., after a PR is merged)
-#   2. A manual trigger from the Actions tab
-#
-# All PRs still get the free compile-only check from build-check.yml.
-# External contributor PRs also require explicit approval before any
-# workflow runs (configured in Settings → Actions → General).
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# Only one GPU run at a time — cancels queued runs if a newer push arrives
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ── Build + full test suite ──────────────────────────────────────────────────
   build-and-test:
     name: Build & Test (GPU)
-    # Requires a self-hosted runner with CUDA, GPU, and the label 'gpu'.
-    # Register one at: Settings → Actions → Runners → New self-hosted runner
+    # Requires a self-hosted runner with CUDA, GPU, and the label 'gpu'
     runs-on: [self-hosted, gpu, linux]
 
     steps:
@@ -56,22 +43,8 @@ jobs:
           fi
           nvcc --version
           nvidia-smi
-          # Persist the spack-filtered PATH and any module-set library paths to
-          # all subsequent steps. Without this each step reverts to the runner's
-          # default PATH, which puts spack's CUDA 13.1 ahead of nvhpc 12.3.
           echo "PATH=$PATH" >> "$GITHUB_ENV"
           [[ -n "$LD_LIBRARY_PATH" ]] && echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV" || true
-
-      - name: Show CUDA + driver info
-        shell: bash
-        run: |
-          echo "=== PATH ==="
-          echo "$PATH"
-          echo "=== nvcc ==="
-          which nvcc || true
-          nvcc --version || true
-          echo "=== nvidia-smi ==="
-          nvidia-smi || true
 
       - name: Configure (Release)
         run: |
@@ -121,7 +94,6 @@ jobs:
   sanitizers:
     name: Sanitizers (ASan + UBSan)
     runs-on: [self-hosted, gpu, linux]
-    # Only run after a clean build+test passes — saves time on broken PRs
     needs: build-and-test
 
     steps:
@@ -139,8 +111,7 @@ jobs:
             module purge
             module load nvhpc/23.11/nvhpc-hpcx-cuda12
           fi
-          # nvc++ does not support -fsanitize; use GCC for the sanitizer build.
-          # nvcc (from the nvhpc module above) is still used for CUDA sources.
+          # nvc++ does not support -fsanitize; use GCC for the sanitizer build
           CC=gcc CXX=g++ cmake --preset asan
 
       - name: Build

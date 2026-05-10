@@ -1,21 +1,41 @@
+/**
+ * tests/stages/test_lorenzo.cpp
+ *
+ * Unit tests for LorenzoStage<T> (lossless delta predictor) and
+ * LorenzoQuantStage<TIn, TCode> (fused lossy predictor + quantizer).
+ *
+ *   LZ1  LorenzoStage/RoundTrip1D                — 1-D int32 ramp, exact reconstruction
+ *   LZ2  LorenzoStage/RoundTrip2D                — 2-D int32 grid, exact reconstruction
+ *   LZ3  LorenzoStage/RoundTrip3D                — 3-D int32 grid, exact reconstruction
+ *   LZ4  LorenzoStage/SerializeDeserialize       — config round-trip via header bytes
+ *   LZ5  LorenzoStage/StageTypeId               — getStageTypeId() == StageType::LORENZO
+ *   LZ6  LorenzoStage/GraphCompatible            — forward stage returns isGraphCompatible()=true
+ *   LZ7  LorenzoStage/Int16RoundTrip             — int16_t type instantiation, exact reconstruction
+ *   LZ8  LorenzoQuantStage/DeterministicRecon    — two independent pipelines produce identical output
+ *   LZ9  LorenzoStage/QuantizerLorenzoPipeline   — Quantizer→Lorenzo chained round-trip
+ */
+
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <numeric>
 #include <vector>
 
 #include "predictors/lorenzo/lorenzo_stage.h"
+#include "fused/lorenzo_quant/lorenzo_quant.h"
+#include "quantizers/quantizer/quantizer.h"
 #include "helpers/stage_harness.h"
 #include "helpers/fz_test_utils.h"
 
 using namespace fz;
 using namespace fz_test;
 
-// ── RoundTrip1D ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ1: RoundTrip1D — 1-D int32 ramp reconstructs exactly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, RoundTrip1D) {
     const size_t N = 4096;
     const size_t in_bytes = N * sizeof(int32_t);
 
-    // Ramp input — predictable deltas, good for delta coding
     std::vector<int32_t> h_input(N);
     std::iota(h_input.begin(), h_input.end(), 0);
 
@@ -30,7 +50,9 @@ TEST(LorenzoStage, RoundTrip1D) {
     EXPECT_EQ(res.max_error, 0.0f);
 }
 
-// ── RoundTrip2D ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ2: RoundTrip2D — 2-D int32 grid reconstructs exactly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, RoundTrip2D) {
     const size_t NX = 64, NY = 64;
     const size_t N = NX * NY;
@@ -51,7 +73,9 @@ TEST(LorenzoStage, RoundTrip2D) {
     EXPECT_EQ(res.max_error, 0.0f);
 }
 
-// ── RoundTrip3D ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ3: RoundTrip3D — 3-D int32 grid reconstructs exactly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, RoundTrip3D) {
     const size_t NX = 16, NY = 16, NZ = 16;
     const size_t N = NX * NY * NZ;
@@ -72,7 +96,9 @@ TEST(LorenzoStage, RoundTrip3D) {
     EXPECT_EQ(res.max_error, 0.0f);
 }
 
-// ── SerializeDeserialize ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ4: SerializeDeserialize — dims survive serializeHeader/deserializeHeader
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, SerializeDeserialize) {
     LorenzoStage<int32_t> original;
     original.setDims(128, 64, 2);
@@ -88,18 +114,24 @@ TEST(LorenzoStage, SerializeDeserialize) {
     EXPECT_EQ(original.ndim(), restored.ndim());
 }
 
-// ── StageTypeId ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ5: StageTypeId — getStageTypeId() returns StageType::LORENZO
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, StageTypeId) {
     EXPECT_EQ(LorenzoStage<int32_t>().getStageTypeId(),
               static_cast<uint16_t>(StageType::LORENZO));
 }
 
-// ── GraphCompatible ───────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ6: GraphCompatible — forward stage returns isGraphCompatible() = true
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, GraphCompatible) {
     EXPECT_TRUE(LorenzoStage<int32_t>().isGraphCompatible());
 }
 
-// ── Int16RoundTrip ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ7: Int16RoundTrip — int16_t instantiation, exact reconstruction
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, Int16RoundTrip) {
     const size_t N = 1024;
     const size_t in_bytes = N * sizeof(int16_t);
@@ -119,14 +151,11 @@ TEST(LorenzoStage, Int16RoundTrip) {
     EXPECT_EQ(res.max_error, 0.0f);
 }
 
-// ── LorenzoQuantStage determinism: two independent pipelines, same input ──────
-// Verifies that the fused kernel is deterministic: two separately constructed
-// LorenzoQuantStage pipelines compress the same data and produce element-wise
-// identical reconstructions.  This guards against non-deterministic GPU
-// behaviour (e.g. atomic ordering) that would cause silent quality divergence.
-#include "fused/lorenzo_quant/lorenzo_quant.h"
-#include "helpers/stage_harness.h"
-
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ8: DeterministicReconstruction — two independent LorenzoQuantStage
+//       pipelines compress the same input and produce element-wise identical
+//       reconstructions, guarding against non-deterministic GPU atomics.
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoQuantStage, DeterministicReconstruction) {
     const size_t N  = 4096;
     const float  EB = 1e-2f;
@@ -160,13 +189,18 @@ TEST(LorenzoQuantStage, DeterministicReconstruction) {
     EXPECT_LE(res1.max_error, EB * 1.01);
 }
 
-// ── Quantizer → Lorenzo round-trip (cuSZp-style, no entropy coding) ──────────
-#include "quantizers/quantizer/quantizer.h"
-
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ9: QuantizerLorenzoPipeline — Quantizer→Lorenzo chained round-trip.
+//       Verifies that LorenzoStage can follow QuantizerStage in a pipeline:
+//       Lorenzo delta-codes the quantizer's integer codes; the inverse path
+//       undoes the delta then maps codes back to floats.
+//
+//       Uses decompress(nullptr, ...) because multi-output QuantizerStage
+//       leaves compressed data in the pipeline's internal pool rather than
+//       a single concatenated buffer — the standard pipeline_round_trip
+//       pattern is not applicable for this topology.
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(LorenzoStage, QuantizerLorenzoPipelineRoundTrip) {
-    // Verifies that LorenzoStage can be chained after QuantizerStage.
-    // Lorenzo receives the quantizer's integer codes and delta-codes them;
-    // inverse reconstructs the codes, which Quantizer inverse maps back to floats.
     const size_t N = 4096;
     const size_t in_bytes = N * sizeof(float);
     auto h_input = make_smooth_data<float>(N);
@@ -191,9 +225,6 @@ TEST(LorenzoStage, QuantizerLorenzoPipelineRoundTrip) {
     d_in.upload(h_input, cs.stream);
     cudaStreamSynchronize(cs.stream);
 
-    // Use nullptr decompress so the pipeline reads buffers from its internal
-    // DAG — required for multi-output stages like Quantizer (4 ports) where
-    // concat parsing via d_comp is not used.
     void* d_comp = nullptr; size_t comp_sz = 0;
     p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, cs.stream);
     cudaStreamSynchronize(cs.stream);

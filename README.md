@@ -35,15 +35,9 @@ git clone https://github.com/szcompressor/FZGPUModules.git
 cd FZGPUModules
 git submodule update --init --recursive
 
-cmake --preset release
+cmake --preset release 
 cmake --build build/release -j$(nproc)
 cmake --install build/release --prefix /your/install/prefix
-```
-
-**Downstream CMake:**
-```cmake
-find_package(FZGPUModules REQUIRED)
-target_link_libraries(my_target PRIVATE FZGMOD::fzgmod)
 ```
 
 ---

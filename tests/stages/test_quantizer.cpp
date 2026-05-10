@@ -1,22 +1,59 @@
 /**
- * tests/test_quantizer.cpp
+ * tests/stages/test_quantizer.cpp
  *
- * Unit tests for QuantizerStage<float, uint16_t> (ABS and NOA modes)
- * and QuantizerStage<float, uint32_t> (REL mode).
+ * Unit tests for QuantizerStage<TIn, TCode> in ABS, NOA, and REL modes.
+ * Values outside the code range are stored losslessly as outliers.
  *
- * QuantizerStage quantises input *values* directly (unlike LorenzoQuantStage which
- * quantises prediction residuals).  Values that would exceed the code range
- * are stored losslessly as outliers.
+ *   ABS  — uniform step:       |x - x_hat| <= eb
+ *   NOA  — norm-of-absolute:   abs_eb = user_eb * (max − min)
+ *   REL  — pointwise relative: |x − x_hat| / |x| <= eb
  *
- *   ABS  — uniform step quantisation:  |x - x_hat| <= eb
- *   NOA  — norm-of-absolute:           abs_eb  = user_eb * (max - min)
- *   REL  — pointwise relative:         |x - x_hat| / |x| <= eb
+ * ABS mode (QZ1-QZ3):
+ *   QZ1   QuantizerABS/SmoothRoundTrip          — smooth float data within error bound
+ *   QZ2   QuantizerABS/ConstantInput            — constant input → exact reconstruction
+ *   QZ3   QuantizerABS/LargeDataRoundTrip       — 16 K floats round-trip within error bound
  *
- * Forward outputs (index → name):
- *   [0] codes          — quantisation codes  (TCode[n])
- *   [1] outlier_vals   — original values at outlier positions (TInput[k])
- *   [2] outlier_idxs   — positions of outliers (uint32_t[k])
- *   [3] outlier_count  — number of outliers    (uint32_t scalar)
+ * NOA mode (QZ4-QZ5):
+ *   QZ4   QuantizerNOA/SmoothRoundTrip          — smooth float data within error bound
+ *   QZ5   QuantizerNOA/ConstantInput            — constant input → forced to outlier path
+ *
+ * REL mode (QZ6-QZ7):
+ *   QZ6   QuantizerREL/SmoothRoundTrip          — smooth float data within relative error bound
+ *   QZ7   QuantizerREL/ZerosGoToOutliers        — zeros cannot be quantized relatively → outliers
+ *
+ * Header serialization (QZ8-QZ10):
+ *   QZ8   QuantizerABS/SerializeDeserialize     — serializeHeader/deserializeHeader round-trip
+ *   QZ9   QuantizerNOA/SerializeDeserialize     — NOA config preserved through header bytes
+ *   QZ10  QuantizerREL/SerializeDeserialize     — REL config preserved through header bytes
+ *
+ * ZigzagCodes flag (QZ11-QZ14):
+ *   QZ11  QuantizerZigzag/ABSRoundTrip          — zigzag_codes=true, ABS mode round-trip
+ *   QZ12  QuantizerZigzag/NOARoundTrip          — zigzag_codes=true, NOA mode round-trip
+ *   QZ13  QuantizerZigzag/RELModeUnaffected     — REL mode ignores zigzag flag
+ *   QZ14  QuantizerZigzag/HeaderSerialization   — zigzag_codes flag preserved through header
+ *
+ * float/uint16_t type variants (QZ15-QZ17):
+ *   QZ15  QuantizerTypeMatrix/FloatUint16_ABSRoundTrip  — <float,uint16_t> ABS round-trip
+ *   QZ16  QuantizerTypeMatrix/FloatUint16_ConstantExact — <float,uint16_t> constant input
+ *   QZ17  QuantizerTypeMatrix/FloatUint16_ZigzagCodes   — <float,uint16_t> with zigzag
+ *
+ * Inplace outliers (QZ18-QZ22):
+ *   QZ18  QuantizerInplace/ABSRoundTrip                 — inplace outlier ABS round-trip
+ *   QZ19  QuantizerInplace/NOARoundTrip                 — inplace outlier NOA round-trip
+ *   QZ20  QuantizerInplace/AllOutliersRoundTrip         — all elements become outliers
+ *   QZ21  QuantizerInplace/SerializeDeserialize         — inplace config preserved through header
+ *   QZ22  QuantizerInplace/BackwardCompatOldHeader      — old 24-byte header still loads correctly
+ *
+ * Outlier threshold (QZ23-QZ27):
+ *   QZ23  QuantizerThreshold/ABSForcesOutliersAboveThreshold  — |x|>=threshold → outlier in ABS
+ *   QZ24  QuantizerThreshold/InplaceABSRoundTrip              — threshold+inplace ABS round-trip
+ *   QZ25  QuantizerThreshold/RELForcesOutliersAboveThreshold  — |x|>=threshold → outlier in REL
+ *   QZ26  QuantizerThreshold/InfThresholdEquivalentToNoThreshold — inf threshold behaves like none
+ *   QZ27  QuantizerThreshold/SerializeDeserialize             — threshold preserved through header
+ *
+ * double-precision variants (QD1-QD2):
+ *   QD1   QuantizerTypeMatrix/DoubleUint16_PipelineRoundTrip  — <double,uint16_t> ABS via Pipeline
+ *   QD2   QuantizerTypeMatrix/DoubleUint32_PipelineRoundTrip  — <double,uint32_t> ABS via Pipeline
  */
 
 #include <gtest/gtest.h>
@@ -125,7 +162,7 @@ static std::vector<float> run_quantizer_inverse(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ABS mode
+// QZ1-QZ3: ABS mode — uniform step quantization |x - x_hat| <= eb
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerABS, SmoothRoundTrip) {
@@ -234,7 +271,7 @@ TEST(QuantizerABS, LargeDataRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NOA mode:  abs_eb = user_eb * (max(data) - min(data))
+// QZ4-QZ5: NOA mode — norm-of-absolute: abs_eb = user_eb * (max − min)
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerNOA, SmoothRoundTrip) {
@@ -311,8 +348,7 @@ TEST(QuantizerNOA, ConstantInput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// REL mode:  |x - x_hat| / |x| <= eb  (log2-space quantisation, PFPL exact)
-// REL packs |log_bin| into extended-range codes, so we use uint32_t.
+// QZ6-QZ7: REL mode — |x − x_hat| / |x| <= eb (log2-space, uint32_t codes)
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerREL, SmoothRoundTrip) {
@@ -430,7 +466,7 @@ TEST(QuantizerREL, ZerosGoToOutliers) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Header serialisation / deserialisation
+// QZ8-QZ10: Header serialization — serializeHeader/deserializeHeader round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerABS, SerializeDeserialize) {
@@ -489,12 +525,7 @@ TEST(QuantizerREL, SerializeDeserialize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ZigzagCodes tests
-// These verify the setZigzagCodes(true) path of QuantizerStage:
-//   1. ABS mode round-trip reconstructs within error bound with zigzag on.
-//   2. NOA mode round-trip works with zigzag on.
-//   3. REL mode is unaffected by zigzag (log-space codes are not zigzag-encoded).
-//   4. The zigzag_codes flag is preserved through serializeHeader/deserializeHeader.
+// QZ11-QZ14: ZigzagCodes — setZigzagCodes(true) paths for ABS, NOA, REL, and header
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerZigzag, ABSRoundTrip) {
@@ -653,16 +684,7 @@ TEST(QuantizerZigzag, HeaderSerialization) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  QuantizerTypeMatrix — exercises every (TInput, TCode) instantiation
-//
-//  The existing suite only tests QuantizerStage<float, uint32_t> (ABS/NOA/REL).
-//  These tests cover:
-//    <float, uint16_t>  — half-width codes (much more common in practice)
-//    <float, uint16_t>  + zigzag flag
-//
-//  (Double-precision variants share the same kernel paths; they would require
-//  a typed run_quantizer_forward<double, TCode> helper and are left for a
-//  future test when that helper is added.)
+// QZ15-QZ17: QuantizerTypeMatrix (float variants) — <float,uint16_t> type coverage
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerTypeMatrix, FloatUint16_ABSRoundTrip) {
@@ -786,11 +808,8 @@ TEST(QuantizerTypeMatrix, FloatUint16_ZigzagCodes) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inplace outlier helpers
-//
-// When setInplaceOutliers(true) the stage has 1 output (codes) not 4.
-// Raw float bits of outliers are stored directly in the codes array;
-// the sentinel check (code >> 1) >= quant_radius distinguishes them.
+// QZ18-QZ22: InplaceOutliers — setInplaceOutliers(true) paths
+// When inplace, stage has 1 output (codes); outlier float bits embedded inline.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct InplaceFwdResult {
@@ -850,7 +869,7 @@ static std::vector<float> run_quantizer_inverse_inplace(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InplaceOutliers — setInplaceOutliers(true) paths (ABS and NOA)
+// QZ18-QZ22: InplaceOutliers tests — ABS, NOA, all-outliers, serialize, backward compat
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerInplace, ABSRoundTrip) {
@@ -1045,10 +1064,7 @@ TEST(QuantizerInplace, BackwardCompatOldHeader) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OutlierThreshold — setOutlierThreshold() in ABS, NOA, REL modes
-//
-// Threshold forces any element with |x| >= threshold to the outlier path,
-// regardless of whether it would otherwise fit in the quantization range.
+// QZ23-QZ27: OutlierThreshold — setOutlierThreshold() forces |x|>=threshold to outliers
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(QuantizerThreshold, ABSForcesOutliersAboveThreshold) {
@@ -1270,24 +1286,19 @@ TEST(QuantizerThreshold, SerializeDeserialize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  QuantizerTypeMatrix — double-precision variants
-//
-//  QuantizerStage<double, uint16_t> and <double, uint32_t> are instantiated in
-//  quantizer.cu.  These tests verify the double-precision kernel path runs
-//  correctly end-to-end using the full Pipeline API.
+// QD1-QD2: QuantizerTypeMatrix (double variants) — <double,uint16_t> and <double,uint32_t>
 // ─────────────────────────────────────────────────────────────────────────────
 
-// QD1: QuantizerStage<double, uint16_t> ABS round-trip via Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+// QD1: QuantizerTypeMatrix/DoubleUint16_PipelineRoundTrip — <double,uint16_t> ABS via Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(QuantizerTypeMatrix, DoubleUint16_PipelineRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 12;   // 4 K doubles
     constexpr double EB = 1e-2;
     const size_t in_bytes = N * sizeof(double);
 
-    std::vector<double> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<double>(i) * 0.01) * 50.0
-                   + std::cos(static_cast<double>(i) * 0.003) * 20.0;
+    auto h_input = make_smooth_data<double>(N);
 
     CudaBuffer<double> d_in(N);
     d_in.upload(h_input, stream);
@@ -1332,17 +1343,16 @@ TEST(QuantizerTypeMatrix, DoubleUint16_PipelineRoundTrip) {
         << "QuantizerStage<double,uint16_t> round-trip max_err=" << max_err;
 }
 
-// QD2: QuantizerStage<double, uint32_t> ABS round-trip via Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
+// QD2: QuantizerTypeMatrix/DoubleUint32_PipelineRoundTrip — <double,uint32_t> ABS via Pipeline
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(QuantizerTypeMatrix, DoubleUint32_PipelineRoundTrip) {
     CudaStream stream;
     constexpr size_t N  = 1 << 12;   // 4 K doubles
     constexpr double EB = 1e-3;
     const size_t in_bytes = N * sizeof(double);
 
-    std::vector<double> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<double>(i) * 0.01) * 50.0
-                   + std::cos(static_cast<double>(i) * 0.003) * 20.0;
+    auto h_input = make_smooth_data<double>(N);
 
     CudaBuffer<double> d_in(N);
     d_in.upload(h_input, stream);

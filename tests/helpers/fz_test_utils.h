@@ -6,7 +6,7 @@
  * Provides:
  *   - CudaBuffer<T>        – RAII device allocation (cudaMalloc / cudaFree)
  *   - CudaStream           – RAII cudaStream_t
- *   - h2d / d2h            – convenience host↔device copy helpers
+ *   - h2d / d2h            – convenience host<-->device copy helpers
  *   - make_test_pool       – build a MemoryPool sized for a test with n bytes of data
  *   - make_random_floats   – reproducible seeded random float data
  *   - max_abs_error        – max absolute element-wise difference between two vectors

@@ -1,20 +1,19 @@
 /**
- * tests/test_zigzag.cpp
+ * tests/stages/test_zigzag.cpp
  *
- * Unit tests for fz::Zigzag<T> (transforms/zigzag/zigzag.h).
+ * Host-only unit tests for fz::Zigzag<T> (transforms/zigzag/zigzag.h).
+ * No CUDA device required — __host__ __device__ functions compile as plain C++.
  *
- * All tests run host-side only; no CUDA device is required.
- * The __host__ __device__ functions compile fine as plain C++ when
- * __CUDACC__ is not defined, so this file links against GTest only.
- *
- * Properties verified:
- *   1. encode/decode are bijections (round-trip identity).
- *   2. encode maps signed magnitude correctly (known test vectors).
- *   3. decode(encode(x)) == x for all representable values (exhaustive
- *      for 8-bit and 16-bit; sampled for 32-bit and 64-bit).
- *   4. Zero encodes to zero.
- *   5. The most-negative value (INT_MIN) round-trips correctly.
- *   6. Convenience aliases compile and agree with the primary template.
+ *   ZZ1  ZigzagKnownVectors/Int32              — known encoding table for int32
+ *   ZZ2  ZigzagKnownVectors/Int16              — known spot values for int16
+ *   ZZ3  ZigzagKnownVectors/Int8               — known spot values for int8
+ *   ZZ4  ZigzagRoundTrip/Exhaustive8Bit        — exhaustive decode(encode(x))==x for int8
+ *   ZZ5  ZigzagRoundTrip/Exhaustive16Bit       — exhaustive decode(encode(x))==x for int16
+ *   ZZ6  ZigzagRoundTrip/Sampled32Bit          — sampled decode(encode(x))==x for int32
+ *   ZZ7  ZigzagRoundTrip/Sampled64Bit          — sampled decode(encode(x))==x for int64
+ *   ZZ8  ZigzagProperties/ZeroMapsToZero       — encode(0)==0 for all widths
+ *   ZZ9  ZigzagProperties/MonotoneMagnitude32  — encode(k)<encode(k+1) for k≥0
+ *   ZZ10 ZigzagAliases/AgreePrimaryTemplate    — Zigzag8/16/32/64 match primary template
  */
 
 #include <gtest/gtest.h>
@@ -27,7 +26,7 @@
 using namespace fz;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Known test vectors
+// ZZ1: KnownVectors/Int32 — known encoding table for int32 values
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagKnownVectors, Int32) {
@@ -53,6 +52,9 @@ TEST(ZigzagKnownVectors, Int32) {
               std::numeric_limits<uint32_t>::max());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZZ2: KnownVectors/Int16 — known spot values for int16 zigzag encoding
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ZigzagKnownVectors, Int16) {
     using ZZ = Zigzag<int16_t>;
 
@@ -63,6 +65,9 @@ TEST(ZigzagKnownVectors, Int16) {
     EXPECT_EQ(ZZ::encode(int16_t( 2)), uint16_t(4));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZZ3: KnownVectors/Int8 — known spot values for int8 zigzag encoding
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ZigzagKnownVectors, Int8) {
     using ZZ = Zigzag<int8_t>;
 
@@ -76,7 +81,7 @@ TEST(ZigzagKnownVectors, Int8) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Round-trip: exhaustive for 8-bit and 16-bit
+// ZZ4: RoundTrip/Exhaustive8Bit — decode(encode(x))==x for all int8 values
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagRoundTrip, Exhaustive8Bit) {
@@ -89,6 +94,9 @@ TEST(ZigzagRoundTrip, Exhaustive8Bit) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZZ5: RoundTrip/Exhaustive16Bit — decode(encode(x))==x for all int16 values
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ZigzagRoundTrip, Exhaustive16Bit) {
     using ZZ = Zigzag<int16_t>;
     for (int i = std::numeric_limits<int16_t>::min();
@@ -99,6 +107,9 @@ TEST(ZigzagRoundTrip, Exhaustive16Bit) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZZ6: RoundTrip/Sampled32Bit — decode(encode(x))==x sampled across int32 range
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ZigzagRoundTrip, Sampled32Bit) {
     using ZZ = Zigzag<int32_t>;
 
@@ -125,6 +136,9 @@ TEST(ZigzagRoundTrip, Sampled32Bit) {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZZ7: RoundTrip/Sampled64Bit — decode(encode(x))==x for int64 extremes and samples
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ZigzagRoundTrip, Sampled64Bit) {
     using ZZ = Zigzag<int64_t>;
 
@@ -145,7 +159,7 @@ TEST(ZigzagRoundTrip, Sampled64Bit) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Zero always encodes to zero
+// ZZ8: Properties/ZeroMapsToZero — encode(0)==0 for all widths
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagProperties, ZeroMapsToZero) {
@@ -156,8 +170,7 @@ TEST(ZigzagProperties, ZeroMapsToZero) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Monotone magnitude ordering: encode(k) < encode(k+1) for k >= 0
-//    and encode(-k) < encode(-(k+1)) for k >= 1
+// ZZ9: Properties/MonotoneMagnitude32 — encode(k)<encode(k+1) for k≥0, both signs
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagProperties, MonotoneMagnitude32) {
@@ -171,7 +184,7 @@ TEST(ZigzagProperties, MonotoneMagnitude32) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Convenience aliases agree with the primary template
+// ZZ10: Aliases/AgreePrimaryTemplate — Zigzag8/16/32/64 produce same results as Zigzag<T>
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(ZigzagAliases, AgreePrimaryTemplate) {

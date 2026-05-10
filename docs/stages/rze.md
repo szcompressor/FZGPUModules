@@ -1,8 +1,13 @@
 # RZEStage {#stage_rze}
 
 **Header:** `modules/coders/rze/rze_stage.h`  
-**Class:** `fz::RZEStage`  
+**Class:** `fz::RZEStage` — no template parameters  
 **Category:** Coder (lossless)
+
+**Common instantiation:**
+```cpp
+auto* rze = p.addStage<fz::RZEStage>();
+```
 
 ---
 

@@ -1,5 +1,5 @@
 /**
- * tests/test_bitshuffle_stage.cpp
+ * tests/stages/test_bitshuffle_stage.cpp
  *
  * GPU unit tests for BitshuffleStage — bit-matrix transpose stage.
  *
@@ -8,19 +8,22 @@
  *                     bits (where W = element_width*8, N = chunk elements).
  *   Inverse (decode): reverse transpose, restoring the original data.
  *
- * Properties verified:
- *   1.  encode → decode round-trip restores original data (uint32).
- *   2.  encode → decode round-trip for uint8 elements.
- *   3.  encode → decode round-trip for uint16 elements.
- *   4.  encode → decode round-trip for uint64 elements.
- *   5.  Size-preserving: output byte count equals input byte count.
- *   6.  Transform is not a no-op: non-trivial input produces different output.
- *   7.  All-zeros input round-trips correctly (and output is all-zeros).
- *   8.  All-ones (0xFF...) input round-trips correctly.
- *   9.  Multi-chunk round-trip: multiple 16 KB blocks processed correctly.
- *   10. Bit-plane ordering: the MSBit plane of all elements is stored first;
- *       verify by encoding a known pattern and checking the output uint32.
- *   11. Header serialization round-trips block_size and element_width.
+ *   BS1   BitshuffleStage/Uint32RoundTrip             — uint32 encode→decode, 16 KB chunk
+ *   BS2   BitshuffleStage/Uint8RoundTrip              — uint8 element_width round-trip
+ *   BS3   BitshuffleStage/Uint16RoundTrip             — uint16 element_width round-trip
+ *   BS4   BitshuffleStage/Uint64RoundTrip             — uint64 element_width round-trip
+ *   BS5   BitshuffleStage/SizePreserving              — estimateOutputSizes == input bytes
+ *   BS6   BitshuffleStage/TransformChangesData        — encoded output differs from input
+ *   BS7   BitshuffleStage/AllZerosRoundTrip           — all-zero input encodes to all-zero
+ *   BS8   BitshuffleStage/AllOnesRoundTrip            — all-0xFF input encodes to all-0xFF
+ *   BS9   BitshuffleStage/MultiChunkRoundTrip         — 4 × 16 KB chunks correct
+ *   BS10  BitshuffleStage/BitPlaneOrdering_MSBOnly    — MSBit plane stored first; verified
+ *   BS11  BitshuffleStage/HeaderSerializationRoundTrip — block_size+element_width survive header
+ *   BS12  BitshuffleStage/SmallBlockSize4KB_EW4       — minimum valid chunk for element_width=4
+ *   BS13  BitshuffleStage/BlockSize8KB_EW2            — 8 KB block with uint16 elements
+ *   BS14  BitshuffleStage/LargeBlockSize32KB_EW8      — 32 KB block with uint64 elements
+ *   BS15  BitshuffleStage/InvalidConfigThrows         — bad block_size and element_width throw
+ *   BS16  BitshuffleStage/PipelineIntegration         — Lorenzo→Bitshuffle full round-trip
  */
 
 #include <gtest/gtest.h>
@@ -80,7 +83,7 @@ static std::vector<uint8_t> make_fill_bytes(size_t n_bytes, uint8_t fill) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. uint32 round-trip (main PFPL use-case)
+// BS1: Uint32RoundTrip — encode→decode with uint32 elements (main PFPL use-case)
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, Uint32RoundTrip) {
@@ -109,7 +112,7 @@ TEST(BitshuffleStage, Uint32RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. uint8 round-trip
+// BS2: Uint8RoundTrip — encode→decode with uint8 element_width
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, Uint8RoundTrip) {
@@ -137,7 +140,7 @@ TEST(BitshuffleStage, Uint8RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. uint16 round-trip
+// BS3: Uint16RoundTrip — encode→decode with uint16 element_width
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, Uint16RoundTrip) {
@@ -165,7 +168,7 @@ TEST(BitshuffleStage, Uint16RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. uint64 round-trip
+// BS4: Uint64RoundTrip — encode→decode with uint64 element_width
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, Uint64RoundTrip) {
@@ -193,7 +196,7 @@ TEST(BitshuffleStage, Uint64RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Size-preserving
+// BS5: SizePreserving — estimateOutputSizes returns input byte count unchanged
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, SizePreserving) {
@@ -204,7 +207,7 @@ TEST(BitshuffleStage, SizePreserving) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Transform changes the data (non-trivial input)
+// BS6: TransformChangesData — encoded output differs from input for non-trivial data
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, TransformChangesData) {
@@ -226,7 +229,7 @@ TEST(BitshuffleStage, TransformChangesData) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. All-zeros round-trip
+// BS7: AllZerosRoundTrip — all-zero input encodes to all-zero output, decodes back
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, AllZerosRoundTrip) {
@@ -255,7 +258,7 @@ TEST(BitshuffleStage, AllZerosRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. All-ones (0xFF) round-trip
+// BS8: AllOnesRoundTrip — all-0xFF input encodes to all-0xFF output, decodes back
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, AllOnesRoundTrip) {
@@ -284,7 +287,7 @@ TEST(BitshuffleStage, AllOnesRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 9. Multi-chunk round-trip (4 consecutive 16 KB chunks)
+// BS9: MultiChunkRoundTrip — 4 consecutive 16 KB blocks processed correctly
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, MultiChunkRoundTrip) {
@@ -318,7 +321,7 @@ TEST(BitshuffleStage, MultiChunkRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 10. Bit-plane ordering verification (known pattern)
+// BS10: BitPlaneOrdering_MSBOnly — MSBit plane stored first; verified with known pattern
 //
 // The 4-byte butterfly naturally places the MSBit contributions in sublane 0,
 // so the physical layout is MSB-first: plane 0 = bit W-1, plane W-1 = bit 0.
@@ -367,7 +370,7 @@ TEST(BitshuffleStage, BitPlaneOrdering_MSBOnly) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 11. Header serialization round-trip
+// BS11: HeaderSerializationRoundTrip — block_size and element_width survive header bytes
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitshuffleStage, HeaderSerializationRoundTrip) {
@@ -389,10 +392,7 @@ TEST(BitshuffleStage, HeaderSerializationRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 12. Block size 4 KB with element_width=4 round-trip
-//
-// 4096 bytes = 1024 uint32 elements — the minimum valid chunk for width=4
-// (must be a multiple of 1024 × element_width = 4096).
+// BS12: SmallBlockSize4KB_EW4 — minimum valid chunk for element_width=4 (4096 bytes)
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BitshuffleStage, SmallBlockSize4KB_EW4) {
     CudaStream stream;
@@ -418,10 +418,7 @@ TEST(BitshuffleStage, SmallBlockSize4KB_EW4) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 13. Block size 8 KB with element_width=2 round-trip
-//
-// 8192 bytes = 4096 uint16 elements.  Minimum for width=2 is
-// 1024 × 2 = 2048 bytes; 8192 is a valid multiple.
+// BS13: BlockSize8KB_EW2 — 8192 bytes with uint16 element_width round-trips correctly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BitshuffleStage, BlockSize8KB_EW2) {
     CudaStream stream;
@@ -447,10 +444,7 @@ TEST(BitshuffleStage, BlockSize8KB_EW2) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 14. Block size 32 KB with element_width=8 round-trip
-//
-// 32768 bytes = 4096 uint64 elements.  Minimum for width=8 is
-// 1024 × 8 = 8192 bytes; 32768 is a valid multiple.
+// BS14: LargeBlockSize32KB_EW8 — 32768 bytes with uint64 element_width round-trips correctly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BitshuffleStage, LargeBlockSize32KB_EW8) {
     CudaStream stream;
@@ -476,12 +470,7 @@ TEST(BitshuffleStage, LargeBlockSize32KB_EW8) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 15. Invalid configuration throws
-//
-// block_size must be a positive multiple of 1024 × element_width.
-// An invalid block_size (e.g. 7000 bytes, not divisible by 4096 for EW=4)
-// must throw std::invalid_argument at execute() time.
-// Also verifies that an unsupported element_width (e.g. 3) throws.
+// BS15: InvalidConfigThrows — bad block_size and unsupported element_width throw
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BitshuffleStage, InvalidConfigThrows) {
     CudaStream stream;
@@ -511,12 +500,7 @@ TEST(BitshuffleStage, InvalidConfigThrows) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 16. Pipeline integration: Lorenzo → Bitshuffle full round-trip
-//
-// Exercises BitshuffleStage as a downstream consumer of Lorenzo's "codes"
-// output through the full Pipeline API (compress → decompress).  Verifies
-// that the pipeline-level data flow is correct and the round-trip is within
-// the configured error bound.
+// BS16: PipelineIntegration — Lorenzo→Bitshuffle compress+decompress within EB
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BitshuffleStage, PipelineIntegration) {
     CudaStream stream;
@@ -524,9 +508,7 @@ TEST(BitshuffleStage, PipelineIntegration) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f;
+    auto h_input = make_sine_floats(N, 0.01f, 50.0f);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);

@@ -1,36 +1,30 @@
 /**
- * tests/test_rze_stage.cpp
+ * tests/stages/test_rze_stage.cpp
  *
  * GPU unit tests for RZEStage — Recursive Zero-byte Elimination.
+ * Compacts non-zero bytes + bitmap (ZE), then recursively eliminates repeated
+ * bitmap bytes (RE) for 3 more levels. Inverse reconstructs exactly.
  *
- * RZEStage compresses a byte stream by:
- *   1. Compacting non-zero bytes and building a bitmap (zero elimination, ZE).
- *   2. Recursively compacting non-repeated bytes of the bitmap (repetition
- *      elimination, RE) for 3 more levels, leaving a tiny final bitmap that
- *      is stored raw.
- *
- * The inverse path reconstructs the original byte stream exactly.
- *
- * Properties verified:
- *   1.  Round-trip: random bytes restore exactly.
- *   2.  Round-trip: all-zeros input (special case — no bitmaps stored).
- *   3.  Round-trip: all-ones (0xFF) input (incompressible, stored as-is).
- *   4.  Round-trip: sparse data (mostly zeros, few non-zero values).
- *   5.  Round-trip: multi-chunk input (2 × 16 KB chunks).
- *   6.  Compression reduces size for highly sparse data.
- *   7.  Output is larger than input for incompressible (random) data OR
- *       within expected bounds.
- *   8.  Header serialization round-trips chunk_size and levels.
- *   9.  Round-trip on a single chunk with a checkerboard byte pattern.
- *   10. Round-trip on data with long runs of repeated bytes (good for RE).
- *   11. Unsupported chunk_size throws at execute() time.
- *   12. Unsupported levels value throws at execute() time.
- *   13. isGraphCompatible() returns true for forward, false for inverse.
- *   14. saveState()/restoreState() preserves config across compress+decompress.
- *   15. Repeated compress+decompress on the same stage objects is stable.
- *   16. Input smaller than one chunk (partial chunk) round-trips correctly.
- *   17. Four-chunk input (4 × 16 KB) round-trips correctly.
- *   18. Mixed-density multi-chunk: half sparse, half dense; round-trip correct.
+ *   RZ1   RZEStage/RandomBytesRoundTrip          — random bytes restore exactly
+ *   RZ2   RZEStage/AllZerosRoundTrip             — all-zeros input (special fast path)
+ *   RZ3   RZEStage/AllOnesRoundTrip              — all-0xFF input (incompressible, stored verbatim)
+ *   RZ4   RZEStage/SparseDataRoundTrip           — ~1% non-zero bytes round-trip exactly
+ *   RZ5   RZEStage/MultiChunkRoundTrip           — 2×16 KB chunks restore exactly
+ *   RZ6   RZEStage/SparseDataCompressionRatio    — sparse data compresses smaller than input
+ *   RZ7   RZEStage/AllZerosCompressesSmall       — all-zeros encodes to ≤17 bytes
+ *   RZ8   RZEStage/HeaderSerialization           — serializeHeader/deserializeHeader preserves config
+ *   RZ9   RZEStage/CheckerboardRoundTrip         — alternating 0x00/0xAA pattern round-trips
+ *   RZ10  RZEStage/LongRunsRoundTrip             — long repeated-byte runs (good RE target) round-trip
+ *   RZ11  RZEStage/UnsupportedChunkSizeThrows    — chunk_size≠16384 throws at execute()
+ *   RZ12  RZEStage/UnsupportedLevelsThrows       — levels∉{4} throws at execute()
+ *   RZ13  RZEStage/IsGraphCompatible             — forward=true, inverse=false (blocking D2H)
+ *   RZ14  RZEStage/SaveRestoreStatePreservesConfig — saveState/restoreState preserves forward config
+ *   RZ15  RZEStage/RepeatedRoundTripStable       — 5 repeated round-trips on same stage objects stable
+ *   RZ16  RZEStage/PartialChunkRoundTrip         — input < one chunk (3000 bytes) round-trips exactly
+ *   RZ17  RZEStage/FourChunksRoundTrip           — 4×16 KB (64 KB) round-trips correctly
+ *   RZ18  RZEStage/MixedDensityMultiChunk        — half sparse, half dense; round-trip correct
+ *   RZ19  RZEStage/PipelineIntegration           — LorenzoQuantStage→RZEStage pipeline round-trip
+ *   RZ20  RZEStage/PipelineCompressionRatio      — Lorenzo→RZE compressed size < raw input
  */
 
 #include <gtest/gtest.h>
@@ -125,10 +119,8 @@ static void round_trip(const std::vector<uint8_t>& original) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests
+// RZ1: RZEStage/RandomBytesRoundTrip — random bytes restore exactly
 // ─────────────────────────────────────────────────────────────────────────────
-
-// 1. Random bytes round-trip
 TEST(RZEStage, RandomBytesRoundTrip) {
     std::mt19937 rng(12345);
     std::uniform_int_distribution<int> dist(0, 255);
@@ -137,17 +129,23 @@ TEST(RZEStage, RandomBytesRoundTrip) {
     round_trip(data);
 }
 
-// 2. All-zeros input (special fast path)
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ2: RZEStage/AllZerosRoundTrip — all-zeros input (special fast path)
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, AllZerosRoundTrip) {
     round_trip(std::vector<uint8_t>(16384, 0));
 }
 
-// 3. All-0xFF input (incompressible, stored verbatim)
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ3: RZEStage/AllOnesRoundTrip — all-0xFF input (incompressible, stored verbatim)
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, AllOnesRoundTrip) {
     round_trip(std::vector<uint8_t>(16384, 0xFF));
 }
 
-// 4. Sparse data: 1% non-zero, rest zeros
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ4: RZEStage/SparseDataRoundTrip — ~1% non-zero bytes round-trip exactly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, SparseDataRoundTrip) {
     std::mt19937 rng(42);
     std::uniform_int_distribution<int> idx_dist(0, 16383);
@@ -158,7 +156,9 @@ TEST(RZEStage, SparseDataRoundTrip) {
     round_trip(data);
 }
 
-// 5. Multi-chunk input (2 × 16 KB = 32 KB)
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ5: RZEStage/MultiChunkRoundTrip — 2×16 KB chunks restore exactly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, MultiChunkRoundTrip) {
     std::mt19937 rng(99);
     std::uniform_int_distribution<int> dist(0, 255);
@@ -167,7 +167,9 @@ TEST(RZEStage, MultiChunkRoundTrip) {
     round_trip(data);
 }
 
-// 6. Sparse data compresses to smaller than input
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ6: RZEStage/SparseDataCompressionRatio — sparse data compresses smaller than input
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, SparseDataCompressionRatio) {
     // 0.5% non-zero bytes → should compress significantly
     std::vector<uint8_t> data(16384, 0);
@@ -189,7 +191,9 @@ TEST(RZEStage, SparseDataCompressionRatio) {
         << "Sparse input should compress below original size";
 }
 
-// 7. All-zeros compresses to near-minimum (header + 2-byte tag per chunk)
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ7: RZEStage/AllZerosCompressesSmall — all-zeros encodes to ≤17 bytes
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, AllZerosCompressesSmall) {
     std::vector<uint8_t> data(16384, 0);
     CudaStream cs;
@@ -206,7 +210,9 @@ TEST(RZEStage, AllZerosCompressesSmall) {
         << "All-zeros chunk should compress to header + 2-byte tag (≤17 with alignment)";
 }
 
-// 8. Header serialization round-trip
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ8: RZEStage/HeaderSerialization — serializeHeader/deserializeHeader preserves config
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, HeaderSerialization) {
     RZEStage s;
     s.setChunkSize(16384);
@@ -223,7 +229,9 @@ TEST(RZEStage, HeaderSerialization) {
     EXPECT_EQ(s2.getCachedOrigBytes(), 0u);  // not set until execute() is called
 }
 
-// 9. Checkerboard byte pattern (alternating 0x00 / 0xAA)
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ9: RZEStage/CheckerboardRoundTrip — alternating 0x00/0xAA pattern round-trips
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, CheckerboardRoundTrip) {
     std::vector<uint8_t> data(16384);
     for (size_t i = 0; i < data.size(); i++)
@@ -231,7 +239,9 @@ TEST(RZEStage, CheckerboardRoundTrip) {
     round_trip(data);
 }
 
-// 10. Long runs of the same byte value (excellent RE target)
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ10: RZEStage/LongRunsRoundTrip — long repeated-byte runs (good RE target) round-trip
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, LongRunsRoundTrip) {
     std::vector<uint8_t> data(16384, 0);
     // Fill with 128 blocks of 128 bytes, each block a distinct byte value
@@ -242,11 +252,9 @@ TEST(RZEStage, LongRunsRoundTrip) {
     round_trip(data);
 }
 
-// 11. Unsupported chunk_size throws at execute()
-//
-// Only chunk_size == 16384 is implemented.  Any other value must throw a
-// std::runtime_error so the caller gets a clear message rather than silent
-// data corruption.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ11: RZEStage/UnsupportedChunkSizeThrows — chunk_size≠16384 throws at execute()
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, UnsupportedChunkSizeThrows) {
     std::vector<uint8_t> data(16384, 0xAB);
     CudaStream cs;
@@ -288,10 +296,9 @@ TEST(RZEStage, UnsupportedChunkSizeThrows) {
     }
 }
 
-// 12. Unsupported levels value throws at execute()
-//
-// Levels 1, 2, 3 are not yet implemented; only levels == 4 is supported.
-// Each unsupported value must throw a std::runtime_error.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ12: RZEStage/UnsupportedLevelsThrows — levels∉{4} throws at execute()
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, UnsupportedLevelsThrows) {
     std::vector<uint8_t> data(16384, 0x55);
     CudaStream cs;
@@ -315,11 +322,9 @@ TEST(RZEStage, UnsupportedLevelsThrows) {
     }
 }
 
-// 13. isGraphCompatible(): true for forward, false for inverse
-//
-// RZE inverse contains a blocking D2H cudaMemcpy (to read per-chunk sizes
-// from the stream header) and a stream sync between scatter and decode
-// kernels — neither is capturable.  The forward path has no such calls.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ13: RZEStage/IsGraphCompatible — forward=true, inverse=false (blocking D2H)
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, IsGraphCompatible) {
     RZEStage fwd;
     fwd.setChunkSize(16384);
@@ -335,14 +340,9 @@ TEST(RZEStage, IsGraphCompatible) {
         << "RZE inverse must NOT be graph-compatible (blocking D2H in execute)";
 }
 
-// 14. saveState()/restoreState() preserves config across compress+decompress
-//
-// decompressMulti() wraps each stage's execute() with saveState()/restoreState()
-// so that header deserialization in the inverse pass does not permanently
-// overwrite the forward configuration.
-// Specifically: cached_orig_bytes_ is set by the forward pass and also written
-// into the serialized header; after a decompress the saved forward value must
-// be intact so a subsequent compress sees the correct config.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ14: RZEStage/SaveRestoreStatePreservesConfig — saveState/restoreState preserves forward config
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, SaveRestoreStatePreservesConfig) {
     std::vector<uint8_t> data(16384, 0x33);
     CudaStream cs;
@@ -384,11 +384,9 @@ TEST(RZEStage, SaveRestoreStatePreservesConfig) {
         << "stage must be in forward mode after restoreState";
 }
 
-// 15. Repeated compress+decompress on the same stage objects is stable
-//
-// Verifies that persistent scratch buffers are correctly reused (not
-// double-freed or left dirty) across multiple round-trips on the same
-// pair of RZEStage objects.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ15: RZEStage/RepeatedRoundTripStable — 5 repeated round-trips on same stage objects stable
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, RepeatedRoundTripStable) {
     std::mt19937 rng(2024);
     std::uniform_int_distribution<int> dist(0, 255);
@@ -426,11 +424,9 @@ TEST(RZEStage, RepeatedRoundTripStable) {
     }
 }
 
-// 16. Partial chunk (input smaller than one chunk) round-trips correctly
-//
-// Exercises the single-chunk path where the input does not fill the
-// full 16 KB chunk size.  The encoder must not read past the end of
-// the input; the decoder must reproduce exactly the bytes passed in.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ16: RZEStage/PartialChunkRoundTrip — input < one chunk (3000 bytes) round-trips exactly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, PartialChunkRoundTrip) {
     // Use a size that is not a power of 2 and well below 16384
     std::vector<uint8_t> data(3000, 0);
@@ -441,10 +437,9 @@ TEST(RZEStage, PartialChunkRoundTrip) {
     round_trip(data);
 }
 
-// 17. Four-chunk input (4 × 16 KB = 64 KB) round-trips correctly
-//
-// Tests that the prefix-sum offset computation in the packing kernel
-// and the inverse scatter are correct beyond 2 chunks.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ17: RZEStage/FourChunksRoundTrip — 4×16 KB (64 KB) round-trips correctly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, FourChunksRoundTrip) {
     std::mt19937 rng(777);
     std::uniform_int_distribution<int> dist(0, 255);
@@ -453,12 +448,9 @@ TEST(RZEStage, FourChunksRoundTrip) {
     round_trip(data);
 }
 
-// 18. Mixed-density multi-chunk: first half sparse, second half dense
-//
-// Exercises per-chunk divergence in the encode kernel — some chunks
-// will take the uncompressed-verbatim path (high-bit flag set) while
-// others will be compressed.  The decoder must handle both cases in
-// the same stream.
+// ─────────────────────────────────────────────────────────────────────────────
+// RZ18: RZEStage/MixedDensityMultiChunk — half sparse, half dense; round-trip correct
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, MixedDensityMultiChunkRoundTrip) {
     constexpr size_t N = 32768;  // 2 × 16 KB chunks
 
@@ -480,12 +472,7 @@ TEST(RZEStage, MixedDensityMultiChunkRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 19. Pipeline integration: Lorenzo → RZEStage full round-trip
-//
-// Exercises RZEStage as a downstream consumer of Lorenzo's "codes" output
-// through the full Pipeline API (compress → decompress).  Smooth sinusoidal
-// input data produces highly compressible Lorenzo quantization codes
-// (many zeros after prediction), which RZE encodes well.
+// RZ19: RZEStage/PipelineIntegration — LorenzoQuantStage→RZEStage pipeline round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, PipelineIntegration) {
     CudaStream stream;
@@ -493,10 +480,7 @@ TEST(RZEStage, PipelineIntegration) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-                   + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);
@@ -546,11 +530,7 @@ TEST(RZEStage, PipelineIntegration) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 20. RZE pipeline: compressed output smaller than raw for smooth data
-//
-// Uses the same Lorenzo→RZE pipeline as test 19 but verifies the compression
-// ratio.  Smooth sinusoidal data produces mostly-zero Lorenzo codes; RZE's
-// zero-elimination should give a meaningfully compressed output.
+// RZ20: RZEStage/PipelineCompressionRatio — Lorenzo→RZE compressed size < raw input
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RZEStage, PipelineCompressionRatio) {
     CudaStream stream;
@@ -558,10 +538,7 @@ TEST(RZEStage, PipelineCompressionRatio) {
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);
 
-    std::vector<float> h_input(N);
-    for (size_t i = 0; i < N; i++)
-        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-                   + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
+    auto h_input = make_smooth_data<float>(N);
 
     CudaBuffer<float> d_in(N);
     d_in.upload(h_input, stream);

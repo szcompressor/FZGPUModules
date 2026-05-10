@@ -1,17 +1,19 @@
 /**
- * tests/test_rle.cpp
+ * tests/stages/test_rle.cpp
  *
- * Unit tests for RLEStage (run-length encoding / decoding).
+ * Unit tests for RLEStage<T> (run-length encoding / decoding).
  *
  * Forward: encodes consecutive identical values as (value, count) pairs.
  *   Format: [num_runs:u32] [val0:T, count0:u32,  val1:T, count1:u32, ...]
  * Inverse: expands pairs back to the original sequence.
  *
- * Key properties verified:
- *   1. Encoding a high-repetition sequence produces a smaller output.
- *   2. Forward followed by Inverse reconstructs the original exactly.
- *   3. Works correctly on data with no repeated values (worst case).
- *   4. Works on larger scale data.
+ *   RL1  RLEStage/SingleElement          — N=1 edge case, exact reconstruction
+ *   RL2  RLEStage/NumRunsHeaderField     — first 4 bytes of encoded buffer = num_runs
+ *   RL3  RLEStage/SimpleRoundTrip        — 3-run sequence round-trips exactly
+ *   RL4  RLEStage/AllSameRoundTrip       — constant array encodes to 1 run, much smaller
+ *   RL5  RLEStage/AlternatingRoundTrip   — alternating values (worst case) round-trips exactly
+ *   RL6  RLEStage/LargeSparseRoundTrip   — 16 K elements ~90% zeros, correct reconstruction
+ *   RL7  RLEStage/HeaderSerialization    — serializeHeader/deserializeHeader preserves stage config
  */
 
 #include <gtest/gtest.h>
@@ -90,7 +92,7 @@ static std::vector<T> run_rle_inverse(RLEStage<T>&               stage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: single-element input (one run of length 1)
+// RL1: SingleElement — N=1 edge case, encodes and decodes exactly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RLEStage, SingleElement) {
     CudaStream stream;
@@ -113,10 +115,7 @@ TEST(RLEStage, SingleElement) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: num_runs header field matches actual number of distinct runs
-//
-// The first 4 bytes of the encoded buffer store num_runs as a uint32_t.
-// For the sequence [7,7,7, 42,42, 1] we expect exactly 3 runs.
+// RL2: NumRunsHeaderField — first 4 encoded bytes equal the number of distinct runs
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RLEStage, NumRunsHeaderField) {
     CudaStream stream;
@@ -144,7 +143,7 @@ TEST(RLEStage, NumRunsHeaderField) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: simple known sequence round-trip
+// RL3: SimpleRoundTrip — 3-run sequence {7,7,7, 42,42, 1} round-trips exactly
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RLEStage, SimpleRoundTrip) {
     CudaStream stream;
@@ -167,7 +166,7 @@ TEST(RLEStage, SimpleRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: all-same sequence — ideal case for RLE compression
+// RL4: AllSameRoundTrip — constant array encodes to 1 run, output much smaller
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RLEStage, AllSameRoundTrip) {
     CudaStream stream;
@@ -194,7 +193,7 @@ TEST(RLEStage, AllSameRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: alternating values — worst case for RLE (no compression gain)
+// RL5: AlternatingRoundTrip — alternating 0,1,0,1,... (worst case) still round-trips
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RLEStage, AlternatingRoundTrip) {
     CudaStream stream;
@@ -219,8 +218,7 @@ TEST(RLEStage, AlternatingRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: large realistic quantization-code-like sequence (mostly zeros with
-//       occasional non-zero values, mimicking Lorenzo output after difference)
+// RL6: LargeSparseRoundTrip — 16 K elements ~90% zeros, mimicking Lorenzo output
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(RLEStage, LargeSparseRoundTrip) {
     CudaStream stream;
@@ -243,4 +241,23 @@ TEST(RLEStage, LargeSparseRoundTrip) {
     for (size_t i = 0; i < N; i++) {
         EXPECT_EQ(h_decoded[i], h_input[i]) << "Mismatch at index " << i;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RL7: HeaderSerialization — serializeHeader/deserializeHeader round-trip.
+//      RLEStage has no user-configurable parameters (num_elements is cached at
+//      execute time), but the serialization path must not throw or corrupt state.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(RLEStage, HeaderSerialization) {
+    RLEStage<uint16_t> stage;
+
+    uint8_t buf[64] = {};
+    size_t written = stage.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_GT(written, 0u) << "serializeHeader should write at least 1 byte";
+
+    RLEStage<uint16_t> restored;
+    ASSERT_NO_THROW(restored.deserializeHeader(buf, written))
+        << "deserializeHeader must not throw on valid header bytes";
+
+    EXPECT_EQ(restored.getStageTypeId(), stage.getStageTypeId());
 }

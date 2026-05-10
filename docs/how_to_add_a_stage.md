@@ -45,6 +45,59 @@ Stages live under `modules/` in one of these categories:
 | Transforms | `modules/transforms/<name>/` | `zigzag/`, `negabinary/` |
 | Fused | `modules/fused/<name>/` | `lorenzo_quant/` |
 
+### Category definitions
+
+**Predictors** decorrelate the data by computing residuals from a prediction model.
+The forward pass subtracts predicted values from actual values, producing a residual
+stream that has much smaller magnitude and is far more compressible.  The inverse
+reconstructs the original by applying the cumulative prediction.  The operation is
+always lossless.  Use this category when your stage consumes raw data values and
+produces signed residuals (e.g. delta coding, Lorenzo predictor, interpolation).
+
+**Quantizers** perform the lossy step: they map a continuous (floating-point) or
+fine-grained value to a discrete integer code within a user-specified error bound.
+Output codes are integers, typically `uint16_t` or `uint32_t`, and the stage emits
+a separate outlier stream for values that fall outside the representable range.
+The inverse reconstructs an approximation of the original values.  Use this
+category when your stage introduces controlled, bounded loss to reduce dynamic range.
+
+**Coders** compress an integer or byte stream losslessly by exploiting statistical
+redundancy — repeated values, long zero runs, or skewed symbol distributions.
+They do not reorder, predict, or transform the data; they only compact it.
+Output byte size is variable and must be smaller than input in the common case
+(or stored raw if not).  The inverse exactly recovers the input stream.  Use this
+category for entropy coders, run-length schemes, or any stage whose sole job is
+symbol-to-bitstream encoding.
+
+**Shufflers** restructure the bytes of a stream without changing any values —
+they are size-preserving, lossless rearrangements designed to improve the
+compressibility of downstream coders.  The canonical example is bit-matrix
+transposition (bitshuffle): grouping bit-plane k of all elements together so
+that sign bits and exponent bits form long runs of identical bytes.  Use this
+category when your stage only reorders bytes/bits and the output is the same size
+as the input.
+
+**Transforms** apply an invertible, element-wise mathematical mapping — every
+input element maps to exactly one output element of a (possibly different) type,
+and the mapping is exactly reversible.  Examples: zigzag encoding maps signed
+integers to unsigned integers preserving magnitude order; negabinary maps signed
+integers to base-(-2) unsigned codes.  Use this category when your stage is a
+bijective point-wise function with no inter-element dependencies, no size change,
+and no loss.
+
+**Fused** stages combine two or more logically distinct operations (typically a
+predictor and a quantizer, or a predictor and a transform) into a single kernel
+to reduce memory round-trips.  A fused stage is always a performance optimization:
+it is semantically equivalent to the un-fused stages wired in sequence, but avoids
+the intermediate buffer reads and writes.  Use this category only when profiling
+shows the unfused version is memory-bandwidth limited and the stages are always
+used together.
+
+If your stage does not fit cleanly into one category, prefer the one that best
+describes its **primary** effect on the data.  A stage that both predicts and
+quantizes but is not performance-critical belongs in `predictors/` or `quantizers/`
+rather than `fused/`.
+
 Create the directory: `modules/<category>/<name>/`
 
 ---
@@ -324,6 +377,19 @@ add_library(fzgmod_modules
 
 ---
 
+## Step 6b — Export in the public header
+
+Add the stage header include to `include/fzgpumodules.h` (the main public API header)
+so users can access it with `#include "fzgpumodules.h"`:
+
+```cpp
+#include "<category>/<name>/<name>_stage.h"
+```
+
+Organize includes alphabetically within each category for consistency.
+
+---
+
 ## Step 7 — Register in the TOML config loader
 
 To make your stage constructable from a `.toml` pipeline file via
@@ -427,6 +493,7 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 - [ ] `stageTypeToString()` case added
 - [ ] `createStage()` factory case added
 - [ ] `.cu` file added to `fzgmod_modules` in root `CMakeLists.txt`
+- [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
 - [ ] `config.cpp` — factory helper + `loadConfig()` branch + `saveConfig()` case
 - [ ] `cli.cpp` — `--stages` name + help text *(if applicable)*
 - [ ] Tests: ForwardRoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState

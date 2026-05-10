@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-// CLI entrypoint implemented in utils/cli/cli.cpp and linked via libfzgmod.
+// CLI entrypoint implemented in utils/cli/cli.cpp and linked via libfzgmod
 int fzgmod_cli_main(int argc, char** argv);
 
 using namespace fz;

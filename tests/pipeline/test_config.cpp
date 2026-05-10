@@ -4,18 +4,22 @@
  * Unit and integration tests for Pipeline::loadConfig() / saveConfig()
  * and the Pipeline(config_path) constructor overload.
  *
- * Tests:
- *   ConfigLoad/LorenzoOnly          — load minimal single-stage config, round-trip
- *   ConfigLoad/FullPipeline         — load multi-stage Lorenzo→Bitshuffle→RZE, round-trip
- *   ConfigLoad/ConstructorOverload  — Pipeline("path.toml") matches loadConfig()
- *   ConfigSave/RoundTrip            — build programmatically, saveConfig, loadConfig, compare
- *   ConfigSave/PreservesParams      — saved TOML contains correct parameter values
- *   ConfigSave/RequiresFinalized    — saveConfig throws when not finalized
- *   ConfigLoad/AlreadyFinalized     — loadConfig throws when already finalized
- *   ConfigLoad/MissingFile          — loadConfig throws on nonexistent path
- *   ConfigLoad/BadStageType         — loadConfig throws on unknown type string
- *   ConfigLoad/BadWiringRef         — loadConfig throws on missing 'from' stage name
- *   ConfigLoad/DuplicateStageName   — loadConfig throws on duplicate stage names
+ *   CL1   ConfigLoad/LorenzoOnly            — load minimal single-stage config, round-trip
+ *   CL2   ConfigLoad/FullPipeline           — load multi-stage Lorenzo→Bitshuffle→RZE, round-trip
+ *   CL3   ConfigLoad/ConstructorOverload    — Pipeline("path.toml") matches loadConfig()
+ *   CS1   ConfigSave/RoundTrip             — build programmatically, saveConfig, loadConfig, compare
+ *   CS2   ConfigSave/PreservesParams       — saved TOML contains correct parameter values
+ *   CS3   ConfigSave/RequiresFinalized     — saveConfig throws when not finalized
+ *   CL4   ConfigLoad/AlreadyFinalized      — loadConfig throws when already finalized
+ *   CL5   ConfigLoad/MissingFile           — loadConfig throws on nonexistent path
+ *   CL6   ConfigLoad/BadStageType          — loadConfig throws on unknown type string
+ *   CL7   ConfigLoad/BadWiringRef          — loadConfig throws on missing 'from' stage name
+ *   CL8   ConfigLoad/DuplicateStageName    — loadConfig throws on duplicate stage names
+ *   CL9   ConfigLoad/AllSupportedStageTypes — all stage types accepted by loadConfig
+ *   CL10  ConfigLoad/ZigzagAndNegabinary   — Zigzag and Negabinary stage types load correctly
+ *   CL11  ConfigLoad/LorenzoStandaloneLoads — "Lorenzo" type string accepted by loadConfig
+ *   CS4   ConfigSave/LorenzoStandaloneSaveLoad — Lorenzo standalone saveConfig round-trip
+ *   CL12  ConfigLoad/QuantizerLorenzoRoundTrip — Quantizer→Lorenzo pipeline via TOML config
  */
 
 #include <gtest/gtest.h>
@@ -32,7 +36,6 @@
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
 
-#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -44,14 +47,6 @@ using namespace fz_test;
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-static std::vector<float> make_smooth_data(size_t n) {
-    std::vector<float> v(n);
-    for (size_t i = 0; i < n; i++)
-        v[i] = std::sin(static_cast<float>(i) * 0.01f) * 50.0f
-             + std::cos(static_cast<float>(i) * 0.003f) * 20.0f;
-    return v;
-}
 
 // Write a TOML string to a temp file and return the path.
 static std::string write_toml(const std::string& name, const std::string& content) {
@@ -86,9 +81,8 @@ static float round_trip_error(Pipeline& p, const std::vector<float>& h_input,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConfigLoad — loading from a hand-authored TOML string
+// CL1: ConfigLoad/LorenzoOnly — load minimal single-stage config, round-trip
 // ─────────────────────────────────────────────────────────────────────────────
-
 TEST(ConfigLoad, LorenzoOnly) {
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
@@ -114,13 +108,16 @@ zigzag_codes     = false
     Pipeline p;
     p.loadConfig(path);
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     float err = round_trip_error(p, h_input, stream);
     EXPECT_LE(err, EB * 1.01f) << "loadConfig round-trip error " << err << " > EB " << EB;
 
     std::remove(path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL2: ConfigLoad/FullPipeline — load multi-stage Lorenzo→Bitshuffle→RZE, round-trip
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, FullPipeline) {
     // Lorenzo → Bitshuffle (codes branch) → RZE
     constexpr size_t N  = 1 << 14;
@@ -164,13 +161,16 @@ inputs = [{ from = "bshuf" }]
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
     p.loadConfig(path);
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     float err = round_trip_error(p, h_input, stream);
     EXPECT_LE(err, EB * 1.01f) << "Full pipeline loadConfig round-trip error " << err;
 
     std::remove(path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL3: ConfigLoad/ConstructorOverload — Pipeline("path.toml") matches loadConfig()
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, ConstructorOverload) {
     // Pipeline(path) should produce identical results to loadConfig(path).
     constexpr size_t N  = 1 << 13;
@@ -194,7 +194,7 @@ zigzag_codes     = false
 )");
 
     CudaStream stream;
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
 
     // Via constructor
     Pipeline p1(path);
@@ -214,9 +214,8 @@ zigzag_codes     = false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConfigSave — saving a built pipeline to TOML
+// CS1: ConfigSave/RoundTrip — build programmatically, saveConfig, loadConfig, compare
 // ─────────────────────────────────────────────────────────────────────────────
-
 TEST(ConfigSave, RoundTrip) {
     // Build a pipeline programmatically, save it, reload it, verify compress quality.
     constexpr size_t N  = 1 << 13;
@@ -241,7 +240,7 @@ TEST(ConfigSave, RoundTrip) {
     p2.loadConfig(cfg_path);
 
     CudaStream stream;
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
     float err = round_trip_error(p2, h_input, stream);
     EXPECT_LE(err, EB * 1.01f)
         << "saveConfig → loadConfig round-trip error " << err << " > EB " << EB;
@@ -249,6 +248,9 @@ TEST(ConfigSave, RoundTrip) {
     std::remove(cfg_path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CS2: ConfigSave/PreservesParams — saved TOML contains correct parameter values
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigSave, PreservesParams) {
     // Check that the saved TOML actually contains the right values by parsing it.
     constexpr float  EB      = 5e-3f;
@@ -334,6 +336,9 @@ TEST(ConfigSave, PreservesParams) {
     std::remove(cfg_path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CS3: ConfigSave/RequiresFinalized — saveConfig throws when not finalized
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigSave, RequiresFinalized) {
     Pipeline p;
     p.addStage<LorenzoQuantStage<float, uint16_t>>();
@@ -342,9 +347,8 @@ TEST(ConfigSave, RequiresFinalized) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConfigLoad — error-handling
+// CL4: ConfigLoad/AlreadyFinalized — loadConfig throws when already finalized
 // ─────────────────────────────────────────────────────────────────────────────
-
 TEST(ConfigLoad, AlreadyFinalized) {
     std::string path = write_toml("already_final", R"(
 [pipeline]
@@ -365,11 +369,17 @@ error_bound = 0.01
     std::remove(path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL5: ConfigLoad/MissingFile — loadConfig throws on nonexistent path
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, MissingFile) {
     Pipeline p;
     EXPECT_THROW(p.loadConfig("/tmp/fzgmod_this_does_not_exist_xyz.toml"), std::runtime_error);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL6: ConfigLoad/BadStageType — loadConfig throws on unknown type string
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, BadStageType) {
     std::string path = write_toml("bad_type", R"(
 [pipeline]
@@ -383,6 +393,9 @@ type = "NonExistentStageType"
     std::remove(path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL7: ConfigLoad/BadWiringRef — loadConfig throws on missing 'from' stage name
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, BadWiringRef) {
     std::string path = write_toml("bad_wiring", R"(
 [pipeline]
@@ -404,6 +417,9 @@ inputs = [{ from = "does_not_exist" }]
     std::remove(path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL8: ConfigLoad/DuplicateStageName — loadConfig throws on duplicate stage names
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, DuplicateStageName) {
     std::string path = write_toml("dup_name", R"(
 [pipeline]
@@ -425,9 +441,8 @@ type = "RZE"
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ConfigSave / ConfigLoad round-trip for every supported stage type combination
+// CL9: ConfigLoad/AllSupportedStageTypes — all stage types accepted by loadConfig
 // ─────────────────────────────────────────────────────────────────────────────
-
 TEST(ConfigLoad, AllSupportedStageTypes) {
     // Build a valid linear pipeline exercising Lorenzo, Difference, RLE,
     // Bitshuffle, and RZE in one chain.  saveConfig → loadConfig must not throw.
@@ -468,6 +483,9 @@ TEST(ConfigLoad, AllSupportedStageTypes) {
     std::remove(cfg_path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CL10: ConfigLoad/ZigzagAndNegabinary — Zigzag and Negabinary stage types load correctly
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, ZigzagAndNegabinary) {
     // Standalone Zigzag and Negabinary stage types.
     {
@@ -498,7 +516,9 @@ output_type = "uint16"
     }
 }
 
-// ── Lorenzo standalone via TOML load ─────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CL11: ConfigLoad/LorenzoStandaloneLoads — "Lorenzo" type string accepted by loadConfig
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, LorenzoStandaloneLoads) {
     // Verify the "Lorenzo" type string is accepted by loadConfig.
     std::string path = write_toml("lorenzo_standalone", R"(
@@ -513,7 +533,9 @@ data_type = "int32"
     std::remove(path.c_str());
 }
 
-// ── Lorenzo saveConfig round-trip ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CS4: ConfigSave/LorenzoStandaloneSaveLoad — Lorenzo standalone saveConfig round-trip
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigSave, LorenzoStandaloneSaveLoad) {
     // Build a pipeline with a Lorenzo stage, save it, reload it.
     const std::string cfg_path = "/tmp/fzgmod_lorenzo_save.toml";
@@ -541,7 +563,9 @@ TEST(ConfigSave, LorenzoStandaloneSaveLoad) {
     std::remove(cfg_path.c_str());
 }
 
-// ── Quantizer → Lorenzo round-trip via TOML config ────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// CL12: ConfigLoad/QuantizerLorenzoRoundTrip — Quantizer→Lorenzo pipeline via TOML config
+// ─────────────────────────────────────────────────────────────────────────────
 TEST(ConfigLoad, QuantizerLorenzoRoundTrip) {
     constexpr size_t N  = 1 << 13;
     constexpr float  EB = 1e-2f;
@@ -570,7 +594,7 @@ data_type = "int32"
 inputs    = [{from = "quant", port = "codes"}]
 )");
 
-    auto h_input = make_smooth_data(N);
+    auto h_input = make_smooth_data<float>(N);
 
     Pipeline p;
     ASSERT_NO_THROW(p.loadConfig(path));

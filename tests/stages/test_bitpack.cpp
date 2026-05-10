@@ -2,25 +2,32 @@
  * tests/stages/test_bitpack.cpp
  *
  * GPU unit tests for BitpackStage<T>.
- *
  * BitpackStage packs N-bit integers into a dense byte stream (forward) and
  * restores them exactly (inverse). nbits must be a power of two.
  *
- * Properties verified:
- *   1.  Round-trip uint16_t, nbits=8  (sub-word, byte-aligned elements).
- *   2.  Round-trip uint16_t, nbits=16 (identity — full width kept).
- *   3.  Round-trip uint32_t, nbits=16 (half-width packing).
- *   4.  Round-trip uint32_t, nbits=32 (identity).
- *   5.  Round-trip uint8_t,  nbits=4  (sub-byte elements).
- *   6.  Zero-element input (n=0) does not crash; output size is 0.
- *   7.  estimateOutputSizes formula: ceil(n*nbits/8).
- *   8.  Packed output size is strictly smaller than input when nbits < 8*sizeof(T).
- *   9.  serializeHeader → deserializeHeader restores nbits.
- *   10. saveState + deserializeHeader (new nbits) + restoreState recovers original.
- *   11. Pipeline integration: Quantizer<float,uint16_t> → Bitpack<uint16_t> round-trip.
- *   12. isGraphCompatible() returns true.
- *   13. setNBits with invalid value (non-power-of-two) throws.
- *   14. setNBits with value exceeding 8*sizeof(T) throws.
+ *   BP1   BitpackStage/RoundTrip_U16_NBits8           — uint16_t, nbits=8 sub-word round-trip
+ *   BP2   BitpackStage/RoundTrip_U16_NBits16_Identity — uint16_t, nbits=16 identity round-trip
+ *   BP3   BitpackStage/RoundTrip_U32_NBits16          — uint32_t, nbits=16 half-width round-trip
+ *   BP4   BitpackStage/RoundTrip_U32_NBits32_Identity — uint32_t, nbits=32 identity round-trip
+ *   BP5   BitpackStage/RoundTrip_U8_NBits4            — uint8_t,  nbits=4  sub-byte round-trip
+ *   BP6   BitpackStage/ZeroInput                      — n=0 does not crash; output size is 0
+ *   BP7   BitpackStage/OutputSizeFormula              — estimateOutputSizes returns ceil(n*nbits/8)
+ *   BP8   BitpackStage/PackedSizeSmallerThanInput     — packed size < input when nbits < 8*sizeof(T)
+ *   BP9   BitpackStage/SerializeDeserialize           — serializeHeader→deserializeHeader restores nbits
+ *   BP10  BitpackStage/SaveRestoreState               — saveState+deserializeHeader+restoreState cycle
+ *   BP11  BitpackStage/PipelineIntegration            — Quantizer<float,uint16_t>→Bitpack round-trip
+ *   BP12  BitpackStage/GraphCompatible                — isGraphCompatible()==true when auto-detect off
+ *   BP13  BitpackStage/InvalidNBits_NonPowerOfTwo     — non-power-of-two nbits throws
+ *   BP14  BitpackStage/InvalidNBits_ExceedsWidth      — nbits > 8*sizeof(T) or 0 throws
+ *   BP15  BitpackStage/AutoDetect_GraphIncompatible   — isGraphCompatible()==false when auto-detect on
+ *   BP16  BitpackStage/AutoDetect_EstimateWorstCase   — estimateOutputSizes returns full input when auto on
+ *   BP17  BitpackStage/AutoDetect_ChoosesNBits_U16_4bit — auto selects nbits=4 for uint16 max=15
+ *   BP18  BitpackStage/AutoDetect_ChoosesNBits_U32_8bit — auto selects nbits=8 for uint32 max=200
+ *   BP19  BitpackStage/AutoDetect_RoundTrip_U16_8bit  — auto uint16 round-trip, 8-bit data
+ *   BP20  BitpackStage/AutoDetect_RoundTrip_U32_16bit — auto uint32 round-trip, 16-bit data
+ *   BP21  BitpackStage/AutoDetect_AllZeros_NBits1     — all-zero input → auto selects nbits=1
+ *   BP22  BitpackStage/AutoDetect_MaxValue_FullWidth  — max=UINT16_MAX → auto selects nbits=16
+ *   BP23  BitpackStage/AutoDetect_PipelineIntegration — pipeline round-trip with auto-detect on
  */
 
 #include <gtest/gtest.h>
@@ -130,7 +137,7 @@ static void round_trip(uint8_t nbits, size_t n_elements) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1-5. Round-trip tests
+// BP1-BP5: Round-trip tests for various (T, nbits) combinations
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, RoundTrip_U16_NBits8) {
@@ -154,7 +161,7 @@ TEST(BitpackStage, RoundTrip_U8_NBits4) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Zero-element input
+// BP6: BitpackStage/ZeroInput — n=0 does not crash; output size is 0
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, ZeroInput) {
@@ -171,7 +178,7 @@ TEST(BitpackStage, ZeroInput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. estimateOutputSizes formula
+// BP7: BitpackStage/OutputSizeFormula — estimateOutputSizes returns ceil(n*nbits/8)
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, OutputSizeFormula) {
@@ -191,7 +198,7 @@ TEST(BitpackStage, OutputSizeFormula) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 8. Packed size < input size when nbits < 8*sizeof(T)
+// BP8: BitpackStage/PackedSizeSmallerThanInput — packed size < input when nbits < 8*sizeof(T)
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, PackedSizeSmallerThanInput) {
@@ -209,7 +216,7 @@ TEST(BitpackStage, PackedSizeSmallerThanInput) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 9. serializeHeader → deserializeHeader restores nbits
+// BP9: BitpackStage/SerializeDeserialize — serializeHeader→deserializeHeader restores nbits
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, SerializeDeserialize) {
@@ -226,7 +233,7 @@ TEST(BitpackStage, SerializeDeserialize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 10. saveState + deserializeHeader + restoreState recovers original
+// BP10: BitpackStage/SaveRestoreState — saveState+deserializeHeader+restoreState cycle
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, SaveRestoreState) {
@@ -248,7 +255,7 @@ TEST(BitpackStage, SaveRestoreState) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 11. Pipeline integration: Quantizer → Bitpack round-trip
+// BP11: BitpackStage/PipelineIntegration — Quantizer<float,uint16_t>→Bitpack round-trip
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, PipelineIntegration) {
@@ -260,7 +267,9 @@ TEST(BitpackStage, PipelineIntegration) {
 
     // Single pipeline instance: compress and decompress share state
     // (inverse DAG is built from the forward pass).
-    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    // MINIMAL strategy: decompress output is cudaMalloc-owned, so
+    // pipeline_round_trip's cudaFree(d_dec) is correct.
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
     auto* quant   = p.addStage<QuantizerStage<float, uint16_t>>();
     auto* bitpack = p.addStage<BitpackStage<uint16_t>>();
     quant->setErrorBound(eb);
@@ -271,6 +280,7 @@ TEST(BitpackStage, PipelineIntegration) {
     bitpack->setNBits(16);
     p.connect(bitpack, quant, "codes");
     p.finalize();
+    p.setPoolManagedDecompOutput(false);  // decomp output is cudaMalloc-owned so pipeline_round_trip's cudaFree is correct
 
     CudaStream cs;
     auto res = fz_test::pipeline_round_trip<float>(p, h_input, cs.stream);
@@ -282,7 +292,7 @@ TEST(BitpackStage, PipelineIntegration) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 12. isGraphCompatible
+// BP12: BitpackStage/GraphCompatible — isGraphCompatible()==true when auto-detect off
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, GraphCompatible) {
@@ -295,7 +305,7 @@ TEST(BitpackStage, GraphCompatible) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 13-14. setNBits validation
+// BP13-BP14: BitpackStage/InvalidNBits — invalid nbits values throw std::invalid_argument
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST(BitpackStage, InvalidNBits_NonPowerOfTwo) {
@@ -309,4 +319,193 @@ TEST(BitpackStage, InvalidNBits_ExceedsWidth) {
     BitpackStage<uint16_t> s;
     EXPECT_THROW(s.setNBits(32), std::invalid_argument);  // max is 16 for uint16_t
     EXPECT_THROW(s.setNBits(0),  std::invalid_argument);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP15: BitpackStage/AutoDetect_GraphIncompatible — isGraphCompatible()==false when auto-detect on
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_GraphIncompatible) {
+    BitpackStage<uint16_t> s;
+    EXPECT_TRUE(s.isGraphCompatible());
+    s.setAutoDetect(true);
+    EXPECT_FALSE(s.isGraphCompatible());
+    s.setAutoDetect(false);
+    EXPECT_TRUE(s.isGraphCompatible());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP16: BitpackStage/AutoDetect_EstimateWorstCase — estimateOutputSizes returns full input when auto on
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_EstimateWorstCase) {
+    BitpackStage<uint16_t> s;
+    s.setAutoDetect(true);
+    // With 1024 uint16_t elements (2048 bytes input), estimate must be >= 2048.
+    const size_t in_bytes = 1024 * sizeof(uint16_t);
+    EXPECT_GE(s.estimateOutputSizes({in_bytes})[0], in_bytes);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP17-BP18: AutoDetect_ChoosesNBits — auto selects correct nbits from data max value
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_ChoosesNBits_U16_4bit) {
+    // Data max = 15 → fits in 4 bits.
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    std::vector<uint16_t> data(1024, 0);
+    data[500] = 15;  // max value
+
+    BitpackStage<uint16_t> enc;
+    enc.setAutoDetect(true);
+
+    pack<uint16_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getNBits(), 4u);
+}
+
+TEST(BitpackStage, AutoDetect_ChoosesNBits_U32_8bit) {
+    // Data max = 200 → fits in 8 bits.
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    std::vector<uint32_t> data(1024, 0);
+    data[0] = 200;  // max value
+
+    BitpackStage<uint32_t> enc;
+    enc.setAutoDetect(true);
+
+    pack<uint32_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getNBits(), 8u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP19-BP20: AutoDetect_RoundTrip — auto-detect pack+unpack reconstructs original exactly
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_RoundTrip_U16_8bit) {
+    // Data fits in 8 bits; auto-detect should choose nbits=8.
+    CudaStream cs;
+    auto pool = make_test_pool(256 * 1024);
+
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<uint16_t> dist(0, 255);
+    const size_t N = 4096;
+    std::vector<uint16_t> original(N);
+    for (auto& v : original) v = dist(rng);
+    original[0] = 255;  // ensure max is exactly 255
+
+    BitpackStage<uint16_t> enc;
+    enc.setAutoDetect(true);
+    const auto packed = pack<uint16_t>(enc, original, cs.stream, *pool);
+    EXPECT_EQ(enc.getNBits(), 8u);
+
+    uint8_t hdr[10] = {};
+    enc.serializeHeader(0, hdr, sizeof(hdr));
+
+    BitpackStage<uint16_t> dec;
+    dec.setInverse(true);
+    dec.deserializeHeader(hdr, sizeof(hdr));
+
+    const auto restored = unpack<uint16_t>(dec, packed, N, cs.stream, *pool);
+    ASSERT_EQ(restored.size(), original.size());
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(restored[i], original[i]) << "mismatch at i=" << i;
+}
+
+TEST(BitpackStage, AutoDetect_RoundTrip_U32_16bit) {
+    // Data fits in 16 bits; auto-detect should choose nbits=16.
+    CudaStream cs;
+    auto pool = make_test_pool(256 * 1024);
+
+    std::mt19937 rng(99);
+    std::uniform_int_distribution<uint32_t> dist(0, 65535);
+    const size_t N = 2048;
+    std::vector<uint32_t> original(N);
+    for (auto& v : original) v = dist(rng);
+    original[0] = 65535;  // ensure max is exactly 65535
+
+    BitpackStage<uint32_t> enc;
+    enc.setAutoDetect(true);
+    const auto packed = pack<uint32_t>(enc, original, cs.stream, *pool);
+    EXPECT_EQ(enc.getNBits(), 16u);
+
+    uint8_t hdr[10] = {};
+    enc.serializeHeader(0, hdr, sizeof(hdr));
+
+    BitpackStage<uint32_t> dec;
+    dec.setInverse(true);
+    dec.deserializeHeader(hdr, sizeof(hdr));
+
+    const auto restored = unpack<uint32_t>(dec, packed, N, cs.stream, *pool);
+    ASSERT_EQ(restored.size(), original.size());
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(restored[i], original[i]) << "mismatch at i=" << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP21: BitpackStage/AutoDetect_AllZeros_NBits1 — all-zero input → auto selects nbits=1
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_AllZeros_NBits1) {
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    std::vector<uint16_t> data(1024, 0);
+
+    BitpackStage<uint16_t> enc;
+    enc.setAutoDetect(true);
+    pack<uint16_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getNBits(), 1u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP22: BitpackStage/AutoDetect_MaxValue_FullWidth — max=UINT16_MAX → auto selects nbits=16
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_MaxValue_FullWidth) {
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    // max = 65535 for uint16_t → needs all 16 bits
+    std::vector<uint16_t> data(1024, 1);
+    data[42] = 65535;
+
+    BitpackStage<uint16_t> enc;
+    enc.setAutoDetect(true);
+    pack<uint16_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getNBits(), 16u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP23: BitpackStage/AutoDetect_PipelineIntegration — pipeline round-trip with auto-detect on
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(BitpackStage, AutoDetect_PipelineIntegration) {
+    const size_t N = 1024;
+    const float eb = 0.01f;
+
+    auto h_input = make_smooth_data<float>(N);
+    const size_t in_bytes = N * sizeof(float);
+
+    // MINIMAL strategy — auto-detect is incompatible with graph mode but not
+    // with MINIMAL (on-demand allocation).
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+    auto* quant   = p.addStage<QuantizerStage<float, uint16_t>>();
+    auto* bitpack = p.addStage<BitpackStage<uint16_t>>();
+    quant->setErrorBound(eb);
+    quant->setQuantRadius(32768);
+    quant->setZigzagCodes(false);
+    bitpack->setAutoDetect(true);
+    p.connect(bitpack, quant, "codes");
+    p.finalize();
+
+    CudaStream cs;
+    auto res = fz_test::pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 2.0)
+        << "Max error " << res.max_error << " exceeds bound " << eb;
+    EXPECT_LT(res.compressed_bytes, in_bytes)
+        << "Compressed size should be smaller than input";
 }

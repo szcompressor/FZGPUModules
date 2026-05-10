@@ -1,19 +1,16 @@
 /**
- * tests/test_negabinary_stage.cpp
+ * tests/stages/test_negabinary_stage.cpp
  *
  * GPU unit tests for NegabinaryStage<TIn, TOut>.
+ * Forward: signed → unsigned (Negabinary<TIn>::encode element-wise on GPU).
+ * Inverse: unsigned → signed (Negabinary<TIn>::decode element-wise on GPU).
  *
- * NegabinaryStage applies negabinary encoding or decoding element-wise:
- *   Forward (encode):  TIn[]  → TOut[]   (signed → unsigned, Negabinary<TIn>::encode)
- *   Inverse (decode):  TOut[] → TIn[]   (unsigned → signed, Negabinary<TIn>::decode)
- *
- * Properties verified:
- *   1. encode → decode round-trip restores original data (int16, int32).
- *   2. decode → encode round-trip also works (inverse-first path).
- *   3. Output byte size equals input byte size (size-preserving).
- *   4. Zero maps to zero: encode(0) == 0.
- *   5. Known spot values: encode(-1) == 3, encode(1) == 1, encode(-2) == 2.
- *   6. Large smooth ramp: GPU results match CPU reference for int16.
+ *   NS1  NegabinaryStage/Int16RoundTrip          — encode→decode round-trip for int16 values
+ *   NS2  NegabinaryStage/Int32RoundTrip          — encode→decode round-trip for int32 values
+ *   NS3  NegabinaryStage/SizePreserving          — estimateOutputSizes returns same byte count as input
+ *   NS4  NegabinaryStage/ZeroMapsToZero          — encode(0)==0 on GPU for all elements
+ *   NS5  NegabinaryStage/KnownSpotValues         — encode(-1)==3, encode(1)==1, encode(-2)==2, encode(2)==6
+ *   NS6  NegabinaryStage/MatchesCPUReferenceInt16 — GPU encode matches host Negabinary<T>::encode
  */
 
 #include <gtest/gtest.h>
@@ -78,7 +75,7 @@ static std::vector<TIn> run_nb_decode(NegabinaryStage<TIn, TOut>& stage,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: int16 encode-then-decode round-trip
+// NS1: NegabinaryStage/Int16RoundTrip — encode→decode round-trip for int16 values
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryStage, Int16RoundTrip) {
     CudaStream stream;
@@ -103,7 +100,7 @@ TEST(NegabinaryStage, Int16RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: int32 encode-then-decode round-trip
+// NS2: NegabinaryStage/Int32RoundTrip — encode→decode round-trip for int32 values
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryStage, Int32RoundTrip) {
     CudaStream stream;
@@ -127,7 +124,7 @@ TEST(NegabinaryStage, Int32RoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: output byte size equals input byte size
+// NS3: NegabinaryStage/SizePreserving — estimateOutputSizes returns same byte count as input
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryStage, SizePreserving) {
     CudaStream stream;
@@ -150,7 +147,7 @@ TEST(NegabinaryStage, SizePreserving) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: zero maps to zero (encode(0) == 0)
+// NS4: NegabinaryStage/ZeroMapsToZero — encode(0)==0 on GPU for all elements
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryStage, ZeroMapsToZero) {
     CudaStream stream;
@@ -166,11 +163,7 @@ TEST(NegabinaryStage, ZeroMapsToZero) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: known spot values
-//   encode(-1) == 3   (negabinary: (-1) + 0xAAAAAAAA = 0xAAAAAAAA - 1 = 0xAAAAAAA9; XOR mask = 3)
-//   encode( 1) == 1
-//   encode(-2) == 2
-//   encode( 2) == 6
+// NS5: NegabinaryStage/KnownSpotValues — encode(-1)==3, encode(1)==1, encode(-2)==2, encode(2)==6
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryStage, KnownSpotValues) {
     CudaStream stream;
@@ -188,7 +181,7 @@ TEST(NegabinaryStage, KnownSpotValues) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test: GPU results match host CPU reference for int16
+// NS6: NegabinaryStage/MatchesCPUReferenceInt16 — GPU encode matches host Negabinary<T>::encode
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(NegabinaryStage, MatchesCPUReferenceInt16) {
     CudaStream stream;
