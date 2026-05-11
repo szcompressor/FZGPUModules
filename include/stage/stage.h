@@ -26,8 +26,6 @@ class MemoryPool;
  * through this interface — no downcasting or type-name branching anywhere in
  * the pipeline or DAG code.
  *
- * @note Thread Safety: Stage instances are not thread-safe. Each pipeline
- * (and its stages) must be used from a single host thread.
  */
 class Stage {
 public:

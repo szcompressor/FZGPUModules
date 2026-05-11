@@ -1,6 +1,7 @@
 // compressor_io.cpp — file-based serialization: buildHeader, writeToFile,
 // readHeader, loadCompressedData, decompressFromFile, getOutputBuffers.
 #include "pipeline/compressor.h"
+#include "pipeline_utils.h"
 #include "fzm_format.h"
 #include "log.h"
 #include "cuda_check.h"
@@ -67,26 +68,6 @@ static uint32_t computeHeaderChecksum(const Pipeline::FZMFileHeader& fh) {
 }
 
 } // anonymous namespace
-
-// ── Local helper: build per-level timing summary (mirrors compressor_exec.cpp) ──
-static std::vector<LevelTimingResult> buildLevelTimings(
-    const std::vector<StageTimingResult>& stages
-) {
-    std::unordered_map<int, LevelTimingResult> level_map;
-    for (const auto& st : stages) {
-        auto& lv = level_map[st.level];
-        lv.level = st.level;
-        lv.parallelism++;
-        lv.elapsed_ms = std::max(lv.elapsed_ms, st.elapsed_ms);
-    }
-    std::vector<LevelTimingResult> levels;
-    for (auto& [lvl, lv] : level_map) levels.push_back(lv);
-    std::sort(levels.begin(), levels.end(),
-              [](const LevelTimingResult& a, const LevelTimingResult& b) {
-                  return a.level < b.level;
-              });
-    return levels;
-}
 
 // ========== File Serialization ==========
 
@@ -493,6 +474,94 @@ void* Pipeline::loadCompressedData(
     return d_data;
 }
 
+// Compute the local pool size for one-shot decompression.
+// Formula: C + 2.5×max_stage_uncompressed + 32 MiB (mempool overhead guard).
+// With 25% headroom this is much smaller than the old (C+U)×2 when C << U.
+size_t Pipeline::computeFilePoolSize(
+    const FZMFileHeader& fh, size_t pool_override_bytes)
+{
+    if (pool_override_bytes > 0) {
+        FZ_LOG(INFO, "decompressFromFile: using caller-supplied pool size of %.2f MB",
+               pool_override_bytes / (1024.0 * 1024.0));
+        return pool_override_bytes;
+    }
+    size_t max_stage_uncompressed = static_cast<size_t>(fh.core.uncompressed_size);
+    for (const auto& buf : fh.buffers)
+        max_stage_uncompressed = std::max(max_stage_uncompressed,
+                                          static_cast<size_t>(buf.uncompressed_size));
+    const size_t C      = static_cast<size_t>(fh.core.compressed_size);
+    const size_t result = C
+                        + static_cast<size_t>(2.5 * static_cast<double>(max_stage_uncompressed))
+                        + 32ULL * 1024 * 1024;
+    FZ_LOG(DEBUG, "decompressFromFile: pool sizing: C=%.2f MB, max_stage_U=%.2f MB "
+           "-> pool=%.2f MB",
+           C / (1024.0 * 1024.0),
+           max_stage_uncompressed / (1024.0 * 1024.0),
+           result / (1024.0 * 1024.0));
+    return result;
+}
+
+// Reconstruct inverse stages and forward topology from a file header.
+// Stages are created in forward order (level 0 first) and set to inverse.
+std::pair<std::vector<std::unique_ptr<Stage>>, std::vector<Pipeline::FwdStageDesc>>
+Pipeline::reconstructForwardTopology(const FZMFileHeader& fh)
+{
+    std::vector<std::unique_ptr<Stage>> owned_stages;
+    owned_stages.reserve(fh.core.num_stages);
+    for (uint32_t i = 0; i < fh.core.num_stages; i++) {
+        const auto& si = fh.stages[i];
+        Stage* stage = createStage(si.stage_type, si.stage_config, si.config_size);
+        stage->setInverse(true);
+        owned_stages.emplace_back(stage);
+        FZ_LOG(DEBUG, "Reconstructed inverse stage %u: %s", i,
+               stageTypeToString(si.stage_type).c_str());
+    }
+
+    std::vector<FwdStageDesc> fwd_topology;
+    fwd_topology.reserve(fh.core.num_stages);
+    for (uint32_t i = 0; i < fh.core.num_stages; i++) {
+        const auto& si = fh.stages[i];
+        FwdStageDesc d;
+        d.stage = owned_stages[i].get();
+        for (int j = 0; j < si.num_outputs && j < static_cast<int>(FZM_MAX_STAGE_OUTPUTS); j++)
+            if (si.output_buffer_ids[j] != 0xFFFF)
+                d.output_buf_ids.push_back(static_cast<int>(si.output_buffer_ids[j]));
+        for (int j = 0; j < si.num_inputs && j < static_cast<int>(FZM_MAX_STAGE_INPUTS); j++)
+            if (si.input_buffer_ids[j] != 0xFFFF)
+                d.input_buf_ids.push_back(static_cast<int>(si.input_buffer_ids[j]));
+        fwd_topology.push_back(std::move(d));
+    }
+
+    return {std::move(owned_stages), std::move(fwd_topology)};
+}
+
+// Identify source stages by topology (no inputs produced by other stages) and
+// look up their uncompressed sizes from the header (v3+) or fall back to the
+// total uncompressed_size for single-source v2 files.
+std::unordered_map<Stage*, size_t> Pipeline::buildSourceSizesFromHeader(
+    const FZMFileHeader& fh, const std::vector<FwdStageDesc>& fwd_topology)
+{
+    std::unordered_set<int> all_output_ids;
+    for (const auto& d : fwd_topology)
+        for (int bid : d.output_buf_ids) all_output_ids.insert(bid);
+
+    std::unordered_map<Stage*, size_t> source_sizes;
+    uint16_t source_idx = 0;
+    for (const auto& fwd_desc : fwd_topology) {
+        bool is_source = true;
+        for (int in_bid : fwd_desc.input_buf_ids)
+            if (all_output_ids.count(in_bid)) { is_source = false; break; }
+        if (!is_source) continue;
+        source_sizes[fwd_desc.stage] =
+            (fh.core.num_sources > source_idx &&
+             fh.core.source_uncompressed_sizes[source_idx] > 0)
+            ? static_cast<size_t>(fh.core.source_uncompressed_sizes[source_idx])
+            : static_cast<size_t>(fh.core.uncompressed_size);
+        ++source_idx;
+    }
+    return source_sizes;
+}
+
 void Pipeline::decompressFromFile(
     const std::string& filename,
     void** d_output,
@@ -503,97 +572,20 @@ void Pipeline::decompressFromFile(
 ) {
     FZ_LOG(INFO, "Decompressing from file: %s", filename.c_str());
 
-    // 1. Read header
     FZMFileHeader fh = readHeader(filename);
     FZ_LOG(DEBUG, "Header: %u stages, %u buffers, %.2f MB compressed, %.2f MB uncompressed",
            fh.core.num_stages, fh.core.num_buffers,
            fh.core.compressed_size / (1024.0 * 1024.0),
            fh.core.uncompressed_size / (1024.0 * 1024.0));
 
-    // 2. Local memory pool for GPU temporaries.
-    //
-    // Pool sizing rationale:
-    //   At any point during inverse-DAG execution with MINIMAL strategy the
-    //   simultaneously live allocations are:
-    //     (a) the compressed blob loaded from disk:  C bytes  (freed at very end)
-    //     (b) the input buffers of the current level: ≤ max_stage_uncompressed
-    //     (c) the output buffers of the current level: ≤ max_stage_uncompressed
-    //
-    //   Parallel branches at a single level share the same data (they divide it),
-    //   so their combined output is bounded by max_stage_uncompressed, not
-    //   num_branches × max_stage_uncompressed.
-    //
-    //   Tight formula:  C + 2 * max_stage_uncompressed
-    //   With 25% headroom: C + 2.5 * max_stage_uncompressed
-    //
-    //   This is significantly smaller than the old (C + U) * 2 = 2C + 2U when
-    //   compression is effective (C << U), while remaining safe.
-    size_t pool_size_bytes;
-    if (pool_override_bytes > 0) {
-        pool_size_bytes = pool_override_bytes;
-        FZ_LOG(INFO, "decompressFromFile: using caller-supplied pool size of %.2f MB",
-               pool_size_bytes / (1024.0 * 1024.0));
-    } else {
-        // Compute max intermediate expansion across all pipeline-output buffers.
-        // fh.buffers[i].uncompressed_size is the decompressed size of that stage's
-        // output, i.e. the maximum size any single level boundary can reach.
-        size_t max_stage_uncompressed = static_cast<size_t>(fh.core.uncompressed_size);
-        for (const auto& buf : fh.buffers) {
-            max_stage_uncompressed = std::max(
-                max_stage_uncompressed,
-                static_cast<size_t>(buf.uncompressed_size));
-        }
-        const size_t C = static_cast<size_t>(fh.core.compressed_size);
-        // 2.5× intermediate headroom + fixed CUDA mempool overhead guard (32 MB)
-        pool_size_bytes = C
-                        + static_cast<size_t>(2.5 * static_cast<double>(max_stage_uncompressed))
-                        + 32ULL * 1024 * 1024;
-        FZ_LOG(DEBUG, "decompressFromFile: pool sizing: C=%.2f MB, max_stage_U=%.2f MB "
-               "-> pool=%.2f MB (old formula would have been %.2f MB)",
-               C / (1024.0 * 1024.0),
-               max_stage_uncompressed / (1024.0 * 1024.0),
-               pool_size_bytes / (1024.0 * 1024.0),
-               (C + fh.core.uncompressed_size) * 2.0 / (1024.0 * 1024.0));
-    }
-    MemoryPoolConfig local_pool_cfg(pool_size_bytes, 1.0f);
+    MemoryPoolConfig local_pool_cfg(computeFilePoolSize(fh, pool_override_bytes), 1.0f);
     MemoryPool local_pool(local_pool_cfg);
 
-    // 3. Load compressed blob to GPU
     void* d_compressed = loadCompressedData(filename, fh, stream, &local_pool);
 
     try {
-        // ── Reconstruct stages from file header (forward order: level 0 first) ──
-        // Stages are stored in forward execution order by buildHeader().
-        std::vector<std::unique_ptr<Stage>> owned_stages;
-        owned_stages.reserve(fh.core.num_stages);
-        for (uint32_t i = 0; i < fh.core.num_stages; i++) {
-            const auto& si = fh.stages[i];
-            Stage* stage = createStage(si.stage_type, si.stage_config, si.config_size);
-            stage->setInverse(true);
-            owned_stages.emplace_back(stage);
-            FZ_LOG(DEBUG, "Reconstructed inverse stage %u: %s", i,
-                   stageTypeToString(si.stage_type).c_str());
-        }
+        auto [owned_stages, fwd_topology] = reconstructForwardTopology(fh);
 
-        // ── Build forward-topology description ────────────────────────────────
-        std::vector<FwdStageDesc> fwd_topology;
-        fwd_topology.reserve(fh.core.num_stages);
-        for (uint32_t i = 0; i < fh.core.num_stages; i++) {
-            const auto& si = fh.stages[i];
-            FwdStageDesc d;
-            d.stage = owned_stages[i].get();
-            for (int j = 0; j < si.num_outputs && j < static_cast<int>(FZM_MAX_STAGE_OUTPUTS); j++) {
-                if (si.output_buffer_ids[j] != 0xFFFF)
-                    d.output_buf_ids.push_back(static_cast<int>(si.output_buffer_ids[j]));
-            }
-            for (int j = 0; j < si.num_inputs && j < static_cast<int>(FZM_MAX_STAGE_INPUTS); j++) {
-                if (si.input_buffer_ids[j] != 0xFFFF)
-                    d.input_buf_ids.push_back(static_cast<int>(si.input_buffer_ids[j]));
-            }
-            fwd_topology.push_back(std::move(d));
-        }
-
-        // ── Build pipeline-output map: fwd_buf_id → {device ptr, size} ────────
         PipelineOutputMap po_map;
         for (const auto& entry : fh.buffers) {
             void* d_buf = static_cast<uint8_t*>(d_compressed) + entry.byte_offset;
@@ -601,39 +593,12 @@ void Pipeline::decompressFromFile(
                 {d_buf, static_cast<size_t>(entry.data_size)};
         }
 
-        // ── Build per-source uncompressed sizes from header (v3+) ─────────────
-        // Source stages are identified by topology: a stage is a source when
-        // none of its input buffer IDs are produced as outputs by another stage.
-        // Sizes come from fh.core.source_uncompressed_sizes[] (written by
-        // buildHeader in the same discovery order); v2-file fallback uses the
-        // total uncompressed_size (correct for single-source pipelines).
-        std::unordered_map<Stage*, size_t> source_sizes;
-        {
-            std::unordered_set<int> all_output_ids;
-            for (const auto& d : fwd_topology) {
-                for (int bid : d.output_buf_ids) all_output_ids.insert(bid);
-            }
-            uint16_t source_idx = 0;
-            for (const auto& fwd_desc : fwd_topology) {
-                bool is_source = true;
-                for (int in_bid : fwd_desc.input_buf_ids) {
-                    if (all_output_ids.count(in_bid)) { is_source = false; break; }
-                }
-                if (!is_source) continue;
-                size_t sz = (fh.core.num_sources > source_idx &&
-                             fh.core.source_uncompressed_sizes[source_idx] > 0)
-                            ? static_cast<size_t>(fh.core.source_uncompressed_sizes[source_idx])
-                            : static_cast<size_t>(fh.core.uncompressed_size);
-                source_sizes[fwd_desc.stage] = sz;
-                ++source_idx;
-            }
-        }
+        auto source_sizes = buildSourceSizesFromHeader(fh, fwd_topology);
         if (source_sizes.empty()) {
             throw std::runtime_error(
                 "decompressFromFile: could not identify any source stage in topology");
         }
 
-        // ── Build and finalize the inverse DAG ───────────────────────────────
         bool do_profile = (perf_out != nullptr);
         auto [inv_dag, inv_result_map] = buildInverseDAG(
             fwd_topology, po_map, &local_pool, MemoryStrategy::MINIMAL,

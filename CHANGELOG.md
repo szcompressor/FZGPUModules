@@ -10,6 +10,11 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Extracted duplicated `align16`, `buildLevelTimings`, and concat buffer layout arithmetic into `src/pipeline/pipeline_utils.h`; introduced `ConcatLayout` struct with `headerSize`/`slotSize` helpers replacing open-coded offset calculations in `compressor.cpp` and `compressor_exec.cpp`
+- Added `PoolBuffer`, `PinnedBuffer`, and `DeviceBuffer` RAII wrappers (private nested structs in `Pipeline`) replacing raw pointer+capacity member pairs; destructor simplified to graph handle teardown only
+- Decomposed `finalize()` into six focused sub-methods: `typeCheckConnections`, `computeInputAlignment`, `refinePoolSize`, `setupGraphModeInput`, `preallocatePadBuffer`, `preallocateConcatBuffers`
+- Extracted `prepareInputSource()` from `compress()` (graph-mode copy and alignment padding logic) and `buildOrReuseInvCache()` from `decompress()` (inverse DAG cache build/reuse)
+- Extracted `computeFilePoolSize`, `reconstructForwardTopology`, and `buildSourceSizesFromHeader` as private static members from `decompressFromFile()`
 - Added Doxygen class-level descriptions to `Logger`, `Zigzag<T>`, and `Negabinary<T>` which were previously undocumented
 - Added "no template parameters" note and common instantiation snippet to `BitshuffleStage` and `RZEStage` stage docs
 - Expanded requirements table in README and docs mainpage to include host compiler guidance (GCC 7+ / Clang 5+, upper bound set by CUDA version; NVHPC 23.11 tested in CI)

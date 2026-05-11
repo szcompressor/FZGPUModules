@@ -75,21 +75,21 @@ constexpr size_t FZM_MAX_SOURCES      = 4;    ///< Maximum source stages per pip
  */
 enum class StageType : uint16_t {
     UNKNOWN    = 0,
-    LORENZO_QUANT = 1,   ///< LorenzoQuantStage — fused predictor+quantizer; ndim stored in LorenzoQuantConfig
-    DIFFERENCE = 2,   ///< DifferenceStage — first-order differencing
-    SCALE      = 3,   ///< ScaleStage (test utility)
-    PASSTHROUGH= 4,   ///< PassThroughStage (test utility)
-    RLE        = 5,   ///< RLEStage — run-length encoding
-    HUFFMAN    = 6,   ///< Reserved (not yet implemented)
-    BITPACK    = 7,   ///< Reserved (not yet implemented)
-    SPLIT      = 10,  ///< SplitStage (test utility)
-    MERGE      = 11,  ///< MergeStage (test utility)
-    LORENZO    = 12,  ///< LorenzoStage — plain integer delta predictor; ndim stored in config
-    QUANTIZER  = 14,  ///< QuantizerStage — direct-value quantization
-    ZIGZAG     = 15,  ///< ZigzagStage — zigzag encode/decode
-    NEGABINARY = 16,  ///< NegabinaryStage — negabinary encode/decode
-    BITSHUFFLE = 17,  ///< BitshuffleStage — GPU bit-matrix transpose
-    RZE        = 18,  ///< RZEStage — recursive zero-byte elimination
+    LORENZO_QUANT = 1,
+    DIFFERENCE = 2,   
+    SCALE      = 3,   
+    PASSTHROUGH= 4,   
+    RLE        = 5,   
+    HUFFMAN    = 6,   
+    BITPACK    = 7,   
+    SPLIT      = 10,  
+    MERGE      = 11,  
+    LORENZO    = 12,  
+    QUANTIZER  = 14,
+    ZIGZAG     = 15, 
+    NEGABINARY = 16,  
+    BITSHUFFLE = 17, 
+    RZE        = 18,  
 };
 
 /**
@@ -183,13 +183,6 @@ struct FZMBufferEntry {
     uint32_t config_size; ///< Valid bytes in stage_config (4B)
 
     uint8_t reserved2[14]; ///< Reserved for future use (14B)
-    // Total: 2+2+1+1+2+64+8+8+8+8+128+4+14 = 250... let me recount
-    // 2+2+1+1+2+64+8+8+8+8+128+4+14 = 250? No...
-    // stage_type(2)+stage_version(2)+data_type(1)+producer_output_idx(1)+dag_buffer_id(2)+name(64)
-    // +data_size(8)+allocated_size(8)+uncompressed_size(8)+byte_offset(8)
-    // +stage_config(128)+config_size(4)+reserved2(14) = 250. Hmm, the static_assert says 256.
-    // Let me check the original: 2+2+1+1+2+64+8+8+8+8+128+4+14 = 250. But static_assert says 256.
-    // There might be padding. Let me just keep it as-is.
 
     FZMBufferEntry() {
         stage_type         = StageType::UNKNOWN;
@@ -243,7 +236,6 @@ struct FZMHeaderCore {
 
     uint32_t data_checksum;   ///< CRC32 of compressed payload (v3.1+; 0 if flag not set) (4B)
     uint32_t header_checksum; ///< CRC32 of header bytes (v3.1+; 0 if flag not set) (4B)
-    // Total: 4+2+2+8+8+8+4+2+2+32+4+4 = 80 bytes
 
     FZMHeaderCore() {
         magic              = FZM_MAGIC;

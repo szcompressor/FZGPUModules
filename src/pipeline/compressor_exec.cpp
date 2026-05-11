@@ -1,5 +1,6 @@
 // compressor_exec.cpp — in-memory compress / decompress execution
 #include "pipeline/compressor.h"
+#include "pipeline_utils.h"
 #include "log.h"
 #include "cuda_check.h"
 #include <chrono>
@@ -10,30 +11,50 @@
 
 namespace fz {
 
-// Must match the helper in compressor.cpp — rounds up to next multiple of 16.
-static inline size_t align16(size_t x) { return (x + 15u) & ~15u; }
-
-// ── Helper: build per-level timing summary from per-stage CUDA event timings ──
-static std::vector<LevelTimingResult> buildLevelTimings(
-    const std::vector<StageTimingResult>& stages
-) {
-    std::unordered_map<int, LevelTimingResult> level_map;
-    for (const auto& st : stages) {
-        auto& lv = level_map[st.level];
-        lv.level = st.level;
-        lv.parallelism++;
-        lv.elapsed_ms = std::max(lv.elapsed_ms, st.elapsed_ms);
-    }
-    std::vector<LevelTimingResult> levels;
-    for (auto& [lvl, lv] : level_map) levels.push_back(lv);
-    std::sort(levels.begin(), levels.end(),
-              [](const LevelTimingResult& a, const LevelTimingResult& b) {
-                  return a.level < b.level;
-              });
-    return levels;
-}
-
 // =====
+
+std::pair<const void*, size_t> Pipeline::prepareInputSource(
+    const void* d_input, size_t input_size, cudaStream_t stream)
+{
+    original_input_size_ = 0;
+
+    if (graph_captured_) {
+        original_input_size_ = (input_alignment_bytes_ > 1 &&
+                                 input_size % input_alignment_bytes_ != 0)
+                               ? input_size : 0;
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_graph_input_.ptr, d_input, input_size,
+                                      cudaMemcpyDeviceToDevice, stream));
+        if (input_size < d_graph_input_size_) {
+            FZ_CUDA_CHECK(cudaMemsetAsync(
+                static_cast<uint8_t*>(d_graph_input_.ptr) + input_size,
+                0, d_graph_input_size_ - input_size, stream));
+        }
+        return {d_graph_input_.ptr, d_graph_input_size_};
+    }
+
+    if (input_alignment_bytes_ > 1 && input_size % input_alignment_bytes_ != 0) {
+        const size_t padded = ((input_size + input_alignment_bytes_ - 1)
+                               / input_alignment_bytes_) * input_alignment_bytes_;
+        if (padded > d_pad_buf_.capacity) {
+            if (!d_pad_buf_.allocate(mem_pool_.get(), padded, stream,
+                                     "pipeline_input_pad", /*persistent=*/true)) {
+                throw std::runtime_error(
+                    "Failed to allocate pipeline input pad buffer (" +
+                    std::to_string(padded) + " bytes); pool may be exhausted");
+            }
+        }
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_pad_buf_.ptr, d_input, input_size,
+                                      cudaMemcpyDeviceToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemsetAsync(static_cast<uint8_t*>(d_pad_buf_.ptr) + input_size,
+                                      0, padded - input_size, stream));
+        FZ_LOG(INFO, "Input padded: %zu → %zu bytes (+%zu bytes for %zu-byte chunk alignment)",
+               input_size, padded, padded - input_size, input_alignment_bytes_);
+        original_input_size_ = input_size;
+        return {d_pad_buf_.ptr, padded};
+    }
+
+    return {d_input, input_size};
+}
 
 void Pipeline::compress(
     const void* d_input,
@@ -51,8 +72,7 @@ void Pipeline::compress(
             " source stage(s); only single-source pipelines are supported");
     }
     if (d_input == nullptr) {
-        throw std::runtime_error(
-            "compress(): null device pointer passed as input");
+        throw std::runtime_error("compress(): null device pointer passed as input");
     }
 
     if (was_compressed_) {
@@ -60,7 +80,6 @@ void Pipeline::compress(
         was_compressed_ = false;
     }
 
-    // Guard: data must not exceed the hint used to size buffers at finalize().
     if (input_size_hint_ > 0 && input_size > input_size_hint_) {
         throw std::runtime_error(
             "compress(): input size (" + std::to_string(input_size) +
@@ -69,54 +88,7 @@ void Pipeline::compress(
             "re-construct the pipeline with a larger input size hint");
     }
 
-    // Transparently pad the input to the required chunk boundary.
-    const void* d_source  = d_input;
-    size_t      source_sz = input_size;
-    original_input_size_ = 0;
-
-    if (graph_captured_) {
-        // Graph mode: copy user data into the stable graph input buffer,
-        // zero any tail padding so stages see clean data past the real payload.
-        original_input_size_ = (input_alignment_bytes_ > 1 &&
-                                 input_size % input_alignment_bytes_ != 0)
-                               ? input_size : 0;
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_graph_input_, d_input, input_size,
-                                      cudaMemcpyDeviceToDevice, stream));
-        if (input_size < d_graph_input_size_) {
-            FZ_CUDA_CHECK(cudaMemsetAsync(
-                static_cast<uint8_t*>(d_graph_input_) + input_size,
-                0, d_graph_input_size_ - input_size, stream));
-        }
-        d_source  = d_graph_input_;
-        source_sz = d_graph_input_size_;
-    } else if (input_alignment_bytes_ > 1 && input_size % input_alignment_bytes_ != 0) {
-        const size_t padded = ((input_size + input_alignment_bytes_ - 1)
-                               / input_alignment_bytes_) * input_alignment_bytes_;
-        if (padded > d_pad_buf_size_) {
-            if (d_pad_buf_) {
-                mem_pool_->free(d_pad_buf_, stream);
-                d_pad_buf_ = nullptr;
-            }
-            d_pad_buf_ = mem_pool_->allocate(padded, stream,
-                                             "pipeline_input_pad", /*persistent=*/true);
-            if (!d_pad_buf_) {
-                throw std::runtime_error(
-                    "Failed to allocate pipeline input pad buffer (" +
-                    std::to_string(padded) + " bytes); pool may be exhausted");
-            }
-            d_pad_buf_size_ = padded;
-        }
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_pad_buf_, d_input, input_size,
-                                      cudaMemcpyDeviceToDevice, stream));
-        FZ_CUDA_CHECK(cudaMemsetAsync(static_cast<uint8_t*>(d_pad_buf_) + input_size,
-                                      0, padded - input_size, stream));
-        FZ_LOG(INFO,
-            "Input padded: %zu → %zu bytes (+%zu bytes for %zu-byte chunk alignment)",
-            input_size, padded, padded - input_size, input_alignment_bytes_);
-        d_source  = d_pad_buf_;
-        source_sz = padded;
-        original_input_size_ = input_size;
-    }
+    auto [d_source, source_sz] = prepareInputSource(d_input, input_size, stream);
 
     dag_->setExternalPointer(input_buffer_ids_[0], const_cast<void*>(d_source));
     dag_->updateBufferSize(input_buffer_ids_[0], source_sz);
@@ -176,7 +148,6 @@ void Pipeline::compress(
             buffer_metadata_.push_back(meta);
         }
 
-        // OWNERSHIP CONTRACT: pool-owned, caller must NOT cudaFree().
         if (needs_concat_) {
             concatOutputs(d_output, output_size, stream);
         } else {
@@ -241,31 +212,25 @@ void Pipeline::decompress(
     auto t_host_start = std::chrono::steady_clock::now();
     FZ_LOG(INFO, "Decompressing");
 
-    // Determine which device pointer feeds each compressed buffer in the
-    // inverse DAG.
+    // Map each compressed buffer ID to a device pointer from d_input or the live DAG.
     std::unordered_map<int, void*> compressed_ptrs;
     if (d_input != nullptr) {
         if (!needs_concat_) {
-            if (!buffer_metadata_.empty()) {
+            if (!buffer_metadata_.empty())
                 compressed_ptrs[buffer_metadata_[0].buffer_id] =
                     const_cast<void*>(d_input);
-            }
         } else {
-            // Layout written by writeConcatBuffer():
-            //   [u32 n][u64 s0]..[u64 sN-1][padding→16B][data0 slot (padded)][data1 slot]...
-            const size_t n          = buffer_metadata_.size();
-            const size_t hdr_padded = align16(sizeof(uint32_t) + n * sizeof(uint64_t));
-            size_t byte_offset      = hdr_padded;
+            const size_t n = buffer_metadata_.size();
+            size_t byte_offset = ConcatLayout::headerSize(n);
             for (const auto& meta : buffer_metadata_) {
                 compressed_ptrs[meta.buffer_id] =
                     static_cast<uint8_t*>(const_cast<void*>(d_input)) + byte_offset;
-                byte_offset += align16(meta.actual_size);
+                byte_offset += ConcatLayout::slotSize(meta.actual_size);
             }
         }
     } else {
-        for (const auto& meta : buffer_metadata_) {
+        for (const auto& meta : buffer_metadata_)
             compressed_ptrs[meta.buffer_id] = dag_->getBuffer(meta.buffer_id);
-        }
     }
 
     for (auto& s : stages_) {
@@ -275,87 +240,22 @@ void Pipeline::decompress(
 
     PipelineOutputMap po_map;
     for (const auto& meta : buffer_metadata_) {
-        auto it   = compressed_ptrs.find(meta.buffer_id);
-        void* ptr = (it != compressed_ptrs.end())
-            ? it->second
-            : dag_->getBuffer(meta.buffer_id);
-        po_map[meta.buffer_id] = {ptr, meta.actual_size};
+        auto it = compressed_ptrs.find(meta.buffer_id);
+        po_map[meta.buffer_id] = {
+            (it != compressed_ptrs.end()) ? it->second : dag_->getBuffer(meta.buffer_id),
+            meta.actual_size
+        };
     }
 
-    // Single source — use the recorded input size.
     Stage* src_stage = input_nodes_[0]->stage;
-    size_t src_sz = (source_input_sizes_.size() > 0 && source_input_sizes_[0] > 0)
-                    ? source_input_sizes_[0]
-                    : input_size_;
-    std::unordered_map<Stage*, size_t> source_sizes = {{src_stage, src_sz}};
+    size_t src_sz    = (source_input_sizes_.size() > 0 && source_input_sizes_[0] > 0)
+                       ? source_input_sizes_[0] : input_size_;
 
-    // ── Inverse DAG: reuse cached instance or build and cache ─────────────────
-    bool cache_valid = (inv_cache_ != nullptr);
-    if (cache_valid) {
-        auto it = inv_cache_->source_sizes.find(src_stage);
-        if (it == inv_cache_->source_sizes.end() || it->second != src_sz) {
-            cache_valid = false;
-            FZ_LOG(DEBUG, "decompress: inv DAG cache invalidated (source size changed)");
-        }
-    }
-
-    if (!cache_valid) {
-        std::vector<FwdStageDesc> fwd_topology;
-        fwd_topology.reserve(stages_.size());
-        for (const auto& level_nodes : dag_->getLevels()) {
-            for (auto* fwd_node : level_nodes) {
-                FwdStageDesc d;
-                d.stage          = fwd_node->stage;
-                d.output_buf_ids = fwd_node->output_buffer_ids;
-                d.input_buf_ids  = fwd_node->input_buffer_ids;
-                fwd_topology.push_back(std::move(d));
-            }
-        }
-
-        auto [inv_dag_up, inv_result_map_new] = buildInverseDAG(
-            fwd_topology, po_map, mem_pool_.get(), strategy_,
-            source_sizes, profiling_enabled_);
-
-        std::unordered_map<int, int> fwd_to_inv_ext_buf;
-        for (auto* node : inv_dag_up->getNodes()) {
-            for (int buf_id : node->input_buffer_ids) {
-                const auto& info = inv_dag_up->getBufferInfo(buf_id);
-                if (info.is_external && info.tag.size() > 8 &&
-                    info.tag.compare(0, 8, "inv_ext_") == 0) {
-                    try {
-                        int fwd_buf_id = std::stoi(info.tag.substr(8));
-                        fwd_to_inv_ext_buf[fwd_buf_id] = buf_id;
-                    } catch (...) {}
-                }
-            }
-        }
-
-        inv_cache_ = std::make_unique<InvDAGCache>();
-        inv_cache_->inv_dag            = std::move(inv_dag_up);
-        inv_cache_->inv_result_map     = std::move(inv_result_map_new);
-        inv_cache_->fwd_to_inv_ext_buf = std::move(fwd_to_inv_ext_buf);
-        inv_cache_->source_sizes       = source_sizes;
-
-        FZ_LOG(DEBUG, "decompress: built and cached inverse DAG (%zu ext buffers mapped)",
-               inv_cache_->fwd_to_inv_ext_buf.size());
-    } else {
-        for (const auto& [fwd_buf_id, inv_buf_id] : inv_cache_->fwd_to_inv_ext_buf) {
-            auto it = po_map.find(fwd_buf_id);
-            if (it != po_map.end()) {
-                inv_cache_->inv_dag->setExternalPointer(inv_buf_id, it->second.first);
-                inv_cache_->inv_dag->updateBufferSize(inv_buf_id, it->second.second);
-            }
-        }
-        inv_cache_->inv_dag->reset(stream);
-        inv_cache_->inv_dag->enableProfiling(profiling_enabled_);
-
-        FZ_LOG(DEBUG, "decompress: reusing cached inverse DAG");
-    }
+    buildOrReuseInvCache(po_map, src_stage, src_sz, stream);
 
     CompressionDAG& inv_dag        = *inv_cache_->inv_dag;
     const auto&     inv_result_map = inv_cache_->inv_result_map;
 
-    // ── Pre-allocate output buffer and wire as external DAG output ────────────
     if (pool_managed_decomp_) {
         for (void* p : d_decomp_outputs_) {
             if (p && mem_pool_) mem_pool_->free(p, stream);
@@ -454,6 +354,74 @@ void Pipeline::decompress(
            profiling_enabled_ ? last_perf_result_.pipeline_throughput_gbs() : 0.0f);
 }
 
+void Pipeline::buildOrReuseInvCache(
+    const PipelineOutputMap& po_map,
+    Stage*       src_stage,
+    size_t       src_sz,
+    cudaStream_t stream)
+{
+    std::unordered_map<Stage*, size_t> source_sizes = {{src_stage, src_sz}};
+
+    bool cache_valid = (inv_cache_ != nullptr);
+    if (cache_valid) {
+        auto it = inv_cache_->source_sizes.find(src_stage);
+        if (it == inv_cache_->source_sizes.end() || it->second != src_sz) {
+            cache_valid = false;
+            FZ_LOG(DEBUG, "decompress: inv DAG cache invalidated (source size changed)");
+        }
+    }
+
+    if (!cache_valid) {
+        std::vector<FwdStageDesc> fwd_topology;
+        fwd_topology.reserve(stages_.size());
+        for (const auto& level_nodes : dag_->getLevels()) {
+            for (auto* fwd_node : level_nodes) {
+                FwdStageDesc d;
+                d.stage          = fwd_node->stage;
+                d.output_buf_ids = fwd_node->output_buffer_ids;
+                d.input_buf_ids  = fwd_node->input_buffer_ids;
+                fwd_topology.push_back(std::move(d));
+            }
+        }
+
+        auto [inv_dag_up, inv_result_map_new] = buildInverseDAG(
+            fwd_topology, po_map, mem_pool_.get(), strategy_,
+            source_sizes, profiling_enabled_);
+
+        std::unordered_map<int, int> fwd_to_inv_ext_buf;
+        for (auto* node : inv_dag_up->getNodes()) {
+            for (int buf_id : node->input_buffer_ids) {
+                const auto& info = inv_dag_up->getBufferInfo(buf_id);
+                if (info.is_external && info.tag.size() > 8 &&
+                    info.tag.compare(0, 8, "inv_ext_") == 0) {
+                    try {
+                        fwd_to_inv_ext_buf[std::stoi(info.tag.substr(8))] = buf_id;
+                    } catch (...) {}
+                }
+            }
+        }
+
+        inv_cache_ = std::make_unique<InvDAGCache>();
+        inv_cache_->inv_dag            = std::move(inv_dag_up);
+        inv_cache_->inv_result_map     = std::move(inv_result_map_new);
+        inv_cache_->fwd_to_inv_ext_buf = std::move(fwd_to_inv_ext_buf);
+        inv_cache_->source_sizes       = source_sizes;
+        FZ_LOG(DEBUG, "decompress: built and cached inverse DAG (%zu ext buffers mapped)",
+               inv_cache_->fwd_to_inv_ext_buf.size());
+    } else {
+        for (const auto& [fwd_buf_id, inv_buf_id] : inv_cache_->fwd_to_inv_ext_buf) {
+            auto it = po_map.find(fwd_buf_id);
+            if (it != po_map.end()) {
+                inv_cache_->inv_dag->setExternalPointer(inv_buf_id, it->second.first);
+                inv_cache_->inv_dag->updateBufferSize(inv_buf_id, it->second.second);
+            }
+        }
+        inv_cache_->inv_dag->reset(stream);
+        inv_cache_->inv_dag->enableProfiling(profiling_enabled_);
+        FZ_LOG(DEBUG, "decompress: reusing cached inverse DAG");
+    }
+}
+
 // ── getMaxCompressedSize ──────────────────────────────────────────────────────
 
 size_t Pipeline::getMaxCompressedSize(size_t input_bytes) const {
@@ -478,8 +446,7 @@ size_t Pipeline::getMaxCompressedSize(size_t input_bytes) const {
         if (level_max > 0) current = level_max;
     }
 
-    // Add 5% margin for stage-internal size-tracking rounding and
-    // concat-format headers (4B num_bufs + 8B per output × n_outputs).
+    // Add 5% margin for stage-internal size-tracking rounding 
     const size_t header_overhead =
         sizeof(uint32_t) + output_buffer_ids_.size() * sizeof(uint64_t);
     return static_cast<size_t>(current * 1.05) + header_overhead;
@@ -505,8 +472,6 @@ void Pipeline::compress(
             "compress(): d_output_buf must not be null for user-owned output");
     }
 
-    // Run the standard pool-owned compress to get the compressed data
-    // into the pool buffer, then D2D-copy into the caller's buffer.
     void*  d_pool_out  = nullptr;
     size_t pool_out_sz = 0;
     compress(d_input, input_size, &d_pool_out, &pool_out_sz, stream);

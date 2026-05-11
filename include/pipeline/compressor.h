@@ -30,8 +30,6 @@ namespace fz {
  *    next compress()/reset() or Pipeline destruction.
  *  - decompress() output is pool-owned by default - do NOT cudaFree it.
  *    Call setPoolManagedDecompOutput(false) to receive a caller-owned pointer instead.
- *
- * @note Not thread-safe. Use one Pipeline per host thread.
  */
 class Pipeline {
 public:
@@ -440,6 +438,72 @@ public:
     void saveConfig(const std::string& path) const;
 
 private:
+    // ── RAII buffer wrappers (private implementation detail) ─────────────────
+
+    // Pool-allocated persistent device buffer.
+    struct PoolBuffer {
+        void*       ptr      = nullptr;
+        size_t      capacity = 0;
+        MemoryPool* pool     = nullptr;
+
+        ~PoolBuffer()                         { free(0); }
+        PoolBuffer()                          = default;
+        PoolBuffer(const PoolBuffer&)         = delete;
+        PoolBuffer& operator=(const PoolBuffer&) = delete;
+
+        void free(cudaStream_t s) {
+            if (ptr && pool) { pool->free(ptr, s); ptr = nullptr; capacity = 0; }
+        }
+        bool allocate(MemoryPool* p, size_t bytes, cudaStream_t s,
+                      const char* tag, bool persistent = false) {
+            free(s);
+            pool = p;
+            ptr  = pool->allocate(bytes, s, tag, persistent);
+            if (ptr) capacity = bytes;
+            return ptr != nullptr;
+        }
+    };
+
+    // cudaHostAlloc pinned host buffer — grows on demand, never shrinks.
+    struct PinnedBuffer {
+        void*  ptr      = nullptr;
+        size_t capacity = 0;
+
+        ~PinnedBuffer()                           { if (ptr) cudaFreeHost(ptr); }
+        PinnedBuffer()                            = default;
+        PinnedBuffer(const PinnedBuffer&)         = delete;
+        PinnedBuffer& operator=(const PinnedBuffer&) = delete;
+
+        // Returns false on CUDA allocation failure.
+        bool ensureCapacity(size_t bytes) {
+            if (capacity >= bytes) return true;
+            if (ptr) { cudaFreeHost(ptr); ptr = nullptr; capacity = 0; }
+            if (cudaHostAlloc(&ptr, bytes, cudaHostAllocDefault) != cudaSuccess) return false;
+            capacity = bytes;
+            return true;
+        }
+    };
+
+    // cudaMalloc device buffer — grows on demand, never shrinks.
+    struct DeviceBuffer {
+        void*  ptr      = nullptr;
+        size_t capacity = 0;
+
+        ~DeviceBuffer()                           { if (ptr) cudaFree(ptr); }
+        DeviceBuffer()                            = default;
+        DeviceBuffer(const DeviceBuffer&)         = delete;
+        DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+
+        // Returns false on CUDA allocation failure.
+        bool ensureCapacity(size_t bytes) {
+            if (capacity >= bytes) return true;
+            if (ptr) { cudaFree(ptr); ptr = nullptr; capacity = 0; }
+            if (cudaMalloc(&ptr, bytes) != cudaSuccess) return false;
+            capacity = bytes;
+            return true;
+        }
+    };
+
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     Stage* addRawStage(Stage* stage);
@@ -467,6 +531,19 @@ private:
     void detectMultiOutputScenario(int pipeline_outputs);
     void configureStreamsIfNeeded();
 
+    // finalize() sub-steps
+    void typeCheckConnections();
+    void computeInputAlignment();
+    void refinePoolSize();
+    void setupGraphModeInput();
+    void preallocatePadBuffer();
+    void preallocateConcatBuffers();
+
+    // compress() helper: handles graph-mode copy or alignment padding.
+    // Returns the effective source pointer and padded source size.
+    std::pair<const void*, size_t> prepareInputSource(
+        const void* d_input, size_t input_size, cudaStream_t stream);
+
     /**
      * Propagate buffer sizes through the DAG from source sizes.
      * force_from_current_inputs=true uses live source buffer sizes (compress-time path
@@ -488,6 +565,20 @@ private:
 
     /** fwd_buf_id → {device pointer, size in bytes} for each pipeline-output buffer. */
     using PipelineOutputMap = std::unordered_map<int, std::pair<void*, size_t>>;
+
+    // decompress() helper: builds or reuses the inverse DAG cache.
+    void buildOrReuseInvCache(
+        const PipelineOutputMap& po_map,
+        Stage*       src_stage,
+        size_t       src_sz,
+        cudaStream_t stream);
+
+    // decompressFromFile() helpers.
+    static size_t computeFilePoolSize(const FZMFileHeader& fh, size_t pool_override_bytes);
+    static std::pair<std::vector<std::unique_ptr<Stage>>, std::vector<FwdStageDesc>>
+        reconstructForwardTopology(const FZMFileHeader& fh);
+    static std::unordered_map<Stage*, size_t> buildSourceSizesFromHeader(
+        const FZMFileHeader& fh, const std::vector<FwdStageDesc>& fwd_topology);
 
     /**
      * Build, wire, and finalize an inverse DAG from a forward topology description.
@@ -563,24 +654,18 @@ private:
     std::vector<int>      input_buffer_ids_;
     std::vector<int>      output_buffer_ids_;
 
-    void*  d_concat_buffer_;
-    size_t concat_buffer_capacity_;
-    bool   needs_concat_;
+    PoolBuffer   d_concat_buffer_;
+    bool         needs_concat_;
 
     // Pool-persistent decompress output buffers (one per source stage).
     // Only used when pool_managed_decomp_ == true.
     std::vector<void*> d_decomp_outputs_;
 
-    // Pinned host buffer for concat header. Allocated once at finalize() to
-    // avoid N+1 tiny H2D copies — CPU packs the header then issues one H2D copy.
-    void*  h_concat_header_;
-    size_t h_concat_header_capacity_;
-
+    // Pinned host buffer for concat header (one H2D copy instead of N).
+    PinnedBuffer h_concat_header_;
     // Persistent pinned host + device descriptor buffers for the gather kernel.
-    // Sized at finalize() for max_outputs; reused every compress call.
-    void*  h_copy_descs_;
-    void*  d_copy_descs_;
-    size_t copy_descs_capacity_;
+    PinnedBuffer h_copy_descs_;
+    DeviceBuffer d_copy_descs_;
 
     size_t input_size_;
 
@@ -588,11 +673,10 @@ private:
     // input_nodes_. Used by decompress() to size each inverse result buffer.
     std::vector<size_t> source_input_sizes_;
 
-    // Input alignment in bytes — LCM of all stage getRequiredInputAlignment() values,
-    // computed at finalize(). compress() zero-pads to this boundary transparently.
-    size_t input_alignment_bytes_;
-    void*  d_pad_buf_;
-    size_t d_pad_buf_size_;
+    // Input alignment in bytes — LCM of all stage getRequiredInputAlignment() values.
+    // compress() zero-pads to this boundary transparently.
+    size_t     input_alignment_bytes_;
+    PoolBuffer d_pad_buf_;
 
     // Original (pre-padding) input size. decompress() uses this to trim the
     // reported output back to what the caller provided. 0 when no padding.
@@ -636,8 +720,8 @@ private:
 
     // Fixed device input buffer whose address is baked into the captured graph.
     // compress() copies user input here before cudaGraphLaunch().
-    void*  d_graph_input_;
-    size_t d_graph_input_size_;
+    PoolBuffer d_graph_input_;
+    size_t     d_graph_input_size_;
 
     cudaGraph_t     captured_graph_;
     cudaGraphExec_t graph_exec_;

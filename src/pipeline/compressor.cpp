@@ -1,5 +1,6 @@
 #include "pipeline/compressor.h"
 #include "pipeline/concat_kernel.h"
+#include "pipeline_utils.h"
 #include "fzm_format.h"
 #include "log.h"
 #include "cuda_check.h"
@@ -24,25 +25,15 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
       is_compressed_(false),
       was_compressed_(false),
       profiling_enabled_(false),
-      d_concat_buffer_(nullptr),
-      concat_buffer_capacity_(0),
       needs_concat_(false),
-      h_concat_header_(nullptr),
-      h_concat_header_capacity_(0),
-      h_copy_descs_(nullptr),
-      d_copy_descs_(nullptr),
-      copy_descs_capacity_(0),
       input_size_(0),
       input_alignment_bytes_(1),
-      d_pad_buf_(nullptr),
-      d_pad_buf_size_(0),
       original_input_size_(0),
       input_size_hint_(input_data_size),
       pool_multiplier_(pool_multiplier),
       dims_({0, 1, 1}),
       graph_mode_enabled_(false),
       graph_captured_(false),
-      d_graph_input_(nullptr),
       d_graph_input_size_(0),
       captured_graph_(nullptr),
       graph_exec_(nullptr) {
@@ -54,39 +45,18 @@ Pipeline::Pipeline(size_t input_data_size, MemoryStrategy strategy, float pool_m
 }
 
 Pipeline::~Pipeline() {
-    // Destroy CUDA Graph handles before the pool is torn down.
+    // Destroy graph handles before the pool is torn down.
     if (graph_exec_)     { cudaGraphExecDestroy(graph_exec_);  graph_exec_     = nullptr; }
     if (captured_graph_) { cudaGraphDestroy(captured_graph_);  captured_graph_ = nullptr; }
-    if (d_graph_input_ && mem_pool_) {
-        mem_pool_->free(d_graph_input_, 0);
-        d_graph_input_ = nullptr;
-    }
 
-    // Free pool-managed buffers before pool is destroyed
-    if (d_concat_buffer_ && mem_pool_) {
-        mem_pool_->free(d_concat_buffer_, 0);
-        d_concat_buffer_ = nullptr;
-    }
+    // Free pool-managed decompress outputs (vector is variable-length; no RAII wrapper).
     for (void* p : d_decomp_outputs_) {
         if (p && mem_pool_) mem_pool_->free(p, 0);
     }
-    d_decomp_outputs_.clear();
-    if (d_pad_buf_ && mem_pool_) {
-        mem_pool_->free(d_pad_buf_, 0);
-        d_pad_buf_ = nullptr;
-    }
-    if (h_concat_header_) {
-        cudaFreeHost(h_concat_header_);
-        h_concat_header_ = nullptr;
-    }
-    if (h_copy_descs_) {
-        cudaFreeHost(h_copy_descs_);
-        h_copy_descs_ = nullptr;
-    }
-    if (d_copy_descs_) {
-        cudaFree(d_copy_descs_);
-        d_copy_descs_ = nullptr;
-    }
+
+    // All other buffers (d_concat_buffer_, d_graph_input_, d_pad_buf_,
+    // h_concat_header_, h_copy_descs_, d_copy_descs_) are freed by their
+    // RAII wrappers — no manual cleanup needed here.
 }
 
 void Pipeline::setMemoryStrategy(MemoryStrategy strategy) {
@@ -196,246 +166,38 @@ void Pipeline::finalize() {
     if (is_finalized_) {
         throw std::runtime_error("Pipeline already finalized");
     }
-    
+
     for (const auto& stage_ptr : stages_) {
         stage_ptr->setDims(dims_);
         auto it = stage_to_node_.find(stage_ptr.get());
-        if (it != stage_to_node_.end() && it->second) {
+        if (it != stage_to_node_.end() && it->second)
             it->second->name = stage_ptr->getName();
-        }
     }
 
     validate();
-
-    // ── Connection type-checking ──────────────────────────────────────────────
-    // Verify that each connection's producer output type is compatible with the
-    // consumer input type.  Byte-transparent stages (Bitshuffle, RZE) return
-    // DataType::UNKNOWN and are silently skipped.
-    //
-    // Compatibility rule:
-    //   • Exact match → always OK.
-    //   • Same element size + both integral → OK.  DifferenceStage accepts
-    //     signed-reinterpreted unsigned input (uint16 ↔ int16, uint32 ↔ int32)
-    //     which is safe because the kernel just reinterprets the bit pattern.
-    //   • Float ↔ integer of any size → error (semantically wrong).
-    //   • Different sizes → error (reads wrong number of elements).
-    {
-        auto typesCompatible = [](uint8_t a, uint8_t b) -> bool {
-            if (a == b) return true;
-            const auto da = static_cast<DataType>(a);
-            const auto db = static_cast<DataType>(b);
-            const bool a_float = (da == DataType::FLOAT32 || da == DataType::FLOAT64);
-            const bool b_float = (db == DataType::FLOAT32 || db == DataType::FLOAT64);
-            if (a_float || b_float) return false;  // float↔int is always wrong
-            return getDataTypeSize(da) == getDataTypeSize(db);
-        };
-
-        constexpr uint8_t kUnknown = static_cast<uint8_t>(DataType::UNKNOWN);
-        for (const auto& conn : connections_) {
-            const uint8_t prod_type = conn.producer->getOutputDataType(
-                static_cast<size_t>(conn.output_index));
-            // Single-input stages use port 0; multi-input merge stages return
-            // UNKNOWN and are skipped automatically.
-            const uint8_t cons_type = conn.dependent->getInputDataType(0);
-
-            if (prod_type == kUnknown || cons_type == kUnknown) continue;
-
-            if (!typesCompatible(prod_type, cons_type)) {
-                throw std::runtime_error(
-                    "Type mismatch: '" + conn.producer->getName() +
-                    "' output '" + conn.output_name + "' has type " +
-                    dataTypeToString(static_cast<DataType>(prod_type)) +
-                    " but '" + conn.dependent->getName() + "' expects " +
-                    dataTypeToString(static_cast<DataType>(cons_type)));
-            }
-        }
-    }
+    typeCheckConnections();
 
     auto [sources, sinks] = identifyTopology();
     setupInputBuffers(sources);
-    
-    int pipeline_outputs = autoDetectUnconnectedOutputs();
-    detectMultiOutputScenario(pipeline_outputs);
-    
+    detectMultiOutputScenario(autoDetectUnconnectedOutputs());
     configureStreamsIfNeeded();
-    
     dag_->finalize();
 
-    // ── Compute required input alignment ─────────────────────────────────────
-    // Walk all stages and take the LCM of their alignment requirements.
-    // Chunked stages (Bitshuffle, Difference, RZE) return their chunk size;
-    // other stages return 1 (no requirement).  compress() will transparently
-    // zero-pad the user's input to this boundary when needed.
-    // IMPORTANT: this must run BEFORE propagateBufferSizes() so that the
-    // rounded-up hint drives all downstream buffer size estimates.
-    {
-        size_t align = 1;
-        int chunked_count = 0;
-        for (const auto& stage_ptr : stages_) {
-            const size_t a = stage_ptr->getRequiredInputAlignment();
-            if (a > 1) { align = std::lcm(align, a); ++chunked_count; }
-        }
-        input_alignment_bytes_ = align;
-        if (align > 1) {
-            // Round up the buffer-sizing hint so that propagateBufferSizes()
-            // allocates intermediate buffers large enough for the padded input,
-            // and so the compress() guard check doesn't reject it.
-            input_size_hint_ = ((input_size_hint_ + align - 1) / align) * align;
-            FZ_LOG(INFO,
-                "Input alignment: %zu bytes (LCM of %d chunked stage(s)); "
-                "buffer hint rounded up to %zu bytes",
-                align, chunked_count, input_size_hint_);
-        }
-    }
-
+    computeInputAlignment();   // must run before propagateBufferSizes
     propagateBufferSizes();
+    refinePoolSize();
 
-    // ── Topology-aware pool sizing ────────────────────────────────────────────
-    // Replace the blunt input_size*multiplier estimate from construction time
-    // with one derived from the actual DAG buffer layout:
-    //   PREALLOCATE → sum of all non-external buffers (all live simultaneously)
-    //   MINIMAL → peak concurrent live bytes across execution levels
-    // pool_multiplier_ is applied on top as headroom for stage-internal scratch
-    // (CUB temp storage, RZE per-chunk scratch, etc.).
-    // Skip when there is no input size hint — buffer sizes will be 1-byte
-    // placeholders and the topology-derived value would be meaningless.
-    if (input_size_hint_ > 0) {
-        // computeTopoPoolSize() already accounts for all intermediate buffers
-        // and persistent stage scratch, so it is the accurate peak requirement.
-        // Apply a small safety margin (10%) for transient CUB allocations that
-        // happen inside execute() calls but are too short-lived to appear in the
-        // topo simulation.  The old pool_multiplier_ (typically 3x) is kept for
-        // the initial pool construction at Pipeline() time only, where we have
-        // no topology yet and must size conservatively from input_size alone.
-        constexpr float kTopoSafetyMargin = 1.1f;
-        const size_t topo_base  = dag_->computeTopoPoolSize();
-        // d_pad_buf_ is allocated from the pool at the first compress() call
-        // (size = input_size_hint_, already rounded to alignment boundary).
-        // It is persistent and live throughout every execution, so it must be
-        // added to the topo estimate even though it never appears in buffers_.
-        // Only add it when chunked stages require alignment (otherwise no pad
-        // buffer is ever created).
-        const size_t pad_bytes  = (input_alignment_bytes_ > 1) ? input_size_hint_ : 0;
-        const size_t topo_sized = static_cast<size_t>((topo_base + pad_bytes) * kTopoSafetyMargin);
-        // Pin the CUDA pool release threshold to UINT64_MAX regardless of
-        // strategy.  The topo-derived value tells CUDA the *capacity* target,
-        // but a low threshold causes the driver to trim freed pages back to the
-        // OS between compress() calls, forcing re-page-faulting on the next
-        // call — visible as random latency spikes in MINIMAL mode.
-        // UINT64_MAX means "never trim": pages freed inside a call stay warm
-        // in the pool for the next call.  This does NOT change the peak
-        // in-flight footprint (MINIMAL still allocates/frees lazily); it only
-        // keeps the OS-level pages hot across calls.
-        mem_pool_->setReleaseThreshold(std::numeric_limits<uint64_t>::max());
-        FZ_LOG(INFO, "Pool threshold: %.2f MB (topo %.2f MB + pad %.2f MB, ×1.1 margin) "
-               "[release threshold pinned to UINT64_MAX]",
-               topo_sized / (1024.0 * 1024.0),
-               topo_base  / (1024.0 * 1024.0),
-               pad_bytes  / (1024.0 * 1024.0));
-    }
-
-    if (strategy_ == MemoryStrategy::PREALLOCATE) {
+    if (strategy_ == MemoryStrategy::PREALLOCATE)
         dag_->preallocateBuffers();
-    }
+    if (graph_mode_enabled_)
+        setupGraphModeInput();
 
-    // ── Graph mode: validate requirements and allocate fixed input slot ───────
-    if (graph_mode_enabled_) {
-        if (strategy_ != MemoryStrategy::PREALLOCATE) {
-            throw std::runtime_error(
-                "Graph mode requires PREALLOCATE memory strategy. "
-                "Call setMemoryStrategy(MemoryStrategy::PREALLOCATE) before finalize().");
-        }
-        if (mem_pool_ && mem_pool_->isFallbackMode()) {
-            throw std::runtime_error(
-                "Graph mode is not supported when the CUDA memory pool is unavailable "
-                "(cudaMalloc fallback mode; common on vGPU or when FZ_FORCE_MEMPOOL_FALLBACK is set). "
-                "Disable graph mode or use a GPU that supports cudaMemPool.");
-        }
-        if (input_size_hint_ == 0) {
-            throw std::runtime_error(
-                "Graph mode requires a non-zero input size hint. "
-                "Pass input_data_size to the Pipeline constructor.");
-        }
-        if (input_nodes_.size() != 1) {
-            throw std::runtime_error(
-                "Graph mode currently supports single-source pipelines only "
-                "(" + std::to_string(input_nodes_.size()) + " source(s) detected).");
-        }
-
-        // The graph's input pointer must be stable across launches, so allocate
-        // a fixed device buffer at the padded hint size.  compress() will D2D-copy
-        // the user's input here before calling cudaGraphLaunch().
-        const size_t padded = (input_alignment_bytes_ > 1)
-            ? ((input_size_hint_ + input_alignment_bytes_ - 1) / input_alignment_bytes_)
-              * input_alignment_bytes_
-            : input_size_hint_;
-
-        if (d_graph_input_) { mem_pool_->free(d_graph_input_, 0); d_graph_input_ = nullptr; }
-        d_graph_input_ = mem_pool_->allocate(padded, 0, "graph_input_slot", /*persistent=*/true);
-        if (!d_graph_input_) {
-            throw std::runtime_error(
-                "Failed to allocate graph input slot (" + std::to_string(padded) +
-                " bytes); pool may be exhausted — increase pool_size_multiplier or input_data_size");
-        }
-        d_graph_input_size_ = padded;
-        FZ_LOG(INFO, "Graph mode: fixed input slot allocated (%.2f MB)",
-               padded / (1024.0 * 1024.0));
-    }
-
-    // Pre-allocate input padding scratch from the memory pool so the first
-    // compress() call does not pay a raw cudaMalloc path for alignment padding.
-    if (input_alignment_bytes_ > 1 && input_size_hint_ > 0) {
-        const size_t padded = ((input_size_hint_ + input_alignment_bytes_ - 1)
-                               / input_alignment_bytes_) * input_alignment_bytes_;
-        if (padded > d_pad_buf_size_) {
-            if (d_pad_buf_) {
-                mem_pool_->free(d_pad_buf_, /*stream=*/0);
-                d_pad_buf_ = nullptr;
-                d_pad_buf_size_ = 0;
-            }
-            d_pad_buf_ = mem_pool_->allocate(padded, /*stream=*/0,
-                                             "pipeline_input_pad", /*persistent=*/true);
-            if (!d_pad_buf_) {
-                throw std::runtime_error(
-                    "Failed to preallocate pipeline input pad buffer (" +
-                    std::to_string(padded) + " bytes); pool may be exhausted");
-            }
-            d_pad_buf_size_ = padded;
-            mem_pool_->synchronize(/*stream=*/0);
-        }
-    }
+    preallocatePadBuffer();
 
     num_streams_ = std::max(1, static_cast<int>(dag_->getStreamCount()));
-
-    // Pre-allocate pinned concat header buffer.
-    // Size = sizeof(uint32_t) + num_outputs * sizeof(uint64_t).
-    // We use output_buffer_ids_.size() as the output count; if it is still 0
-    // here (single-sink, no concat needed) we skip — needs_concat_ is false.
-    if (needs_concat_ && !output_buffer_ids_.empty()) {
-        const size_t n_outputs = output_buffer_ids_.size();
-
-        // Header buffer: [num_buffers: u32][size_0..N-1: u64]
-        const size_t hdr_bytes  = sizeof(uint32_t) + n_outputs * sizeof(uint64_t);
-        if (h_concat_header_ == nullptr || h_concat_header_capacity_ < hdr_bytes) {
-            if (h_concat_header_) cudaFreeHost(h_concat_header_);
-            FZ_CUDA_CHECK(cudaHostAlloc(&h_concat_header_, hdr_bytes, cudaHostAllocDefault));
-            h_concat_header_capacity_ = hdr_bytes;
-        }
-
-        // Gather kernel descriptor buffers: one CopyDesc per output segment.
-        // Pinned host buffer for CPU packing; device mirror for kernel access.
-        const size_t desc_bytes = n_outputs * sizeof(CopyDesc);
-        if (h_copy_descs_ == nullptr || copy_descs_capacity_ < desc_bytes) {
-            if (h_copy_descs_) cudaFreeHost(h_copy_descs_);
-            if (d_copy_descs_) cudaFree(d_copy_descs_);
-            FZ_CUDA_CHECK(cudaHostAlloc(&h_copy_descs_, desc_bytes, cudaHostAllocDefault));
-            FZ_CUDA_CHECK(cudaMalloc(&d_copy_descs_, desc_bytes));
-            copy_descs_capacity_ = desc_bytes;
-        }
-    }
+    preallocateConcatBuffers();
 
     is_finalized_ = true;
-
     FZ_LOG(INFO, "Finalized with %zu stages, strategy=%s",
            stages_.size(),
            strategy_ == MemoryStrategy::MINIMAL ? "MINIMAL" : "PREALLOCATE");
@@ -444,6 +206,148 @@ void Pipeline::finalize() {
         FZ_LOG(INFO, "Auto-warmup triggered by setWarmupOnFinalize(true)");
         warmup(/*stream=*/0);
     }
+}
+
+void Pipeline::typeCheckConnections() {
+    // Byte-transparent stages (Bitshuffle, RZE) return UNKNOWN and are skipped.
+    // Compatibility: exact match, or same element size + both integral (allows
+    // uint16↔int16 reinterpret in DifferenceStage). Float↔integer is always wrong.
+    auto typesCompatible = [](uint8_t a, uint8_t b) -> bool {
+        if (a == b) return true;
+        const auto da = static_cast<DataType>(a);
+        const auto db = static_cast<DataType>(b);
+        const bool a_float = (da == DataType::FLOAT32 || da == DataType::FLOAT64);
+        const bool b_float = (db == DataType::FLOAT32 || db == DataType::FLOAT64);
+        if (a_float || b_float) return false;
+        return getDataTypeSize(da) == getDataTypeSize(db);
+    };
+
+    constexpr uint8_t kUnknown = static_cast<uint8_t>(DataType::UNKNOWN);
+    for (const auto& conn : connections_) {
+        const uint8_t prod_type = conn.producer->getOutputDataType(
+            static_cast<size_t>(conn.output_index));
+        const uint8_t cons_type = conn.dependent->getInputDataType(0);
+
+        if (prod_type == kUnknown || cons_type == kUnknown) continue;
+
+        if (!typesCompatible(prod_type, cons_type)) {
+            throw std::runtime_error(
+                "Type mismatch: '" + conn.producer->getName() +
+                "' output '" + conn.output_name + "' has type " +
+                dataTypeToString(static_cast<DataType>(prod_type)) +
+                " but '" + conn.dependent->getName() + "' expects " +
+                dataTypeToString(static_cast<DataType>(cons_type)));
+        }
+    }
+}
+
+void Pipeline::computeInputAlignment() {
+    // LCM of all stage alignment requirements. Must run before propagateBufferSizes()
+    // so the rounded-up hint drives all downstream buffer size estimates.
+    size_t align = 1;
+    int chunked_count = 0;
+    for (const auto& stage_ptr : stages_) {
+        const size_t a = stage_ptr->getRequiredInputAlignment();
+        if (a > 1) { align = std::lcm(align, a); ++chunked_count; }
+    }
+    input_alignment_bytes_ = align;
+    if (align > 1) {
+        input_size_hint_ = ((input_size_hint_ + align - 1) / align) * align;
+        FZ_LOG(INFO, "Input alignment: %zu bytes (LCM of %d chunked stage(s)); "
+               "buffer hint rounded up to %zu bytes",
+               align, chunked_count, input_size_hint_);
+    }
+}
+
+void Pipeline::refinePoolSize() {
+    // Skip without an input hint — buffer sizes are 1-byte placeholders.
+    if (input_size_hint_ == 0) return;
+
+    constexpr float kTopoSafetyMargin = 1.1f;  // 10% headroom for transient CUB allocations
+    const size_t topo_base  = dag_->computeTopoPoolSize();
+    // d_pad_buf_ is pool-allocated but never appears in buffers_, so add it manually.
+    const size_t pad_bytes  = (input_alignment_bytes_ > 1) ? input_size_hint_ : 0;
+    const size_t topo_sized = static_cast<size_t>((topo_base + pad_bytes) * kTopoSafetyMargin);
+    // UINT64_MAX: never trim pool pages between calls — avoids re-page-fault latency spikes.
+    // Does not affect peak in-flight footprint; MINIMAL still allocates/frees lazily.
+    mem_pool_->setReleaseThreshold(std::numeric_limits<uint64_t>::max());
+    FZ_LOG(INFO, "Pool threshold: %.2f MB (topo %.2f MB + pad %.2f MB, ×1.1 margin) "
+           "[release threshold pinned to UINT64_MAX]",
+           topo_sized / (1024.0 * 1024.0),
+           topo_base  / (1024.0 * 1024.0),
+           pad_bytes  / (1024.0 * 1024.0));
+}
+
+void Pipeline::setupGraphModeInput() {
+    if (strategy_ != MemoryStrategy::PREALLOCATE) {
+        throw std::runtime_error(
+            "Graph mode requires PREALLOCATE memory strategy. "
+            "Call setMemoryStrategy(MemoryStrategy::PREALLOCATE) before finalize().");
+    }
+    if (mem_pool_ && mem_pool_->isFallbackMode()) {
+        throw std::runtime_error(
+            "Graph mode is not supported when the CUDA memory pool is unavailable "
+            "(cudaMalloc fallback mode; common on vGPU or when FZ_FORCE_MEMPOOL_FALLBACK is set). "
+            "Disable graph mode or use a GPU that supports cudaMemPool.");
+    }
+    if (input_size_hint_ == 0) {
+        throw std::runtime_error(
+            "Graph mode requires a non-zero input size hint. "
+            "Pass input_data_size to the Pipeline constructor.");
+    }
+    if (input_nodes_.size() != 1) {
+        throw std::runtime_error(
+            "Graph mode currently supports single-source pipelines only "
+            "(" + std::to_string(input_nodes_.size()) + " source(s) detected).");
+    }
+
+    // Allocate a fixed device buffer at the padded hint size. compress() will
+    // D2D-copy the user's input here before calling cudaGraphLaunch().
+    const size_t padded = (input_alignment_bytes_ > 1)
+        ? ((input_size_hint_ + input_alignment_bytes_ - 1) / input_alignment_bytes_)
+          * input_alignment_bytes_
+        : input_size_hint_;
+
+    if (!d_graph_input_.allocate(mem_pool_.get(), padded, 0,
+                                 "graph_input_slot", /*persistent=*/true)) {
+        throw std::runtime_error(
+            "Failed to allocate graph input slot (" + std::to_string(padded) +
+            " bytes); pool may be exhausted — increase pool_size_multiplier or input_data_size");
+    }
+    d_graph_input_size_ = padded;
+    FZ_LOG(INFO, "Graph mode: fixed input slot allocated (%.2f MB)",
+           padded / (1024.0 * 1024.0));
+}
+
+void Pipeline::preallocatePadBuffer() {
+    if (input_alignment_bytes_ <= 1 || input_size_hint_ == 0) return;
+
+    const size_t padded = ((input_size_hint_ + input_alignment_bytes_ - 1)
+                           / input_alignment_bytes_) * input_alignment_bytes_;
+    if (padded <= d_pad_buf_.capacity) return;
+
+    if (!d_pad_buf_.allocate(mem_pool_.get(), padded, /*stream=*/0,
+                             "pipeline_input_pad", /*persistent=*/true)) {
+        throw std::runtime_error(
+            "Failed to preallocate pipeline input pad buffer (" +
+            std::to_string(padded) + " bytes); pool may be exhausted");
+    }
+    mem_pool_->synchronize(/*stream=*/0);
+}
+
+void Pipeline::preallocateConcatBuffers() {
+    if (!needs_concat_ || output_buffer_ids_.empty()) return;
+
+    const size_t n_outputs  = output_buffer_ids_.size();
+    const size_t hdr_bytes  = sizeof(uint32_t) + n_outputs * sizeof(uint64_t);
+    const size_t desc_bytes = n_outputs * sizeof(CopyDesc);
+
+    if (!h_concat_header_.ensureCapacity(hdr_bytes))
+        throw std::runtime_error("Failed to allocate pinned concat header buffer");
+    if (!h_copy_descs_.ensureCapacity(desc_bytes))
+        throw std::runtime_error("Failed to allocate pinned copy descriptor buffer");
+    if (!d_copy_descs_.ensureCapacity(desc_bytes))
+        throw std::runtime_error("Failed to allocate device copy descriptor buffer");
 }
 
 void Pipeline::warmup(cudaStream_t stream) {
@@ -530,7 +434,7 @@ void Pipeline::captureGraph(cudaStream_t stream) {
     // Wire the fixed input slot as the DAG's stable source pointer.
     // This pointer is baked into the graph; compress() will D2D-copy user
     // data here before each cudaGraphLaunch().
-    dag_->setExternalPointer(input_buffer_ids_[0], d_graph_input_);
+    dag_->setExternalPointer(input_buffer_ids_[0], d_graph_input_.ptr);
     dag_->updateBufferSize(input_buffer_ids_[0], d_graph_input_size_);
 
     // setCaptureMode(true) validates that every stage in the DAG is
@@ -873,22 +777,11 @@ std::vector<Pipeline::OutputBufferInfo> Pipeline::collectOutputBuffers() const {
     return outputs;
 }
 
-// Round up to the next multiple of 16 for concat slot alignment.
-static inline size_t align16(size_t x) { return (x + 15u) & ~15u; }
-
 size_t Pipeline::calculateConcatSize(const std::vector<OutputBufferInfo>& outputs) const {
-    const size_t n = outputs.size();
-    // Header: [num_buffers: u32][size_0..N-1: u64], padded to 16-byte boundary
-    // so the first data segment's dst pointer is 16-byte aligned.
-    const size_t hdr_raw     = sizeof(uint32_t) + n * sizeof(uint64_t);
-    const size_t hdr_padded  = align16(hdr_raw);
-    size_t total_size = hdr_padded;
-    for (const auto& output : outputs) {
-        // Each segment's slot is padded to 16 bytes so subsequent dst pointers
-        // stay aligned.  The header stores the actual (unpadded) size.
-        total_size += align16(output.actual_size);
-    }
-    return total_size;
+    size_t total = ConcatLayout::headerSize(outputs.size());
+    for (const auto& output : outputs)
+        total += ConcatLayout::slotSize(output.actual_size);
+    return total;
 }
 
 size_t Pipeline::writeConcatBuffer(
@@ -902,7 +795,7 @@ size_t Pipeline::writeConcatBuffer(
     // Layout: [num_buffers: u32][size_0: u64][size_1: u64]...[size_N-1: u64]
     const size_t hdr_bytes = sizeof(uint32_t) + n * sizeof(uint64_t);
 
-    uint8_t* h = static_cast<uint8_t*>(h_concat_header_);
+    uint8_t* h = static_cast<uint8_t*>(h_concat_header_.ptr);
     uint32_t n_u32 = static_cast<uint32_t>(n);
     std::memcpy(h, &n_u32, sizeof(uint32_t));
     h += sizeof(uint32_t);
@@ -913,29 +806,27 @@ size_t Pipeline::writeConcatBuffer(
     }
 
     // ── Build gather descriptors on the CPU (no API calls) ──────────────────
-    // Offsets use padded slot sizes so each dst pointer is 16-byte aligned;
-    // the bytes field carries the actual (unpadded) size for the kernel.
-    CopyDesc* h_descs = static_cast<CopyDesc*>(h_copy_descs_);
-    size_t offset = align16(hdr_bytes);  // first segment starts after padded header
+    CopyDesc* h_descs = static_cast<CopyDesc*>(h_copy_descs_.ptr);
+    size_t offset = ConcatLayout::headerSize(n);
     for (size_t i = 0; i < n; i++) {
         h_descs[i].src   = static_cast<const uint8_t*>(outputs[i].d_ptr);
         h_descs[i].dst   = d_concat_bytes + offset;
         h_descs[i].bytes = outputs[i].actual_size;
         FZ_LOG(TRACE, "Concat desc[%zu]: %s  %.1f KB -> offset %zu",
                i, outputs[i].stage_name.c_str(), outputs[i].actual_size / 1024.0, offset);
-        offset += align16(outputs[i].actual_size);  // advance by padded slot size
+        offset += ConcatLayout::slotSize(outputs[i].actual_size);
     }
 
     // ── Two H2D copies + one kernel launch (replaces 1 H2D + N D2D) ─────────
     // 1. Header (num_buffers + per-segment sizes)
-    FZ_CUDA_CHECK(cudaMemcpyAsync(d_concat_bytes, h_concat_header_, hdr_bytes,
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_concat_bytes, h_concat_header_.ptr, hdr_bytes,
                                   cudaMemcpyHostToDevice, stream));
     // 2. Gather descriptors
     const size_t desc_bytes = n * sizeof(CopyDesc);
-    FZ_CUDA_CHECK(cudaMemcpyAsync(d_copy_descs_, h_copy_descs_, desc_bytes,
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_copy_descs_.ptr, h_copy_descs_.ptr, desc_bytes,
                                   cudaMemcpyHostToDevice, stream));
     // 3. Gather kernel: one block per segment, 256 threads each
-    launch_gather_kernel(static_cast<const CopyDesc*>(d_copy_descs_),
+    launch_gather_kernel(static_cast<const CopyDesc*>(d_copy_descs_.ptr),
                          static_cast<int>(n), 256, stream);
 
     return offset;
@@ -946,26 +837,20 @@ void Pipeline::concatOutputs(void** d_output, size_t* output_size, cudaStream_t 
     
     size_t total_size = calculateConcatSize(outputs);
     
-    if (d_concat_buffer_ == nullptr || concat_buffer_capacity_ < total_size) {
-        if (d_concat_buffer_) {
-            mem_pool_->free(d_concat_buffer_, stream);
-        }
-        
-        d_concat_buffer_ = mem_pool_->allocate(total_size, stream, "concat_output", true);
-        if (!d_concat_buffer_) {
+    if (d_concat_buffer_.capacity < total_size) {
+        if (!d_concat_buffer_.allocate(mem_pool_.get(), total_size, stream,
+                                       "concat_output", /*persistent=*/true)) {
             throw std::runtime_error(
                 "Failed to allocate concat output buffer (" + std::to_string(total_size) +
                 " bytes for " + std::to_string(outputs.size()) +
                 " outputs); pool may be exhausted");
         }
-        concat_buffer_capacity_ = total_size;
-        
         FZ_LOG(DEBUG, "Allocated concat buffer: %.1f KB for %zu outputs",
                total_size / 1024.0, outputs.size());
     }
-    
-    *d_output = d_concat_buffer_;
-    *output_size = writeConcatBuffer(outputs, static_cast<uint8_t*>(d_concat_buffer_), stream);
+
+    *d_output    = d_concat_buffer_.ptr;
+    *output_size = writeConcatBuffer(outputs, static_cast<uint8_t*>(d_concat_buffer_.ptr), stream);
     
     FZ_LOG(DEBUG, "Concatenation complete: %zu buffers -> %.1f KB",
            outputs.size(), total_size / 1024.0);

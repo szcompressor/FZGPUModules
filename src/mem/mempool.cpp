@@ -145,11 +145,6 @@ void MemoryPool::initializeMemPool() {
             cudaGetLastError(); // Clear error
         }
     }
-    
-    // 3. Optional pre-reservation is intentionally skipped.
-    // cudaMemPoolAttrReservedMemCurrent is query-only and cannot be set via
-    // cudaMemPoolSetAttribute; attempting to do so triggers invalid-argument
-    // API errors in Compute Sanitizer. Let the pool grow on demand.
 }
 
 void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& tag, bool persistent) {
@@ -161,7 +156,6 @@ void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& 
     if (mem_pool_) {
         err = cudaMallocFromPoolAsync(&ptr, size, mem_pool_, stream);
     } else {
-        // Fallback: use regular cudaMalloc when memory pools are unavailable
         err = cudaMalloc(&ptr, size);
     }
 
@@ -171,7 +165,7 @@ void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& 
         return nullptr;
     }
     
-    // Track allocation in appropriate map (always track for stats, but can be disabled if needed)
+    // Track allocation in appropriate map
     if (persistent) {
         graph_allocations_[ptr] = AllocationInfo(ptr, size, tag);
     } else {
@@ -179,9 +173,7 @@ void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& 
     }
     total_allocations_++;
     
-    // Update running host-side total and warn once if we exceed the configured size.
-    // The CUDA pool itself will grow beyond the threshold (it is not a hard cap), but
-    // exceeding it is a sign that the pool was sized too conservatively for this workload.
+    // Update running host-side total
     current_allocated_bytes_ += size;
     if (!overflow_warned_ && current_allocated_bytes_ > config_.getPoolSize()) {
         overflow_warned_ = true;
@@ -205,8 +197,6 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
         if (mem_pool_) {
             FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
         } else {
-            // Fallback mode: cudaFree is synchronous, so sync the stream first
-            // to ensure kernels are done using this pointer
             FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(ptr));
         }
@@ -235,7 +225,6 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
 }
 
 void MemoryPool::reset(cudaStream_t stream) {
-    // In fallback mode, sync stream once before freeing all allocations
     if (!mem_pool_) {
         FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
     }
@@ -256,9 +245,6 @@ void MemoryPool::reset(cudaStream_t stream) {
     current_allocated_bytes_ = 0;  // graph_allocations_ are intentionally excluded
     overflow_warned_ = false;
 
-    // Reset the CUDA high-water mark so getPeakUsage() reflects only the *next* run.
-    // This is a write of 0 to cudaMemPoolAttrUsedMemHigh; the driver supports it since
-    // CUDA 11.2.  Non-fatal if unsupported on older runtimes.
     if (mem_pool_) {
         uint64_t zero = 0;
         cudaError_t err = cudaMemPoolSetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &zero);
