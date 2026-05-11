@@ -47,6 +47,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 **Documentation**
 - Added `docs/stages/` — per-stage Doxygen pages covering constraints, behavioral rules, mode details, and usage examples for all eight stages (`LorenzoQuantStage`, `LorenzoStage`, `QuantizerStage`, `DifferenceStage`, `BitshuffleStage`, `RZEStage`, `RLEStage`, `BitpackStage`)
 - Updated `Doxyfile` to include `docs/stages/` in `INPUT`; added `\ref stages_overview` link from the mainpage
+- Populated `docs/libpressio_python.md` with full libpressio Python bindings guide: setup, quick start, `from_config` structure, all pipeline/stage options, metrics, common recipes, CUDA graph mode, stage output exposure, TOML config, and error handling
 
 **Stages**
 - `BitpackStage` — sub-byte and multi-byte integer bit-packing; supports `uint8`/`uint16`/`uint32`, all power-of-two `nbits` values; graph-compatible; registered in `StageFactory`; 14 tests in `test_bitpack.cpp`

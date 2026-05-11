@@ -24,7 +24,8 @@ INPUT                  = include/ \
                          docs/architecture.md \
                          docs/how_to_add_a_stage.md \
                          docs/fzm_format.md \
-                         docs/docker.md
+                         docs/docker.md \
+                         docs/libpressio_python.md
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
