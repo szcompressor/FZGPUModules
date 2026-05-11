@@ -300,14 +300,190 @@ static Stage* addNegabinaryStage(Pipeline& p, const toml::table& t) {
     DataType in_dt  = dataTypeFromString(optStr(t, "input_type",  "int32"));
     DataType out_dt = dataTypeFromString(optStr(t, "output_type", "uint32"));
 
-    // Import NegabinaryStage — lives in the negabinary module header
-    using namespace fz;
     if (in_dt == DataType::INT8  && out_dt == DataType::UINT8)  return p.addStage<NegabinaryStage<int8_t,  uint8_t>>();
     if (in_dt == DataType::INT16 && out_dt == DataType::UINT16) return p.addStage<NegabinaryStage<int16_t, uint16_t>>();
     if (in_dt == DataType::INT32 && out_dt == DataType::UINT32) return p.addStage<NegabinaryStage<int32_t, uint32_t>>();
     if (in_dt == DataType::INT64 && out_dt == DataType::UINT64) return p.addStage<NegabinaryStage<int64_t, uint64_t>>();
     throw std::runtime_error("loadConfig: unsupported Negabinary type combination");
 }
+
+// Previously inlined in the load dispatch; now named helpers for registry use.
+static Stage* addBitshuffleStage(Pipeline& p, const toml::table& t) {
+    auto* bs = p.addStage<BitshuffleStage>();
+    bs->setBlockSize(static_cast<size_t>(optInt(t, "block_size", 16384)));
+    bs->setElementWidth(static_cast<size_t>(optInt(t, "element_width", 4)));
+    return bs;
+}
+static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
+    auto* rze = p.addStage<RZEStage>();
+    rze->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
+    rze->setLevels(static_cast<int>(optInt(t, "levels", 4)));
+    return rze;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stage serialization helpers (save direction)
+// Each saveXxxStage mirrors its addXxxStage counterpart.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void saveLorenzoStage(Stage* s, std::ostringstream& out) {
+    DataType dt = static_cast<DataType>(s->getOutputDataType(0));
+    out << "data_type = \"" << dataTypeToString(dt) << "\"\n";
+}
+
+static void saveLorenzoQuantStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[128] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+
+    DataType in_dt   = static_cast<DataType>(s->getInputDataType(0));
+    DataType code_dt = static_cast<DataType>(s->getOutputDataType(0));
+    if (sz >= sizeof(LorenzoQuantConfig)) {
+        LorenzoQuantConfig lc;
+        std::memcpy(&lc, buf, sizeof(LorenzoQuantConfig));
+        in_dt   = lc.input_type;
+        code_dt = lc.code_type;
+    }
+    out << "input_type = \"" << dataTypeToString(in_dt) << "\"\n";
+    out << "code_type = \"" << dataTypeToString(code_dt) << "\"\n";
+
+    float cap = 0.2f, eb = 1e-3f;
+    ErrorBoundMode ebm = ErrorBoundMode::ABS;
+    int qr = 32768;
+    bool zz = false;
+
+    auto read = [&](auto* lrz) {
+        eb  = static_cast<float>(lrz->getErrorBound());
+        ebm = lrz->getErrorBoundMode();
+        qr  = static_cast<int>(lrz->getQuantRadius());
+        cap = lrz->getOutlierCapacity();
+        zz  = lrz->getZigzagCodes();
+    };
+    if      (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) read(static_cast<LorenzoQuantStage<float,  uint16_t>*>(s));
+    else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16) read(static_cast<LorenzoQuantStage<double, uint16_t>*>(s));
+    else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8)  read(static_cast<LorenzoQuantStage<float,  uint8_t>*>(s));
+    else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32) read(static_cast<LorenzoQuantStage<double, uint32_t>*>(s));
+
+    out << "error_bound = "        << static_cast<double>(eb) << "\n";
+    out << "error_bound_mode = \"" << ebModeToString(ebm)     << "\"\n";
+    out << "quant_radius = "       << static_cast<int64_t>(qr) << "\n";
+    out << "outlier_capacity = "   << static_cast<double>(cap) << "\n";
+    out << "zigzag_codes = "       << (zz ? "true" : "false") << "\n";
+}
+
+static void saveQuantizerStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(QuantizerConfig)] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+
+    DataType in_dt   = static_cast<DataType>(s->getInputDataType(0));
+    DataType code_dt = static_cast<DataType>(s->getOutputDataType(0));
+    if (sz >= sizeof(QuantizerConfig)) {
+        QuantizerConfig qc;
+        std::memcpy(&qc, buf, sizeof(QuantizerConfig));
+        in_dt   = qc.input_type;
+        code_dt = qc.code_type;
+    }
+    out << "input_type = \"" << dataTypeToString(in_dt)   << "\"\n";
+    out << "code_type = \""  << dataTypeToString(code_dt) << "\"\n";
+
+    auto write = [&](auto* q) {
+        out << "error_bound = "        << static_cast<double>(q->getErrorBound())   << "\n";
+        out << "error_bound_mode = \"" << ebModeToString(q->getErrorBoundMode())    << "\"\n";
+        out << "quant_radius = "       << static_cast<int64_t>(q->getQuantRadius()) << "\n";
+        out << "outlier_capacity = "   << static_cast<double>(q->getOutlierCapacity()) << "\n";
+        out << "zigzag_codes = "       << (q->getZigzagCodes() ? "true" : "false") << "\n";
+        float thr = q->getOutlierThreshold();
+        if (std::isfinite(thr)) out << "outlier_threshold = " << thr << "\n";
+        if (q->getInplaceOutliers())  out << "inplace_outliers = true\n";
+    };
+    if      (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) write(static_cast<QuantizerStage<float,  uint16_t>*>(s));
+    else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT32) write(static_cast<QuantizerStage<float,  uint32_t>*>(s));
+    else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16) write(static_cast<QuantizerStage<double, uint16_t>*>(s));
+    else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32) write(static_cast<QuantizerStage<double, uint32_t>*>(s));
+}
+
+static void saveBitshuffleStage(Stage* s, std::ostringstream& out) {
+    auto* bs = static_cast<BitshuffleStage*>(s);
+    out << "block_size = "    << static_cast<int64_t>(bs->getBlockSize())    << "\n";
+    out << "element_width = " << static_cast<int64_t>(bs->getElementWidth()) << "\n";
+}
+
+static void saveRZEStage(Stage* s, std::ostringstream& out) {
+    auto* rze = static_cast<RZEStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(rze->getChunkSize()) << "\n";
+    out << "levels = "     << static_cast<int64_t>(rze->getLevels())    << "\n";
+}
+
+static void saveRLEStage(Stage* s, std::ostringstream& out) {
+    out << "data_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+}
+
+static void saveDifferenceStage(Stage* s, std::ostringstream& out) {
+    out << "input_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))  << "\"\n";
+    out << "output_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+    uint8_t buf[8] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    if (sz >= 6) {
+        uint32_t cs = 0;
+        std::memcpy(&cs, buf + 2, sizeof(uint32_t));
+        out << "chunk_size = " << static_cast<int64_t>(cs) << "\n";
+    }
+}
+
+static void saveZigzagStage(Stage* s, std::ostringstream& out) {
+    out << "input_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))  << "\"\n";
+    out << "output_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+}
+
+static void saveNegabinaryStage(Stage* s, std::ostringstream& out) {
+    out << "input_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))  << "\"\n";
+    out << "output_type = \""
+        << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+}
+
+static void saveBitpackStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[10] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    DataType dt   = (sz >= 1) ? static_cast<DataType>(buf[0]) : DataType::UINT16;
+    uint8_t nbits = (sz >= 2) ? buf[1] : 16;
+    out << "input_type = \"" << dataTypeToString(dt)       << "\"\n";
+    out << "nbits = "        << static_cast<int64_t>(nbits) << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stage registry
+//
+// Single location for all load + save dispatch.
+// To add a new stage type:
+//   1. #include its header at the top of this file
+//   2. Add addXxxStage / saveXxxStage helpers above
+//   3. Append one entry to kStageRegistry below
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct StageEntry {
+    const char*  type_name;  // TOML "type" string (load and save)
+    StageType    enum_val;   // matches getStageTypeId() for the save direction
+    Stage*       (*load_fn)(Pipeline&, const toml::table&);
+    void         (*save_fn)(Stage*, std::ostringstream&);
+};
+
+static const StageEntry kStageRegistry[] = {
+    { "Lorenzo",      StageType::LORENZO,      addLorenzoStage,      saveLorenzoStage      },
+    { "LorenzoQuant", StageType::LORENZO_QUANT, addLorenzoQuantStage, saveLorenzoQuantStage },
+    { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage    },
+    { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage   },
+    { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage          },
+    { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage          },
+    { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage   },
+    { "Zigzag",       StageType::ZIGZAG,       addZigzagStage,       saveZigzagStage       },
+    { "Negabinary",   StageType::NEGABINARY,   addNegabinaryStage,   saveNegabinaryStage   },
+    { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage      },
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline::loadConfig()
@@ -380,36 +556,11 @@ void Pipeline::loadConfig(const std::string& path) {
             throw std::runtime_error("loadConfig: duplicate stage name \"" + name + "\"");
 
         Stage* s = nullptr;
-
-        if (type == "Lorenzo") {
-            s = addLorenzoStage(*this, *t);
-        } else if (type == "LorenzoQuant") {
-            s = addLorenzoQuantStage(*this, *t);
-        } else if (type == "Quantizer") {
-            s = addQuantizerStage(*this, *t);
-        } else if (type == "Bitshuffle") {
-            auto* bs = addStage<BitshuffleStage>();
-            bs->setBlockSize(static_cast<size_t>(optInt(*t, "block_size", 16384)));
-            bs->setElementWidth(static_cast<size_t>(optInt(*t, "element_width", 4)));
-            s = bs;
-        } else if (type == "RZE") {
-            auto* rze = addStage<RZEStage>();
-            rze->setChunkSize(static_cast<size_t>(optInt(*t, "chunk_size", 16384)));
-            rze->setLevels(static_cast<int>(optInt(*t, "levels", 4)));
-            s = rze;
-        } else if (type == "RLE") {
-            s = addRLEStage(*this, *t);
-        } else if (type == "Difference") {
-            s = addDifferenceStage(*this, *t);
-        } else if (type == "Zigzag") {
-            s = addZigzagStage(*this, *t);
-        } else if (type == "Negabinary") {
-            s = addNegabinaryStage(*this, *t);
-        } else if (type == "Bitpack") {
-            s = addBitpackStage(*this, *t);
-        } else {
-            throw std::runtime_error("loadConfig: unknown stage type \"" + type + "\"");
+        for (const auto& entry : kStageRegistry) {
+            if (type == entry.type_name) { s = entry.load_fn(*this, *t); break; }
         }
+        if (!s)
+            throw std::runtime_error("loadConfig: unknown stage type \"" + type + "\"");
 
         stage_map[name] = s;
         entries.push_back({name, s, t});
@@ -485,139 +636,15 @@ void Pipeline::saveConfig(const std::string& path) const {
         uint16_t type_id = s->getStageTypeId();
         StageType stype  = static_cast<StageType>(type_id);
 
+        const StageEntry* entry = nullptr;
+        for (const auto& e : kStageRegistry) {
+            if (e.enum_val == stype) { entry = &e; break; }
+        }
+
         out << "[[stage]]\n";
         out << "name = \"" << tomlEscape(local_name) << "\"\n";
-        out << "type = \"" << stageTypeToString(stype) << "\"\n";
-
-        // Per-type parameters — write human-readable keys
-        switch (stype) {
-            case StageType::LORENZO_QUANT: {
-                // Use serializeHeader to read back the LorenzoQuantConfig struct,
-                // which gives us the canonical type IDs. Then use public getters
-                // for the user-facing parameters (error_bound, eb_mode, etc.),
-                // since those are always valid post-finalize regardless of whether
-                // compress() has been called.
-                uint8_t buf[128] = {};
-                size_t sz = s->serializeHeader(0, buf, sizeof(buf));
-
-                // Determine type strings via the binary config (most reliable source)
-                // or fall back to the output/input DataType methods.
-                DataType in_dt   = static_cast<DataType>(s->getInputDataType(0));
-                DataType code_dt = static_cast<DataType>(s->getOutputDataType(0)); // codes port
-
-                if (sz >= sizeof(LorenzoQuantConfig)) {
-                    LorenzoQuantConfig lc;
-                    std::memcpy(&lc, buf, sizeof(LorenzoQuantConfig));
-                    in_dt   = lc.input_type;
-                    code_dt = lc.code_type;
-                }
-
-                out << "input_type = \"" << dataTypeToString(in_dt) << "\"\n";
-                out << "code_type = \"" << dataTypeToString(code_dt) << "\"\n";
-
-                // All remaining params come from public getters — always valid.
-                float cap = 0.2f;
-                float eb  = 1e-3f;
-                ErrorBoundMode ebm = ErrorBoundMode::ABS;
-                int   qr  = 32768;
-                bool  zz  = false;
-
-                if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) {
-                    auto* lrz = static_cast<LorenzoQuantStage<float, uint16_t>*>(s);
-                    eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
-                    qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
-                    zz = lrz->getZigzagCodes();
-                } else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16) {
-                    auto* lrz = static_cast<LorenzoQuantStage<double, uint16_t>*>(s);
-                    eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
-                    qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
-                    zz = lrz->getZigzagCodes();
-                } else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8) {
-                    auto* lrz = static_cast<LorenzoQuantStage<float, uint8_t>*>(s);
-                    eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
-                    qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
-                    zz = lrz->getZigzagCodes();
-                } else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32) {
-                    auto* lrz = static_cast<LorenzoQuantStage<double, uint32_t>*>(s);
-                    eb = static_cast<float>(lrz->getErrorBound()); ebm = lrz->getErrorBoundMode();
-                    qr = static_cast<int>(lrz->getQuantRadius()); cap = lrz->getOutlierCapacity();
-                    zz = lrz->getZigzagCodes();
-                }
-
-                out << "error_bound = " << static_cast<double>(eb) << "\n";
-                out << "error_bound_mode = \"" << ebModeToString(ebm) << "\"\n";
-                out << "quant_radius = " << static_cast<int64_t>(qr) << "\n";
-                out << "outlier_capacity = " << static_cast<double>(cap) << "\n";
-                out << "zigzag_codes = " << (zz ? "true" : "false") << "\n";
-                break;
-            }
-            case StageType::BITSHUFFLE: {
-                auto* bs = static_cast<BitshuffleStage*>(s);
-                out << "block_size = " << static_cast<int64_t>(bs->getBlockSize()) << "\n";
-                out << "element_width = " << static_cast<int64_t>(bs->getElementWidth()) << "\n";
-                break;
-            }
-            case StageType::RZE: {
-                auto* rze = static_cast<RZEStage*>(s);
-                out << "chunk_size = " << static_cast<int64_t>(rze->getChunkSize()) << "\n";
-                out << "levels = " << static_cast<int64_t>(rze->getLevels()) << "\n";
-                break;
-            }
-            case StageType::RLE: {
-                // DataType is baked into the template; read it from the stage output type
-                out << "data_type = \""
-                    << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0)))
-                    << "\"\n";
-                break;
-            }
-            case StageType::DIFFERENCE: {
-                out << "input_type = \""
-                    << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))
-                    << "\"\n";
-                out << "output_type = \""
-                    << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0)))
-                    << "\"\n";
-                // chunk_size: stored in serialized header bytes 2-5
-                uint8_t buf[8] = {};
-                size_t sz = s->serializeHeader(0, buf, sizeof(buf));
-                if (sz >= 6) {
-                    uint32_t cs = 0;
-                    std::memcpy(&cs, buf + 2, sizeof(uint32_t));
-                    out << "chunk_size = " << static_cast<int64_t>(cs) << "\n";
-                }
-                break;
-            }
-            case StageType::ZIGZAG:
-            case StageType::NEGABINARY: {
-                out << "input_type = \""
-                    << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))
-                    << "\"\n";
-                out << "output_type = \""
-                    << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0)))
-                    << "\"\n";
-                break;
-            }
-            case StageType::BITPACK: {
-                // Read nbits from the serialized header (byte 1).
-                uint8_t buf[10] = {};
-                size_t sz = s->serializeHeader(0, buf, sizeof(buf));
-                DataType dt = (sz >= 1)
-                    ? static_cast<DataType>(buf[0])
-                    : DataType::UINT16;
-                uint8_t nbits = (sz >= 2) ? buf[1] : 16;
-                out << "input_type = \"" << dataTypeToString(dt) << "\"\n";
-                out << "nbits = " << static_cast<int64_t>(nbits) << "\n";
-                break;
-            }
-            case StageType::LORENZO: {
-                // data_type is encoded in getOutputDataType(0)
-                DataType dt = static_cast<DataType>(s->getOutputDataType(0));
-                out << "data_type = \"" << dataTypeToString(dt) << "\"\n";
-                break;
-            }
-            default:
-                break;  // Unknown/unsupported — emit type string only
-        }
+        out << "type = \"" << (entry ? entry->type_name : stageTypeToString(stype)) << "\"\n";
+        if (entry) entry->save_fn(s, out);
 
         // inputs: collect connections that have this stage as dependent
         bool has_inputs = false;

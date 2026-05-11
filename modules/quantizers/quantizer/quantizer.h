@@ -222,6 +222,7 @@ public:
     int            getQuantRadius()       const { return config_.quant_radius; }
     ErrorBoundMode getErrorBoundMode()    const { return config_.eb_mode; }
     float          getValueBase()         const { return config_.precomputed_value_base; }
+    float          getOutlierCapacity()   const { return config_.outlier_capacity; }
     bool           getZigzagCodes()       const { return config_.zigzag_codes; }
     float          getOutlierThreshold()  const { return config_.outlier_threshold; }
     bool           getInplaceOutliers()   const { return config_.inplace_outliers; }

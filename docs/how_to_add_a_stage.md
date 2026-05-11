@@ -25,7 +25,7 @@ there is no casting or type-name branching anywhere in pipeline or DAG code.
 | `include/fzm_format.h` | Add `StageType` enum value |
 | `include/stage/stage_factory.h` | Add reconstruction case in `createStage()` |
 | `CMakeLists.txt` (root) | Add `.cu` to `fzgmod_modules` library target |
-| `src/pipeline/config.cpp` | Add factory case for TOML `loadConfig()` support |
+| `src/pipeline/config.cpp` | Add `#include`, `addXxxStage` + `saveXxxStage` helpers, one `kStageRegistry[]` entry |
 | `src/utils/cli/cli.cpp` | *(Optional)* Add name to `--stages` dynamic builder |
 | `tests/stages/test_<name>.cpp` | Standard test set |
 | `tests/stages/CMakeLists.txt` | Register the test |
@@ -393,15 +393,17 @@ Organize includes alphabetically within each category for consistency.
 ## Step 7 — Register in the TOML config loader
 
 To make your stage constructable from a `.toml` pipeline file via
-`Pipeline::loadConfig()`, add to `src/pipeline/config.cpp`.
+`Pipeline::loadConfig()` / `saveConfig()`, edit `src/pipeline/config.cpp`.
+The file uses a central `kStageRegistry[]` table — there are **no scattered
+`if/else` chains or `switch` blocks to hunt down**:
 
-First include your stage header at the top alongside the other stage headers:
+**1. Add the header include** at the top alongside the other stage includes:
 
 ```cpp
 #include "<category>/<name>/<name>_stage.h"
 ```
 
-Then add a factory helper (follow the pattern of existing helpers in that file):
+**2. Write a load helper** (reads TOML keys, adds stage to the pipeline):
 
 ```cpp
 static Stage* addMyStage(Pipeline& p, const toml::table& t) {
@@ -411,21 +413,26 @@ static Stage* addMyStage(Pipeline& p, const toml::table& t) {
 }
 ```
 
-And add a branch in the stage-construction pass inside `loadConfig()`:
+**3. Write a save helper** (writes TOML keys for `saveConfig()`):
 
 ```cpp
-} else if (type == "MyStage") {
-    s = addMyStage(*this, *t);
+static void saveMyStage(Stage* s, std::ostringstream& out) {
+    auto* ms = static_cast<MyStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(ms->getChunkSize()) << "\n";
+}
 ```
 
-The `type` string must match exactly. Convention: use the class name without the
-`Stage` suffix (e.g. `"Bitshuffle"`, `"RZE"`, `"Quantizer"`).
+**4. Add one entry to `kStageRegistry[]`**:
 
-If your stage is templated, dispatch on `input_type` / `code_type` TOML keys —
-see `addLorenzoQuantStage` or `addQuantizerStage` for the pattern.
+```cpp
+{ "MyStage", StageType::MY_STAGE, addMyStage, saveMyStage },
+```
 
-Also add the corresponding `saveConfig()` serialization case (search for
-`stage->getName()` in `config.cpp` to find the save path).
+That's it. The `type` string (first field) is what appears in TOML files.
+Convention: class name without the `Stage` suffix (e.g. `"Bitshuffle"`, `"RZE"`, `"Quantizer"`).
+
+If your stage is templated, dispatch on `input_type` / `code_type` TOML keys in
+the helpers — see `addLorenzoQuantStage` / `saveLorenzoQuantStage` for the pattern.
 
 ---
 
@@ -494,7 +501,7 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 - [ ] `createStage()` factory case added
 - [ ] `.cu` file added to `fzgmod_modules` in root `CMakeLists.txt`
 - [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
-- [ ] `config.cpp` — factory helper + `loadConfig()` branch + `saveConfig()` case
+- [ ] `config.cpp` — `#include` header, `addXxxStage` / `saveXxxStage` helpers, one entry in `kStageRegistry[]`
 - [ ] `cli.cpp` — `--stages` name + help text *(if applicable)*
 - [ ] Tests: ForwardRoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState
 - [ ] `saveState`/`restoreState` implemented if `deserializeHeader` overwrites forward-pass config
