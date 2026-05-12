@@ -151,8 +151,8 @@ decompressed = comp.decode(compressed, out)
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `pressio:abs` | float | 1e-3 | Absolute error bound |
-| `pressio:rel` | float | 1e-3 | Relative error bound (when `error_bound_mode="rel"`) |
+| `pressio:abs` | double | 1e-3 | Absolute error bound |
+| `pressio:rel` | double | 1e-3 | Relative error bound (corresponds to noa to fzgpumodules) |
 | `fzgpumodules:error_bound_mode` | str | `"abs"` | `"abs"`, `"rel"`, or `"noa"` |
 | `fzgpumodules:stages` | list[str] | `["lorenzo:float:uint16", "diff:uint16"]` | Ordered stage tokens |
 | `fzgpumodules:connections` | list[str] | `["s1 <- s0:codes"]` | Stage wiring strings |
@@ -166,11 +166,13 @@ decompressed = comp.decode(compressed, out)
 
 ### Error bound modes
 
-| Mode | Meaning |
-|------|---------|
-| `abs` | `\|original - reconstructed\| <= pressio:abs` |
-| `rel` | `\|error\| <= pressio:rel * value_range` |
-| `noa` | Normalized absolute — bound relative to a scanned value range |
+| Value | Meaning |
+|-------|---------|
+| `ABS` | Absolute error — `abs(x_orig - x_recon) ≤ eb` |
+| `REL` | Global approximate point-wise relative — `abs(error) / abs(x_orig) ≤ eb` (approximately) |
+| `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute) | 
+
+Note: `pressio:rel` is interpreted as NOA for the plugin, as it follows more semantically distinct definitions of relative error. See [Fast and Effective Lossy Compression on GPUs  and CPUs with Guaranteed Error Bounds](https://doi.org/10.1109/IPDPS64566.2025.00083) for details on the error bound definitions and their implications for compression.
 
 ### Connections format
 
@@ -192,7 +194,7 @@ automatically.
 Each entry in `fzgpumodules:stages` is a token of the form `<kind>[:<type>[:<type2>]]`.
 Per-stage parameters use the key `fzgpumodules:<sid>:<param>` where `<sid>` is `s0`, `s1`, etc.
 
-### `lorenzo` — Lorenzo predictor + quantizer
+### Lorenzo Predictor + Quantizer
 
 **Quantizing variants** (lossy, float/double input):
 
@@ -220,7 +222,7 @@ Per-stage options (prefix `fzgpumodules:sN:`):
 
 Typically followed by `zigzag:intN` + `bitpack:uintN`.
 
-### `quantizer` — standalone quantizer
+### Standalone Quantizer
 
 ```python
 "quantizer:float:uint16", "quantizer:float:uint32"
@@ -231,10 +233,10 @@ All Lorenzo options above, plus:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `outlier_threshold` | float | inf | `\|x\| >= threshold` stored losslessly |
+| `outlier_threshold` | float | inf | `abs(x) >= threshold` stored losslessly |
 | `inplace_outliers` | bool | False | Inline outliers in code array (requires `zigzag_codes=True` and `quantizer:float:uint32`) |
 
-### `diff` — difference stage
+### Difference Stage
 
 ```python
 # Single-type:
@@ -247,7 +249,7 @@ All Lorenzo options above, plus:
 
 Note: `diff:int8` and `diff:int16` (same-type signed) are not available in the v2.0 library.
 
-### `zigzag` and `negabinary` — transforms
+### Zigzag and Negabinary Transforms
 
 ```python
 "zigzag:int8", "zigzag:int16", "zigzag:int32", "zigzag:int64"     # signed → unsigned
@@ -256,7 +258,7 @@ Note: `diff:int8` and `diff:int16` (same-type signed) are not available in the v
 
 No per-stage options.
 
-### `rle` — run-length encoding
+### Run-Length Encoding (RLE)
 
 ```python
 "rle:uint8", "rle:uint16", "rle:uint32", "rle:int32"
@@ -264,7 +266,7 @@ No per-stage options.
 
 No per-stage options.
 
-### `bitpack` — bit packing
+### Bitpacking
 
 ```python
 "bitpack:uint8", "bitpack:uint16", "bitpack:uint32"
@@ -276,7 +278,7 @@ No per-stage options.
 
 Valid `nbits` values: `uint8` → 1/2/4/8; `uint16` → 1/2/4/8/16; `uint32` → 1/2/4/8/16/32.
 
-### `bitshuffle` — bit-matrix transpose
+### Bitshuffle
 
 ```python
 "fzgpumodules:stages": ["bitshuffle"]
@@ -289,7 +291,7 @@ Valid `nbits` values: `uint8` → 1/2/4/8; `uint16` → 1/2/4/8/16; `uint32` →
 
 `element_width` must match the actual dtype of the incoming data (e.g. 2 for uint16, 4 for float32).
 
-### `rze` — run-zero encoding
+### Repeated Zero Elimination (RZE)
 
 ```python
 "fzgpumodules:stages": ["rze"]
@@ -574,8 +576,7 @@ inputs = [{ from = "lorenzo", port = "codes" }]
 
 See [config_file.md](config_file.md) for the full TOML format reference and stage type names.
 
-> Per-stage outlier count metrics (`fzgpumodules:sN:outlier_count`) are not available in
-> config-file mode.
+Per-stage outlier count metrics (`fzgpumodules:sN:outlier_count`) are not available in config-file mode.
 
 ---
 
@@ -595,11 +596,3 @@ Common causes:
 - `inplace_outliers=True` with a stage other than `quantizer:float:uint32`.
 - `graph_mode=True` combined with the `rze` stage.
 - Input dtype does not match what the first pipeline stage expects.
-
----
-
-## Extending the Plugin
-
-To add a new stage to the plugin, see [Adding a New Stage to the LibPressio Plugin](../memory/references/AddingAStage.md).
-The stage-registry pattern means only three things change: a new `stage_<name>.h` header, one
-`#include` in `fzgpumodules.cc`, and one `push_back` in `make_stage_kinds()`.
