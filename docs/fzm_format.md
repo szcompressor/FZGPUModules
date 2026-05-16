@@ -135,7 +135,7 @@ position within the payload.
 | 3  | `SCALE`        | `ScaleStage` (test utility) |
 | 4  | `PASSTHROUGH`  | `PassThroughStage` (test utility) |
 | 5  | `RLE`          | `RLEStage` — run-length encoding |
-| 6  | `HUFFMAN`      | Reserved for future use |
+| 6  | `HUFFMAN`      | `HuffmanStage` — GPU Huffman entropy coding (PHF) |
 | 7  | `BITPACK`      | `BitpackStage` — dense N-bit integer packing |
 | 10 | `SPLIT`        | `SplitStage` (test utility) |
 | 11 | `MERGE`        | `MergeStage` (test utility) |

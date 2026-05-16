@@ -265,6 +265,31 @@ bytes -- smaller than the input when nbits < 8*sizeof(T). nbits must be a power 
 | input_type | string | "uint16" | Element type of the input codes. One of "uint8", "uint16", "uint32". |
 | nbits | integer | 16 | Bits per element. Must be a power of two: 1, 2, 4, 8 for uint8; 1-16 for uint16; 1-32 for uint32. |
 
+### Huffman
+
+GPU Huffman entropy coding (PHF coarse-grained). Encodes a flat symbol stream
+into a variable-length bitstream with an embedded self-describing header.
+
+> [!NOTE]
+> All input symbols must be in `[0, bklen)`. When pairing with Lorenzo/Quantizer
+> using `zigzag_codes=true`, set `bklen = 2 * quant_radius` to cover the exact
+> symbol range without over-allocating the codebook.
+> HuffmanStage is not CUDA Graph compatible (two D2H syncs per forward call).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| input_type | string | "uint16" | Symbol element type. One of "uint8", "uint16", "uint32". |
+| bklen | integer | 256 (uint8) / 1024 (uint16, uint32) | Codebook length. Must cover all symbols: all inputs must be in `[0, bklen)`. |
+
+```toml
+[[stage]]
+name       = "huf"
+type       = "Huffman"
+input_type = "uint16"
+bklen      = 1024
+inputs     = [{from = "lrz", port = "codes"}]
+```
+
 ---
 
 ## Complete Examples
@@ -371,11 +396,11 @@ fzgmod-cli -b -c examples/presets/pfpl.toml -i data.f32
 - No post-load parameter editing. Because loadConfig() calls finalize()
   internally, stages are immutable after loading. Change parameters by editing
   the .toml file.
-- Supported stage types only. The factory handles the 10 types listed above
+- Supported stage types only. The factory handles the types listed above
   (Lorenzo1D/2D/3D, Quantizer, Bitshuffle, RZE, RLE, Difference, Zigzag,
-  Negabinary). Custom stages written outside the library require a manual
-  addStage() / connect() / finalize() call chain (or a PR to add the type to
-  the dispatch table in config.cpp).
+  Negabinary, Bitpack, Huffman). Custom stages written outside the library
+  require a manual addStage() / connect() / finalize() call chain (or a PR
+  to add the type to the dispatch table in config.cpp).
 - Single-source pipelines only. The [pipeline] table has one input_size and
   one dims triple. Multi-source pipelines are not currently representable in
   the config format and must be constructed manually.

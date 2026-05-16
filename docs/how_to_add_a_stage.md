@@ -237,15 +237,23 @@ void* scratch = pool->allocate(scratch_bytes, stream, "my_scratch", /*persistent
 
 ### CUDA Graph compatibility
 
-If `execute()` reads any data back from the device to the host (D2H copy) to make
-a branch decision, override:
+Override `isGraphCompatible()` to return `false` if `execute()` contains any of:
+- `cudaStreamSynchronize()` on its own stream
+- Blocking D2H copies (`cudaMemcpy` with `DeviceToHost`)
+- CPU decisions based on device data
 
 ```cpp
 bool isGraphCompatible() const override { return false; }
 ```
 
-If you need a D2H transfer only after the whole pipeline finishes, use
-`postStreamSync()` instead — the stream is idle there and graph capture is unaffected.
+If you need a D2H transfer only *after* the whole pipeline finishes, use
+`postStreamSync()` instead — the stream is idle there and graph capture is
+unaffected.
+
+Stages that sync mid-execute are valid and supported. The pattern is used by
+`HuffmanStage` (histogram D2H for codebook build + partition metadata D2H)
+and any future ANS/arithmetic coder that needs CPU-side renormalization. Document
+the sync points and return `false` from `isGraphCompatible()`.
 
 ### Input alignment
 
@@ -300,8 +308,21 @@ void MyStage::execute(cudaStream_t stream, MemoryPool* pool,
 } // namespace fz
 ```
 
-**Do not call `cudaDeviceSynchronize()` inside `execute()`** — the pipeline manages
-stream ordering through CUDA events. All work must be enqueued on `stream`.
+**Enqueue all GPU work on `stream`** — the pipeline manages inter-stage ordering
+through CUDA events. Do not call `cudaDeviceSynchronize()` or synchronize a
+*different* stream inside `execute()`.
+
+**Calling `cudaStreamSynchronize(stream)` on your own stream is permitted**
+when the algorithm inherently requires it (e.g. reading a GPU histogram to the
+host to build a CPU-side codebook, as in Huffman or ANS). When you do this:
+
+- Override `isGraphCompatible()` to return `false` — CUDA Graph capture records
+  a snapshot of the command stream; a mid-execute sync prevents capture.
+- Document the sync points in your class header and in `docs/stages/<name>.md`.
+- Be aware that the DAG dispatches nodes within a level sequentially on the CPU.
+  A sync inside your `execute()` blocks the CPU from dispatching sibling nodes
+  (stages at the same DAG level) until your stream is idle. In a linear chain
+  this has no impact; in a wide DAG it delays parallel branches.
 
 ### Shared output locations
 
@@ -495,7 +516,7 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 ## Checklist
 
 - [ ] `<name>_stage.h` — all required overrides implemented
-- [ ] `<name>_stage.cu` — `execute()` enqueues on `stream`, never calls `cudaDeviceSynchronize()`
+- [ ] `<name>_stage.cu` — `execute()` enqueues on `stream`; if it calls `cudaStreamSynchronize(stream)`, `isGraphCompatible()` returns `false` and sync points are documented
 - [ ] `StageType` enum value added (unique integer, never reuse old values)
 - [ ] `stageTypeToString()` case added
 - [ ] `createStage()` factory case added

@@ -534,6 +534,7 @@ private:
     // finalize() sub-steps
     void typeCheckConnections();
     void computeInputAlignment();
+    void notifyStagesFinalizeHooks();
     void refinePoolSize();
     void setupGraphModeInput();
     void preallocatePadBuffer();

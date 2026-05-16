@@ -26,6 +26,22 @@ struct AllocationInfo {
         : ptr(p), size(s), tag(t), in_use(true) {}
 };
 
+/**
+ * Metadata for a persistent (non-stream-ordered) allocation.
+ *
+ * Unlike stream-ordered I/O buffers, persistent allocations survive the
+ * full pipeline lifetime (device memory via `cudaMalloc`, pinned host
+ * memory via `cudaMallocHost`).  They are freed explicitly via
+ * `freePersistentDevice`/`freePersistentPinned` or in bulk by the pool
+ * destructor.
+ */
+struct PersistentAllocInfo {
+    void*       ptr;
+    size_t      bytes;
+    std::string tag;
+    bool        is_pinned; ///< true = cudaMallocHost; false = cudaMalloc
+};
+
 /** Construction parameters for MemoryPool. */
 struct MemoryPoolConfig {
     size_t input_data_size;      ///< Input byte count used to size the pool.
@@ -71,7 +87,7 @@ public:
     MemoryPool(const MemoryPool&)            = delete;
     MemoryPool& operator=(const MemoryPool&) = delete;
 
-    // ── Allocation ────────────────────────────────────────────────────────────
+    // ── Stream-ordered allocation (I/O buffers) ───────────────────────────────
 
     /**
      * Allocate `size` bytes from the pool on `stream`.
@@ -88,6 +104,39 @@ public:
 
     /** Free `ptr` back to the pool, ordered on `stream`. */
     void free(void* ptr, cudaStream_t stream);
+
+    // ── Persistent allocation (stage-internal scratch) ────────────────────────
+
+    /**
+     * Allocate `bytes` bytes of persistent device memory via `cudaMalloc`.
+     *
+     * Use for stage-internal buffers that live for the stage's lifetime:
+     * codebooks, histograms, partition metadata.  Not stream-ordered;
+     * not subject to MINIMAL/PREALLOCATE policy; safe across CUDA Graph
+     * captures (stable device address).
+     *
+     * Freed explicitly via `freePersistentDevice()` or in bulk by the
+     * pool destructor.  Tracked for `getPersistentDeviceBytes()` reporting.
+     */
+    void* allocatePersistentDevice(size_t bytes, const std::string& tag = "");
+
+    /**
+     * Allocate `bytes` bytes of persistent pinned host memory via `cudaMallocHost`.
+     *
+     * Use for host-side stage buffers that participate in async D2H/H2D
+     * transfers (codebook tables, partition metadata arrays).  Pinned memory
+     * enables DMA without staging and is required for reliable async transfers.
+     *
+     * Freed explicitly via `freePersistentPinned()` or in bulk by the
+     * pool destructor.  Tracked for `getPersistentPinnedBytes()` reporting.
+     */
+    void* allocatePersistentPinned(size_t bytes, const std::string& tag = "");
+
+    /** Return a previously persistent-device allocation to the pool. */
+    void freePersistentDevice(void* ptr);
+
+    /** Return a previously persistent-pinned allocation to the pool. */
+    void freePersistentPinned(void* ptr);
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -111,6 +160,12 @@ public:
     void synchronize(cudaStream_t stream);
 
     // ── Stats & debug ─────────────────────────────────────────────────────────
+
+    /** Bytes currently held in persistent device allocations. */
+    size_t getPersistentDeviceBytes() const { return persistent_device_bytes_; }
+
+    /** Bytes currently held in persistent pinned-host allocations. */
+    size_t getPersistentPinnedBytes() const { return persistent_pinned_bytes_; }
 
     /** Current live bytes (queries `cudaMemPoolAttrUsedMemCurrent`). */
     size_t getCurrentUsage() const {
@@ -153,6 +208,11 @@ private:
 
     std::unordered_map<void*, AllocationInfo> allocations_;
     std::unordered_map<void*, AllocationInfo> graph_allocations_; ///< Persistent for graph replay.
+
+    // Persistent allocations (device + pinned host) — freed individually or in destructor.
+    std::vector<PersistentAllocInfo> persistent_allocs_;
+    size_t persistent_device_bytes_ = 0;
+    size_t persistent_pinned_bytes_ = 0;
 
     size_t total_allocations_;
     size_t total_frees_;

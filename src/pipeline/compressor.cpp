@@ -185,6 +185,7 @@ void Pipeline::finalize() {
 
     computeInputAlignment();   // must run before propagateBufferSizes
     propagateBufferSizes();
+    notifyStagesFinalizeHooks();  // let stages pre-allocate using propagated sizes
     refinePoolSize();
 
     if (strategy_ == MemoryStrategy::PREALLOCATE)
@@ -676,6 +677,23 @@ void Pipeline::propagateBufferSizes(bool force_from_current_inputs) {
     } else {
         FZ_LOG(DEBUG, "Buffer sizes estimated from input hint (%.2f MB)",
                input_size_hint_ / (1024.0 * 1024.0));
+    }
+}
+
+void Pipeline::notifyStagesFinalizeHooks() {
+    // Call Stage::onFinalize for each stage with its estimated input size (bytes)
+    // so stages with complex internal memory (e.g. HuffmanStage) can pre-allocate
+    // their persistent scratch from the pool rather than lazily via cudaMalloc.
+    // This makes PREALLOCATE mode semantically correct and makes pool-bypass
+    // allocations visible to pool footprint reporting.
+    MemoryPool* pool = mem_pool_.get();
+    for (const auto& level_nodes : dag_->getLevels()) {
+        for (auto* node : level_nodes) {
+            size_t estimated_inlen = 0;
+            if (!node->input_buffer_ids.empty())
+                estimated_inlen = dag_->getBufferSize(node->input_buffer_ids[0]);
+            node->stage->onFinalize(estimated_inlen, pool);
+        }
     }
 }
 

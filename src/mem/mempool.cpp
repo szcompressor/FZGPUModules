@@ -79,6 +79,17 @@ MemoryPool::~MemoryPool() {
         }
         graph_allocations_.clear();
     }
+
+    // Free any persistent allocations not already returned by their owners.
+    // Normal teardown: stages are destroyed before the pool (declared later in
+    // Pipeline), so Buf<T>::~Buf() has already called freePersistent* for each
+    // pointer and this loop is a no-op.  For abnormal teardown (standalone
+    // stage tests, pool outliving stages) this acts as a safety net.
+    for (auto& a : persistent_allocs_) {
+        if (a.is_pinned) cudaFreeHost(a.ptr);
+        else             cudaFree(a.ptr);
+    }
+    persistent_allocs_.clear();
 }
 
 void MemoryPool::initializeMemPool() {
@@ -222,6 +233,66 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
     }
 
     FZ_LOG(WARN, "MemoryPool::free - pointer not found in allocations");
+}
+
+void* MemoryPool::allocatePersistentDevice(size_t bytes, const std::string& tag)
+{
+    if (bytes == 0) return nullptr;
+    void* ptr = nullptr;
+    cudaError_t err = cudaMalloc(&ptr, bytes);
+    if (err != cudaSuccess) {
+        FZ_LOG(WARN, "MemoryPool::allocatePersistentDevice failed for %zu bytes (tag: %s): %s",
+               bytes, tag.c_str(), cudaGetErrorString(err));
+        return nullptr;
+    }
+    persistent_allocs_.push_back({ptr, bytes, tag, /*is_pinned=*/false});
+    persistent_device_bytes_ += bytes;
+    FZ_LOG(TRACE, "allocatePersistentDevice %zu bytes (tag: %s) → %p", bytes, tag.c_str(), ptr);
+    return ptr;
+}
+
+void* MemoryPool::allocatePersistentPinned(size_t bytes, const std::string& tag)
+{
+    if (bytes == 0) return nullptr;
+    void* ptr = nullptr;
+    cudaError_t err = cudaMallocHost(&ptr, bytes);
+    if (err != cudaSuccess) {
+        FZ_LOG(WARN, "MemoryPool::allocatePersistentPinned failed for %zu bytes (tag: %s): %s",
+               bytes, tag.c_str(), cudaGetErrorString(err));
+        return nullptr;
+    }
+    persistent_allocs_.push_back({ptr, bytes, tag, /*is_pinned=*/true});
+    persistent_pinned_bytes_ += bytes;
+    FZ_LOG(TRACE, "allocatePersistentPinned %zu bytes (tag: %s) → %p", bytes, tag.c_str(), ptr);
+    return ptr;
+}
+
+void MemoryPool::freePersistentDevice(void* ptr)
+{
+    if (!ptr) return;
+    auto it = std::find_if(persistent_allocs_.begin(), persistent_allocs_.end(),
+        [ptr](const PersistentAllocInfo& a){ return a.ptr == ptr && !a.is_pinned; });
+    if (it == persistent_allocs_.end()) {
+        FZ_LOG(WARN, "MemoryPool::freePersistentDevice - pointer %p not tracked", ptr);
+        return;
+    }
+    persistent_device_bytes_ -= it->bytes;
+    persistent_allocs_.erase(it);
+    cudaFree(ptr);
+}
+
+void MemoryPool::freePersistentPinned(void* ptr)
+{
+    if (!ptr) return;
+    auto it = std::find_if(persistent_allocs_.begin(), persistent_allocs_.end(),
+        [ptr](const PersistentAllocInfo& a){ return a.ptr == ptr && a.is_pinned; });
+    if (it == persistent_allocs_.end()) {
+        FZ_LOG(WARN, "MemoryPool::freePersistentPinned - pointer %p not tracked", ptr);
+        return;
+    }
+    persistent_pinned_bytes_ -= it->bytes;
+    persistent_allocs_.erase(it);
+    cudaFreeHost(ptr);
 }
 
 void MemoryPool::reset(cudaStream_t stream) {

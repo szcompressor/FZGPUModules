@@ -39,6 +39,7 @@
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
+#include "coders/huffman/huffman_stage.h"
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
 
@@ -321,6 +322,26 @@ static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
     return rze;
 }
 
+static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
+    uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
+    if (dt == DataType::UINT8) {
+        auto* s = p.addStage<HuffmanStage<uint8_t>>();
+        s->setBklen(bklen);
+        return s;
+    } else if (dt == DataType::UINT16) {
+        auto* s = p.addStage<HuffmanStage<uint16_t>>();
+        s->setBklen(bklen);
+        return s;
+    } else if (dt == DataType::UINT32) {
+        auto* s = p.addStage<HuffmanStage<uint32_t>>();
+        s->setBklen(bklen);
+        return s;
+    }
+    throw std::runtime_error("loadConfig: unsupported Huffman input_type \""
+        + optStr(t, "input_type", "uint16") + "\"");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Stage serialization helpers (save direction)
 // Each saveXxxStage mirrors its addXxxStage counterpart.
@@ -455,6 +476,16 @@ static void saveBitpackStage(Stage* s, std::ostringstream& out) {
     out << "nbits = "        << static_cast<int64_t>(nbits) << "\n";
 }
 
+static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[16] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    DataType dt  = (sz >= 1) ? static_cast<DataType>(buf[0]) : DataType::UINT16;
+    uint16_t bklen = 1024;
+    if (sz >= 3) std::memcpy(&bklen, buf + 1, sizeof(uint16_t));
+    out << "input_type = \"" << dataTypeToString(dt)          << "\"\n";
+    out << "bklen = "        << static_cast<int64_t>(bklen)   << "\n";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Stage registry
 //
@@ -483,6 +514,7 @@ static const StageEntry kStageRegistry[] = {
     { "Zigzag",       StageType::ZIGZAG,       addZigzagStage,       saveZigzagStage       },
     { "Negabinary",   StageType::NEGABINARY,   addNegabinaryStage,   saveNegabinaryStage   },
     { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage      },
+    { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage      },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

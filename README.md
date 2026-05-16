@@ -90,6 +90,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
+| `HuffmanStage<T>` | GPU Huffman entropy coding (PHF) |
 
 ---
 

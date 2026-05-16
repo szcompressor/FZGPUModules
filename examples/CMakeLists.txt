@@ -53,3 +53,9 @@ add_executable(debug_logging debug_logging.cpp)
 target_link_libraries(debug_logging PRIVATE fzgmod)
 set_target_properties(debug_logging PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── Lorenzo mode comparison: raw-delta vs zigzag code distributions ───────────
+add_executable(compare_lorenzo_modes compare_lorenzo_modes.cpp)
+target_link_libraries(compare_lorenzo_modes PRIVATE fzgmod)
+set_target_properties(compare_lorenzo_modes PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

@@ -31,7 +31,20 @@ class Stage {
 public:
     virtual ~Stage() = default;
 
-    /** Execute the stage. Inputs, outputs, and sizes are device pointers/bytes. */
+    /**
+     * Execute the stage. Inputs, outputs, and sizes are device pointers/bytes.
+     *
+     * Stages may call cudaStreamSynchronize(stream) or issue blocking D2H copies
+     * when the algorithm requires it (e.g. Huffman histogram readback for codebook
+     * construction, ANS renormalization tables).  Such stages must return false from
+     * isGraphCompatible() and must document the sync points.
+     *
+     * Note: the DAG dispatches sibling nodes (same topological level) via a
+     * sequential CPU loop, each enqueuing to its own stream.  A sync inside
+     * execute() blocks the CPU from dispatching subsequent siblings until the
+     * synced stream is idle — this delays parallel branches in wide DAGs.
+     * In a linear pipeline there are no siblings and no extra cost.
+     */
     virtual void execute(
         cudaStream_t stream,
         MemoryPool* pool,
@@ -152,6 +165,39 @@ public:
      * @param dims  {x, y, z} extents (z==1 → 2-D; y==z==1 → 1-D)
      */
     virtual void setDims(const std::array<size_t, 3>& dims) { (void)dims; }
+
+    /**
+     * Called once by Pipeline::finalize() after buffer-size propagation,
+     * with this stage's estimated input size (bytes) and the pipeline pool.
+     *
+     * Implement this to pre-allocate persistent stage-internal scratch (e.g.
+     * Huffman codebook/histogram buffers) via `pool->allocatePersistentDevice`
+     * and `pool->allocatePersistentPinned` rather than via `cudaMalloc` directly.
+     * Pre-allocating here makes PREALLOCATE mode semantically correct
+     * (all memory committed at finalize time) and makes the stage footprint
+     * visible via `pool->getPersistentDeviceBytes()` / `getPersistentPinnedBytes()`.
+     *
+     * Stages that also allow lazy allocation (e.g. for capacity-growth realloc in
+     * execute()) should check whether `pool` was already used to allocate here and
+     * skip the lazy path if so.
+     *
+     * Default: no-op.
+     */
+    virtual void onFinalize(size_t /*estimated_inlen*/, MemoryPool* /*pool*/) {}
+
+    /**
+     * Estimated persistent device memory this stage allocates outside the pool
+     * (via `pool->allocatePersistentDevice`).  Used for total footprint reporting.
+     * Default: 0.
+     */
+    virtual size_t estimateDeviceFootprintBytes(size_t /*inlen*/) const { return 0; }
+
+    /**
+     * Estimated persistent pinned-host memory this stage allocates outside the pool
+     * (via `pool->allocatePersistentPinned`).  Used for total footprint reporting.
+     * Default: 0.
+     */
+    virtual size_t estimatePinnedFootprintBytes(size_t /*inlen*/) const { return 0; }
 
     /**
      * Called after dag->execute() and stream sync, before compress() returns.

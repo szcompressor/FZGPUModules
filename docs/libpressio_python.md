@@ -304,6 +304,19 @@ Valid `nbits` values: `uint8` → 1/2/4/8; `uint16` → 1/2/4/8/16; `uint32` →
 
 Incompatible with `graph_mode=True`.
 
+### Huffman Entropy Coding
+
+```python
+"huffman:uint8", "huffman:uint16", "huffman:uint32"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `bklen` | int | 256 (uint8) / 1024 (uint16, uint32) | Codebook length; all input symbols must be in `[0, bklen)` |
+
+When following a Lorenzo/Quantizer stage with `zigzag_codes=True` and radius `r`, set `bklen = 2 * r`.
+Incompatible with `graph_mode=True` (two D2H syncs per forward call).
+
 ---
 
 ## Metrics

@@ -467,12 +467,22 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         } else if (name == "rle") {
             auto* rle = pipeline->addStage<RLEStage<uint16_t>>();
             connect_next(rle);
+        } else if (name == "huffman" || name == "huf") {
+            // When following a predictor with zigzag_codes=true, codes are in [0, 2*radius-2];
+            // set bklen=2*quant_radius to cover the full symbol range exactly.
+            // When not following a predictor, fall back to 1024; use TOML for custom bklen.
+            const uint32_t bklen = last_is_codes_port
+                ? static_cast<uint32_t>(2 * s.quant_radius)
+                : 1024u;
+            auto* huf = pipeline->addStage<HuffmanStage<uint16_t>>();
+            huf->setBklen(bklen);
+            connect_next(huf);
         } else if (name == "none") {
             // explicit no-op
         } else {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
-                "Supported: lorenzo, quantizer, bitshuffle, rze, diff, rle");
+                "Supported: lorenzo, quantizer, bitshuffle, rze, diff, rle, huffman");
         }
     }
 
@@ -503,7 +513,7 @@ static void print_root_usage(const char* argv0) {
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
-        << "                                                      rze, diff, rle\n"
+        << "                                                      rze, diff, rle, huffman\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

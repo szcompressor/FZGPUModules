@@ -1,0 +1,48 @@
+[pipeline]
+# Lorenzo-Quant → Huffman  (cuSZ-style)
+#
+# Fused Lorenzo predictor + quantizer followed by Huffman entropy coding.
+# Faithfully reproduces the cuSZ compression pipeline.
+#
+# Symbol range constraint
+# ─────────────────────────────────────────────────────────────────────────────
+# HuffmanStage requires all input symbols in [0, bklen).  There are two ways to
+# satisfy this when pairing with LorenzoQuantStage:
+#
+#   MODE A — zigzag_codes = true  (recommended, default here)
+#     Zigzag maps signed residuals to non-negative codes:
+#       delta=0 → 0, delta=+k → 2k, delta=-k → 2k-1
+#     For quant_radius=512, codes land in [0, 1022] ⊂ [0, bklen=1024).
+#     Set bklen = 2 * quant_radius (= 1024 for radius=512).
+#
+#   MODE B — zigzag_codes = false (raw two's-complement, larger codebook)
+#     Codes are signed residuals cast to uint16; positive deltas map to
+#     [0..radius-1] and negative deltas wrap to [65536-radius+1..65535].
+#     The codes are NOT contiguous — you must set bklen = 65536 to cover
+#     the full uint16 range regardless of quant_radius.
+#     To use MODE B, change the two lines below:
+#       zigzag_codes = false
+#       bklen        = 65536
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/cusz.toml \
+#              -i data/field.f32 -l 100x500x500 -b --report
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "lrz"
+type = "LorenzoQuant"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 1e-4
+error_bound_mode = "NOA"
+quant_radius = 512
+outlier_capacity = 0.2
+zigzag_codes = true
+
+[[stage]]
+name = "huf"
+type = "Huffman"
+input_type = "uint16"
+bklen = 1024
+inputs = [{from = "lrz", port = "codes"}]

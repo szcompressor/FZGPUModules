@@ -93,7 +93,7 @@ Example Output:
 | -i <file> | Input file |
 | -o <file> | Output file |
 | -c <file.toml> | Load pipeline from TOML config |
-| --stages <s1->s2->...> | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze, diff, rle) |
+| --stages <s1->s2->...> | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze, diff, rle, huffman) |
 | -t <f32\|f64> | Data type (default: f32) |
 | -m <rel\|abs\|noa> | Error bound mode (default: rel) |
 | -e <val> | Error bound value (default: 1e-3) |

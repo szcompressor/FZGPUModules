@@ -97,6 +97,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | `ZigzagStage<TIn, TOut>`           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | `NegabinaryStage<TIn, TOut>`       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
 | `BitpackStage<T>`                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
+| `HuffmanStage<T>`                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF)               |
 
 ### Memory Strategies
 

@@ -222,6 +222,17 @@ target_link_libraries(fzgmod_mem
   fzgmod_compile_settings
 )
 
+#### Internal Utilities (shared helpers not part of the public API)
+add_library(fzgmod_utils STATIC
+  modules/util/histogram/histogram.cu
+)
+set_target_properties(fzgmod_utils PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(fzgmod_utils
+  PUBLIC
+    fzgmod_compile_settings
+)
+add_library(FZGMOD::utils ALIAS fzgmod_utils)
+
 #### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
 add_library(fzgmod_modules
   modules/predictors/diff/diff.cu
@@ -235,11 +246,22 @@ add_library(fzgmod_modules
   modules/shufflers/bitshuffle/bitshuffle_stage.cu
   modules/fused/lorenzo_quant/lorenzo_quant.cu
   modules/fused/lorenzo_quant/lorenzo_quant_nd.cu
+  # Huffman (PHF CPU layer + GPU kernels + stage wrapper)
+  modules/coders/huffman/phf/hf_buf.cc
+  modules/coders/huffman/phf/hf_hl.cc
+  modules/coders/huffman/phf/hf_bk.cc
+  modules/coders/huffman/phf/hf_bk_impl1.cc
+  modules/coders/huffman/phf/hf_bk_internal.cc
+  modules/coders/huffman/phf/hf_canon.cc
+  modules/coders/huffman/phf/hf_kernels.cu
+  modules/coders/huffman/huffman_stage.cu
 )
 target_link_libraries(fzgmod_modules
   PUBLIC
-  fzgmod_compile_settings
-  CUDA::cudart
+    fzgmod_compile_settings
+    CUDA::cudart
+  PRIVATE
+    fzgmod_utils
 )
 add_library(FZGMOD::modules ALIAS fzgmod_modules)
 

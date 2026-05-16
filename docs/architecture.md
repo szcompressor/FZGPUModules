@@ -133,6 +133,16 @@ Two strategies control when allocations happen:
 buffers have non-overlapping lifetimes and assigns them to the same backing memory,
 reducing total allocation footprint without affecting correctness.
 
+**Persistent allocations** are a second tier for stage-internal scratch that must
+live for the stage's full lifetime — codebook tables, histogram buffers, partition
+metadata.  These are allocated via `pool->allocatePersistentDevice()` (backed by
+`cudaMalloc`) and `pool->allocatePersistentPinned()` (backed by `cudaMallocHost`),
+and freed when the stage's internal buffer is destroyed or when the pool is torn
+down.  They are not stream-ordered, not subject to MINIMAL/PREALLOCATE policy, and
+not eligible for buffer coloring — but they are tracked for footprint reporting via
+`pool->getPersistentDeviceBytes()` / `getPersistentPinnedBytes()`.  Stages that
+use this path implement `Stage::onFinalize()` to pre-allocate at finalize time.
+
 ---
 
 ## Execution Flow

@@ -118,3 +118,11 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+# ─── Huffman stage ────────────────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_huffman
+    SOURCES test_huffman.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
