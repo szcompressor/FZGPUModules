@@ -92,6 +92,16 @@ static std::string tomlEscape(const std::string& s) {
     return out;
 }
 
+static HuffmanEncodeMode huffmanModeFromString(const std::string& s) {
+    if (s == "Fine")   return HuffmanEncodeMode::Fine;
+    if (s == "Coarse") return HuffmanEncodeMode::Coarse;
+    throw std::runtime_error("loadConfig: unknown Huffman encode_mode \"" + s + "\"");
+}
+
+static const char* huffmanModeToString(HuffmanEncodeMode m) {
+    return m == HuffmanEncodeMode::Fine ? "Fine" : "Coarse";
+}
+
 static DataType dataTypeFromString(const std::string& s) {
     if (s == "float32") return DataType::FLOAT32;
     if (s == "float64") return DataType::FLOAT64;
@@ -325,19 +335,17 @@ static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
 static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
-    if (dt == DataType::UINT8) {
-        auto* s = p.addStage<HuffmanStage<uint8_t>>();
+    HuffmanEncodeMode mode = huffmanModeFromString(optStr(t, "encode_mode", "Coarse"));
+
+    auto configure = [&](auto* s) -> Stage* {
         s->setBklen(bklen);
+        s->setEncodeMode(mode);
         return s;
-    } else if (dt == DataType::UINT16) {
-        auto* s = p.addStage<HuffmanStage<uint16_t>>();
-        s->setBklen(bklen);
-        return s;
-    } else if (dt == DataType::UINT32) {
-        auto* s = p.addStage<HuffmanStage<uint32_t>>();
-        s->setBklen(bklen);
-        return s;
-    }
+    };
+
+    if (dt == DataType::UINT8)   return configure(p.addStage<HuffmanStage<uint8_t>>());
+    if (dt == DataType::UINT16)  return configure(p.addStage<HuffmanStage<uint16_t>>());
+    if (dt == DataType::UINT32)  return configure(p.addStage<HuffmanStage<uint32_t>>());
     throw std::runtime_error("loadConfig: unsupported Huffman input_type \""
         + optStr(t, "input_type", "uint16") + "\"");
 }
@@ -484,6 +492,14 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     if (sz >= 3) std::memcpy(&bklen, buf + 1, sizeof(uint16_t));
     out << "input_type = \"" << dataTypeToString(dt)          << "\"\n";
     out << "bklen = "        << static_cast<int64_t>(bklen)   << "\n";
+
+    // Emit encode_mode only when non-default so existing configs stay minimal.
+    HuffmanEncodeMode mode = HuffmanEncodeMode::Coarse;
+    if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  mode = hs->getEncodeMode();
+    else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) mode = hs->getEncodeMode();
+    else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) mode = hs->getEncodeMode();
+    if (mode != HuffmanEncodeMode::Coarse)
+        out << "encode_mode = \"" << huffmanModeToString(mode) << "\"\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

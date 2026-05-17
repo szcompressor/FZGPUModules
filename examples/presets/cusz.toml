@@ -45,4 +45,5 @@ name = "huf"
 type = "Huffman"
 input_type = "uint16"
 bklen = 1024
+encode_mode = "Fine"
 inputs = [{from = "lrz", port = "codes"}]

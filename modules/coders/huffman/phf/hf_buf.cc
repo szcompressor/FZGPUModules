@@ -8,6 +8,8 @@
 //     freePersistentPinned.  Pool is the sole owner of all memory.
 //   - Removed MAKE_UNIQUE_DEVICE / MAKE_UNIQUE_HOST macros (no longer needed).
 //   - Removed .get() calls throughout (members are now raw pointers).
+//   - When use_HFR=true, allocates fine-path async-total buffers (d/h_total_nbit/ncell)
+//     and CUB temp storage (d_cub_temp); all null otherwise.
 
 #include <cstddef>
 
@@ -75,30 +77,41 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
     d_freq = PALLOC_DEV(uint32_t, bklen, "huf_d_freq");
     h_freq = PALLOC_PIN(uint32_t, bklen, "huf_h_freq");
 
-    // ReVISIT-lite specific scratch
-    d_brval = PALLOC_DEV(E,        100 + len / 10 + 1, "huf_d_brval");
-    d_bridx = PALLOC_DEV(uint32_t, 100 + len / 10 + 1, "huf_d_bridx");
-    d_brnum = PALLOC_DEV(uint32_t, 1,                  "huf_d_brnum");
-    h_brnum = PALLOC_PIN(uint32_t, 1,                  "huf_h_brnum");
+    // Fine-path async totals and CUB scan temp — only when use_HFR is active
+    if (_use_HFR) {
+        cub_temp_bytes = phf::cuhip::modules<E, H4>::GPU_cub_scan_temp_bytes(pardeg);
+        d_cub_temp    = PALLOC_DEV(uint8_t,  cub_temp_bytes, "huf_d_cub_temp");
+        d_total_nbit  = PALLOC_DEV(uint64_t, 1,              "huf_d_total_nbit");
+        d_total_ncell = PALLOC_DEV(uint64_t, 1,              "huf_d_total_ncell");
+        h_total_nbit  = PALLOC_PIN(uint64_t, 1,              "huf_h_total_nbit");
+        h_total_ncell = PALLOC_PIN(uint64_t, 1,              "huf_h_total_ncell");
+    } else {
+        cub_temp_bytes = 0;
+        d_cub_temp    = nullptr;
+        d_total_nbit  = nullptr;
+        d_total_ncell = nullptr;
+        h_total_nbit  = nullptr;
+        h_total_ncell = nullptr;
+    }
 
     // d_encoded / h_encoded alias the scratch buffers (not separate allocations)
     d_encoded = reinterpret_cast<PHF_BYTE*>(d_scratch4);
     h_encoded = reinterpret_cast<PHF_BYTE*>(h_scratch4);
 
+    size_t fine_d_extra = _use_HFR ? (cub_temp_bytes + 2 * sizeof(uint64_t)) : 0;
+    size_t fine_h_extra = _use_HFR ? (2 * sizeof(uint64_t)) : 0;
     total_footprint_d  = (sizeof(H4) * len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
                          (sizeof(uint32_t) * bklen) +
-                         (sizeof(E) * (100 + len / 10 + 1)) +
-                         (sizeof(uint32_t) * (100 + len / 10 + 1)) +
-                         sizeof(uint32_t);
+                         fine_d_extra;
     total_footprint_h  = (sizeof(H4) * len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
                          (sizeof(uint32_t) * bklen) +
-                         sizeof(uint32_t);
+                         fine_h_extra;
 }
 
 #undef PALLOC_DEV
@@ -118,9 +131,9 @@ Buf<E>::~Buf()
     pool_->freePersistentDevice(d_par_ncell);
     pool_->freePersistentDevice(d_par_entry);
     pool_->freePersistentDevice(d_freq);
-    pool_->freePersistentDevice(d_brval);
-    pool_->freePersistentDevice(d_bridx);
-    pool_->freePersistentDevice(d_brnum);
+    if (d_cub_temp)    pool_->freePersistentDevice(d_cub_temp);
+    if (d_total_nbit)  pool_->freePersistentDevice(d_total_nbit);
+    if (d_total_ncell) pool_->freePersistentDevice(d_total_ncell);
 
     pool_->freePersistentPinned(h_scratch4);
     pool_->freePersistentPinned(h_bk4);
@@ -130,7 +143,8 @@ Buf<E>::~Buf()
     pool_->freePersistentPinned(h_par_ncell);
     pool_->freePersistentPinned(h_par_entry);
     pool_->freePersistentPinned(h_freq);
-    pool_->freePersistentPinned(h_brnum);
+    if (h_total_nbit)  pool_->freePersistentPinned(h_total_nbit);
+    if (h_total_ncell) pool_->freePersistentPinned(h_total_ncell);
     // d_encoded / h_encoded are aliases — do not free separately
 }
 

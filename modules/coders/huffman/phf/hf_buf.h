@@ -103,11 +103,16 @@ struct Buf {
     uint32_t* d_freq;
     uint32_t* h_freq;
 
-    // ReVISIT-lite (fine encode) scratch
-    E*        d_brval;
-    uint32_t* d_bridx;
-    uint32_t* d_brnum;
-    uint32_t* h_brnum;
+    // Fine-path async totals: populated after GPU_fine_encode; read after caller sync.
+    // Null when use_HFR is false.
+    uint64_t* d_total_nbit;
+    uint64_t* d_total_ncell;
+    uint64_t* h_total_nbit;
+    uint64_t* h_total_ncell;
+
+    // CUB temp storage for GPU_encode_scan (ExclusiveSum). Null when use_HFR is false.
+    uint8_t*  d_cub_temp;
+    size_t    cub_temp_bytes;
 
     // ── Static helpers ────────────────────────────────────────────────────────
     static int _revbk4_bytes(int bklen);

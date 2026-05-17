@@ -2,8 +2,9 @@
  * tests/stages/test_huffman.cpp
  *
  * GPU unit tests for HuffmanStage<T>.
- * HuffmanStage Huffman-encodes a flat symbol stream (PHF coarse-grained) and
- * reconstructs it exactly. Not graph-compatible (two D2H syncs in forward execute).
+ * Covers both HuffmanEncodeMode::Coarse (default, CPU-sync phase 3) and
+ * HuffmanEncodeMode::Fine (ReVISIT-lite kernel, GPU-async phase 3).
+ * Not graph-compatible (histogram D2H sync in forward execute regardless of mode).
  *
  *   HF1   HuffmanStage/RoundTrip_U16                  — uint16_t forward+inverse exact match
  *   HF2   HuffmanStage/RoundTrip_U8                   — uint8_t forward+inverse exact match
@@ -17,6 +18,15 @@
  *   HF10  HuffmanStage/RoundTrip_U32                  — uint32_t forward+inverse exact match
  *   HF11  HuffmanStage/ReuseAfterSizeChange            — shrink reuses existing buf_; grow triggers realloc; both correct
  *   HF12  HuffmanStage/OutOfRangeSymbolThrows          — symbols >= bklen throw std::runtime_error (not silent corruption)
+ *   HF13  HuffmanStage/FineEncode_RoundTrip_U16        — Fine mode: uint16_t round-trip exact match
+ *   HF14  HuffmanStage/FineEncode_RoundTrip_U8         — Fine mode: uint8_t round-trip exact match
+ *   HF15  HuffmanStage/FineEncode_CompressedSmaller    — Fine mode: compressed < input for skewed data
+ *   HF16  HuffmanStage/FineEncode_ModeSwitch           — switching Coarse→Fine→Coarse triggers realloc; all round-trips correct
+ *   HF17  HuffmanStage/FineEncode_RoundTrip_U32        — Fine mode: uint32_t round-trip exact match
+ *   HF18  HuffmanStage/FineEncode_ReuseAfterSizeChange — Fine mode: shrink reuses buf_; grow triggers realloc; both correct
+ *   HF19  HuffmanStage/FineEncode_OutOfRangeSymbolThrows — Fine mode: symbols >= bklen throw std::runtime_error
+ *   HF20  HuffmanStage/FineEncode_PipelineIntegration_U16 — Fine mode: full Pipeline round-trip
+ *   HF21  HuffmanStage/FineEncode_LorenzoQuantPipeline — Fine mode: LorenzoQuant→Huffman end-to-end float round-trip
  */
 
 #include <gtest/gtest.h>
@@ -368,6 +378,264 @@ TEST(HuffmanStage, LorenzoQuantPipeline) {
 
     auto* huf = p.addStage<HuffmanStage<uint16_t>>();
     huf->setBklen(1024);
+    p.connect(huf, lq, "codes");
+
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_in, cs.stream);
+
+    ASSERT_EQ(res.data.size(), N);
+    EXPECT_GT(res.compressed_bytes, 0u);
+    EXPECT_LT(res.compressed_bytes, in_bytes)
+        << "compressed size should be smaller than raw for smooth data";
+    EXPECT_LE(res.max_error, static_cast<double>(EB) * 1.01)
+        << "max reconstruction error " << res.max_error << " exceeds bound " << EB;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF13 — FineEncode_RoundTrip_U16
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_RoundTrip_U16) {
+    const size_t N = 4096;
+    std::vector<uint16_t> h_in(N);
+    for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint16_t>(i % 128);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t));
+
+    HuffmanStage<uint16_t> stage;
+    stage.setBklen(1024);
+    stage.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    auto encoded = huffman_encode(stage, h_in, cs.stream, *pool);
+    ASSERT_GT(encoded.size(), 0u);
+
+    stage.setInverse(false);
+    auto decoded = huffman_decode(stage, encoded, N, cs.stream, *pool);
+    ASSERT_EQ(decoded.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(decoded[i], h_in[i]) << "mismatch at i=" << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF14 — FineEncode_RoundTrip_U8
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_RoundTrip_U8) {
+    const size_t N = 2048;
+    std::vector<uint8_t> h_in(N);
+    for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint8_t>(i % 64);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint8_t));
+
+    HuffmanStage<uint8_t> stage;
+    stage.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    auto encoded = huffman_encode(stage, h_in, cs.stream, *pool);
+    ASSERT_GT(encoded.size(), 0u);
+
+    stage.setInverse(false);
+    auto decoded = huffman_decode(stage, encoded, N, cs.stream, *pool);
+    ASSERT_EQ(decoded.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(decoded[i], h_in[i]) << "mismatch at i=" << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF15 — FineEncode_CompressedSmaller
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_CompressedSmaller) {
+    const size_t N = 16384;
+    std::vector<uint16_t> h_in(N, 42);  // all same symbol — maximally compressible
+    h_in[0] = 0; h_in[1] = 1;           // ensure at least 3 distinct symbols for valid codebook
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t));
+
+    HuffmanStage<uint16_t> stage;
+    stage.setBklen(1024);
+    stage.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    auto encoded = huffman_encode(stage, h_in, cs.stream, *pool);
+    ASSERT_GT(encoded.size(), 0u);
+    EXPECT_LT(encoded.size(), N * sizeof(uint16_t))
+        << "fine-encode compressed size should be smaller than raw";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF16 — FineEncode_ModeSwitch
+// Switching Coarse→Fine→Coarse triggers buf_ reallocation each time;
+// all three passes produce correct round-trips.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_ModeSwitch) {
+    const size_t N = 4096;
+    std::vector<uint16_t> h_in(N);
+    for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint16_t>(i % 64);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t) * 4);
+
+    HuffmanStage<uint16_t> stage;
+    stage.setBklen(1024);
+
+    auto check_roundtrip = [&](HuffmanEncodeMode mode) {
+        stage.setEncodeMode(mode);
+        stage.setInverse(false);
+        auto encoded = huffman_encode(stage, h_in, cs.stream, *pool);
+        ASSERT_GT(encoded.size(), 0u);
+        stage.setInverse(false);
+        auto decoded = huffman_decode(stage, encoded, N, cs.stream, *pool);
+        ASSERT_EQ(decoded.size(), N);
+        for (size_t i = 0; i < N; ++i)
+            EXPECT_EQ(decoded[i], h_in[i]) << "mismatch at i=" << i;
+    };
+
+    check_roundtrip(HuffmanEncodeMode::Coarse);
+    check_roundtrip(HuffmanEncodeMode::Fine);
+    check_roundtrip(HuffmanEncodeMode::Coarse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF17 — FineEncode_RoundTrip_U32
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_RoundTrip_U32) {
+    const size_t N = 2048;
+    std::vector<uint32_t> h_in(N);
+    for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint32_t>(i % 64);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint32_t));
+
+    HuffmanStage<uint32_t> stage;
+    stage.setBklen(256);  // symbols in [0, 63] ⊂ [0, 256)
+    stage.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    auto encoded = huffman_encode(stage, h_in, cs.stream, *pool);
+    ASSERT_GT(encoded.size(), 0u);
+
+    stage.setInverse(false);
+    auto decoded = huffman_decode(stage, encoded, N, cs.stream, *pool);
+    ASSERT_EQ(decoded.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(decoded[i], h_in[i]) << "mismatch at i=" << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF18 — FineEncode_ReuseAfterSizeChange
+// Verifies capacity-based reallocation in Fine mode:
+//   Pass 1 (N1=8192): initial allocation; cap_inlen_ = 8192.
+//   Pass 2 (N2=2048): inlen < cap_inlen_ — existing buf_ is reused (no realloc).
+// Both round-trips must produce exact output.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_ReuseAfterSizeChange) {
+    CudaStream cs;
+
+    HuffmanStage<uint16_t> stage;
+    stage.setBklen(1024);
+    stage.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    // ── First call: large input ───────────────────────────────────────────────
+    const size_t N1 = 8192;
+    std::vector<uint16_t> h_in1(N1);
+    for (size_t i = 0; i < N1; ++i) h_in1[i] = static_cast<uint16_t>(i % 256);
+
+    auto pool1 = make_test_pool(N1 * sizeof(uint16_t));
+    auto encoded1 = huffman_encode(stage, h_in1, cs.stream, *pool1);
+    ASSERT_GT(encoded1.size(), 0u);
+
+    stage.setInverse(false);
+    auto decoded1 = huffman_decode(stage, encoded1, N1, cs.stream, *pool1);
+    ASSERT_EQ(decoded1.size(), N1);
+    for (size_t i = 0; i < N1; ++i)
+        EXPECT_EQ(decoded1[i], h_in1[i]) << "pass1 mismatch at i=" << i;
+
+    // ── Second call: smaller input — reuses existing buf_ (cap_inlen_=8192) ──
+    const size_t N2 = 2048;
+    std::vector<uint16_t> h_in2(N2);
+    for (size_t i = 0; i < N2; ++i) h_in2[i] = static_cast<uint16_t>((i * 7) % 128);
+
+    auto pool2 = make_test_pool(N2 * sizeof(uint16_t));
+    stage.setInverse(false);
+    auto encoded2 = huffman_encode(stage, h_in2, cs.stream, *pool2);
+    ASSERT_GT(encoded2.size(), 0u);
+
+    stage.setInverse(false);
+    auto decoded2 = huffman_decode(stage, encoded2, N2, cs.stream, *pool2);
+    ASSERT_EQ(decoded2.size(), N2);
+    for (size_t i = 0; i < N2; ++i)
+        EXPECT_EQ(decoded2[i], h_in2[i]) << "pass2 mismatch at i=" << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF19 — FineEncode_OutOfRangeSymbolThrows
+// With symbol range validation enabled, any symbol >= bklen must throw
+// std::runtime_error in Fine mode just as in Coarse mode (validation happens
+// before the encode-mode branch in execute()).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_OutOfRangeSymbolThrows) {
+    const size_t N = 1024;
+    std::vector<uint16_t> h_in(N, 0);
+    h_in[42] = 100;  // out of range: bklen=64 means [0,64) is valid
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t));
+
+    HuffmanStage<uint16_t> stage;
+    stage.setBklen(64);
+    stage.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    EXPECT_THROW(huffman_encode(stage, h_in, cs.stream, *pool), std::runtime_error);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF20 — FineEncode_PipelineIntegration_U16
+// Full Pipeline round-trip with Fine encode mode selected on the stage.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_PipelineIntegration_U16) {
+    const size_t N        = 4096;
+    const size_t in_bytes = N * sizeof(uint16_t);
+
+    std::vector<uint16_t> h_in(N);
+    for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint16_t>(i % 256);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    auto* stage = p.addStage<HuffmanStage<uint16_t>>();
+    stage->setBklen(1024);
+    stage->setEncodeMode(HuffmanEncodeMode::Fine);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<uint16_t>(p, h_in, cs.stream);
+
+    ASSERT_EQ(res.data.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(res.data[i], h_in[i]) << "mismatch at i=" << i;
+    EXPECT_GT(res.compressed_bytes, 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF21 — FineEncode_LorenzoQuantPipeline
+// End-to-end: LorenzoQuantStage<float,uint16_t> → HuffmanStage<uint16_t> (Fine)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, FineEncode_LorenzoQuantPipeline) {
+    constexpr size_t N  = 1 << 14;   // 16 K floats
+    constexpr float  EB = 1e-2f;
+    const size_t in_bytes = N * sizeof(float);
+
+    auto h_in = make_smooth_data<float>(N);
+
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+
+    auto* lq = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lq->setErrorBound(EB);
+    lq->setQuantRadius(512);
+    lq->setOutlierCapacity(0.2f);
+    lq->setZigzagCodes(true);
+
+    auto* huf = p.addStage<HuffmanStage<uint16_t>>();
+    huf->setBklen(1024);
+    huf->setEncodeMode(HuffmanEncodeMode::Fine);
     p.connect(huf, lq, "codes");
 
     p.finalize();

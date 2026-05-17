@@ -2,13 +2,19 @@
 
 /**
  * @file huffman_stage.h
- * @brief Huffman entropy coding stage (PHF coarse-grained encoding).
+ * @brief Huffman entropy coding stage with selectable encode mode.
  *
  * Forward: `T[]` → variable-length PHF bitstream (inline phf_header prepended).
  * Inverse: PHF bitstream → `T[]`.
  *
- * Not graph-compatible: forward execute contains two host-synchronous operations
- * (histogram D2H and GPU_coarse_encode sync inside phf::high_level::encode).
+ * Two encode modes are available via setEncodeMode():
+ *   - HuffmanEncodeMode::Coarse (default): multi-kernel coarse-grained path with a
+ *     CPU prefix-sum sync in the middle of encode. Stable and well-tested.
+ *   - HuffmanEncodeMode::Fine: single ReVISIT-lite kernel path with a fully GPU-async
+ *     phase 3 (CUB ExclusiveSum + custom reduce kernel). No mid-encode CPU sync;
+ *     preferred for latency-sensitive or graph-capture use cases.
+ *
+ * Note: the histogram D2H is still a CPU-sync operation in both modes.
  *
  * Supported input types: `uint8_t`, `uint16_t`, `uint32_t`.
  *
@@ -37,6 +43,12 @@
 namespace phf { template<typename E> struct Buf; }
 
 namespace fz {
+
+/** Selects the PHF encode algorithm used by HuffmanStage on the forward path. */
+enum class HuffmanEncodeMode {
+    Coarse, ///< Multi-kernel coarse path; CPU prefix-sum sync in phase 3 (default).
+    Fine,   ///< ReVISIT-lite single kernel; fully GPU-async phase 3, no mid-encode CPU sync.
+};
 
 /**
  * Huffman entropy coding stage.
@@ -78,11 +90,21 @@ public:
     void     setBklen(uint32_t bklen) { bklen_ = bklen; }
     uint32_t getBklen() const         { return bklen_; }
 
+    /**
+     * Select the encode algorithm for the forward path.
+     *
+     * Must be called before the first compress() / execute() call (or before
+     * the next one if changing mode at runtime — triggers Buf reallocation).
+     * Default: HuffmanEncodeMode::Coarse.
+     */
+    void             setEncodeMode(HuffmanEncodeMode mode) { encode_mode_ = mode; }
+    HuffmanEncodeMode getEncodeMode() const                { return encode_mode_; }
+
     // ── Stage control ─────────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    // Two host-synchronous ops in forward execute make this graph-incompatible.
+    // Histogram D2H makes this graph-incompatible regardless of encode mode.
     bool isGraphCompatible() const override { return false; }
 
     // ── Pool lifecycle ────────────────────────────────────────────────────────
@@ -185,12 +207,14 @@ public:
     }
 
 private:
-    bool     is_inverse_         = false;
-    uint32_t bklen_              = defaultBklen();
+    bool              is_inverse_   = false;
+    uint32_t          bklen_        = defaultBklen();
+    HuffmanEncodeMode encode_mode_  = HuffmanEncodeMode::Coarse;
     uint64_t original_len_       = 0;   // element count set by forward execute
     size_t   actual_output_size_ = 0;
-    size_t   cap_inlen_          = 0;   // allocated capacity (elements); grow-only
-    uint32_t last_bklen_         = 0;   // bklen_ when buf_ was last allocated
+    size_t            cap_inlen_        = 0;                          // allocated capacity (elements); grow-only
+    uint32_t          last_bklen_       = 0;                          // bklen_ when buf_ was last allocated
+    HuffmanEncodeMode last_encode_mode_ = HuffmanEncodeMode::Coarse;  // encode_mode_ when buf_ was last allocated
 
     // Histogram launch params — computed once in initBuf(), reused every execute()
     int hist_grid_dim_    = 0;

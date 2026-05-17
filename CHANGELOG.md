@@ -11,6 +11,18 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 - CLI `--stages` now accepts `huffman` (alias `huf`): adds `HuffmanStage<uint16_t>` with `bklen` auto-derived from `2 * quant_radius` when following a predictor, or 1024 otherwise
+- `HuffmanStage<T>::setEncodeMode(HuffmanEncodeMode)`: selects between `Coarse` (default, multi-kernel with CPU prefix-sum sync in phase 3) and `Fine` (ReVISIT-lite single kernel with fully GPU-async phase 3 — no mid-encode CPU sync, preferred for latency-sensitive workloads)
+- `HuffmanEncodeMode` enum (`Coarse`, `Fine`) in `huffman_stage.h`; `getEncodeMode()` getter
+- Fine encode path (`HuffmanEncodeMode::Fine`): replaces CPU prefix-sum with `cub::DeviceScan::ExclusiveSum` (`GPU_encode_scan`), a combined nbit+ncell reduction kernel accumulating in `uint64_t` (`GPU_encode_finalize_totals`), and async D→H copy of the two total scalars to pinned memory; totals are read by the caller after the natural stream sync — no additional synchronization required
+- Four new Huffman tests covering the fine encode path: `FineEncode_RoundTrip_U16`, `FineEncode_RoundTrip_U8`, `FineEncode_CompressedSmaller`, `FineEncode_ModeSwitch`
+- Five additional fine-path tests matching coarse-path coverage: `FineEncode_RoundTrip_U32`, `FineEncode_ReuseAfterSizeChange`, `FineEncode_OutOfRangeSymbolThrows`, `FineEncode_PipelineIntegration_U16`, `FineEncode_LorenzoQuantPipeline`
+- `loadConfig`/`saveConfig`: `encode_mode` TOML key for `HuffmanStage` (`"Coarse"` or `"Fine"`); omitted on save when default (`Coarse`) to keep existing configs minimal
+- `hf_hl.cc`: Fine-path max-codelen guard — after `build_book`, scans `h_bk4` for max code length; if `max_codelen > 8` (four symbols would overflow the 32-bit shard accumulator in the ReVISIT-lite kernel), silently falls back to Coarse
+- `examples/presets/cusz.toml`: set `encode_mode = "Fine"` on the Huffman stage
+
+### Fixed
+- `KERNEL_CUHIP_Huffman_ReVISIT_lite` break handler: read `s_book[MaxBkLen]` one past the end of the `MaxBkLen`-element array, aliasing uninitialized `s_reduced[0]` and corrupting `par_ncell`; removed the break handler entirely — the fine path is restricted to `max_codelen ≤ 8` bits by the guard in `hf_hl.cc::encode()`, so the shard accumulator (ShardSize=4, BITWIDTH=32) never overflows and the handler was unreachable
+- `GPU_scatter` / `KERNEL_CUHIP_scatter`: removed dead code — the scatter re-integration step (second half of break handling) was never called from `GPU_fine_encode`; also removed associated `d_brval`/`d_bridx`/`d_brnum`/`h_brnum` buffer allocations from `phf::Buf<E>`
 
 ### Changed
 - `HuffmanStage<T>`: `phf::Buf<T>` is now reallocated only on capacity growth (inlen > cap_inlen_) or bklen change; shrinking inputs reuse the existing allocation; `phf_header.original_len` and `pardeg` now reflect the actual encode length (not the allocated capacity) — required `make_metadata` in `hf_hl.cc` to derive `pardeg` from `data_len` rather than `buf->len`

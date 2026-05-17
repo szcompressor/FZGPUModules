@@ -1,6 +1,9 @@
 // Adapted from PHF reference (origin/v1.1.0_dev:modules/codec/huffman/hf_impl.hh)
 // Changes: moved #include "hf.h" to top (PHF_METADATA needed early);
-//          no external-project deps in original, so no other changes.
+//          replaced GPU_coarse_encode_phase3_sync (CPU prefix-sum + sync) with
+//          GPU_encode_scan (CUB ExclusiveSum) + GPU_encode_finalize_totals
+//          (custom reduce kernel + async D→H), making both encode paths fully
+//          GPU-async with no mid-encode CPU synchronization barrier.
 
 #ifndef PHF_HF_IMPL_HH
 #define PHF_HF_IMPL_HH
@@ -295,8 +298,7 @@ public:
 
     static void GPU_fine_encode_phase1_2(
         E* in, const size_t len, H* book, const uint32_t bklen, H* bitstream,
-        M* par_nbit, M* par_ncell, const uint32_t nblock, E* brval,
-        uint32_t* bridx, uint32_t* brnum, void* stream);
+        M* par_nbit, M* par_ncell, const uint32_t nblock, void* stream);
 
     static void GPU_coarse_encode_phase3_sync(
         phf::par_config hfpar, M* d_par_nbit, M* h_par_nbit,
@@ -309,6 +311,7 @@ public:
         phf::par_config hfpar, H* bitstream, const size_t max_bitstream_len,
         void* stream);
 
+    // ── Coarse encode (CPU-sync phase 3, stable default) ─────────────────────
     static void GPU_coarse_encode(
         E* in_data, size_t data_len, H* in_book, uint32_t book_len,
         int numSMs, phf::par_config hfpar,
@@ -317,22 +320,40 @@ public:
         H* d_bitstream4, size_t bitstream_max_len,
         size_t* out_total_nbit, size_t* out_total_ncell, void* stream);
 
+    // ── Fine encode (GPU-async phase 3, ReVISIT-lite kernel) ─────────────────
+
+    // Async GPU exclusive scan: d_par_ncell → d_par_entry (partition offsets).
+    // Uses pre-allocated CUB temp storage; no CPU sync.
+    static void GPU_encode_scan(
+        M* d_par_ncell, M* d_par_entry, int pardeg,
+        uint8_t* d_cub_temp, size_t cub_temp_bytes, void* stream);
+
+    // Combined nbit+ncell reduction → device uint64_t scalars, then async D→H
+    // copy to pinned memory. Values are ready after the caller's stream sync.
+    static void GPU_encode_finalize_totals(
+        M* d_par_nbit, M* d_par_ncell, int pardeg,
+        uint64_t* d_total_nbit, uint64_t* d_total_ncell,
+        uint64_t* h_total_nbit, uint64_t* h_total_ncell,
+        void* stream);
+
+    // Returns the CUB temp storage bytes needed for GPU_encode_scan at pardeg.
+    static size_t GPU_cub_scan_temp_bytes(size_t pardeg);
+
     static void GPU_fine_encode(
         E* in_data, size_t data_len, H* in_book, uint32_t book_len,
         phf::par_config hfpar,
-        H* d_scratch4, M* d_par_nbit, M* h_par_nbit,
-        M* d_par_ncell, M* h_par_ncell, M* d_par_entry, M* h_par_entry,
+        H* d_scratch4,
+        M* d_par_nbit, M* d_par_ncell, M* d_par_entry,
         H* d_bitstream4, size_t bitstream_max_len,
-        E* d_brval, uint32_t* d_bridx, uint32_t* d_brnum,
-        size_t* out_total_nbit, size_t* out_total_ncell, void* stream);
+        uint64_t* d_total_nbit, uint64_t* d_total_ncell,
+        uint64_t* h_total_nbit, uint64_t* h_total_ncell,
+        uint8_t* d_cub_temp, size_t cub_temp_bytes, void* stream);
 
     static void GPU_coarse_decode(
         H* in_bitstream, uint8_t* in_revbook, size_t const revbook_len,
         M* in_par_nbit, M* in_par_entry, size_t const sublen,
         size_t const pardeg, E* out_decoded, void* stream);
 
-    static void GPU_scatter(
-        E* val, uint32_t* idx, const uint32_t h_num, E* out, void* stream);
 };
 
 }  // namespace phf::cuhip

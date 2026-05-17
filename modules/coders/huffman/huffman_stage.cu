@@ -1,10 +1,6 @@
 // Adapted from PHF reference (origin/v1.1.0_dev:modules/codec/huffman/)
 // Changes:
-//   - Wrapped in fz::HuffmanStage<T> stage interface.
-//   - Histogram utility (fz::module::GPU_histogram_generic*) replaces inline hist call.
-//   - PHF buffers (phf::Buf<T>) allocated from MemoryPool via allocatePersistentDevice /
-//     allocatePersistentPinned; pool is the sole owner of all PHF scratch memory.
-//   - Forward output copied D2D from buf_->d_encoded to pipeline-managed outputs[0].
+//   - PHF buffers (phf::Buf<T>) allocated from MemoryPool
 //   - Buf reallocated only on capacity growth or bklen change (not on every inlen change).
 //   - Symbol range validation: freq_sum check after D2H catches out-of-[0,bklen) symbols.
 //   - onFinalize() pre-allocates buf_ from pool at finalize time for PREALLOCATE mode;
@@ -42,10 +38,12 @@ template <typename T>
 void HuffmanStage<T>::initBuf(size_t inlen, MemoryPool* pool)
 {
     buf_.reset();  // destroy old Buf<T> first — returns allocations to pool
-    buf_        = std::make_unique<phf::Buf<T>>(inlen, bklen_, pool);
-    pool_       = pool;
-    cap_inlen_  = inlen;
-    last_bklen_ = bklen_;
+    bool use_hfr = (encode_mode_ == HuffmanEncodeMode::Fine);
+    buf_               = std::make_unique<phf::Buf<T>>(inlen, bklen_, pool, -1, use_hfr);
+    pool_              = pool;
+    cap_inlen_         = inlen;
+    last_bklen_        = bklen_;
+    last_encode_mode_  = encode_mode_;
     fz::module::GPU_histogram_generic_optimizer_on_initialization<T>(
         inlen, static_cast<uint16_t>(bklen_),
         hist_grid_dim_, hist_block_dim_, hist_shmem_use_, hist_r_per_block_);
@@ -72,15 +70,19 @@ size_t HuffmanStage<T>::estimateDeviceFootprintBytes(size_t inlen) const
     const size_t pardeg = (n - 1) / 4096 + 1;  // approximate sublen=4096 default
     using M = PHF_METADATA;
     using H4 = uint32_t;
-    return sizeof(H4) * n                          // d_scratch4
-         + sizeof(H4) * bklen_                     // d_bk4
-         + bklen_ * 4 * sizeof(T)                  // d_revbk4 (approx)
-         + sizeof(H4) * (n / 2)                    // d_bitstream4
-         + sizeof(M) * pardeg * 3                  // d_par_nbit/ncell/entry
-         + sizeof(uint32_t) * bklen_               // d_freq
-         + sizeof(T) * (100 + n / 10 + 1)          // d_brval
-         + sizeof(uint32_t) * (100 + n / 10 + 1)   // d_bridx
-         + sizeof(uint32_t);                        // d_brnum
+    size_t base = sizeof(H4) * n                          // d_scratch4
+                + sizeof(H4) * bklen_                     // d_bk4
+                + bklen_ * 4 * sizeof(T)                  // d_revbk4 (approx)
+                + sizeof(H4) * (n / 2)                    // d_bitstream4
+                + sizeof(M) * pardeg * 3                  // d_par_nbit/ncell/entry
+                + sizeof(uint32_t) * bklen_               // d_freq
+                + sizeof(T) * (100 + n / 10 + 1)          // d_brval
+                + sizeof(uint32_t) * (100 + n / 10 + 1)   // d_bridx
+                + sizeof(uint32_t);                        // d_brnum
+    // Fine mode adds CUB temp storage (~few KB) and two uint64_t device scalars
+    if (encode_mode_ == HuffmanEncodeMode::Fine)
+        base += 65536 + 2 * sizeof(uint64_t);  // conservative CUB temp upper bound
+    return base;
 }
 
 template <typename T>
@@ -91,13 +93,16 @@ size_t HuffmanStage<T>::estimatePinnedFootprintBytes(size_t inlen) const
     const size_t pardeg = (n - 1) / 4096 + 1;
     using M = PHF_METADATA;
     using H4 = uint32_t;
-    return sizeof(H4) * n                          // h_scratch4
-         + sizeof(H4) * bklen_                     // h_bk4
-         + bklen_ * 4 * sizeof(T)                  // h_revbk4 (approx)
-         + sizeof(H4) * (n / 2)                    // h_bitstream4
-         + sizeof(M) * pardeg * 3                  // h_par_nbit/ncell/entry
-         + sizeof(uint32_t) * bklen_               // h_freq
-         + sizeof(uint32_t);                        // h_brnum
+    size_t base = sizeof(H4) * n                          // h_scratch4
+                + sizeof(H4) * bklen_                     // h_bk4
+                + bklen_ * 4 * sizeof(T)                  // h_revbk4 (approx)
+                + sizeof(H4) * (n / 2)                    // h_bitstream4
+                + sizeof(M) * pardeg * 3                  // h_par_nbit/ncell/entry
+                + sizeof(uint32_t) * bklen_               // h_freq
+                + sizeof(uint32_t);                        // h_brnum
+    if (encode_mode_ == HuffmanEncodeMode::Fine)
+        base += 2 * sizeof(uint64_t);  // h_total_nbit, h_total_ncell
+    return base;
 }
 
 // ── execute ───────────────────────────────────────────────────────────────────
@@ -121,9 +126,10 @@ void HuffmanStage<T>::execute(
         T*     d_input = static_cast<T*>(inputs[0]);
         size_t inlen   = sizes[0] / sizeof(T);
 
-        // Reallocate only when capacity is exceeded or bklen changed.
+        // Reallocate when capacity exceeded, bklen changed, or encode mode changed.
         // Use pool from execute() parameter; on first call, this also sets pool_.
-        if (!buf_ || inlen > cap_inlen_ || bklen_ != last_bklen_) initBuf(inlen, pool);
+        if (!buf_ || inlen > cap_inlen_ || bklen_ != last_bklen_ || encode_mode_ != last_encode_mode_)
+            initBuf(inlen, pool);
 
         // Zero frequency array (histogram kernel uses atomicAdd into d_freq)
         FZ_CUDA_CHECK(cudaMemsetAsync(
