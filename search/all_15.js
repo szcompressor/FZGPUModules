@@ -1,0 +1,28 @@
+var searchData=
+[
+  ['magic_0',['magic',['../structfz_1_1FZMHeaderCore.html#af60b81f82bb28b71bb3fb1ca1d1f75ae',1,'fz::FZMHeaderCore']]],
+  ['manual_20bit_20width_1',['Manual bit-width',['../stage_bitpack.html#autotoc_md53',1,'']]],
+  ['manual_20tt_20nbits_20tt_2',['Manual &lt;tt&gt;nbits&lt;/tt&gt;',['../stage_bitpack.html#autotoc_md57',1,'']]],
+  ['max_5ferror_3',['max_error',['../structfz_1_1ReconstructionStats.html#a6e52ca17d365917eb96f404c81aa21ec',1,'fz::ReconstructionStats']]],
+  ['max_5ferror_5findex_4',['max_error_index',['../structfz_1_1ReconstructionStats.html#ab9f3a244ec9906ee857f3f673b37a31b',1,'fz::ReconstructionStats']]],
+  ['memory_5',['Persistent scratch memory',['../how_to_add_a_stage.html#autotoc_md297',1,'']]],
+  ['memory_20ownership_6',['Memory Ownership',['../architecture.html#autotoc_md283',1,'']]],
+  ['memory_20ownership_20summary_7',['Memory Ownership Summary',['../api_reference.html#autotoc_md254',1,'']]],
+  ['memory_20strategies_8',['Memory Strategies',['../index.html#autotoc_md8',1,'']]],
+  ['memorypool_9',['memorypool',['../architecture.html#autotoc_md277',1,'MemoryPool'],['../classfz_1_1MemoryPool.html',1,'fz::MemoryPool']]],
+  ['memorypoolconfig_10',['MemoryPoolConfig',['../structfz_1_1MemoryPoolConfig.html',1,'fz']]],
+  ['memorystrategy_11',['MemoryStrategy',['../dag_8h.html#a84034db5538023ab3e2b979970333a07',1,'fz']]],
+  ['mempool_2eh_12',['mempool.h',['../mempool_8h.html',1,'']]],
+  ['methods_13',['Methods',['../config_file_overview.html#autotoc_md203',1,'']]],
+  ['metrics_14',['Metrics',['../libpressio_python.html#autotoc_md388',1,'']]],
+  ['minimal_15',['MINIMAL',['../dag_8h.html#a84034db5538023ab3e2b979970333a07a02f2534ad4997e23ec250e1015eeb929',1,'fz']]],
+  ['mode_16',['mode',['../stage_bitpack.html#autotoc_md54',1,'Auto-detect mode'],['../libpressio_python.html#autotoc_md398',1,'CUDA Graph Mode']]],
+  ['mode_201_20output_17',['Inplace outlier mode (1 output)',['../stage_quantizer.html#autotoc_md153',1,'']]],
+  ['mode_204_20outputs_18',['Normal mode (4 outputs)',['../stage_quantizer.html#autotoc_md152',1,'']]],
+  ['model_19',['Layer Model',['../architecture.html#autotoc_md271',1,'']]],
+  ['modes_20',['modes',['../stage_quantizer.html#autotoc_md155',1,'Error bound modes'],['../stage_lorenzo_quant.html#autotoc_md125',1,'Error bound modes'],['../libpressio_python.html#autotoc_md374',1,'Error bound modes']]],
+  ['movement_20pattern_21',['Execution flow (CPU–GPU movement pattern)',['../stage_huffman.html#huffman-execution',1,'']]],
+  ['mse_22',['mse',['../structfz_1_1ReconstructionStats.html#ae5b973345e90d3220426f7c64fce4aa2',1,'fz::ReconstructionStats']]],
+  ['multi_20output_20stages_23',['Multi-output stages',['../how_to_add_a_stage.html#autotoc_md295',1,'']]],
+  ['must_20be_20enabled_24',['1. Zigzag encoding must be enabled',['../stage_quantizer.html#autotoc_md159',1,'']]]
+];
