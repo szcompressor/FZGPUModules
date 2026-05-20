@@ -144,6 +144,56 @@ fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --repo
 
 ---
 
+## Acknowledgements
+
+FZGPUModules builds on prior work from the following projects.
+
+**LC framework** (Burtscher et al., Texas State University) — the RZE, Bitshuffle,
+Difference, and Quantizer stages incorporate algorithms and GPU kernels from the
+LC framework for synthesizing high-speed parallel lossless and lossy compression.
+
+> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez, Benila Jerald,
+> Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
+> https://github.com/burtscher/LC-framework
+
+**cuSZ / PHF** (cuSZ team, Argonne National Laboratory, Indiana University, and others) —
+the LorenzoQuant stage follows the cuSZ fused Lorenzo predictor+quantizer design, and the
+Huffman stage incorporates vendored PHF codec source files adapted from the cuSZ repository.
+
+> cuSZ team.
+> *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*
+> https://github.com/szcompressor/cuSZ
+
+Both projects are BSD-3-Clause licensed. See [`THIRD_PARTY.md`](THIRD_PARTY.md) for full
+copyright notices and per-module attribution details.
+
+---
+
+## Acknowledgements
+
+FZGPUModules builds on prior work from the following projects.
+
+**LC framework** (Burtscher et al., Texas State University) — the RZE, Bitshuffle,
+Difference, and Quantizer stages incorporate algorithms and GPU kernels from the
+LC framework for synthesizing high-speed parallel lossless and lossy compression.
+
+> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez, Benila Jerald,
+> Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
+> https://github.com/burtscher/LC-framework
+
+**cuSZ / PHF** (cuSZ team, Argonne National Laboratory, Indiana University, and others) —
+the LorenzoQuant stage follows the cuSZ fused Lorenzo predictor+quantizer design, and the
+Huffman stage incorporates vendored PHF codec source files adapted from the cuSZ repository.
+
+> cuSZ team.
+> *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*
+> https://github.com/szcompressor/cuSZ
+
+Both projects are BSD-3-Clause licensed. See [`THIRD_PARTY.md`](THIRD_PARTY.md) for full
+copyright notices and per-module attribution details.
+
+---
+
 ## Citation
 
 If you reference this work, please cite:

@@ -56,6 +56,12 @@ enum class HuffmanEncodeMode {
  * Forward: `T[] → uint8_t[]`  PHF-encoded bitstream with embedded phf_header.
  * Inverse: `uint8_t[] → T[]`  Decoded symbol stream.
  *
+ * @note **Prior work:** PHF source files (`hf.h`, `hf_bk*.cc`, `hf_buf.cc`,
+ *       `hf_canon.cc`, `hf_hl.cc`, `hf_kernels.cu`, `hf_impl.hh`) are vendored
+ *       and adapted from the cuSZ PHF codec (`origin/v1.1.0_dev`), by the cuSZ
+ *       team (BSD-3-Clause). Changes are documented at the top of each file.
+ *       See `THIRD_PARTY.md`.
+ *
  * @tparam T  Input element type: `uint8_t`, `uint16_t`, or `uint32_t`.
  */
 template <typename T>

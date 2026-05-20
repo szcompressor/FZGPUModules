@@ -1,3 +1,5 @@
+// Algorithm adapted from the cuSZ Lorenzo implementation (cuSZ team, BSD-3-Clause).
+// Upstream: https://github.com/szcompressor/cuSZ — see THIRD_PARTY.md.
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"

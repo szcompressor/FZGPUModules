@@ -10,6 +10,12 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Added
+- `THIRD_PARTY.md`: full copyright notices and per-module attribution for LC framework (RZE, Bitshuffle, Difference, Quantizer) and cuSZ/PHF (LorenzoQuant, Huffman)
+- Attribution `@note` in Doxygen class comments for all six derived stages
+- `## Acknowledgements` section added to stage docs for all six derived stages
+- `README.md`: Acknowledgements section crediting LC framework and cuSZ
+- `docs/how_to_add_a_stage.md`: Step 8b — attribution guide for new stages based on prior work; checklist item added
+- `scripts/new_stage.sh`: attribution reminder appended to the post-run summary
 - CLI `--stages` now accepts `huffman` (alias `huf`): adds `HuffmanStage<uint16_t>` with `bklen` auto-derived from `2 * quant_radius` when following a predictor, or 1024 otherwise
 - `HuffmanStage<T>::setEncodeMode(HuffmanEncodeMode)`: selects between `Coarse` (default, multi-kernel with CPU prefix-sum sync in phase 3) and `Fine` (ReVISIT-lite single kernel with fully GPU-async phase 3 — no mid-encode CPU sync, preferred for latency-sensitive workloads)
 - `HuffmanEncodeMode` enum (`Coarse`, `Fine`) in `huffman_stage.h`; `getEncodeMode()` getter

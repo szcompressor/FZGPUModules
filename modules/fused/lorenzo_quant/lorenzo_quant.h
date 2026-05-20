@@ -70,6 +70,10 @@ static_assert(sizeof(LorenzoQuantConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoQuant
 /**
  * Lorenzo predictor with error-bounded quantization (1-D, 2-D, 3-D).
  *
+ * @note **Prior work:** fused predictor+quantizer kernels and the multi-output
+ *       design follow the cuSZ Lorenzo implementation (`lrz_c.cuhip.inl`,
+ *       `lrz_x.cuhip.inl`) by the cuSZ team (BSD-3-Clause). See `THIRD_PARTY.md`.
+ *
  * Forward outputs (compression):
  * - [0] codes         — quantization codes for all elements (`TCode`)
  * - [1] outlier_errors — prediction errors for outliers (`TInput`)

@@ -61,3 +61,20 @@ p.finalize();
 Set `element_width` to match the element type flowing in from upstream:
 - Codes from `LorenzoQuantStage<float, uint16_t>` → `setElementWidth(2)`
 - Codes from `QuantizerStage<float, uint32_t>` → `setElementWidth(4)`
+
+---
+
+## Acknowledgements
+
+The 4- and 8-byte butterfly shuffle kernels in `BitshuffleStage` are adapted
+from `d_BIT_4` / `d_BIT_8` in the **LC framework**
+(Burtscher et al., Texas State University, BSD-3-Clause).
+The 1- and 2-byte paths use a standard `__ballot_sync` approach.
+
+> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez,
+> Benila Jerald, Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
+> *LC framework for synthesizing high-speed parallel lossless and
+> error-bounded lossy data compression and decompression algorithms for CPUs and GPUs.*
+> https://github.com/burtscher/LC-framework
+
+See `THIRD_PARTY.md` for the full license text.

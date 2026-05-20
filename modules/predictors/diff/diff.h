@@ -17,6 +17,9 @@ namespace fz {
 /**
  * Difference coding stage.
  *
+ * @note **Prior work:** kernel follows the `d_DIFFNB` algorithm from the LC/PFPL
+ *       framework (Burtscher et al., BSD-3-Clause). See `THIRD_PARTY.md`.
+ *
  * Forward (compression): first-order differences with optional negabinary output
  *   output[0] = input[0]
  *   output[i] = input[i] - input[i-1]           (when TOut == T)

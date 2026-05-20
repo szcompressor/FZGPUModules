@@ -159,3 +159,17 @@ p.connect(bshuf, lrz, "codes");
 p.connect(rze,   bshuf);
 p.finalize();
 ```
+
+---
+
+## Acknowledgements
+
+The fused predictor+quantizer kernels and multi-output design in
+`LorenzoQuantStage` follow the **cuSZ** Lorenzo implementation
+(`lrz_c.cuhip.inl`, `lrz_x.cuhip.inl`) by the cuSZ team (BSD-3-Clause).
+
+> cuSZ team (UChicago Argonne National Laboratory, Indiana University, and others).
+> *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*
+> https://github.com/szcompressor/cuSZ
+
+See `THIRD_PARTY.md` for the full license text.

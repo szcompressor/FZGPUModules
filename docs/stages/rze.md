@@ -63,3 +63,19 @@ p.finalize();
 [uint32_t x num_chunks: per-chunk compressed sizes (high bit set -> chunk stored raw)]
 [compressed chunk data ...]
 ```
+
+---
+
+## Acknowledgements
+
+The GPU kernels in `RZEStage` are a direct port of `zero_elim.h`,
+`repeated_elim.h`, and `rze.h` from the **LC framework**
+(Burtscher et al., Texas State University, BSD-3-Clause).
+
+> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez,
+> Benila Jerald, Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
+> *LC framework for synthesizing high-speed parallel lossless and
+> error-bounded lossy data compression and decompression algorithms for CPUs and GPUs.*
+> https://github.com/burtscher/LC-framework
+
+See `THIRD_PARTY.md` for the full license text.

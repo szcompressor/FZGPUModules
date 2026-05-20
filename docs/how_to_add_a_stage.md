@@ -467,6 +467,66 @@ instantiations or unusual wiring can be TOML-only.
 
 ---
 
+## Step 8b — Attribution *(required when based on prior work)*
+
+If your stage ports, adapts, or closely follows an algorithm from another
+project, you must acknowledge it in three places:
+
+**1. Source file comment** — top of the `.cu` file:
+
+```cpp
+// Algorithm adapted from <Project Name> (<Authors>, <License>).
+// Upstream: <URL> — see THIRD_PARTY.md.
+```
+
+For a direct port (kernel logic transliterated from upstream source), use:
+
+```cpp
+// GPU kernels are a direct port of <filename(s)> from <Project Name>
+// (<Authors>, <License>). Upstream: <URL> — see THIRD_PARTY.md.
+```
+
+**2. Doxygen class comment** — in the `_stage.h` header, inside the class-level
+`/** ... */` block:
+
+```cpp
+/**
+ * My stage description.
+ *
+ * @note **Prior work:** <one-line description of what was adapted and from where>
+ *       (<Authors>, <License>). See `THIRD_PARTY.md`.
+ * ...
+ */
+```
+
+**3. Stage documentation** — at the end of `docs/stages/<name>.md`, add an
+`## Acknowledgements` section:
+
+```markdown
+## Acknowledgements
+
+<Stage name> <relationship — e.g. "kernels are a direct port of X from"> the
+**<Project Name>** (<Authors>, <License>).
+
+> <Author list.>
+> *<Paper or project title.>*
+> <URL>
+
+See `THIRD_PARTY.md` for the full license text.
+```
+
+**4. THIRD_PARTY.md** — if the upstream project is not already listed there,
+add a new entry with:
+- The modules that use it and the relationship (direct port / algorithm-based /
+  vendored).
+- The verbatim copyright notice copied from the upstream LICENSE file.
+
+You do **not** need to do any of this for algorithms that are textbook-standard
+and not derived from a specific project's code (e.g., zigzag, negabinary, basic
+prefix sums).
+
+---
+
 ## Step 9 — Write tests
 
 Create `tests/stages/test_<name>.cpp` with at minimum:
@@ -529,3 +589,4 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 - [ ] `estimateScratchBytes()` overridden if stage holds persistent pool allocations
 - [ ] `getRequiredInputAlignment()` overridden if stage requires chunk-aligned input
 - [ ] `isGraphCompatible()` returns `false` if `execute()` does any D2H transfer
+- [ ] If based on prior work: attribution comment in `.cu`, `@note` in `.h`, `## Acknowledgements` in `docs/stages/<name>.md`, entry in `THIRD_PARTY.md` (if upstream not already listed)

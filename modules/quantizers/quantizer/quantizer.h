@@ -51,6 +51,10 @@ static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
 /**
  * Direct-value quantizer with error-bounded coding and lossless outlier fallback.
  *
+ * @note **Prior work:** ABS/NOA/REL quantization scheme, outlier handling, and
+ *       log-space REL encoding follow the LC/PFPL framework (Burtscher et al.,
+ *       BSD-3-Clause). See `THIRD_PARTY.md`.
+ *
  * Unlike LorenzoQuantStage (which quantizes prediction *differences*), this stage
  * quantizes the input *values* directly.  It supports all three error-bound
  * modes:

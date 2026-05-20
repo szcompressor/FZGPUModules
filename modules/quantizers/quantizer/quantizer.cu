@@ -1,3 +1,5 @@
+// Algorithm adapted from the LC/PFPL framework (Burtscher et al., BSD-3-Clause).
+// Upstream: https://github.com/burtscher/LC-framework — see THIRD_PARTY.md.
 #include "quantizers/quantizer/quantizer.h"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"

@@ -242,3 +242,18 @@ reallocating.  The `phf_header` embedded in the output always records the actual
 element count (not the allocation capacity), so encode and decode are always
 consistent.  Initial allocation and capacity-growth events incur full GPU allocator
 overhead; steady-state or shrinking workloads do not.
+
+---
+
+## Acknowledgements
+
+`HuffmanStage` incorporates PHF source files (`hf.h`, `hf_bk*.cc`, `hf_buf.cc`,
+`hf_canon.cc`, `hf_hl.cc`, `hf_kernels.cu`, `hf_impl.hh`) vendored and adapted
+from the **cuSZ** project PHF codec (`origin/v1.1.0_dev`), by the cuSZ team
+(BSD-3-Clause). Changes are documented at the top of each adapted file.
+
+> cuSZ team (UChicago Argonne National Laboratory, Indiana University, and others).
+> *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*
+> https://github.com/szcompressor/cuSZ
+
+See `THIRD_PARTY.md` for the full license text.

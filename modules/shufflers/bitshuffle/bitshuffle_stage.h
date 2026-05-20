@@ -34,6 +34,11 @@ namespace fz {
  * `setBlockSize(bytes)` — chunk size in bytes (default 16384; must be a
  * multiple of `1024 × element_width`).
  * `setElementWidth(bytes)` — element width: 1, 2, 4, or 8 (default 4).
+ *
+ * @note **Prior work:** the 4- and 8-byte butterfly kernels are adapted from
+ *       `d_BIT_4` / `d_BIT_8` in the LC framework (Burtscher et al.,
+ *       BSD-3-Clause). The 1- and 2-byte paths use a standard `__ballot_sync`
+ *       approach. See `THIRD_PARTY.md`.
  */
 class BitshuffleStage : public Stage {
 public:

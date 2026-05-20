@@ -40,6 +40,10 @@ namespace fz {
  * `setChunkSize(bytes)` — chunk size (default 16384; must be a multiple of 4096).
  * `setLevels(n)` — recursion depth 1–4 (default 4).
  *
+ * @note **Prior work:** GPU kernels are a direct port of `zero_elim.h`,
+ *       `repeated_elim.h`, and `rze.h` from the LC framework
+ *       (Burtscher et al., BSD-3-Clause). See `THIRD_PARTY.md`.
+ *
  * @note CUDA Graph capture is supported for compression only. The inverse path
  *       requires two blocking D2H copies to read the stream header before the
  *       decode kernel can be launched.

@@ -82,6 +82,21 @@ of `sizeof(T)`.  Default is 0 (no chunking — whole array is one context).
 
 ---
 
+## Acknowledgements
+
+The `DifferenceStage` kernel follows the `d_DIFFNB` algorithm from the
+**LC/PFPL framework** (Burtscher et al., Texas State University, BSD-3-Clause).
+
+> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez,
+> Benila Jerald, Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
+> *LC framework for synthesizing high-speed parallel lossless and
+> error-bounded lossy data compression and decompression algorithms for CPUs and GPUs.*
+> https://github.com/burtscher/LC-framework
+
+See `THIRD_PARTY.md` for the full license text.
+
+---
+
 ## Typical pipeline
 
 ```cpp
