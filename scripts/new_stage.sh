@@ -49,8 +49,15 @@ CATEGORY="$2"   # transforms | encoders | predictors
 # Strip trailing "Stage" if the user included it, so class is always <NAME>Stage
 NAME="${NAME%Stage}"
 
-LOWER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:upper:]' '[:lower:]')
-UPPER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:lower:]' '[:upper:]')
+# All-caps abbreviations (e.g. ANS, ADM, RLE) must not be snake-cased letter-by-letter.
+# If the name is all uppercase letters/digits, use it directly; otherwise apply camelCase→snake_case.
+if [[ "$NAME" =~ ^[A-Z][A-Z0-9]*$ ]]; then
+    LOWER=$(echo "$NAME" | tr '[:upper:]' '[:lower:]')
+    UPPER="$NAME"
+else
+    LOWER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:upper:]' '[:lower:]')
+    UPPER=$(echo "$NAME" | sed 's/\([A-Z]\)/_\1/g' | sed 's/^_//' | tr '[:lower:]' '[:upper:]')
+fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FZM_FORMAT_H="${REPO_ROOT}/include/fzm_format.h"
@@ -65,9 +72,9 @@ if [[ $# -ge 3 ]]; then
     echo "  Using explicit StageTypeId: ${TYPE_ID}"
 else
     # Find the lowest positive integer not already assigned in the StageType enum.
-    # Reads all "= <number>," occurrences from the enum block, sorts them, then
-    # walks from 1 upward to find the first gap.
-    TYPE_ID=$(grep -oP '=\s*\K[0-9]+(?=\s*,)' "$FZM_FORMAT_H" \
+    # Scopes the grep to the StageType enum block only (avoids picking up DataType values).
+    TYPE_ID=$(awk '/enum class StageType/,/\};/' "$FZM_FORMAT_H" \
+        | grep -oP '=\s*\K[0-9]+(?=\s*,)' \
         | sort -n \
         | awk 'BEGIN{e=1} {if($1==e)e++} END{print e}')
     echo "  Auto-selected StageTypeId: ${TYPE_ID} (lowest unused value)"
@@ -396,9 +403,9 @@ tid    = sys.argv[3]
 
 text = open(path).read()
 
-# Match the last "    IDENTIFIER = NUMBER,  ///< ..." line inside the enum
-# and insert the new entry immediately after it.
-pattern = r'([ \t]+\w+\s*=\s*\d+,\s*///[^\n]*\n)(\s*\};)'
+# Match the last "    IDENTIFIER = NUMBER, ..." line in the StageType enum block
+# and insert the new entry immediately after it. The trailing comment is optional.
+pattern = r'([ \t]+\w+\s*=\s*\d+,[^\n]*\n)(\s*\};)'
 new_entry = f'    {upper:<10} = {tid},   ///< TODO: describe this stage\n'
 replacement = r'\1' + new_entry + r'\2'
 

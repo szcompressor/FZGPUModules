@@ -255,7 +255,9 @@ add_library(fzgmod_modules
   modules/coders/huffman/phf/hf_canon.cc
   modules/coders/huffman/phf/hf_kernels.cu
   modules/coders/huffman/huffman_stage.cu
+  modules/coders/ans/ans_stage.cu
 )
+
 target_link_libraries(fzgmod_modules
   PUBLIC
     fzgmod_compile_settings

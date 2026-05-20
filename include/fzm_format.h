@@ -90,6 +90,7 @@ enum class StageType : uint16_t {
     NEGABINARY = 16,  
     BITSHUFFLE = 17, 
     RZE        = 18,  
+    ANS        = 20,   ///< TODO: describe this stage
 };
 
 /**
@@ -311,6 +312,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::BITSHUFFLE:  return "Bitshuffle";
         case StageType::RZE:         return "RZE";
         case StageType::LORENZO:     return "Lorenzo";
+        case StageType::ANS:  return "ANS";
         default:                     return "Unknown";
     }
 }

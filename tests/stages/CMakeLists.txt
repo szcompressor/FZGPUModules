@@ -126,3 +126,12 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+
+# ─── ANS stage ────────────────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_ans
+    SOURCES test_ans.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
