@@ -256,6 +256,7 @@ add_library(fzgmod_modules
   modules/coders/huffman/phf/hf_kernels.cu
   modules/coders/huffman/huffman_stage.cu
   modules/coders/ans/ans_stage.cu
+  modules/coders/ans/dietgpu/GpuANS.cu
 )
 
 target_link_libraries(fzgmod_modules
@@ -264,6 +265,10 @@ target_link_libraries(fzgmod_modules
     CUDA::cudart
   PRIVATE
     fzgmod_utils
+)
+target_include_directories(fzgmod_modules
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/modules/coders/ans/dietgpu
 )
 add_library(FZGMOD::modules ALIAS fzgmod_modules)
 

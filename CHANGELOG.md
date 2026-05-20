@@ -10,6 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Added
+- `modules/coders/ans/dietgpu/`: vendored dietGPU rANS headers (Meta Platforms, MIT license); namespace adapted to `fz::ans`, histogram functions stripped in favor of shared `fz::module::GPU_histogram_generic`
 - `THIRD_PARTY.md`: full copyright notices and per-module attribution for LC framework (RZE, Bitshuffle, Difference, Quantizer) and cuSZ/PHF (LorenzoQuant, Huffman)
 - Attribution `@note` in Doxygen class comments for all six derived stages
 - `## Acknowledgements` section added to stage docs for all six derived stages
