@@ -62,6 +62,10 @@ struct CliSettings {
     bool profile = false;
     bool report = false;
 
+    int  verbose_level = 0;    // 0=off, 1=INFO, 2=DEBUG, 3=TRACE
+    bool print_pipeline = false;
+    bool bounds_check = false;
+
     size_t chunk_size = kDefaultChunkSize;
     int rze_levels = 4;
 
@@ -165,6 +169,12 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
 
     for (int i = start_index; i < argc; ++i) {
         std::string token = argv[i];
+
+        // -v/-vv/-vvv: verbose level shortcuts (set opts directly, highest seen wins)
+        if (token == "-v")   { if (opts.count("verbose") == 0 || opts["verbose"] < "1") opts["verbose"] = "1"; continue; }
+        if (token == "-vv")  { if (opts.count("verbose") == 0 || opts["verbose"] < "2") opts["verbose"] = "2"; continue; }
+        if (token == "-vvv") { opts["verbose"] = "3"; continue; }
+
         if (token == "-h" || token == "--help") {
             opts["help"] = "true";
             continue;
@@ -209,13 +219,21 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
 
         key = normalize_key(key);
 
+        // --verbose / --verbose=N / --verbose=level : optional-value option
+        if (key == "verbose") {
+            opts[key] = has_value ? value : "1";
+            continue;
+        }
+
         const bool is_flag =
             (key == "z") ||
             (key == "x") ||
             (key == "b" || key == "benchmark") ||
             (key == "report") ||
             (key == "warmup") ||
-            (key == "profile");
+            (key == "profile") ||
+            (key == "print-pipeline") ||
+            (key == "bounds-check");
 
         if (is_flag) {
             opts[key] = "true";
@@ -310,6 +328,23 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
     s->warmup = contains(opts, "warmup") && parse_bool(opts.at("warmup"), "warmup");
     s->profile = contains(opts, "profile") && parse_bool(opts.at("profile"), "profile");
     s->report = contains(opts, "report") && parse_bool(opts.at("report"), "report");
+    s->print_pipeline = contains(opts, "print-pipeline") && parse_bool(opts.at("print-pipeline"), "print-pipeline");
+    s->bounds_check   = contains(opts, "bounds-check")   && parse_bool(opts.at("bounds-check"),   "bounds-check");
+
+    if (contains(opts, "verbose")) {
+        const std::string& v = opts.at("verbose");
+        if (v == "true" || v == "1" || v == "info") s->verbose_level = 1;
+        else if (v == "2" || v == "debug")           s->verbose_level = 2;
+        else if (v == "3" || v == "trace")           s->verbose_level = 3;
+        else s->verbose_level = parse_integer<int>(v, "verbose");
+    }
+
+    if (s->verbose_level > 0) {
+        fz::LogLevel log_level = fz::LogLevel::INFO;
+        if      (s->verbose_level >= 3) log_level = fz::LogLevel::TRACE;
+        else if (s->verbose_level >= 2) log_level = fz::LogLevel::DEBUG;
+        fz::Logger::enableStderr(log_level);
+    }
 
     if (contains(opts, "z")) s->operation = CliOperation::Compress;
     if (contains(opts, "x")) s->operation = CliOperation::Decompress;
@@ -486,7 +521,9 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         }
     }
 
+    if (s.bounds_check) pipeline->enableBoundsCheck(true);
     pipeline->finalize();
+    if (s.print_pipeline) pipeline->printPipeline();
 }
 
 static void print_root_usage(const char* argv0) {
@@ -507,8 +544,16 @@ static void print_root_usage(const char* argv0) {
         << "  -h, --help                        Show this help message and exit\n"
         << "  -c, --config <file.toml>          Load pipeline from TOML config\n\n"
         << "Analysis Options:\n"
-        << "  -R, --report                      Generate a report\n"
-        << "  --compare <original>              Compare decompressed output with original\n\n"
+        << "  -R, --report                      Generate a compression/decompression report\n"
+        << "  --compare <original>              Compare decompressed output with original\n"
+        << "  --profile                         Print per-stage GPU timing table\n"
+        << "  --print-pipeline                  Print pipeline stage graph after finalize\n\n"
+        << "Diagnostic Options:\n"
+        << "  -v                                Verbose: enable INFO-level library logging\n"
+        << "  -vv                               Verbose: enable DEBUG-level library logging\n"
+        << "  -vvv                              Verbose: enable TRACE-level library logging\n"
+        << "  --verbose[=N]                     Verbose level (1=INFO, 2=DEBUG, 3=TRACE)\n"
+        << "  --bounds-check                    Enable runtime buffer overrun detection\n\n"
         << "Compression Parameters (for dynamic linear pipelines):\n"
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
@@ -561,7 +606,11 @@ static int run_compress(CliSettings s) {
         if (!s.config_path.empty()) {
             pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
             pipeline->setDims(s.nx, s.ny, s.nz);
+            pipeline->setWarmupOnFinalize(s.warmup);
+            pipeline->enableProfiling(s.profile);
+            if (s.bounds_check) pipeline->enableBoundsCheck(true);
             pipeline->loadConfig(s.config_path);
+            if (s.print_pipeline) pipeline->printPipeline();
         } else {
             pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
             if (s.type == "f32") {
@@ -583,6 +632,10 @@ static int run_compress(CliSettings s) {
 
         pipeline->writeToFile(s.output_path, 0);
 
+        if (s.profile) {
+            pipeline->getLastPerfResult().print(std::cout);
+        }
+
         if (s.report) {
             double ratio = static_cast<double>(payload_bytes) / static_cast<double>(compressed_size);
             double tput = static_cast<double>(payload_bytes) / (host_ms * 1e-3) / 1e9;
@@ -591,7 +644,9 @@ static int run_compress(CliSettings s) {
                       << "  Compressed size: " << compressed_size << " bytes\n"
                       << "  Ratio:           " << std::fixed << std::setprecision(2) << ratio << "x\n"
                       << "  Time:            " << host_ms << " ms\n"
-                      << "  Throughput:      " << tput << " GB/s\n";
+                      << "  Throughput:      " << tput << " GB/s\n"
+                      << "  Peak device mem: " << std::setprecision(1)
+                      << pipeline->getPeakMemoryUsage() / 1024.0 / 1024.0 << " MB\n";
         }
     } catch (...) {
         if (d_input) FZ_CUDA_CHECK_WARN(cudaFree(d_input));
@@ -616,8 +671,10 @@ static int run_decompress(CliSettings s) {
             orig = read_binary_file(s.original_path);
         }
 
+        PipelinePerfResult decomp_perf;
         const auto t0 = std::chrono::high_resolution_clock::now();
-        Pipeline::decompressFromFile(s.input_path, &d_output, &output_size, 0);
+        Pipeline::decompressFromFile(s.input_path, &d_output, &output_size, 0,
+                                     s.profile ? &decomp_perf : nullptr);
         FZ_CUDA_CHECK(cudaDeviceSynchronize());
         const auto t1 = std::chrono::high_resolution_clock::now();
         double host_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -635,6 +692,10 @@ static int run_decompress(CliSettings s) {
 
         if (!s.output_path.empty()) {
             write_binary_file(s.output_path, host.data(), host.size());
+        }
+
+        if (s.profile) {
+            decomp_perf.print(std::cout);
         }
 
         if (s.report || !s.original_path.empty()) {
@@ -692,8 +753,11 @@ static int run_benchmark(CliSettings s) {
         if (!s.config_path.empty()) {
             pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
             pipeline->setDims(s.nx, s.ny, s.nz);
-            pipeline->loadConfig(s.config_path);
+            pipeline->setWarmupOnFinalize(s.warmup);
             pipeline->enableProfiling(true);
+            if (s.bounds_check) pipeline->enableBoundsCheck(true);
+            pipeline->loadConfig(s.config_path);
+            if (s.print_pipeline) pipeline->printPipeline();
         } else {
             pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
             if (s.type == "f32") {
@@ -712,13 +776,17 @@ static int run_benchmark(CliSettings s) {
 
         TimingSummary compress_stats, decompress_stats;
         std::vector<uint8_t> final_recon;
+        PipelinePerfResult last_compress_perf, last_decompress_perf;
 
         for (int i = 0; i < s.benchmark_runs; ++i) {
+            const bool is_last = (i == s.benchmark_runs - 1);
+
             const auto t0 = std::chrono::high_resolution_clock::now();
             pipeline->compress(d_input, payload_bytes, &d_compressed, &compressed_size, 0);
             FZ_CUDA_CHECK(cudaDeviceSynchronize());
             const auto t1 = std::chrono::high_resolution_clock::now();
             compress_stats.add(std::chrono::duration<double, std::milli>(t1 - t0).count(), pipeline->getLastPerfResult().dag_elapsed_ms);
+            if (is_last) last_compress_perf = pipeline->getLastPerfResult();
 
             void* d_recon = nullptr;
             size_t recon_size = 0;
@@ -726,18 +794,19 @@ static int run_benchmark(CliSettings s) {
             pipeline->decompress(d_compressed, compressed_size, &d_recon, &recon_size, 0);
             FZ_CUDA_CHECK(cudaDeviceSynchronize());
             const auto t3 = std::chrono::high_resolution_clock::now();
-            
+
             if (recon_size != payload_bytes) {
                 if (d_recon) FZ_CUDA_CHECK_WARN(cudaFree(d_recon));
                 throw std::runtime_error("Benchmark size mismatch");
             }
             decompress_stats.add(std::chrono::duration<double, std::milli>(t3 - t2).count(), pipeline->getLastPerfResult().dag_elapsed_ms);
-            
-            if ((s.report || !s.original_path.empty()) && i == s.benchmark_runs - 1) {
+            if (is_last) last_decompress_perf = pipeline->getLastPerfResult();
+
+            if ((s.report || !s.original_path.empty()) && is_last) {
                 final_recon.resize(recon_size);
                 FZ_CUDA_CHECK(cudaMemcpy(final_recon.data(), d_recon, recon_size, cudaMemcpyDeviceToHost));
             }
-            
+
             if (!pipeline->isPoolManagedDecompOutput() && d_recon) {
                 FZ_CUDA_CHECK(cudaFree(d_recon));
             }
@@ -745,13 +814,17 @@ static int run_benchmark(CliSettings s) {
 
         print_summary("compress", compress_stats, payload_bytes);
         print_summary("decompress", decompress_stats, payload_bytes);
-        
+        last_compress_perf.print(std::cout);
+        last_decompress_perf.print(std::cout);
+
         if (s.report || !s.original_path.empty()) {
             double ratio = static_cast<double>(payload_bytes) / compressed_size;
             std::cout << "\n[Quality Report]\n"
                       << "  Input size:      " << payload_bytes << " bytes\n"
                       << "  Compressed size: " << compressed_size << " bytes\n"
-                      << "  Ratio:           " << std::fixed << std::setprecision(2) << ratio << "x\n";
+                      << "  Ratio:           " << std::fixed << std::setprecision(2) << ratio << "x\n"
+                      << "  Peak device mem: " << std::setprecision(1)
+                      << pipeline->getPeakMemoryUsage() / 1024.0 / 1024.0 << " MB\n";
             
             std::vector<uint8_t> orig;
             if (!s.original_path.empty()) {
