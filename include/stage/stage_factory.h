@@ -17,6 +17,7 @@
 #include "coders/rze/rze_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/huffman/huffman_stage.h"
+#include "coders/ans/ans_stage.h"
 
 #include <memory>
 #include <stdexcept>
@@ -236,6 +237,13 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
                     "Unsupported LorenzoStage DataType: "
                     + std::to_string(static_cast<int>(dt)));
             stage->deserializeHeader(config, config_size);
+            break;
+        }
+
+        case StageType::ANS: {
+            auto* s = new ANSStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
             break;
         }
 

@@ -10,7 +10,22 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Added
+- CLI `-v`/`-vv`/`-vvv` and `--verbose[=N]` flags: route library log output (INFO/DEBUG/TRACE) to stderr via `fz::Logger::enableStderr()`
+- CLI `--profile`: now prints the full per-stage GPU timing table (`PipelinePerfResult::print()`) in compress, decompress, and benchmark modes; benchmark captures both compress and decompress stage breakdowns from the last timed run
+- CLI `--print-pipeline`: calls `pipeline->printPipeline()` after finalize to display stage topology and connections
+- CLI `--bounds-check`: enables `pipeline->enableBoundsCheck(true)` for runtime buffer overrun detection
+- CLI `--report` now includes peak device memory usage (`pipeline->getPeakMemoryUsage()`) for compress and benchmark modes
+- CLI: TOML config path now respects `--warmup`, `--profile`, `--bounds-check`, and `--print-pipeline` flags (previously only the dynamic builder path applied these settings)
 - `modules/coders/ans/dietgpu/`: vendored dietGPU rANS headers (Meta Platforms, MIT license); namespace adapted to `fz::ans`, histogram functions stripped in favor of shared `fz::module::GPU_histogram_generic`
+- `ANSStage`: full class definition in `ans_stage.h` — `ANSConfig` (12-byte FZM header with prob_bits + original_bytes_), 7 persistent scratch pointer fields, `isGraphCompatible()=false`, `estimateOutputSizes()`, `serializeHeader()`/`deserializeHeader()`, `saveState()`/`restoreState()`, `getRequiredInputAlignment()=4`, `estimateDeviceFootprintBytes()`, `estimateScratchBytes()`, `onFinalize()` pre-allocation path
+- `ANSStage::execute()` in `ans_stage.cu`: forward path (histogram → `ansCalcWeights` → `ansEncodeBatch<10,4096>` → `batchExclusivePrefixSum` → `ansEncodeCoalesceBatch<64>` → D2H header readback); inverse path (D2H header peek → `ansDecodeTable<256>` → occupancy-based `ansDecodeKernel<128,10,4096>`); `initScratch()`/`onFinalize()`/`estimateDeviceFootprintBytes()`/`estimateScratchBytes()` implementations
+- `ANSStage` registered in `stage_factory.h` (`case StageType::ANS:`) and `config.cpp` (`addANSStage`/`saveANSStage`/`kStageRegistry` entry with TOML type `"ANS"` and `prob_bits` key)
+- `tests/stages/test_ans.cpp`: 12 tests (AN1–AN12) covering round-trip, zero input, compression ratio, header serialization, save/restore state, graph-compatibility, Pipeline integration, reuse-after-size-change, file round-trip, LorenzoQuant→ANS end-to-end pipeline, partial-block input (< 4096 bytes), and unsupported prob_bits validation
+- `examples/cusz_huffman_vs_ans.cpp`: side-by-side throughput and compression-ratio comparison of `LorenzoQuantStage<float,uint16_t>→HuffmanStage<uint16_t>` vs `→ANSStage`; reports compress/decompress GB/s (host and DAG), CR, peak memory, and error stats per run with a final summary table
+- `ANSStage` added to `fzgpumodules.h` public include
+- `docs/stages/ans.md`: full stage documentation for `ANSStage` (execution flow, scratch buffers, header layout, limitations, acknowledgements)
+- `docs/stages/coders.md`: added `ANSStage` entry to coder stage index
+- `THIRD_PARTY.md`: added dietGPU (MIT, Meta Platforms) and MANS (BSD-3, Huang et al.) sections with verbatim license texts
 - `THIRD_PARTY.md`: full copyright notices and per-module attribution for LC framework (RZE, Bitshuffle, Difference, Quantizer) and cuSZ/PHF (LorenzoQuant, Huffman)
 - Attribution `@note` in Doxygen class comments for all six derived stages
 - `## Acknowledgements` section added to stage docs for all six derived stages

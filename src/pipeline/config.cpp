@@ -40,6 +40,7 @@
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/huffman/huffman_stage.h"
+#include "coders/ans/ans_stage.h"
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
 
@@ -332,6 +333,12 @@ static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
     return rze;
 }
 
+static Stage* addANSStage(Pipeline& p, const toml::table& t) {
+    auto* s = p.addStage<ANSStage>();
+    s->setProbBits(static_cast<uint8_t>(optInt(t, "prob_bits", 10)));
+    return s;
+}
+
 static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
@@ -484,6 +491,11 @@ static void saveBitpackStage(Stage* s, std::ostringstream& out) {
     out << "nbits = "        << static_cast<int64_t>(nbits) << "\n";
 }
 
+static void saveANSStage(Stage* s, std::ostringstream& out) {
+    auto* ans = static_cast<ANSStage*>(s);
+    out << "prob_bits = " << static_cast<int64_t>(ans->getProbBits()) << "\n";
+}
+
 static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     uint8_t buf[16] = {};
     size_t sz = s->serializeHeader(0, buf, sizeof(buf));
@@ -531,6 +543,7 @@ static const StageEntry kStageRegistry[] = {
     { "Negabinary",   StageType::NEGABINARY,   addNegabinaryStage,   saveNegabinaryStage   },
     { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage      },
     { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage      },
+    { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

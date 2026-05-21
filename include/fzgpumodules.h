@@ -30,3 +30,4 @@
 #include "transforms/negabinary/negabinary_stage.h"
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/huffman/huffman_stage.h"
+#include "coders/ans/ans_stage.h"

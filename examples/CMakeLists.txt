@@ -59,3 +59,9 @@ add_executable(compare_lorenzo_modes compare_lorenzo_modes.cpp)
 target_link_libraries(compare_lorenzo_modes PRIVATE fzgmod)
 set_target_properties(compare_lorenzo_modes PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── Huffman vs ANS throughput and compression-ratio comparison ─────────────────
+add_executable(cusz_huffman_vs_ans cusz_huffman_vs_ans.cpp)
+target_link_libraries(cusz_huffman_vs_ans PRIVATE fzgmod)
+set_target_properties(cusz_huffman_vs_ans PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
