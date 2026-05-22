@@ -90,8 +90,8 @@ enum class StageType : uint16_t {
     NEGABINARY = 16,  
     BITSHUFFLE = 17, 
     RZE        = 18,  
-    ANS        = 20,   ///< TODO: describe this stage
-    ADM        = 19,   ///< TODO: describe this stage
+    ANS        = 20,   ///< rANS entropy coder (GPU, via dietGPU)
+    ADM        = 19,   ///< Adaptive Data Mapping transform (MANS)
 };
 
 /**

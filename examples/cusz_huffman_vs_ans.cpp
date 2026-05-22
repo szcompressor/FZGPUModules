@@ -2,11 +2,14 @@
  * examples/cusz_huffman_vs_ans.cpp
  *
  * Throughput and compression-ratio comparison:
- *   Pipeline A (Huffman): LorenzoQuantStage<float,uint16_t> → HuffmanStage<uint16_t>
- *   Pipeline B (ANS):     LorenzoQuantStage<float,uint16_t> → ANSStage
+ *   Pipeline A (Huffman):  LorenzoQuantStage<float,uint16_t> → HuffmanStage<uint16_t>
+ *   Pipeline B (ANS):      LorenzoQuantStage<float,uint16_t> → ANSStage
+ *   Pipeline C (ADM+ANS):  LorenzoQuantStage<float,uint16_t> → ADMStage → ANSStage
  *
- * Both pipelines share identical LorenzoQuant settings so the only variable is
- * the entropy coder at the end of the chain.  Metrics reported:
+ * Pipelines A and B isolate the entropy-coder variable.  Pipeline C adds ADM
+ * between LorenzoQuant and ANS to show the additional compression-ratio gain
+ * from remapping uint16 codes into a compact 8-bit symbol domain before ANS.
+ * All three pipelines share identical LorenzoQuant settings.  Metrics reported:
  *   - Compressed size and compression ratio
  *   - Compress throughput  (host-wall and DAG-timer, mean / best)
  *   - Decompress throughput (host-wall and DAG-timer, mean / best)
@@ -25,6 +28,10 @@
  * Examples:
  *   ./build/bin/examples/cusz_huffman_vs_ans data/CLDHGH.f32 3600 1800
  *   ./build/bin/examples/cusz_huffman_vs_ans data/CLDHGH.f32 3600 1800 1e-3 20
+ *
+ * Delta columns in the summary:
+ *   ANS/Huf      — ANS relative to Huffman (isolates entropy-coder change)
+ *   ADM+ANS/ANS  — ADM+ANS relative to ANS (isolates ADM's contribution)
  */
 
 #include "fzgpumodules.h"
@@ -113,6 +120,27 @@ static void build_ans_pipeline(Pipeline& p, float eb, size_t dim_x, size_t dim_y
     auto* ans = p.addStage<ANSStage>();
     (void)ans;  // default prob_bits=10
     p.connect(ans, lq, "codes");
+
+    p.finalize();
+}
+
+static void build_adm_ans_pipeline(Pipeline& p, float eb, size_t dim_x, size_t dim_y)
+{
+    p.setDims(dim_x, dim_y, 1);
+
+    auto* lq = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lq->setErrorBound(eb);
+    lq->setErrorBoundMode(ErrorBoundMode::ABS);
+    lq->setQuantRadius(QUANT_RADIUS);
+    lq->setOutlierCapacity(OUTLIER_CAP);
+    lq->setZigzagCodes(true);
+
+    // ADM remaps uint16_t codes into a compact 8-bit domain before ANS encoding.
+    auto* adm = p.addStage<ADMStage>();  // default dtype=U16 matches LorenzoQuant output
+    p.connect(adm, lq, "codes");
+
+    auto* ans = p.addStage<ANSStage>();
+    p.connect(ans, adm);
 
     p.finalize();
 }
@@ -308,23 +336,24 @@ int main(int argc, char* argv[])
     float* d_input = nullptr;
     if (!load_data(input_file, dim_x, dim_y, h_input, &d_input)) return 1;
 
-    std::cout << "=== cuSZ: Huffman vs ANS Entropy Coder Comparison ===\n"
-              << "  Dataset:       " << input_file << " (" << dim_x << " x " << dim_y << ")\n"
-              << "  Elements:      " << N << "\n"
-              << "  Raw size:      " << std::fixed << std::setprecision(2)
+    std::cout << "=== cuSZ: Huffman vs ANS vs ADM+ANS Comparison ===\n"
+              << "  Dataset:        " << input_file << " (" << dim_x << " x " << dim_y << ")\n"
+              << "  Elements:       " << N << "\n"
+              << "  Raw size:       " << std::fixed << std::setprecision(2)
               << input_bytes / (1024.0 * 1024.0) << " MB\n"
-              << "  Error bound:   " << std::scientific << std::setprecision(1) << eb << " (ABS)\n"
-              << "  Quant radius:  " << QUANT_RADIUS << "  (zigzag → [0, "
+              << "  Error bound:    " << std::scientific << std::setprecision(1) << eb << " (ABS)\n"
+              << "  Quant radius:   " << QUANT_RADIUS << "  (zigzag → [0, "
               << 2 * QUANT_RADIUS - 2 << "])\n"
-              << "  Outlier cap:   " << std::fixed << std::setprecision(0)
+              << "  Outlier cap:    " << std::fixed << std::setprecision(0)
               << OUTLIER_CAP * 100.0f << "% of N\n"
-              << "  Huffman bklen: 1024\n"
-              << "  ANS prob_bits: 10\n"
-              << "  Runs:          " << runs << " (+ 1 warmup each)\n"
-              << "  Pool mult:     " << POOL_MULT << "x\n";
+              << "  Huffman bklen:  1024\n"
+              << "  ANS prob_bits:  10 (both ANS and ADM+ANS)\n"
+              << "  ADM dtype:      U16 (matches LorenzoQuant uint16_t codes)\n"
+              << "  Runs:           " << runs << " (+ 1 warmup each)\n"
+              << "  Pool mult:      " << POOL_MULT << "x\n";
 
     // ── Huffman variant ───────────────────────────────────────────────────────
-    VariantResult huf_res, ans_res;
+    VariantResult huf_res, ans_res, adm_ans_res;
 
     {
         Pipeline p(input_bytes, MemoryStrategy::PREALLOCATE, POOL_MULT);
@@ -341,76 +370,97 @@ int main(int argc, char* argv[])
         ans_res = run_variant(p, "ANS (rANS, dietGPU)", d_input, input_bytes, h_input, runs);
     }
 
+    // ── ADM+ANS variant ───────────────────────────────────────────────────────
+    {
+        Pipeline p(input_bytes, MemoryStrategy::PREALLOCATE, POOL_MULT);
+        p.enableProfiling(true);
+        build_adm_ans_pipeline(p, eb, dim_x, dim_y);
+        adm_ans_res = run_variant(p, "ADM+ANS (MANS-style)", d_input, input_bytes, h_input, runs);
+    }
+
     // ── Side-by-side comparison ───────────────────────────────────────────────
     const auto tput = [&](double ms) -> float {
         return static_cast<float>(input_bytes) / static_cast<float>(ms * 1e-3) / 1e9f;
     };
 
-    const double cr_huf = static_cast<double>(input_bytes) / huf_res.compressed_size;
-    const double cr_ans = static_cast<double>(input_bytes) / ans_res.compressed_size;
+    const double cr_huf     = static_cast<double>(input_bytes) / huf_res.compressed_size;
+    const double cr_ans     = static_cast<double>(input_bytes) / ans_res.compressed_size;
+    const double cr_adm_ans = static_cast<double>(input_bytes) / adm_ans_res.compressed_size;
 
-    // Relative delta: positive means ANS is better.
-    const auto pct = [](double ans_v, double huf_v) -> double {
-        return (ans_v - huf_v) / huf_v * 100.0;
+    // Returns "+X.X%" / "-X.X%" / "~same" for a relative delta.
+    // "better" direction follows higher_is_better.
+    const auto fmt_delta = [](double v_new, double v_base, bool higher_is_better) -> std::string {
+        const double delta = (v_new - v_base) / v_base * 100.0;
+        if (std::abs(delta) < 0.05) return "~same";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(1) << std::abs(delta) << "%";
+        return ((delta > 0) == higher_is_better ? "+" : "-") + oss.str();
     };
 
-    std::cout << "\n\n══ Summary ════════════════════════════════════════════════════════\n";
+    std::cout << "\n\n══ Summary ═══════════════════════════════════════════════════════════════════════════════\n";
     std::cout << std::left  << std::setw(28) << "Metric"
               << std::right << std::setw(16) << "Huffman"
               << std::setw(16) << "ANS"
-              << std::setw(14) << "ANS vs Huf"
-              << "\n" << std::string(74, '-') << "\n";
+              << std::setw(16) << "ADM+ANS"
+              << std::setw(14) << "ANS/Huf"
+              << std::setw(16) << "ADM+ANS/ANS"
+              << "\n" << std::string(90, '-') << "\n";
 
     const auto row = [&](const std::string& label,
-                         double v_huf, double v_ans,
+                         double v_huf, double v_ans, double v_adm,
                          const std::string& unit,
                          bool higher_is_better = true)
     {
-        const double delta = pct(v_ans, v_huf);
-        const std::string delta_str =
-            (std::abs(delta) < 0.05) ? "  ~same"
-            : ((delta > 0) == higher_is_better)
-                ? ("  +" + (std::ostringstream{} << std::fixed << std::setprecision(1) << std::abs(delta)).str() + "% ANS")
-                : ("  -" + (std::ostringstream{} << std::fixed << std::setprecision(1) << std::abs(delta)).str() + "% ANS");
-
         std::cout << std::left  << std::setw(28) << label
                   << std::right << std::setw(13) << std::fixed << std::setprecision(2) << v_huf << unit
                   << std::setw(13) << v_ans << unit
-                  << "  " << delta_str << "\n";
+                  << std::setw(13) << v_adm << unit
+                  << "  " << std::setw(10) << fmt_delta(v_ans, v_huf, higher_is_better)
+                  << "  " << std::setw(12) << fmt_delta(v_adm, v_ans, higher_is_better)
+                  << "\n";
     };
 
     row("Compressed size",
         huf_res.compressed_size / (1024.0 * 1024.0),
-        ans_res.compressed_size / (1024.0 * 1024.0), " MB", false);
-    row("Compression ratio",   cr_huf,  cr_ans,  "x  ", true);
+        ans_res.compressed_size / (1024.0 * 1024.0),
+        adm_ans_res.compressed_size / (1024.0 * 1024.0), " MB", false);
+    row("Compression ratio",   cr_huf,  cr_ans,  cr_adm_ans,  "x  ", true);
     row("Comp tput dag mean",
         tput(huf_res.comp_mean_dag_ms),
-        tput(ans_res.comp_mean_dag_ms),  " GB/s", true);
+        tput(ans_res.comp_mean_dag_ms),
+        tput(adm_ans_res.comp_mean_dag_ms),  " GB/s", true);
     row("Comp tput dag best",
         tput(huf_res.comp_min_dag_ms),
-        tput(ans_res.comp_min_dag_ms),   " GB/s", true);
+        tput(ans_res.comp_min_dag_ms),
+        tput(adm_ans_res.comp_min_dag_ms),   " GB/s", true);
     row("Comp tput host mean",
         tput(huf_res.comp_mean_host_ms),
-        tput(ans_res.comp_mean_host_ms), " GB/s", true);
+        tput(ans_res.comp_mean_host_ms),
+        tput(adm_ans_res.comp_mean_host_ms), " GB/s", true);
     row("Decomp tput dag mean",
         tput(huf_res.decomp_mean_dag_ms),
-        tput(ans_res.decomp_mean_dag_ms),  " GB/s", true);
+        tput(ans_res.decomp_mean_dag_ms),
+        tput(adm_ans_res.decomp_mean_dag_ms),  " GB/s", true);
     row("Decomp tput dag best",
         tput(huf_res.decomp_min_dag_ms),
-        tput(ans_res.decomp_min_dag_ms),   " GB/s", true);
+        tput(ans_res.decomp_min_dag_ms),
+        tput(adm_ans_res.decomp_min_dag_ms),   " GB/s", true);
     row("Decomp tput host mean",
         tput(huf_res.decomp_mean_host_ms),
-        tput(ans_res.decomp_mean_host_ms), " GB/s", true);
+        tput(ans_res.decomp_mean_host_ms),
+        tput(adm_ans_res.decomp_mean_host_ms), " GB/s", true);
     row("Peak device memory",
         huf_res.peak_memory / (1024.0 * 1024.0),
-        ans_res.peak_memory / (1024.0 * 1024.0), " MB", false);
+        ans_res.peak_memory / (1024.0 * 1024.0),
+        adm_ans_res.peak_memory / (1024.0 * 1024.0), " MB", false);
     row("Max abs error",
         static_cast<double>(huf_res.max_abs_error),
-        static_cast<double>(ans_res.max_abs_error), "   ", false);
-    row("MAE",  huf_res.mae,  ans_res.mae,  "   ", false);
-    row("RMSE", huf_res.rmse, ans_res.rmse, "   ", false);
+        static_cast<double>(ans_res.max_abs_error),
+        static_cast<double>(adm_ans_res.max_abs_error), "   ", false);
+    row("MAE",  huf_res.mae,  ans_res.mae,  adm_ans_res.mae,  "   ", false);
+    row("RMSE", huf_res.rmse, ans_res.rmse, adm_ans_res.rmse, "   ", false);
 
-    std::cout << std::string(74, '-') << "\n"
+    std::cout << std::string(90, '-') << "\n"
               << "  Input bytes: " << input_bytes << "  ("
               << std::setprecision(2) << input_bytes / (1024.0 * 1024.0) << " MB)\n"
               << "  Error bound: " << std::scientific << std::setprecision(1) << eb << " ABS\n";

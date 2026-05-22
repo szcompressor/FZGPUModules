@@ -512,12 +512,20 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             auto* huf = pipeline->addStage<HuffmanStage<uint16_t>>();
             huf->setBklen(bklen);
             connect_next(huf);
+        } else if (name == "ans") {
+            auto* ans = pipeline->addStage<ANSStage>();
+            connect_next(ans);
+        } else if (name == "adm") {
+            auto* adm = pipeline->addStage<ADMStage>();
+            // If upstream emits uint16_t codes (predictor), use U16; otherwise U16 is the default.
+            adm->setDtype(ADMDtype::U16);
+            connect_next(adm);
         } else if (name == "none") {
             // explicit no-op
         } else {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
-                "Supported: lorenzo, quantizer, bitshuffle, rze, diff, rle, huffman");
+                "Supported: lorenzo, quantizer, bitshuffle, rze, diff, rle, huffman, ans, adm");
         }
     }
 
@@ -558,7 +566,7 @@ static void print_root_usage(const char* argv0) {
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
-        << "                                                      rze, diff, rle, huffman\n"
+        << "                                                      rze, diff, rle, huffman, ans, adm\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

@@ -16,6 +16,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - `tests/stages/test_adm.cpp` AD7 (`SerializeDeserialize`): used `adm_encode<uint16_t>` with `dtype=U32`, causing the U32 kernel to mis-interpret uint16_t bytes as uint32_t values with huge diffs; changed to `adm_encode<uint32_t>` with matching `make_u32_data`
 
 ### Added
+- CLI `--stages`: added `ans` and `adm` as recognized stage tokens in the dynamic pipeline builder; updated help text and error message to list both
+- `fzm_format.h`: replaced stale `TODO` comments on `StageType::ANS` and `StageType::ADM` with accurate descriptions
+- `examples/cusz_huffman_vs_ans.cpp`: added third pipeline variant (ADM+ANS) showing `LorenzoQuantStage → ADMStage → ANSStage`; summary table now shows three data columns with `ANS/Huf` and `ADM+ANS/ANS` relative-delta columns
 - CLI `-v`/`-vv`/`-vvv` and `--verbose[=N]` flags: route library log output (INFO/DEBUG/TRACE) to stderr via `fz::Logger::enableStderr()`
 - CLI `--profile`: now prints the full per-stage GPU timing table (`PipelinePerfResult::print()`) in compress, decompress, and benchmark modes; benchmark captures both compress and decompress stage breakdowns from the last timed run
 - CLI `--print-pipeline`: calls `pipeline->printPipeline()` after finalize to display stage topology and connections
