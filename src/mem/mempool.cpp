@@ -68,7 +68,11 @@ MemoryPool::~MemoryPool() {
         // Destroy memory pool
         cudaMemPoolDestroy(mem_pool_);
     } else {
-        // Fallback mode: free with cudaFree
+        // Fallback mode: sync device so any in-flight GPU work completes (and any
+        // vGPU-deferred page-fault SIGSEGVs are delivered here, not in a later test)
+        // before we free with cudaFree.
+        cudaDeviceSynchronize();
+
         for (auto& [ptr, info] : allocations_) {
             cudaFree(ptr);
         }
@@ -90,6 +94,13 @@ MemoryPool::~MemoryPool() {
         else             cudaFree(a.ptr);
     }
     persistent_allocs_.clear();
+
+    // On vGPU (fallback mode), the driver processes cudaFree asynchronously.
+    // A final sync ensures all deallocations complete before the next pool
+    // (in a subsequent test) starts allocating at the same device addresses.
+    if (!mem_pool_) {
+        cudaDeviceSynchronize();
+    }
 }
 
 void MemoryPool::initializeMemPool() {

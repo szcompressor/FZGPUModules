@@ -17,6 +17,7 @@
 #include "cuda_check.h"
 
 #include <cuda_runtime.h>
+#include <sched.h>
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
@@ -34,6 +35,18 @@ void ANSStage::initScratch(size_t inlen, MemoryPool* pool)
         fz::ans::divUp(static_cast<uint64_t>(inlen),
                        static_cast<uint64_t>(fz::ans::kDefaultBlockSize)));
 
+    // batchExclusivePrefixSum1 always reads kMaxBEPSThreads (512) elements per
+    // CUDA block regardless of how many are valid.  For multi-block launches the
+    // kernel reads roundUp(max_blocks, kMaxBEPSThreads) entries in total.  Pad
+    // the comp_words buffers to that size so every speculative load lands inside
+    // the allocation — on vGPU, out-of-bounds device reads hit unmapped pages
+    // and the driver converts the GPU page fault into a CPU SIGSEGV.
+    const size_t safe_comp_words = static_cast<size_t>(
+        fz::ans::roundUp(
+            static_cast<uint64_t>(std::max(max_blocks,
+                static_cast<uint32_t>(fz::ans::kMaxBEPSThreads))),
+            static_cast<uint64_t>(fz::ans::kMaxBEPSThreads)));
+
     // Release existing allocations before resizing.
     if (d_temp_histogram_)    pool->freePersistentDevice(d_temp_histogram_);
     if (d_table_)             pool->freePersistentDevice(d_table_);
@@ -45,29 +58,36 @@ void ANSStage::initScratch(size_t inlen, MemoryPool* pool)
 
     d_temp_histogram_ = static_cast<uint32_t*>(pool->allocatePersistentDevice(
         fz::ans::kNumSymbols * sizeof(uint32_t), "ans.histogram"));
+    if (!d_temp_histogram_) throw std::runtime_error("ANSStage: d_temp_histogram_ alloc failed");
 
     d_table_ = pool->allocatePersistentDevice(
         fz::ans::kNumSymbols * sizeof(uint4), "ans.encode_table");
+    if (!d_table_) throw std::runtime_error("ANSStage: d_table_ alloc failed");
 
     d_compressed_blocks_ = static_cast<uint8_t*>(pool->allocatePersistentDevice(
         static_cast<size_t>(max_blocks) * kUncoalescedStride, "ans.comp_blocks"));
+    if (!d_compressed_blocks_) throw std::runtime_error("ANSStage: d_compressed_blocks_ alloc failed");
 
     d_compressed_words_ = static_cast<uint32_t*>(pool->allocatePersistentDevice(
-        static_cast<size_t>(max_blocks) * sizeof(uint32_t), "ans.comp_words"));
+        safe_comp_words * sizeof(uint32_t), "ans.comp_words"));
+    if (!d_compressed_words_) throw std::runtime_error("ANSStage: d_compressed_words_ alloc failed");
 
     d_comp_words_prefix_ = static_cast<uint32_t*>(pool->allocatePersistentDevice(
-        static_cast<size_t>(max_blocks) * sizeof(uint32_t), "ans.comp_words_prefix"));
+        safe_comp_words * sizeof(uint32_t), "ans.comp_words_prefix"));
+    if (!d_comp_words_prefix_) throw std::runtime_error("ANSStage: d_comp_words_prefix_ alloc failed");
 
     const size_t temp_elems = fz::ans::getBatchExclusivePrefixSumTempSize(max_blocks);
     if (temp_elems > 0) {
         d_temp_prefix_sum_ = pool->allocatePersistentDevice(
             temp_elems * sizeof(uint32_t), "ans.prefix_sum_temp");
+        if (!d_temp_prefix_sum_) throw std::runtime_error("ANSStage: d_temp_prefix_sum_ alloc failed");
     } else {
         d_temp_prefix_sum_ = nullptr;
     }
 
     d_decode_table_ = static_cast<uint32_t*>(pool->allocatePersistentDevice(
         (size_t(1) << prob_bits_) * sizeof(uint32_t), "ans.decode_table"));
+    if (!d_decode_table_) throw std::runtime_error("ANSStage: d_decode_table_ alloc failed");
 
     fz::module::GPU_histogram_generic_optimizer_on_initialization<uint8_t>(
         inlen, static_cast<uint16_t>(fz::ans::kNumSymbols),
@@ -92,14 +112,19 @@ size_t ANSStage::estimateDeviceFootprintBytes(size_t inlen) const
     const auto max_blocks = static_cast<uint32_t>(
         (static_cast<uint64_t>(inlen) + fz::ans::kDefaultBlockSize - 1)
         / fz::ans::kDefaultBlockSize);
+    const size_t safe_comp_words = static_cast<size_t>(
+        fz::ans::roundUp(
+            static_cast<uint64_t>(std::max(max_blocks,
+                static_cast<uint32_t>(fz::ans::kMaxBEPSThreads))),
+            static_cast<uint64_t>(fz::ans::kMaxBEPSThreads)));
     const size_t temp_bytes =
         fz::ans::getBatchExclusivePrefixSumTempSize(max_blocks) * sizeof(uint32_t);
 
     return fz::ans::kNumSymbols  * sizeof(uint32_t)               // d_temp_histogram_
          + fz::ans::kNumSymbols  * sizeof(uint4)                   // d_table_
          + static_cast<size_t>(max_blocks) * kUncoalescedStride    // d_compressed_blocks_
-         + static_cast<size_t>(max_blocks) * sizeof(uint32_t)      // d_compressed_words_
-         + static_cast<size_t>(max_blocks) * sizeof(uint32_t)      // d_comp_words_prefix_
+         + safe_comp_words       * sizeof(uint32_t)                // d_compressed_words_
+         + safe_comp_words       * sizeof(uint32_t)                // d_comp_words_prefix_
          + temp_bytes                                               // d_temp_prefix_sum_
          + (size_t(1) << prob_bits_) * sizeof(uint32_t);           // d_decode_table_
 }
@@ -148,10 +173,50 @@ void ANSStage::execute(
             (static_cast<uint64_t>(inlen) + fz::ans::kDefaultBlockSize - 1)
             / fz::ans::kDefaultBlockSize);
 
-        // Step 1: Build uint8_t histogram (256 bins).
+        // On vGPU (e.g. Jetstream2), cudaMemPoolCreate fails and MemoryPool falls back
+        // to plain cudaMalloc.  Freshly-malloc'd pages are demand-mapped: the first GPU
+        // write triggers a page fault which the driver converts into a pending SIGSEGV
+        // delivered asynchronously to the CPU process.  We apply two vGPU-only mitigations
+        // (pre-touch memsets and sched_yield calls) that have no effect on normal hardware.
+        const bool vgpu_fallback = pool->isFallbackMode();
+
+        // Step 1: Zero-init correctness buffers, and on vGPU also pre-touch the rest.
+        //
+        // d_temp_histogram_ MUST be zeroed: histogram accumulation is done with atomics
+        //   that add to whatever is already there.
+        // d_compressed_words_ MUST be zeroed up to safe_comp_words: batchExclusivePrefixSum1
+        //   unconditionally reads kMaxBEPSThreads (512) entries; padding beyond max_blocks
+        //   must be 0 so those speculative loads don't contribute to the prefix sum.
+        //
+        // The remaining buffers (out, d_table_, d_compressed_blocks_, d_comp_words_prefix_)
+        // are fully overwritten by their respective kernels; zeroing them here serves only
+        // as a vGPU pre-touch so the driver maps pages before the encode kernels run, keeping
+        // all page faults inside cheaper memset kernels rather than the complex encoders.
+        const size_t safe_comp_words = static_cast<size_t>(
+            fz::ans::roundUp(
+                static_cast<uint64_t>(std::max(max_blocks,
+                    static_cast<uint32_t>(fz::ans::kMaxBEPSThreads))),
+                static_cast<uint64_t>(fz::ans::kMaxBEPSThreads)));
         FZ_CUDA_CHECK(cudaMemsetAsync(
             d_temp_histogram_, 0,
             fz::ans::kNumSymbols * sizeof(uint32_t), stream));
+        FZ_CUDA_CHECK(cudaMemsetAsync(
+            d_compressed_words_, 0,
+            safe_comp_words * sizeof(uint32_t), stream));
+        if (vgpu_fallback) {
+            // Pre-touch buffers fully overwritten by encode kernels.
+            // estimateOutputSizes() guarantees the caller allocated at least byte_size*2+8192.
+            FZ_CUDA_CHECK(cudaMemsetAsync(out, 0, byte_size * 2 + 8192, stream));
+            FZ_CUDA_CHECK(cudaMemsetAsync(
+                d_table_, 0,
+                fz::ans::kNumSymbols * sizeof(uint4), stream));
+            FZ_CUDA_CHECK(cudaMemsetAsync(
+                d_compressed_blocks_, 0,
+                static_cast<size_t>(max_blocks) * kUncoalescedStride, stream));
+            FZ_CUDA_CHECK(cudaMemsetAsync(
+                d_comp_words_prefix_, 0,
+                safe_comp_words * sizeof(uint32_t), stream));
+        }
         fz::module::GPU_histogram_generic<uint8_t>(
             in, byte_size, d_temp_histogram_,
             static_cast<uint16_t>(fz::ans::kNumSymbols),
@@ -198,14 +263,25 @@ void ANSStage::execute(
 
         // Step 6: D2H readback of ANSCoalescedHeader to get actual compressed size.
         // Stream sync is required; stage is not graph-compatible.
+        //
+        // vGPU only: the driver raises SIGSEGV asynchronously for GPU page faults, then
+        // the cuda-EvtHandlr background thread withdraws it once the fault is resolved.
+        // sched_yield() gives that thread OS scheduling opportunities to complete the
+        // withdrawal before the next user-space instruction runs.  Five yields are spread
+        // around the blocking streamSync so the thread has time at every critical point.
+        if (vgpu_fallback) sched_yield();
         FZ_CUDA_CHECK(cudaMemcpyAsync(
             last_header_bytes_, out, 32, cudaMemcpyDeviceToHost, stream));
+        if (vgpu_fallback) sched_yield();
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (vgpu_fallback) sched_yield();
 
         const auto* h =
             reinterpret_cast<const fz::ans::ANSCoalescedHeader*>(last_header_bytes_);
         actual_output_size_ = h->getTotalCompressedSize();
+        if (vgpu_fallback) sched_yield();
         original_bytes_     = byte_size;
+        if (vgpu_fallback) sched_yield();
 
     } else {
         // ── Inverse (decompress) ──────────────────────────────────────────────
