@@ -180,10 +180,18 @@ URL: https://github.com/facebookresearch/dietgpu
 **Used by:** `ADMStage` (`modules/transforms/adm/`), `MANSStage` (`modules/fused/mans/`)
 
 **Relationship:**
-- The Adaptive Data Mapping (ADM) kernels in `ADMStage` and the fused
-  ADM+ANS logic in `MANSStage` are algorithm-faithful reimplementations
-  adapted from the MANS project by Huang et al.  The GPU rANS component
-  used inside these stages is covered by the dietGPU entry above.
+- `ADMStage` (`modules/transforms/adm/mapping_uint16.cu`,
+  `mapping_uint32.cu`) — GPU kernels are a direct port of
+  `nv/adm/mapping_uint16.cu` and `nv/adm/mapping_uint32.cu` from the MANS
+  repository.  Kernel logic is unchanged.  Changes from the original: unused
+  `MansParams` parameter removed; per-call `cudaMalloc`/`cudaFree` replaced
+  by pool-allocated `AdmScratch`; `check_cuda()` replaced by `FZ_CUDA_CHECK`;
+  namespace changed from `mans::nv::adm` to `fz::adm`; kernels renamed with
+  `_u16`/`_u32` suffix to avoid TU-level naming conflicts; inline Chinese
+  comments translated to English.
+- `MANSStage` (`modules/fused/mans/`) — to be added in a future release;
+  will follow the fused ADM+rANS design from the MANS repository.  The GPU
+  rANS component is covered by the dietGPU entry above.
 
 **License:**
 

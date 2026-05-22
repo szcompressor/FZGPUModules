@@ -257,6 +257,9 @@ add_library(fzgmod_modules
   modules/coders/huffman/huffman_stage.cu
   modules/coders/ans/ans_stage.cu
   modules/coders/ans/dietgpu/GpuANS.cu
+  modules/transforms/adm/adm_stage.cu
+  modules/transforms/adm/mapping_uint16.cu
+  modules/transforms/adm/mapping_uint32.cu
 )
 
 target_link_libraries(fzgmod_modules

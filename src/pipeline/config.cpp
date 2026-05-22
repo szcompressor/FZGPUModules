@@ -41,6 +41,7 @@
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
+#include "transforms/adm/adm_stage.h"
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
 
@@ -339,6 +340,13 @@ static Stage* addANSStage(Pipeline& p, const toml::table& t) {
     return s;
 }
 
+static Stage* addADMStage(Pipeline& p, const toml::table& t) {
+    auto* s = p.addStage<ADMStage>();
+    std::string dtype_str = optStr(t, "dtype", "uint16");
+    if (dtype_str == "uint32") s->setDtype(ADMDtype::U32);
+    return s;
+}
+
 static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
@@ -496,6 +504,11 @@ static void saveANSStage(Stage* s, std::ostringstream& out) {
     out << "prob_bits = " << static_cast<int64_t>(ans->getProbBits()) << "\n";
 }
 
+static void saveADMStage(Stage* s, std::ostringstream& out) {
+    auto* adm = static_cast<ADMStage*>(s);
+    out << "dtype = \"" << (adm->getDtype() == ADMDtype::U16 ? "uint16" : "uint32") << "\"\n";
+}
+
 static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     uint8_t buf[16] = {};
     size_t sz = s->serializeHeader(0, buf, sizeof(buf));
@@ -544,6 +557,7 @@ static const StageEntry kStageRegistry[] = {
     { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage      },
     { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage      },
     { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
+    { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

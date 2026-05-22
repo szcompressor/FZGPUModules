@@ -9,6 +9,12 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — 2.0.0
 
+### Fixed
+- `adm_map_decoupled_u16`/`adm_map_thrust_u16`/`adm_map_decoupled_u32`/`adm_map_thrust_u32`: added `#ifndef NDEBUG` overflow sentinel — kernels call `atomicOr(d_overflow_flag, 1)` when a thread's `bit_offset` exceeds `kChunk × kMaxSignalBytes × 8`; host checks the flag after `cudaStreamSynchronize` and throws a `std::runtime_error` to catch inputs that violate the algorithm's bounded-diff assumption
+- `adm_map_decoupled_u16`/`adm_map_decoupled_u32`: `__shared__ excl_sum` was uninitialized for the first warp block (warp=0), causing non-deterministic writes to `d_concat_signals`; initialize to 0 at kernel entry
+- `tests/stages/test_adm.cpp` AD2 (`U32RoundTrip`): `make_u32_data` amplitude (±12000) exceeded the algorithm's per-thread `local_bits` capacity (64 bytes, supports max diff ≤ 4032); reduced amplitude to ±250
+- `tests/stages/test_adm.cpp` AD7 (`SerializeDeserialize`): used `adm_encode<uint16_t>` with `dtype=U32`, causing the U32 kernel to mis-interpret uint16_t bytes as uint32_t values with huge diffs; changed to `adm_encode<uint32_t>` with matching `make_u32_data`
+
 ### Added
 - CLI `-v`/`-vv`/`-vvv` and `--verbose[=N]` flags: route library log output (INFO/DEBUG/TRACE) to stderr via `fz::Logger::enableStderr()`
 - CLI `--profile`: now prints the full per-stage GPU timing table (`PipelinePerfResult::print()`) in compress, decompress, and benchmark modes; benchmark captures both compress and decompress stage breakdowns from the last timed run
@@ -16,6 +22,11 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - CLI `--bounds-check`: enables `pipeline->enableBoundsCheck(true)` for runtime buffer overrun detection
 - CLI `--report` now includes peak device memory usage (`pipeline->getPeakMemoryUsage()`) for compress and benchmark modes
 - CLI: TOML config path now respects `--warmup`, `--profile`, `--bounds-check`, and `--print-pipeline` flags (previously only the dynamic builder path applied these settings)
+- `ADMStage`: Adaptive Data Mapping stage adapted from the MANS project (Huang et al., BSD-3-Clause); remaps `uint16_t[]`/`uint32_t[]` streams into a compact 8-bit symbol domain before entropy coding; `isGraphCompatible()=false`; 12-byte FZM header stores dtype + `num_elements`; two encode paths: decoupled look-back prefix sum for gsize ≤ 1024 and Thrust `exclusive_scan` fallback for larger arrays; 9 persistent scratch device buffers managed via `MemoryPool::allocatePersistentDevice`
+- `ADMStage` kernel files: `modules/transforms/adm/mapping_uint16.cu` and `mapping_uint32.cu` — TU-private `__global__` kernels with exported host wrappers (`compress_u16`/`decompress_u16`/`get_max_u16_payload_bytes` and u32 equivalents); all per-call `cudaMalloc`/`cudaFree` from the MANS reference replaced with `AdmScratch` pool pointers
+- `ADMStage` registered in `stage_factory.h` (`case StageType::ADM:`) and `config.cpp` (`addADMStage`/`saveADMStage`/`kStageRegistry` entry with TOML type `"ADM"` and `dtype` key)
+- `ADMStage` added to `fzgpumodules.h` public include
+- `tests/stages/test_adm.cpp`: 12 tests (AD1–AD12) covering u16/u32 round-trip, small input (< one warp block), large input (Thrust fallback path), zero input, compression ratio, header serialization, save/restore state, graph-compatibility, Pipeline integration, file round-trip, and LorenzoQuant→ADM→ANS end-to-end pipeline
 - `modules/coders/ans/dietgpu/`: vendored dietGPU rANS headers (Meta Platforms, MIT license); namespace adapted to `fz::ans`, histogram functions stripped in favor of shared `fz::module::GPU_histogram_generic`
 - `ANSStage`: full class definition in `ans_stage.h` — `ANSConfig` (12-byte FZM header with prob_bits + original_bytes_), 7 persistent scratch pointer fields, `isGraphCompatible()=false`, `estimateOutputSizes()`, `serializeHeader()`/`deserializeHeader()`, `saveState()`/`restoreState()`, `getRequiredInputAlignment()=4`, `estimateDeviceFootprintBytes()`, `estimateScratchBytes()`, `onFinalize()` pre-allocation path
 - `ANSStage::execute()` in `ans_stage.cu`: forward path (histogram → `ansCalcWeights` → `ansEncodeBatch<10,4096>` → `batchExclusivePrefixSum` → `ansEncodeCoalesceBatch<64>` → D2H header readback); inverse path (D2H header peek → `ansDecodeTable<256>` → occupancy-based `ansDecodeKernel<128,10,4096>`); `initScratch()`/`onFinalize()`/`estimateDeviceFootprintBytes()`/`estimateScratchBytes()` implementations

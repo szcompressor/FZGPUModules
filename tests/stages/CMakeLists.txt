@@ -135,3 +135,11 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+# ─── ADM stage ────────────────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_adm
+    SOURCES test_adm.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)

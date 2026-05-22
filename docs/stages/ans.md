@@ -176,9 +176,8 @@ one in every inverse call (to read the header before decoding).
 
 **Byte-level encoding only.** `ANSStage` operates on `uint8_t` symbols (256-entry
 alphabet).  For multi-byte integer streams (e.g., `uint16_t` quantization codes),
-pair it with `ADMStage` (coming in Phase 2) which remaps the wide symbol space into
-the 8-bit domain before ANS coding — or use `MANSStage` (Phase 3) for the fused
-path.
+pair it with `ADMStage` (\ref stage_adm) which remaps the wide symbol space into
+the 8-bit domain before ANS coding — or use `MANSStage` for the fused path.
 
 **Compression ratio depends on upstream symbol compactness.** ANS achieves its
 theoretical Shannon entropy bound only when the symbol distribution is known at
