@@ -1,5 +1,7 @@
 /**
- * ownership_example.cpp — compress and decompress output ownership semantics.
+ * examples/ownership_example.cpp
+ *
+ * Compress and decompress output ownership semantics.
  *
  * The pipeline has two independently controllable ownership modes.
  *
@@ -23,10 +25,14 @@
  *                          decompress() returns a fresh cudaMalloc'd pointer.
  *                          Caller MUST cudaFree when done.
  *
- * No external data files required.
+ * No external data files required — uses synthetic float data.
  *
  * Usage:
- *   ./build/bin/ownership_example
+ *   ./build/bin/examples/ownership_example
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/ownership_example
  */
 
 #include "fzgpumodules.h"

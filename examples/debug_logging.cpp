@@ -1,36 +1,44 @@
 /**
- * debug_logging.cpp — debugging and logging tools for pipeline development.
+ * examples/debug_logging.cpp
  *
- * Covers the four main tools for understanding what the pipeline is doing:
+ * Debugging and logging tools for pipeline development.
+ *
+ * Covers the five main tools for understanding what the pipeline is doing:
  *
  *   1. Logger  — route library log output to stderr or a custom callback.
  *                Log levels: TRACE (0) < DEBUG (1) < INFO (2) < WARN (3) < SILENT.
  *                Default: INFO at runtime, compile-time floor set by FZ_LOG_MIN_LEVEL.
  *
- *   2. printPipeline() / printDAG() / printBufferLifetimes()
+ *   2. Custom log callback — filter, tag, or redirect log lines to any sink
+ *                (test buffer, file, GUI panel, etc.).
+ *
+ *   3. printPipeline() / getDAG()->printDAG() / getDAG()->printBufferLifetimes()
  *                Explicit diagnostic dumps — always produce output regardless of
  *                log level. Route through the Logger callback if one is set,
  *                otherwise write to stdout.
  *
- *   3. enableProfiling() + getLastPerfResult()
+ *   4. enableProfiling() + getLastPerfResult()
  *                CUDA-event per-stage timing. Use to find which stage dominates,
  *                compare pipeline variants, or profile before optimising.
  *
- *   4. enableBoundsCheck()
+ *   5. enableBoundsCheck()
  *                Runtime check that no stage writes beyond its allocated buffer.
  *                Enabled automatically in debug builds; opt-in in release.
  *
- * No external data files required.
+ * No external data files required — uses synthetic float data.
  *
  * Usage:
- *   ./build/bin/debug_logging
+ *   ./build/bin/examples/debug_logging
  *
  * To see TRACE + DEBUG logs, rebuild with:
- *   cmake -DFZ_LOG_MIN_LEVEL=0 --preset release && cmake --build --preset release
+ *   cmake -DFZ_LOG_MIN_LEVEL=0 --preset release && cmake --build build/release -j$(nproc)
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/debug_logging
  */
 
 #include "fzgpumodules.h"
-#include "log.h"
 
 #include <algorithm>
 #include <cmath>

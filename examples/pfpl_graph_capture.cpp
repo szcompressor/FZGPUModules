@@ -27,6 +27,10 @@
  *   ./build/bin/examples/pfpl_graph_capture data/CLDHGH.f32 3600 1800
  *   ./build/bin/examples/pfpl_graph_capture data/CLDHGH.f32 3600 1800 1e-3 rel 30
  *   ./build/bin/examples/pfpl_graph_capture data/CLDHGH.f32 3600 1800 1e-4 abs 20
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/pfpl_graph_capture
  */
 
 #include "fzgpumodules.h"
@@ -117,7 +121,6 @@ static QuantizerStage<float, uint32_t>* build_pfpl_stages(
 // ── Per-strategy result ───────────────────────────────────────────────────────
 struct StrategyResult {
     std::string strat_name;
-    size_t      pool_threshold;
     size_t      peak_memory;
     size_t      compressed_size;
     double      mean_host_ms;
@@ -144,8 +147,6 @@ static StrategyResult run_normal(
     build_pfpl_stages(comp, eb, mode);  // normal path: stage performs its own scan
     comp.finalize();
     comp.enableProfiling(true);
-
-    const size_t pool_threshold = comp.getPoolThreshold();
 
     void*  d_out  = nullptr;
     size_t out_sz = 0;
@@ -209,7 +210,7 @@ static StrategyResult run_normal(
               << tput(mean_h) << " GB/s\n"
               << "  Throughput (dag  mean): " << std::setw(6) << tput(mean_d) << " GB/s\n";
 
-    return {strat_name, pool_threshold, peak_mem, out_sz,
+    return {strat_name, peak_mem, out_sz,
             mean_h, mean_d, min_h, min_d, max_h, max_d};
 }
 
@@ -240,8 +241,6 @@ static StrategyResult run_graph(
     comp.enableGraphMode(true);
     comp.finalize();
     comp.enableProfiling(true);
-
-    const size_t pool_threshold = comp.getPoolThreshold();
 
     // CUDA Graph capture requires a non-default stream.  The legacy default
     // stream (stream 0) cannot be captured; cudaStreamBeginCapture would
@@ -338,7 +337,7 @@ static StrategyResult run_graph(
 
     cudaStreamDestroy(graph_stream);
 
-    return {strat_name, pool_threshold, peak_mem, out_sz,
+    return {strat_name, peak_mem, out_sz,
             mean_h, mean_d, min_h, min_d, max_h, max_d};
 }
 
@@ -442,10 +441,6 @@ int main(int argc, char* argv[]) {
                   << std::setw(11) << v_graph << unit << "\n";
     };
 
-    row3("Pool threshold (MB)",
-         r_min.pool_threshold  / (1024.0 * 1024.0),
-         r_pre.pool_threshold  / (1024.0 * 1024.0),
-         r_graph.pool_threshold / (1024.0 * 1024.0), " MB");
     row3("Peak memory (MB)",
          r_min.peak_memory  / (1024.0 * 1024.0),
          r_pre.peak_memory  / (1024.0 * 1024.0),

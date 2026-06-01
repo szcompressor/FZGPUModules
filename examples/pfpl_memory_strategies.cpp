@@ -1,20 +1,31 @@
 /**
- * PFPL profiling example (minimal).
+ * examples/pfpl_memory_strategies.cpp
  *
- * Runs the same pipeline under both PREALLOCATE and MINIMAL memory strategies
- * and prints a side-by-side memory and throughput comparison.
+ * PFPL memory strategy comparison: PREALLOCATE vs MINIMAL.
  *
- * Profiles one phase at a time:
- *   - compress
- *   - decompress
+ * Runs the same Quantizer → Diff → Bitshuffle → RZE pipeline under both
+ * MemoryStrategy::PREALLOCATE (all intermediate buffers allocated at finalize())
+ * and MemoryStrategy::MINIMAL (each buffer allocated just before its stage runs
+ * and freed afterwards).  Prints a side-by-side table of pool threshold, peak
+ * device memory, compression ratio, and throughput.
+ *
+ * Demonstrates:
+ *   - MemoryStrategy::PREALLOCATE vs MemoryStrategy::MINIMAL
+ *   - getPeakMemoryUsage() for memory footprint accounting
+ *   - enableProfiling() + getLastPerfResult() for per-stage GPU timing
+ *   - ABS / REL / NOA error-bound modes and the optional outlier threshold
  *
  * Usage:
- *   ./build/bin/examples/pfpl_example [file [dim_x [dim_y [error_bound [mode [phase [runs [threshold]]]]]]]]
+ *   ./build/bin/examples/pfpl_memory_strategies <file> [dim_x [dim_y [eb [mode [phase [runs [threshold]]]]]]]
  *
  * Examples:
- *   ./build/bin/examples/pfpl_example data/CLDHGH.f32 3600 1800
- *   ./build/bin/examples/pfpl_example data/CLDHGH.f32 3600 1800 1e-3 rel compress 20
- *   ./build/bin/examples/pfpl_example data/CLDHGH.f32 3600 1800 1e-3 abs decompress 20
+ *   ./build/bin/examples/pfpl_memory_strategies data/CLDHGH.f32 3600 1800
+ *   ./build/bin/examples/pfpl_memory_strategies data/CLDHGH.f32 3600 1800 1e-3 rel compress 20
+ *   ./build/bin/examples/pfpl_memory_strategies data/CLDHGH.f32 3600 1800 1e-3 abs decompress 20
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/pfpl_memory_strategies
  */
 
 #include "fzgpumodules.h"
@@ -92,7 +103,7 @@ static void build_pfpl_pipeline(
 
 static void print_usage() {
     std::cerr
-        << "Usage: pfpl_example [file [dim_x [dim_y [error_bound [mode [phase [runs [threshold]]]]]]]]\n"
+        << "Usage: pfpl_memory_strategies <file> [dim_x [dim_y [error_bound [mode [phase [runs [threshold]]]]]]]]\n"
         << "  file:        path to float32 binary input file (required)\n"
         << "  dim_x:       X dimension (default: 3600)\n"
         << "  dim_y:       Y dimension (default: 1800)\n"
@@ -106,7 +117,6 @@ static void print_usage() {
 // ── Per-strategy result ───────────────────────────────────────────────────────
 struct StrategyResult {
     std::string strat_name;
-    size_t      pool_threshold;   // topology-aware threshold set at finalize()
     size_t      peak_memory;      // actual CUDA pool high-water mark after warmup
     size_t      compressed_size;
     double      mean_host_ms;
@@ -135,10 +145,6 @@ static StrategyResult run_strategy(
     Pipeline comp(data_bytes, strat, POOL_MULT);
     build_pfpl_pipeline(comp, eb, mode, threshold);
     comp.enableProfiling(true);
-
-    // finalize() (called inside build_pfpl_pipeline) tightens the pool threshold
-    // to topo_base × 1.1.  Read back the actual value that was set.
-    const size_t pool_threshold = comp.getPoolThreshold();
 
     void*  d_compressed  = nullptr;
     size_t compressed_sz = 0;
@@ -219,7 +225,7 @@ static StrategyResult run_strategy(
               << "  Throughput (dag  mean): " << std::setw(6)
               << tput(static_cast<double>(mean_d)) << " GB/s\n";
 
-    return {strat_name, pool_threshold, peak_mem, compressed_sz,
+    return {strat_name, peak_mem, compressed_sz,
             mean_h, mean_d, min_h, min_d, max_h, max_d};
 }
 
@@ -318,9 +324,6 @@ int main(int argc, char* argv[]) {
                   << std::setw(13) << v_min << unit << "\n";
     };
 
-    row("Pool threshold",
-        pre.pool_threshold / (1024.0 * 1024.0),
-        min.pool_threshold / (1024.0 * 1024.0), " MB");
     row("Peak memory used",
         pre.peak_memory    / (1024.0 * 1024.0),
         min.peak_memory    / (1024.0 * 1024.0), " MB");
@@ -343,7 +346,8 @@ int main(int argc, char* argv[]) {
     std::cout << std::string(52, '-') << "\n"
               << "  MINIMAL peak memory is " << std::setprecision(1)
               << mem_savings_pct << "% lower than PREALLOCATE\n"
-              << "  (pool threshold = topo base × 1.1 safety margin after finalize)\n";
+              << "  (MINIMAL allocates each buffer on demand and frees it after use;\n"
+              << "   PREALLOCATE holds all buffers from finalize() through destruction)\n";
 
     cudaFree(d_input);
     std::cout << "\nDone.\n";

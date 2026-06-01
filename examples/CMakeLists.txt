@@ -6,6 +6,24 @@ if(NOT BUILD_EXAMPLES)
   return()
 endif()
 
+# ── Hello-world introduction: LorenzoQuant → Huffman compress+decompress+verify
+add_executable(minimal_intro minimal_intro.cpp)
+target_link_libraries(minimal_intro PRIVATE fzgmod)
+set_target_properties(minimal_intro PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── TOML config: load preset, saveConfig, loadConfig round-trip ──────────────
+add_executable(toml_config toml_config.cpp)
+target_link_libraries(toml_config PRIVATE fzgmod)
+set_target_properties(toml_config PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── cuSZ standalone: LorenzoQuant + Huffman without Pipeline DAG ──────────────
+add_executable(cusz_standalone cusz_standalone.cpp)
+target_link_libraries(cusz_standalone PRIVATE fzgmod)
+set_target_properties(cusz_standalone PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
 # ── Standalone Lorenzo code-distribution analyser ─────────────────────────────
 add_executable(analyze_lorenzo analyze_lorenzo.cpp)
 target_link_libraries(analyze_lorenzo PRIVATE fzgmod)
@@ -13,9 +31,9 @@ set_target_properties(analyze_lorenzo PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
 # ── PREALLOCATE vs MINIMAL memory strategy comparison ─────────────────────────
-add_executable(pfpl_example pfpl_pipeline.cpp)
-target_link_libraries(pfpl_example PRIVATE fzgmod)
-set_target_properties(pfpl_example PROPERTIES
+add_executable(pfpl_memory_strategies pfpl_memory_strategies.cpp)
+target_link_libraries(pfpl_memory_strategies PRIVATE fzgmod)
+set_target_properties(pfpl_memory_strategies PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
 # ── MINIMAL / PREALLOCATE / CUDA Graph capture three-way comparison ───────────
@@ -24,14 +42,14 @@ target_link_libraries(pfpl_graph_capture PRIVATE fzgmod)
 set_target_properties(pfpl_graph_capture PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
-# ── Simple API: Lorenzo dual-branch pipeline on a real input file ─────────────
-add_executable(simple_api_lorenzo_dual_branch simple_api_lorenzo_dual_branch.cpp)
-target_link_libraries(simple_api_lorenzo_dual_branch PRIVATE fzgmod)
-set_target_properties(simple_api_lorenzo_dual_branch PROPERTIES
+# ── Getting-started: LorenzoQuant → Bitshuffle → RZE ─────────────────────────
+add_executable(lorenzo_intro lorenzo_intro.cpp)
+target_link_libraries(lorenzo_intro PRIVATE fzgmod)
+set_target_properties(lorenzo_intro PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
 # ── Manual stage execution vs Pipeline DAG throughput comparison ──────────────
-add_executable(pfpl_manual_vs_dag manual_pipeline.cpp)
+add_executable(pfpl_manual_vs_dag pfpl_manual_vs_dag.cpp)
 target_link_libraries(pfpl_manual_vs_dag PRIVATE fzgmod)
 set_target_properties(pfpl_manual_vs_dag PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

@@ -1,16 +1,25 @@
 /**
- * Simple API usage example: Lorenzo → Bitshuffle → RZE pipeline on a real input file.
+ * examples/lorenzo_intro.cpp
+ *
+ * Getting-started example: LorenzoQuant → Bitshuffle → RZE pipeline.
  *
  * Demonstrates:
  *   - Building and running a Pipeline on a binary float32 input file
- *   - 2D Lorenzo with zigzag codes on the "codes" output port
+ *   - 2D Lorenzo quantisation with zigzag codes connected on the "codes" port
  *   - Accessing per-stage actual output sizes after compress()
- *   - enableProfiling() + getLastPerfResult().print() for timing
- *   - Computing compression error statistics on the host
+ *   - enableProfiling() + getLastPerfResult().print() for per-stage GPU timing
+ *   - Computing error statistics (max abs error, MAE, RMSE) on the host
  *
  * Usage:
- *   ./build/bin/examples/simple_api_lorenzo_dual_branch <input_file> [dim_x=3600] [dim_y=1800] [error_bound=1e-3]
+ *   ./build/bin/examples/lorenzo_intro <input_file> [dim_x=3600] [dim_y=1800] [error_bound=1e-3]
  *   Positional and key=value args are both accepted (e.g. dim_x=3600 or just 3600).
+ *
+ * Example:
+ *   ./build/bin/examples/lorenzo_intro data/CLDHGH.f32 3600 1800 1e-3
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/lorenzo_intro
  */
 
 #include "fzgpumodules.h"
@@ -18,14 +27,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
 
 using namespace fz;
-
-#include <fstream>
 
 static constexpr size_t CHUNK = 16384;
 
@@ -166,7 +174,7 @@ int main(int argc, char** argv) {
     const double within_eb_pct = 100.0 * static_cast<double>(within_eb_count) / static_cast<double>(N);
 
     std::cout << std::fixed << std::setprecision(3);
-    std::cout << "Simple PFPL-style Lorenzo API example\n";
+    std::cout << "=== LorenzoQuant → Bitshuffle → RZE ===\n";
     std::cout << "  data grid:     " << dim_x << " x " << dim_y << "\n";
     std::cout << "  lorenzo mode:  2D\n";
     std::cout << "  error bound:   " << eb << " (ABS)\n";

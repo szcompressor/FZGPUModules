@@ -10,6 +10,18 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Fixed
+- `src/mem/mempool.cpp` `MemoryPool::setReleaseThreshold()`: skip `config_` update when `bytes == UINT64_MAX` (the "never trim" sentinel); the previous code set `config_.input_data_size = UINT64_MAX`, causing `getConfiguredSize()` → `getPoolSize()` to overflow a float cast and return 0, which made `Pipeline::getPoolThreshold()` always return 0 post-finalize
+- `examples/analyze_lorenzo.cpp`, `examples/compare_lorenzo_modes.cpp`: replaced internal `#include "fused/lorenzo_quant/lorenzo_quant.h"` and `#include "mem/mempool.h"` with `#include "fzgpumodules.h"` to comply with the public-API-only rule for example code
+- `examples/simple_api_lorenzo_dual_branch.cpp` → `examples/lorenzo_intro.cpp`: renamed to match new catalog naming convention; CMake target renamed `simple_api_lorenzo_dual_branch` → `lorenzo_intro`; doc block updated; fixed misplaced `#include <fstream>` stranded after `using namespace fz;`; updated output header label
+- `examples/pfpl_pipeline.cpp` → `examples/pfpl_memory_strategies.cpp`: renamed for clarity; CMake target renamed `pfpl_example` → `pfpl_memory_strategies`; doc block reframed around the memory-strategy comparison concept; removed `getPoolThreshold()` call and table row (returns 0 post-finalize)
+- `examples/manual_pipeline.cpp` → `examples/pfpl_manual_vs_dag.cpp`: renamed to match the existing binary name; doc block updated to frame the "when to bypass the DAG" angle
+- `examples/pfpl_graph_capture.cpp`: removed `getPoolThreshold()` calls and "Pool threshold" row from comparison table (same post-finalize = 0 issue); added Build reminder to doc block
+- `examples/file_io_example.cpp`: fixed Usage binary path in doc block; added Build reminder; verified all four decompress paths against current API
+- `examples/ownership_example.cpp`: fixed Usage binary path in doc block; added Build reminder; verified all four ownership sections
+- `examples/debug_logging.cpp`: fixed Usage binary path in doc block; added Build reminder; removed policy-violating `#include "log.h"` (already available via `fzgpumodules.h`)
+- `examples/minimal_intro.cpp`: new hello-world example — LorenzoQuantStage→HuffmanStage compress+decompress+verify, synthetic data, ~80 lines
+- `examples/toml_config.cpp`: new TOML config example — loadConfig() from preset, saveConfig(), loadConfig() round-trip verification, Pipeline::readHeader() on .fzm file; documents the correct Pattern of Pipeline(data_bytes)+loadConfig() for PREALLOCATE presets
+- `examples/cusz_standalone.cpp`: new standalone stage execution example — LorenzoQuantStage+HuffmanStage driven via execute() without Pipeline; covers pool construction, onFinalize() scratch pre-allocation, postStreamSync() for outlier count, setInverse() for decompress direction
 - `adm_map_decoupled_u16`/`adm_map_thrust_u16`/`adm_map_decoupled_u32`/`adm_map_thrust_u32`: added `#ifndef NDEBUG` overflow sentinel — kernels call `atomicOr(d_overflow_flag, 1)` when a thread's `bit_offset` exceeds `kChunk × kMaxSignalBytes × 8`; host checks the flag after `cudaStreamSynchronize` and throws a `std::runtime_error` to catch inputs that violate the algorithm's bounded-diff assumption
 - `adm_map_decoupled_u16`/`adm_map_decoupled_u32`: `__shared__ excl_sum` was uninitialized for the first warp block (warp=0), causing non-deterministic writes to `d_concat_signals`; initialize to 0 at kernel entry
 - `tests/stages/test_adm.cpp` AD2 (`U32RoundTrip`): `make_u32_data` amplitude (±12000) exceeded the algorithm's per-thread `local_bits` capacity (64 bytes, supports max diff ≤ 4032); reduced amplitude to ±250

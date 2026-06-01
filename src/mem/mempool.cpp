@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <stdexcept>
 
 #include "mem/mempool.h"
@@ -350,6 +351,10 @@ void MemoryPool::setReleaseThreshold(size_t bytes) {
                bytes / (1024.0 * 1024.0));
         return;
     }
+    // UINT64_MAX is a sentinel meaning "never trim" — not a real pool size.
+    // Updating config_ with it would cause getConfiguredSize() to overflow (float
+    // cast of UINT64_MAX wraps to 0 on x86-64), so leave config_ unchanged.
+    if (bytes == std::numeric_limits<size_t>::max()) return;
     // Keep config in sync so getConfiguredSize() and overflow warnings
     // use the new threshold value rather than the stale construction-time one.
     config_.input_data_size      = bytes;

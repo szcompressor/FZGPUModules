@@ -1,18 +1,23 @@
 /**
- * file_io_example.cpp — compress to .fzm file and decompress from file.
+ * examples/file_io_example.cpp
  *
- * Demonstrates the three decompression paths for FZM files:
+ * Compress to a .fzm file and decompress via all three file-based paths.
  *
- *   1. Pipeline::decompressFromFile()    (static)
+ * Demonstrates:
+ *   1. compress() + writeToFile()
+ *      Compress in-memory and serialise the result (including the pipeline
+ *      config) to a .fzm file.
+ *
+ *   2. Pipeline::decompressFromFile()  (static)
  *      One-shot. Reconstructs the pipeline from the file header automatically.
  *      Output is always caller-owned — you must cudaFree(*d_output).
  *
- *   2. Pipeline::readHeader()
+ *   3. Pipeline::readHeader()
  *      Parse the file header without running decompression. Use this to inspect
  *      metadata (compressed size, stage count, etc.) before deciding whether to
  *      decompress, or to compute a custom pool size via pool_override_bytes.
  *
- *   3. pipeline.decompressFromFileInstance()   (instance method)
+ *   4. pipeline.decompressFromFileInstance()  (instance method)
  *      Same reconstruction logic as the static overload, but output ownership
  *      follows setPoolManagedDecompOutput() on the instance:
  *        true (default) → pool-owned, valid until reset()/destruction, do NOT cudaFree
@@ -28,8 +33,12 @@
  * No external data files required — uses synthetic float data.
  *
  * Usage:
- *   ./build/bin/file_io_example [output.fzm]
+ *   ./build/bin/examples/file_io_example [output.fzm]
  *   Default output path: /tmp/fzgmod_file_io_example.fzm
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/file_io_example
  */
 
 #include "fzgpumodules.h"

@@ -35,10 +35,8 @@
  *   Binary: build/release/bin/examples/compare_lorenzo_modes
  */
 
-#include "fused/lorenzo_quant/lorenzo_quant.h"
-#include "mem/mempool.h"
+#include "fzgpumodules.h"
 
-#include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

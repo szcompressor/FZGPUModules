@@ -1,16 +1,22 @@
 /**
- * manual_pipeline.cpp — PFPL manual stages vs Pipeline DAG throughput comparison.
+ * examples/pfpl_manual_vs_dag.cpp
+ *
+ * PFPL manual stage execution vs Pipeline DAG — throughput comparison.
  *
  * Runs the PFPL core chain (Quantizer → Diff → Bitshuffle → RZE) two ways:
  *
- *   MANUAL  — stages created and called directly via Stage::execute(), with
- *             pre-allocated intermediate device buffers.
- *   DAG     — same stages wired through the Pipeline builder API and run via
- *             compress().
+ *   MANUAL  — stages created as stack objects and driven directly via
+ *             Stage::execute(), with pre-allocated intermediate device buffers
+ *             and a caller-managed MemoryPool.  Use this approach when you need
+ *             precise control over execution order, stream assignment, or
+ *             intermediate buffer placement.
+ *   DAG     — same stages wired through the Pipeline builder API and executed
+ *             via compress().  Simpler to write; buffer lifetimes are managed
+ *             automatically.
  *
  * The final concat/header step is intentionally omitted from both paths to
- * isolate the core computation.  All device allocations happen before the
- * timed region.  Throughput is reported for the original (unpadded) data size.
+ * isolate the core compute.  All device allocations happen before the timed
+ * region.  Throughput is reported for the original (unpadded) data size.
  *
  * Usage:
  *   ./build/bin/examples/pfpl_manual_vs_dag <file> [dim_x [dim_y [error_bound [runs]]]]
@@ -18,6 +24,10 @@
  * Example:
  *   ./build/bin/examples/pfpl_manual_vs_dag data/CLDHGH.f32 3600 1800
  *   ./build/bin/examples/pfpl_manual_vs_dag data/CLDHGH.f32 3600 1800 1e-4 20
+ *
+ * Build:
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
+ *   Binary: build/bin/examples/pfpl_manual_vs_dag
  */
 
 #include "fzgpumodules.h"
