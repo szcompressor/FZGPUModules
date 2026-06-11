@@ -260,6 +260,9 @@ add_library(fzgmod_modules
   modules/transforms/adm/adm_stage.cu
   modules/transforms/adm/mapping_uint16.cu
   modules/transforms/adm/mapping_uint32.cu
+  # GInterp (cuSZ-Hi spline interpolation predictor + quantizer)
+  modules/predictors/ginterp/ginterp_kernels.cu
+  modules/predictors/ginterp/ginterp_stage.cu
 )
 
 target_link_libraries(fzgmod_modules

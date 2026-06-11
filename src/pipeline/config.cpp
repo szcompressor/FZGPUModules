@@ -44,6 +44,7 @@
 #include "transforms/adm/adm_stage.h"
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
+#include "predictors/ginterp/ginterp_stage.h"
 
 #include <fstream>
 #include <iomanip>
@@ -509,6 +510,53 @@ static void saveADMStage(Stage* s, std::ostringstream& out) {
     out << "dtype = \"" << (adm->getDtype() == ADMDtype::U16 ? "uint16" : "uint32") << "\"\n";
 }
 
+// Add a GInterp stage (3-D MVP — dispatches on code_type).
+// dims are NOT read from TOML — they come from `Pipeline::setDims()` which is
+// already required for any 3-D pipeline; setDims() is invoked on every stage
+// at addStage time, and GInterpStage::setDims throws unless dims[2] > 1.
+static Stage* addGInterpStage(Pipeline& p, const toml::table& t) {
+    std::string code_type = optStr(t, "code_type", "uint16");
+    DataType    code_dt   = dataTypeFromString(code_type);
+
+    Stage* s = nullptr;
+    auto configure = [&](auto* g) {
+        g->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
+        g->setErrorBoundMode(ebModeFromString(optStr(t, "error_bound_mode", "ABS")));
+        g->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 512)));
+        g->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.10)));
+        s = g;
+    };
+    if      (code_dt == DataType::UINT16) configure(p.addStage<GInterpStage<float, uint16_t>>());
+    else if (code_dt == DataType::UINT8)  configure(p.addStage<GInterpStage<float, uint8_t>>());
+    else if (code_dt == DataType::UINT32) configure(p.addStage<GInterpStage<float, uint32_t>>());
+    else
+        throw std::runtime_error(
+            "loadConfig: unsupported GInterp code_type \"" + code_type + "\"");
+    return s;
+}
+
+static void saveGInterpStage(Stage* s, std::ostringstream& out) {
+    DataType code_dt = static_cast<DataType>(s->getOutputDataType(0));
+    out << "code_type = \"" << dataTypeToString(code_dt) << "\"\n";
+
+    float eb = 1e-3f, cap = 0.10f;
+    ErrorBoundMode ebm = ErrorBoundMode::ABS;
+    int qr = 512;
+    auto read = [&](auto* g) {
+        eb  = g->getErrorBound();
+        ebm = g->getErrorBoundMode();
+        qr  = g->getQuantRadius();
+        cap = g->getOutlierCapacity();
+    };
+    if      (code_dt == DataType::UINT16) read(static_cast<GInterpStage<float, uint16_t>*>(s));
+    else if (code_dt == DataType::UINT8)  read(static_cast<GInterpStage<float, uint8_t>*>(s));
+    else if (code_dt == DataType::UINT32) read(static_cast<GInterpStage<float, uint32_t>*>(s));
+    out << "error_bound = "      << static_cast<double>(eb)  << "\n";
+    out << "error_bound_mode = \"" << ebModeToString(ebm)    << "\"\n";
+    out << "quant_radius = "     << static_cast<int64_t>(qr) << "\n";
+    out << "outlier_capacity = " << static_cast<double>(cap) << "\n";
+}
+
 static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     uint8_t buf[16] = {};
     size_t sz = s->serializeHeader(0, buf, sizeof(buf));
@@ -558,6 +606,7 @@ static const StageEntry kStageRegistry[] = {
     { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage      },
     { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
     { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
+    { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -143,3 +143,11 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+# ─── GInterp stage (cuSZ-Hi spline predictor) ─────────────────────────────────
+fz_add_test(
+    NAME    test_ginterp
+    SOURCES test_ginterp.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)

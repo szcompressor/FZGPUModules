@@ -132,6 +132,61 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 ---
 
+## cuSZ-Hi
+
+**Used by:** `GInterpStage` (`modules/predictors/ginterp/`)
+
+**Relationship:**
+- `GInterpStage` (`modules/predictors/ginterp/`) — the multi-level spline
+  interpolation kernels are adapted from `spline3.cu` and `spline3_md.inl`
+  in the cuSZ-Hi repository. Changes from the original: `namespace cusz` →
+  `namespace fz::ginterp`; `err.hh` / `timer.hh` includes stripped; the
+  `pszmem_cxx<T>` buffer abstraction is replaced by raw device pointers
+  routed through the FZGPUModules `MemoryPool`; the `CompactDram` outlier
+  triplet is replaced by separate `outlier_vals` / `outlier_idxs` /
+  `outlier_count` output ports; minimal `cusz_type_subset.h` reproduces
+  only the `INTERPOLATION_PARAMS` struct and `u4` typedef from upstream
+  `cusz/type.h`. Host-side wrapper, memory-pool integration, outlier-
+  fusion contract, and radius auto-tune are FZGPUModules code.
+
+**License:**
+
+```
+BSD 3-Clause License
+
+Copyright (c) 2024-2025, Indiana University and UChicago Argonne, LLC
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+URL: https://github.com/shixun404/cuSZ-Hi
+
+---
+
 ## dietGPU
 
 **Used by:** `ANSStage` (`modules/coders/ans/`)

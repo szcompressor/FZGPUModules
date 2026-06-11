@@ -92,6 +92,7 @@ enum class StageType : uint16_t {
     RZE        = 18,  
     ANS        = 20,   ///< rANS entropy coder (GPU, via dietGPU)
     ADM        = 19,   ///< Adaptive Data Mapping transform (MANS)
+    G_INTERP   = 22,   ///< Spline interpolation predictor + quantizer (cuSZ-Hi G-Interp)
 };
 
 /**
@@ -315,6 +316,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::LORENZO:     return "Lorenzo";
         case StageType::ANS:  return "ANS";
         case StageType::ADM:  return "ADM";
+        case StageType::G_INTERP:    return "GInterp";
         default:                     return "Unknown";
     }
 }

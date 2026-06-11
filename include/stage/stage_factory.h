@@ -19,6 +19,7 @@
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
 #include "transforms/adm/adm_stage.h"
+#include "predictors/ginterp/ginterp_stage.h"
 
 #include <memory>
 #include <stdexcept>
@@ -252,6 +253,39 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             auto* s = new ADMStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+            break;
+        }
+
+        case StageType::G_INTERP: {
+            // Code type stored in config[5] (DataType code_type in GInterpConfig).
+            if (config_size < sizeof(GInterpConfig)) {
+                throw std::runtime_error(
+                    "GInterp config too small: " + std::to_string(config_size));
+            }
+            GInterpConfig gc;
+            std::memcpy(&gc, config, sizeof(GInterpConfig));
+            if (gc.input_type != DataType::FLOAT32) {
+                throw std::runtime_error(
+                    "Unsupported GInterp input_type: "
+                    + std::to_string(static_cast<int>(gc.input_type)));
+            }
+            if (gc.code_type == DataType::UINT8) {
+                auto* s = new GInterpStage<float, uint8_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else if (gc.code_type == DataType::UINT16) {
+                auto* s = new GInterpStage<float, uint16_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else if (gc.code_type == DataType::UINT32) {
+                auto* s = new GInterpStage<float, uint32_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else {
+                throw std::runtime_error(
+                    "Unsupported GInterp code_type: "
+                    + std::to_string(static_cast<int>(gc.code_type)));
+            }
             break;
         }
 
