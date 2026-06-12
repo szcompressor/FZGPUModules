@@ -78,15 +78,21 @@ struct QuantizerForwardResult {
     std::vector<uint8_t> codes_raw;   // raw bytes of quantisation codes
     std::vector<uint8_t> vals_raw;    // raw bytes of outlier values
     std::vector<uint8_t> idxs_raw;    // raw bytes of outlier indices
-    std::vector<uint8_t> count_raw;   // raw bytes of outlier count (4 bytes)
     // Actual sizes in bytes
     size_t codes_bytes = 0;
     size_t vals_bytes  = 0;
     size_t idxs_bytes  = 0;
-    size_t count_bytes = 0;
+    // The outlier count is no longer a DAG port — it's read from the
+    // serialized header on the inverse path. The forward helper extracts it
+    // from the trimmed idxs_bytes (postStreamSync sets it to count*4).
+    uint32_t outlier_count = 0;
 };
 
 // Run a Quantizer forward pass.  Works for both uint16_t and uint32_t code types.
+// The caller must call stage.onFinalize(in_bytes, &pool) before this runs to
+// pre-allocate the stage-private outlier-count scratch (or rely on lazy alloc
+// — onFinalize is only required for PREALLOCATE callers; tests using MINIMAL
+// pools get away without it since initOutlierCountScratch is idempotent).
 template<typename TCode>
 static QuantizerForwardResult run_quantizer_forward(
     QuantizerStage<float, TCode>& stage,
@@ -100,17 +106,18 @@ static QuantizerForwardResult run_quantizer_forward(
     CudaBuffer<float> d_in(n);
     d_in.upload(h_input, stream);
 
+    stage.onFinalize(in_bytes, &pool);
+
     auto est = stage.estimateOutputSizes({in_bytes});
-    EXPECT_EQ(est.size(), 4u);
+    EXPECT_EQ(est.size(), 3u);
 
     CudaBuffer<uint8_t> d_codes(est[0]);
     CudaBuffer<uint8_t> d_vals (est[1]);
     CudaBuffer<uint8_t> d_idxs (est[2]);
-    CudaBuffer<uint8_t> d_count(est[3]);
 
     std::vector<void*>  inputs  = {d_in.void_ptr()};
     std::vector<void*>  outputs = {d_codes.void_ptr(), d_vals.void_ptr(),
-                                    d_idxs.void_ptr(), d_count.void_ptr()};
+                                    d_idxs.void_ptr()};
     std::vector<size_t> sizes   = {in_bytes};
 
     stage.execute(stream, &pool, inputs, outputs, sizes);
@@ -123,17 +130,19 @@ static QuantizerForwardResult run_quantizer_forward(
     r.codes_bytes = actual.count("codes")         ? actual.at("codes")         : est[0];
     r.vals_bytes  = actual.count("outlier_vals")  ? actual.at("outlier_vals")  : est[1];
     r.idxs_bytes  = actual.count("outlier_idxs")  ? actual.at("outlier_idxs")  : est[2];
-    r.count_bytes = actual.count("outlier_count") ? actual.at("outlier_count") : est[3];
+    r.outlier_count = static_cast<uint32_t>(r.idxs_bytes / sizeof(uint32_t));
 
     r.codes_raw = d_codes.download_bytes(r.codes_bytes, stream);
     r.vals_raw  = d_vals.download_bytes(r.vals_bytes,  stream);
     r.idxs_raw  = d_idxs.download_bytes(r.idxs_bytes,  stream);
-    r.count_raw = d_count.download_bytes(r.count_bytes, stream);
 
     return r;
 }
 
 // Run a Quantizer inverse pass; returns reconstructed floats.
+// `stage` must have its outlier count set — typically by deserializeHeader()
+// in the caller, which carries the count over from the forward stage's
+// serialized config.
 template<typename TCode>
 static std::vector<float> run_quantizer_inverse(
     QuantizerStage<float, TCode>& stage,
@@ -145,15 +154,14 @@ static std::vector<float> run_quantizer_inverse(
     CudaBuffer<uint8_t> d_codes(fwd.codes_raw.size()); d_codes.upload(fwd.codes_raw, stream);
     CudaBuffer<uint8_t> d_vals (fwd.vals_raw.size());  d_vals.upload(fwd.vals_raw,  stream);
     CudaBuffer<uint8_t> d_idxs (fwd.idxs_raw.size());  d_idxs.upload(fwd.idxs_raw,  stream);
-    CudaBuffer<uint8_t> d_count(fwd.count_raw.size()); d_count.upload(fwd.count_raw, stream);
 
     CudaBuffer<float> d_out(n_elements);
 
     std::vector<void*>  inputs  = {d_codes.void_ptr(), d_vals.void_ptr(),
-                                    d_idxs.void_ptr(), d_count.void_ptr()};
+                                    d_idxs.void_ptr()};
     std::vector<void*>  outputs = {d_out.void_ptr()};
     std::vector<size_t> sizes   = {fwd.codes_bytes, fwd.vals_bytes,
-                                    fwd.idxs_bytes,  fwd.count_bytes};
+                                    fwd.idxs_bytes};
 
     stage.execute(stream, &pool, inputs, outputs, sizes);
     cudaStreamSynchronize(stream);
@@ -217,9 +225,7 @@ TEST(QuantizerABS, ConstantInput) {
 
     auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
 
-    ASSERT_GE(fwd_result.count_raw.size(), sizeof(uint32_t));
-    uint32_t outlier_count = 0;
-    std::memcpy(&outlier_count, fwd_result.count_raw.data(), sizeof(uint32_t));
+    uint32_t outlier_count = fwd_result.outlier_count;
     EXPECT_EQ(outlier_count, 0u)
         << "Constant input should produce zero outliers (no boundary issue)";
 
@@ -380,9 +386,7 @@ TEST(QuantizerREL, SmoothRoundTrip) {
     auto h_recon = run_quantizer_inverse(inv, fwd_result, N, stream, *pool);
 
     ASSERT_EQ(h_recon.size(), N);
-    uint32_t outlier_count = 0;
-    if (fwd_result.count_raw.size() >= sizeof(uint32_t))
-        std::memcpy(&outlier_count, fwd_result.count_raw.data(), sizeof(uint32_t));
+    uint32_t outlier_count = fwd_result.outlier_count;
 
     // Build a set of outlier indices for exact-match checking.
     std::vector<uint32_t> outlier_idxs;
@@ -442,9 +446,7 @@ TEST(QuantizerREL, ZerosGoToOutliers) {
 
     auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
 
-    ASSERT_GE(fwd_result.count_raw.size(), sizeof(uint32_t));
-    uint32_t outlier_count = 0;
-    std::memcpy(&outlier_count, fwd_result.count_raw.data(), sizeof(uint32_t));
+    uint32_t outlier_count = fwd_result.outlier_count;
 
     // The N/4 zeros must all appear as outliers.
     EXPECT_GE(outlier_count, N / 4)
@@ -1096,9 +1098,7 @@ TEST(QuantizerThreshold, ABSForcesOutliersAboveThreshold) {
 
     auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
 
-    ASSERT_GE(fwd_result.count_raw.size(), sizeof(uint32_t));
-    uint32_t outlier_count = 0;
-    std::memcpy(&outlier_count, fwd_result.count_raw.data(), sizeof(uint32_t));
+    uint32_t outlier_count = fwd_result.outlier_count;
     EXPECT_EQ(outlier_count, static_cast<uint32_t>(expected_outliers))
         << "ABS threshold: expected " << expected_outliers
         << " outliers, got " << outlier_count;
@@ -1188,9 +1188,7 @@ TEST(QuantizerThreshold, RELForcesOutliersAboveThreshold) {
 
     auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
 
-    ASSERT_GE(fwd_result.count_raw.size(), sizeof(uint32_t));
-    uint32_t outlier_count = 0;
-    std::memcpy(&outlier_count, fwd_result.count_raw.data(), sizeof(uint32_t));
+    uint32_t outlier_count = fwd_result.outlier_count;
     EXPECT_GE(outlier_count, static_cast<uint32_t>(expected_outliers))
         << "REL threshold: at least " << expected_outliers
         << " outliers expected, got " << outlier_count;

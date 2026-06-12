@@ -84,14 +84,23 @@ static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
  *         For epsilon >= 0.01 with float32, uint16_t codes are sufficient in
  *         practice (max |log_bin| ≈ 4460 << 16383 max for uint16 REL).
  *
- * Outputs (compression mode):
+ * Outputs (compression mode, scatter path):
  *   [0] codes         — quantization codes (TCode[n])
  *   [1] outlier_vals  — original values at outlier positions (TInput[k])
  *   [2] outlier_idxs  — indices of outlier positions (uint32_t[k])
- *   [3] outlier_count — number of outliers (uint32_t scalar)
  *
- * Inputs (decompression mode):
- *   same 4 buffers → reconstructed TInput[n]
+ * The outlier *count* is not a DAG output port — it lives in a stage-private
+ * 4-byte device scratch (allocated via `pool->allocatePersistentDevice` in
+ * `onFinalize()`), is D2H'd in `postStreamSync()`, and is serialized into the
+ * FZM stage header. The inverse path receives it as a `uint32_t` kernel
+ * argument read from the deserialized header.
+ *
+ * Inplace mode (`setInplaceOutliers(true)`, ABS/NOA only) emits 1 output —
+ * the codes array with raw float bits encoded in-place; no scatter buffers,
+ * no count scratch.
+ *
+ * Inputs (decompression mode): same 3 buffers (or 1 in inplace mode) →
+ *   reconstructed TInput[n].
  */
 template<typename TInput = float, typename TCode = uint16_t>
 class QuantizerStage : public Stage {
@@ -122,6 +131,7 @@ public:
     };
 
     explicit QuantizerStage(const Config& config = Config());
+    ~QuantizerStage() override;
 
     void execute(
         cudaStream_t stream,
@@ -133,21 +143,31 @@ public:
 
     void postStreamSync(cudaStream_t stream) override;
 
+    /// Pre-allocate the stage-private 4-byte outlier-count device scratch
+    /// (via `pool->allocatePersistentDevice`) in PREALLOCATE mode. In MINIMAL
+    /// mode this is deferred to the first compress execute(). Inplace mode
+    /// skips the allocation entirely.
+    void onFinalize(size_t estimated_inlen, MemoryPool* pool) override;
+
+    size_t estimateDeviceFootprintBytes(size_t /*estimated_inlen*/) const override {
+        return isInplaceMode() ? 0 : sizeof(uint32_t);
+    }
+
     std::string getName() const override { return "Quantizer"; }
 
     size_t getNumInputs() const override {
         if (!is_inverse_) return 1;
-        return isInplaceMode() ? 1 : 4;
+        return isInplaceMode() ? 1 : 3;
     }
     size_t getNumOutputs() const override {
         if (is_inverse_) return 1;
-        return isInplaceMode() ? 1 : 4;
+        return isInplaceMode() ? 1 : 3;
     }
 
     std::vector<std::string> getOutputNames() const override {
         if (is_inverse_) return {"reconstructed"};
         if (isInplaceMode()) return {"codes"};
-        return {"codes", "outlier_vals", "outlier_idxs", "outlier_count"};
+        return {"codes", "outlier_vals", "outlier_idxs"};
     }
 
     std::vector<size_t> estimateOutputSizes(
@@ -180,7 +200,6 @@ public:
             case 0: return static_cast<uint8_t>(getCodeDataType());
             case 1: return static_cast<uint8_t>(getInputDataType());
             case 2: return static_cast<uint8_t>(DataType::UINT32);
-            case 3: return static_cast<uint8_t>(DataType::UINT32);
             default: return static_cast<uint8_t>(DataType::UINT8);
         }
     }
@@ -245,7 +264,22 @@ private:
     TInput   saved_computed_abs_eb_ = static_cast<TInput>(1e-4);
     float    computed_value_base_ = 0.0f;
     float    saved_computed_value_base_ = 0.0f;
-    const void* d_outlier_count_ptr_ = nullptr;
+    /// Stage-private 4-byte device scratch holding the live outlier count.
+    /// Allocated lazily via `pool->allocatePersistentDevice(4, ...)` — see
+    /// `initOutlierCountScratch()`. Used by the forward kernel as the atomic
+    /// counter and D2H'd in `postStreamSync()`. The inverse path does NOT
+    /// touch this — it reads the count from the deserialized FZM header and
+    /// passes it as a `uint32_t` kernel-launch argument. Not used in inplace
+    /// mode (which has no separate scatter path).
+    uint32_t* d_outlier_count_scratch_ = nullptr;
+    /// Pool that owns `d_outlier_count_scratch_` — captured at allocation
+    /// time so the destructor returns it to the right pool.
+    MemoryPool* persistent_pool_ = nullptr;
+
+    /// Lazily allocate the 4-byte outlier-count scratch via the pool's
+    /// persistent allocator. Idempotent; no-op if already allocated, or if
+    /// the stage is configured for inplace-outlier mode.
+    void initOutlierCountScratch(MemoryPool* pool);
 
     bool isInplaceMode() const {
         return config_.inplace_outliers

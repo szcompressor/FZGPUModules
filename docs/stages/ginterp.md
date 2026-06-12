@@ -1,8 +1,8 @@
 # GInterpStage {#stage_ginterp}
 
-**Header:** `modules/predictors/ginterp/ginterp_stage.h`
+**Header:** `modules/fused/ginterp/ginterp_stage.h`
 **Class:** `fz::GInterpStage<TInput, TCode>`
-**Category:** Predictor + quantizer (lossy)
+**Category:** Fused predictor + quantizer (lossy)
 
 **Common instantiation:**
 ```cpp
@@ -28,6 +28,34 @@ ported from the [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) compressor.
 G-Interp typically yields a higher compression ratio than `LorenzoQuantStage` on
 **smooth scientific data** (climate fields, simulation snapshots, etc.) at the
 same error bound. It is the prediction stage used in the cuSZ-Hi compressor.
+
+### Why this stage is fused (no standalone predictor)
+
+`LorenzoStage` ships in two flavours — the lossless plain predictor and the
+fused `LorenzoQuantStage` — because the Lorenzo prediction at each cell reads
+only the *original input values* of its neighbours. The quantizer is a clean
+post-processing step that can be applied (or not) independently.
+
+G-Interp does not work that way. The forward pass is an interpolation
+**pyramid**: level 4 anchors are exact, then level 3 samples are predicted
+from level-4 anchors, level 2 from the *quantized-and-reconstructed* level-3
+samples, level 1 from the reconstructed level-2 samples, and so on. Each
+finer level depends on the **lossy reconstruction** of every coarser level —
+exactly the reconstruction the decoder will see — because that's the only
+way the encoder can guarantee its error bound matches what the decoder
+produces. The decoder mirrors this: it must walk the same tree using the
+same quantizer to recover each level before moving to the next.
+
+If you removed the quantizer, there'd be no value to feed into the next
+level's prediction, so the kernel can't run. Splitting into a "pure G-Interp
+predictor" + "separate quantizer" stage would either (a) require the
+predictor to re-implement the quantizer internally just to feed itself,
+making the split cosmetic, or (b) reduce the algorithm to a single-level
+predictor, which throws away the multi-level CR gain that motivates using
+G-Interp in the first place.
+
+So unlike Lorenzo, the prediction-quantization coupling here is intrinsic
+to the algorithm — G-Interp ships only as the fused stage.
 
 ---
 
@@ -55,7 +83,8 @@ Only these types are compiled and linked:
 | `setErrorBoundMode(mode)` | `ErrorBoundMode` | `ABS` | `ABS`, `REL`, or `NOA` (same semantics as `QuantizerStage`) |
 | `setQuantRadius(r)` | `int` | `0` (auto) | Quantization radius — see "Radius auto-tune" below |
 | `setOutlierCapacity(c)` | `float` | `0.10` | Fraction of `N` reserved for outliers (0.10 ⇒ 10%) |
-| `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(|data|)` (REL); set before graph capture |
+| `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (REL); set before graph capture |
+| `setAutoTuning(mode)` | `uint8_t` | `0` | Enable `INTERPOLATION_PARAMS` auto-tuning — see "Auto-tuning" below |
 
 ### Radius auto-tune
 
@@ -82,6 +111,51 @@ The manual path is required for:
 The auto-tuned radius is cached in the serialized header on first compress, so
 the decompressor never needs to know which mode was used.
 
+### Auto-tuning
+
+cuSZ-Hi's compression ratio depends heavily on the per-level interpolation
+choices encoded by `INTERPOLATION_PARAMS` (alpha, beta, and the three
+`use_md` / `use_natural` / `reverse` boolean arrays). By default the stage
+runs the deterministic baseline (`alpha=1.75`, `beta=4.0`,
+`use_md={true,true,false,false,false,false}`, `use_natural`/`reverse` all
+false), which is the safe choice when the data distribution is unknown.
+
+Enable auto-tuning to pick those flags per-dataset:
+
+```cpp
+g->setAutoTuning(3);   // recommended: full structural profiling
+```
+
+| Mode | Probe kernel | What it sets |
+|---|---|---|
+| `0` | none | (off; baseline) |
+| `1` | `c_spline_profiling_data` (2 errors) | `reverse[0..3]` only (one global bool replicated) |
+| `3` | `pa_spline_infprecis_data` (18 errors) | `use_md` / `use_natural` / `reverse` per level (matches the cuSZ-Hi paper) |
+
+Modes `2` (2-D-only structural probe), `4` (full + alpha/beta sweep), and
+`5+` (manual alpha/beta override) from cuSZ-Hi are not yet wired —
+straightforward follow-up scope.
+
+Common patterns:
+
+```cpp
+// alpha is always interpolated from rel_eb (see cuSZ-Hi spline3.cu:80-103).
+// For ABS mode, the stage scans the data range once to derive rel_eb;
+// REL/NOA reuses the user-supplied eb directly.
+g->setErrorBoundMode(ErrorBoundMode::REL);
+g->setErrorBound(1e-3f);
+g->setAutoTuning(3);
+```
+
+**Auto-tuning is incompatible with CUDA graph capture.** Each profiling
+kernel ends with a D2H of the error array and a `cudaStreamSynchronize`,
+which would error out inside a captured region. `isGraphCompatible()` is
+`false` whether auto-tuning is on or off in the MVP.
+
+The resolved `INTERPOLATION_PARAMS` are embedded in the FZM stage header at
+compress time, so the decompressor reuses them verbatim — there is no
+re-tuning on the inverse path.
+
 ### Error bound and limitations
 
 The error bound `eb` is a **target**, not a hard guarantee. The multi-level
@@ -99,10 +173,11 @@ Other MVP limitations:
 - **3-D only.** `setDims()` throws for 1-D or 2-D inputs.
 - Best results when each `dim` is a multiple of 16 (the anchor tile size).
   Ragged dims still work but edge voxels see slightly worse prediction.
-- cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning is **not yet ported**. This MVP
-  uses the upstream deterministic baseline (`alpha=1.75`, `beta=4.0`,
-  `use_md={true,true,false,false,false,false}`). Real-world compression ratio
-  may be 10–30 % off the cuSZ-Hi paper until phase 2 lands.
+- cuSZ-Hi `auto_tuning` modes `2`/`4`/`5+` are **not yet ported**. Modes `1`
+  (cheap reverse-only profile) and `3` (full structural — the cuSZ-Hi paper
+  mode) are available via `setAutoTuning()`; see the "Auto-tuning" section
+  above. Mode `4` (alpha/beta sweep on top of mode 3) and the 2-D-targeted
+  mode `2` are straightforward follow-ups.
 - `isGraphCompatible()` returns `false` in the MVP. The forward path does no
   D2H during `execute()`, but the auto-tune scan and `postStreamSync()` for the
   outlier count do. End-to-end graph compatibility will be enabled after the
@@ -120,7 +195,16 @@ Other MVP limitations:
 | 1 | `anchor` | `TInput` | `~N / 4096` |
 | 2 | `outlier_vals` | `TInput` | up to `outlier_capacity * N` |
 | 3 | `outlier_idxs` | `uint32_t` | up to `outlier_capacity * N` |
-| 4 | `outlier_count` | `uint32_t` | 4 bytes |
+
+The outlier **count** is *not* a DAG output port. It lives in a stage-private
+4-byte device scratch (allocated in `onFinalize()` via
+`pool->allocatePersistentDevice`), is D2H'd in `postStreamSync()`, and is
+serialized into the FZM stage header. The inverse path receives it as a
+`uint32_t` kernel-launch argument — read from the deserialized header — so
+the scatter kernel never has to dereference a device pointer to know its
+loop bound. The count is also retrievable post-compress via
+`getActualOutputSizesByName().at("outlier_idxs") / sizeof(uint32_t)`,
+since `postStreamSync()` trims the indices size to the real count.
 
 Connect downstream stages to the `codes` port:
 
@@ -130,7 +214,7 @@ p.connect(next, g, "codes");
 
 ### Inverse
 
-Five inputs (in the order above) → one output (reconstructed `TInput[N]`).
+Four inputs (in the order above) → one output (reconstructed `TInput[N]`).
 
 ---
 
@@ -164,9 +248,10 @@ type         = "GInterp"
 input_type   = "float32"
 code_type    = "uint16"
 error_bound  = 1e-2
-eb_mode      = "ABS"        # "ABS", "REL", or "NOA"
+error_bound_mode = "ABS"    # "ABS", "REL", or "NOA"
 quant_radius = 0            # 0 = auto-tune (default); positive = manual override
 outlier_capacity = 0.10
+auto_tuning  = 0            # 0=off, 1=cheap, 3=full structural
 ```
 
 ---

@@ -63,14 +63,23 @@ quant->setValueBase(range);            // NOA: skip internal data scan
 
 ## Output ports (compression)
 
-### Normal mode (4 outputs)
+### Normal mode (3 outputs)
 
 | Index | Name | Type | Description |
 |---|---|---|---|
 | 0 | `"codes"` | `TCode[n]` | Quantization codes |
 | 1 | `"outlier_vals"` | `TInput[k]` | Original values at outlier positions |
 | 2 | `"outlier_idxs"` | `uint32_t[k]` | Linear indices of outlier positions |
-| 3 | `"outlier_count"` | `uint32_t` | Number of outliers (scalar) |
+
+The outlier **count** is *not* a DAG output port. It lives in a stage-private
+4-byte device scratch (allocated in `onFinalize()` via
+`pool->allocatePersistentDevice`), is D2H'd in `postStreamSync()`, and is
+serialized into the FZM stage header. The inverse path receives it as a
+`uint32_t` kernel-launch argument — read from the deserialized header — so
+the scatter kernel never has to dereference a device pointer to know its
+loop bound. The count is also retrievable post-compress via
+`getActualOutputSizesByName().at("outlier_idxs") / sizeof(uint32_t)`,
+since `postStreamSync()` trims the indices size to the real count.
 
 Connect downstream stages to `"codes"`:
 
@@ -82,7 +91,7 @@ p.connect(next_stage, quant, "codes");
 
 When `setInplaceOutliers(true)` is active, outliers are embedded directly in
 the codes array using their raw IEEE-754 bit pattern.  Only the `"codes"` port
-exists; the three outlier scatter ports are absent.
+exists; the scatter buffers and outlier-count scratch are absent.
 
 ---
 

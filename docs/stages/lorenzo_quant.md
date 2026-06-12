@@ -70,7 +70,16 @@ lorenzo->setValueBase(max_abs);          // REL: skip internal data scan
 | 0 | `"codes"` | `TCode[n]` | Quantized prediction errors |
 | 1 | `"outlier_errors"` | `TInput[k]` | Original values at outlier positions |
 | 2 | `"outlier_indices"` | `uint32_t[k]` | Linear indices of outlier positions |
-| 3 | `"outlier_count"` | `uint32_t` | Number of outliers (scalar) |
+
+The outlier **count** is *not* a DAG output port. It lives in a stage-private
+4-byte device scratch (allocated in `onFinalize()` via
+`pool->allocatePersistentDevice`), is D2H'd in `postStreamSync()`, and is
+serialized into the FZM stage header. The inverse path receives it as a
+`uint32_t` kernel-launch argument — read from the deserialized header — so
+the scatter kernel never has to dereference a device pointer to know its
+loop bound. The count is also retrievable post-compress via
+`getActualOutputSizesByName().at("outlier_indices") / sizeof(uint32_t)`,
+since `postStreamSync()` trims the indices size to the real count.
 
 Connect downstream stages to the `"codes"` port:
 

@@ -44,7 +44,7 @@
 #include "transforms/adm/adm_stage.h"
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
-#include "predictors/ginterp/ginterp_stage.h"
+#include "fused/ginterp/ginterp_stage.h"
 
 #include <fstream>
 #include <iomanip>
@@ -522,8 +522,9 @@ static Stage* addGInterpStage(Pipeline& p, const toml::table& t) {
     auto configure = [&](auto* g) {
         g->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
         g->setErrorBoundMode(ebModeFromString(optStr(t, "error_bound_mode", "ABS")));
-        g->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 512)));
+        g->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 0)));
         g->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.10)));
+        g->setAutoTuning(static_cast<uint8_t>(optInt(t, "auto_tuning", 0)));
         s = g;
     };
     if      (code_dt == DataType::UINT16) configure(p.addStage<GInterpStage<float, uint16_t>>());
@@ -541,12 +542,14 @@ static void saveGInterpStage(Stage* s, std::ostringstream& out) {
 
     float eb = 1e-3f, cap = 0.10f;
     ErrorBoundMode ebm = ErrorBoundMode::ABS;
-    int qr = 512;
+    int qr = 0;
+    uint8_t at = 0;
     auto read = [&](auto* g) {
         eb  = g->getErrorBound();
         ebm = g->getErrorBoundMode();
         qr  = g->getQuantRadius();
         cap = g->getOutlierCapacity();
+        at  = g->getAutoTuningMode();
     };
     if      (code_dt == DataType::UINT16) read(static_cast<GInterpStage<float, uint16_t>*>(s));
     else if (code_dt == DataType::UINT8)  read(static_cast<GInterpStage<float, uint8_t>*>(s));
@@ -555,6 +558,9 @@ static void saveGInterpStage(Stage* s, std::ostringstream& out) {
     out << "error_bound_mode = \"" << ebModeToString(ebm)    << "\"\n";
     out << "quant_radius = "     << static_cast<int64_t>(qr) << "\n";
     out << "outlier_capacity = " << static_cast<double>(cap) << "\n";
+    // Omit auto_tuning when 0 (the default) to keep round-trip configs minimal.
+    if (at != 0)
+        out << "auto_tuning = " << static_cast<int>(at) << "\n";
 }
 
 static void saveHuffmanStage(Stage* s, std::ostringstream& out) {

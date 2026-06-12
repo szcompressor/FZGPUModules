@@ -134,10 +134,10 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 ## cuSZ-Hi
 
-**Used by:** `GInterpStage` (`modules/predictors/ginterp/`)
+**Used by:** `GInterpStage` (`modules/fused/ginterp/`)
 
 **Relationship:**
-- `GInterpStage` (`modules/predictors/ginterp/`) — the multi-level spline
+- `GInterpStage` (`modules/fused/ginterp/`) — the multi-level spline
   interpolation kernels are adapted from `spline3.cu` and `spline3_md.inl`
   in the cuSZ-Hi repository. Changes from the original: `namespace cusz` →
   `namespace fz::ginterp`; `err.hh` / `timer.hh` includes stripped; the

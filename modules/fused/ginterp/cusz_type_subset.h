@@ -35,7 +35,7 @@ struct INTERPOLATION_PARAMS {
     bool use_md[6];
     bool use_natural[6];
     bool reverse[6];
-    uint8_t auto_tuning{3};
+    uint8_t auto_tuning{0};
 
     INTERPOLATION_PARAMS()
         : use_md{true, true, false, false, false, false},

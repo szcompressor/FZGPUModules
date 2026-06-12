@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
 
     // Estimate output capacities
     auto est = stage.estimateOutputSizes({in_bytes});
-    if (est.size() < 4) {
+    if (est.size() < 3) {
         std::cerr << "Unexpected estimateOutputSizes result\n";
         return 1;
     }
@@ -326,18 +326,18 @@ int main(int argc, char** argv) {
     DevBuf d_codes  (est[0]);
     DevBuf d_errors (est[1]);
     DevBuf d_indices(est[2]);
-    DevBuf d_count  (est[3]);
 
     // ── 4. Memory pool ───────────────────────────────────────────────────────
     fz::MemoryPoolConfig pool_cfg(in_bytes, /*multiplier=*/5.0f);
     fz::MemoryPool pool(pool_cfg);
+    // Pre-allocate the stage-private 4-byte outlier-count scratch.
+    stage.onFinalize(in_bytes, &pool);
 
     // ── 5. Execute ───────────────────────────────────────────────────────────
     std::cout << "\nRunning Lorenzo forward pass... " << std::flush;
 
     std::vector<void*> inputs  = {d_in.ptr};
-    std::vector<void*> outputs = {d_codes.ptr, d_errors.ptr,
-                                   d_indices.ptr, d_count.ptr};
+    std::vector<void*> outputs = {d_codes.ptr, d_errors.ptr, d_indices.ptr};
     std::vector<size_t> sizes  = {in_bytes};
 
     stage.execute(stream, &pool, inputs, outputs, sizes);
@@ -347,17 +347,15 @@ int main(int argc, char** argv) {
     std::cout << "done.\n\n";
 
     // ── 6. Retrieve actual sizes ──────────────────────────────────────────────
+    // outlier_count is no longer a port — it's the indices buffer size divided
+    // by sizeof(uint32_t) (postStreamSync trimmed it to the actual count).
     auto actual = stage.getActualOutputSizesByName();
-    size_t codes_bytes   = actual.count("codes") ? actual.at("codes") : est[0];
-    size_t outlier_count_bytes = actual.count("outlier_count")
-                                  ? actual.at("outlier_count") : est[3];
+    size_t codes_bytes = actual.count("codes") ? actual.at("codes") : est[0];
 
     size_t n_codes    = codes_bytes / sizeof(uint16_t);
     size_t n_outliers = 0;
-    if (outlier_count_bytes >= sizeof(uint32_t)) {
-        uint32_t oc = 0;
-        CUDA_CHECK(cudaMemcpy(&oc, d_count.ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-        n_outliers = oc;
+    if (actual.count("outlier_indices")) {
+        n_outliers = actual.at("outlier_indices") / sizeof(uint32_t);
     }
 
     // ── 7. Download codes ─────────────────────────────────────────────────────

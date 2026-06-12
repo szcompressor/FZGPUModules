@@ -414,8 +414,8 @@ template<typename TInput, typename TCode>
 void launchLorenzoInverseKernel2D(
     const TCode* d_codes,
     const TInput* d_outlier_errors, const uint32_t* d_outlier_indices,
-    const uint32_t* d_outlier_count,
-    size_t nx, size_t ny, size_t max_outliers,
+    uint32_t outlier_n,
+    size_t nx, size_t ny,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
@@ -430,12 +430,13 @@ void launchLorenzoInverseKernel2D(
     // Step 0: zero output (scatter target)
     FZ_CUDA_CHECK(cudaMemsetAsync(d_output, 0, total * sizeof(TInput), stream));
 
-    // Step 1: scatter outlier prediction errors into output
-    if (d_outlier_count != nullptr && max_outliers > 0) {
+    // Step 1: scatter outlier prediction errors into output. The count is a
+    // register arg (came from the deserialized FZM header).
+    if (outlier_n > 0) {
         int sblk  = 256;
-        int sgrid = (static_cast<int>(max_outliers) + sblk - 1) / sblk;
+        int sgrid = (static_cast<int>(outlier_n) + sblk - 1) / sblk;
         scatter_outliers_kernel<TInput><<<sgrid, sblk, 0, stream>>>(
-            d_outlier_errors, d_outlier_indices, d_outlier_count, d_output);
+            d_outlier_errors, d_outlier_indices, outlier_n, d_output);
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess)
             throw std::runtime_error(
@@ -525,8 +526,8 @@ template<typename TInput, typename TCode>
 void launchLorenzoInverseKernel3D(
     const TCode* d_codes,
     const TInput* d_outlier_errors, const uint32_t* d_outlier_indices,
-    const uint32_t* d_outlier_count,
-    size_t nx, size_t ny, size_t nz, size_t max_outliers,
+    uint32_t outlier_n,
+    size_t nx, size_t ny, size_t nz,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
@@ -540,12 +541,13 @@ void launchLorenzoInverseKernel3D(
     // Step 0: zero output (scatter target)
     FZ_CUDA_CHECK(cudaMemsetAsync(d_output, 0, total * sizeof(TInput), stream));
 
-    // Step 1: scatter outlier prediction errors into output
-    if (d_outlier_count != nullptr && max_outliers > 0) {
+    // Step 1: scatter outlier prediction errors into output. Count is a
+    // register arg (came from the deserialized FZM header).
+    if (outlier_n > 0) {
         int sblk  = 256;
-        int sgrid = (static_cast<int>(max_outliers) + sblk - 1) / sblk;
+        int sgrid = (static_cast<int>(outlier_n) + sblk - 1) / sblk;
         scatter_outliers_kernel<TInput><<<sgrid, sblk, 0, stream>>>(
-            d_outlier_errors, d_outlier_indices, d_outlier_count, d_output);
+            d_outlier_errors, d_outlier_indices, outlier_n, d_output);
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess)
             throw std::runtime_error(
@@ -592,14 +594,14 @@ void launchLorenzoInverseKernel3D(
         const TInput*, size_t, size_t, TInput, TCode, \
         TCode*, TInput*, uint32_t*, uint32_t*, size_t, bool, cudaStream_t); \
     template void launchLorenzoInverseKernel2D<TInput, TCode>( \
-        const TCode*, const TInput*, const uint32_t*, const uint32_t*, \
-        size_t, size_t, size_t, TInput, TCode, TInput*, bool, cudaStream_t, MemoryPool*); \
+        const TCode*, const TInput*, const uint32_t*, uint32_t, \
+        size_t, size_t, TInput, TCode, TInput*, bool, cudaStream_t, MemoryPool*); \
     template void launchLorenzoKernel3D<TInput, TCode>( \
         const TInput*, size_t, size_t, size_t, TInput, TCode, \
         TCode*, TInput*, uint32_t*, uint32_t*, size_t, bool, cudaStream_t); \
     template void launchLorenzoInverseKernel3D<TInput, TCode>( \
-        const TCode*, const TInput*, const uint32_t*, const uint32_t*, \
-        size_t, size_t, size_t, size_t, TInput, TCode, TInput*, bool, cudaStream_t, MemoryPool*);
+        const TCode*, const TInput*, const uint32_t*, uint32_t, \
+        size_t, size_t, size_t, TInput, TCode, TInput*, bool, cudaStream_t, MemoryPool*);
 
 INSTANTIATE_LORENZO_ND(float,  uint16_t)
 INSTANTIATE_LORENZO_ND(float,  uint8_t)

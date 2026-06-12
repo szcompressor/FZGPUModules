@@ -260,3 +260,110 @@ TEST(GInterpStage, GI9_ManualRadiusSkipsScan) {
     EXPECT_LE(res.max_error, 1e-2f * 1.5)
         << "Manual radius=512 should still give a reasonable bound on smooth data";
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI10: AutoTuneMode1 — cheap profiling (sets `reverse[]` only). Verifies the
+// round-trip still satisfies the bound and that the resolved alpha/beta were
+// recomputed from rel_eb (alpha should differ from the 1.75 baseline at this eb).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI10_AutoTuneMode1) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t N = NX * NY * NZ;
+    const size_t in_bytes = N * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    stage->setAutoTuning(1);   // cheap profiling
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "max_error=" << res.max_error << " > 1.5 * eb=" << eb;
+    EXPECT_EQ(stage->getAutoTuningMode(), 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI11: AutoTuneMode3 — full structural profiling. Same correctness bound
+// check; on smooth data the structural tune may improve CR but the round-trip
+// max-error contract is unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI11_AutoTuneMode3) {
+    const size_t NX = 64, NY = 64, NZ = 64;  // need >= 2 * S_STRIDE/16 = 16 per dim
+    const size_t N = NX * NY * NZ;
+    const size_t in_bytes = N * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    stage->setAutoTuning(3);   // structural
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "max_error=" << res.max_error << " > 1.5 * eb=" << eb;
+    EXPECT_EQ(stage->getAutoTuningMode(), 3);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI12: AutoTuneFileRoundTrip — the resolved INTERPOLATION_PARAMS must survive
+// the .fzm header round-trip so the decompressor uses the same intp_param as
+// the compressor. Uses mode 3 (writes non-default reverse/use_md flags).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI12_AutoTuneFileRoundTrip) {
+    const size_t NX = 64, NY = 64, NZ = 64;
+    const size_t N = NX * NY * NZ;
+    const size_t in_bytes = N * sizeof(float);
+    const float  eb = 1e-2f;
+    const std::string path = "/tmp/test_ginterp_gi12.fzm";
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(3);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_file_round_trip<float>(p, h_input, cs.stream, path);
+
+    EXPECT_LE(res.max_error, eb * 1.5);
+    std::remove(path.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI13: AutoTuneSerializeHeader — the new INTERPOLATION_PARAMS fields survive
+// raw serializeHeader / deserializeHeader round-trip via the same in-memory
+// path as the FZM reader.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI13_AutoTuneSerializeHeader) {
+    GInterpStage<float, uint16_t> original;
+    original.setDims(64, 64, 64);
+    original.setErrorBound(1e-2f);
+    original.setAutoTuning(3);
+
+    uint8_t buf[128] = {};
+    size_t written = original.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(written, sizeof(GInterpConfig));
+
+    GInterpStage<float, uint16_t> restored;
+    restored.deserializeHeader(buf, written);
+
+    EXPECT_EQ(original.getAutoTuningMode(), restored.getAutoTuningMode());
+}

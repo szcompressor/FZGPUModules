@@ -1774,7 +1774,13 @@ __global__ void fz::ginterp::c_spline_profiling_data(
         // } shmem;
         c_reset_scratch_profiling_data<T, SPLINE_DIM, PROFILE_BLOCK_SIZE_X, PROFILE_BLOCK_SIZE_Y, PROFILE_BLOCK_SIZE_Z, PROFILE_NUM_BLOCK_X, PROFILE_NUM_BLOCK_Y, PROFILE_NUM_BLOCK_Z, LINEAR_BLOCK_SIZE>(shmem_data, 0.0);
         
-        global2shmem_profiling_data<T, T, PROFILE_BLOCK_SIZE_X, PROFILE_BLOCK_SIZE_Y, PROFILE_BLOCK_SIZE_Z, PROFILE_NUM_BLOCK_X, PROFILE_NUM_BLOCK_Y, PROFILE_NUM_BLOCK_Z, LINEAR_BLOCK_SIZE>(data, data_size, data_leap, shmem_data);
+        // BUGFIX vs. upstream cuSZ-Hi: the original call here omits the
+        // SPLINE_DIM template argument, which silently shifts the rest of
+        // the int pack by one — PROFILE_NUM_BLOCK_Z ends up taking
+        // LINEAR_BLOCK_SIZE's value (384), producing massive shared-memory
+        // OOB writes. Restore the intended alignment by passing SPLINE_DIM
+        // explicitly.
+        global2shmem_profiling_data<T, T, SPLINE_DIM, PROFILE_BLOCK_SIZE_X, PROFILE_BLOCK_SIZE_Y, PROFILE_BLOCK_SIZE_Z, PROFILE_NUM_BLOCK_X, PROFILE_NUM_BLOCK_Y, PROFILE_NUM_BLOCK_Z, LINEAR_BLOCK_SIZE>(data, data_size, data_leap, shmem_data);
 
         fz::ginterp::device_api::auto_tuning<T, SPLINE_DIM, PROFILE_BLOCK_SIZE_X, PROFILE_BLOCK_SIZE_Y, PROFILE_BLOCK_SIZE_Z, PROFILE_NUM_BLOCK_X, PROFILE_NUM_BLOCK_Y, PROFILE_NUM_BLOCK_Z, LINEAR_BLOCK_SIZE>(shmem_data, shmem_local_errs, data_size, errors);
 

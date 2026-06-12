@@ -35,7 +35,7 @@ allows `ANSStage` to accept any upstream output as raw bytes — most commonly t
 |---|---|---|---|
 | `setProbBits(n)` | `uint8_t` | `10` | ANS probability resolution (table size = 2^n) |
 
-### `prob_bits` limitation
+### prob_bits limitation
 
 **Only `prob_bits=10` is supported in this build.**  The dietGPU rANS kernels are
 compiled as explicit template instantiations for `kANSDefaultProbBits=10` in
@@ -65,7 +65,7 @@ Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
 auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
 lrz->setErrorBound(1e-3f);
 lrz->setQuantRadius(512);
-lrz->setZigzagCodes(true);   // maps codes to [0, 1022] — compact symbol range
+lrz->setZigzagCodes(true);   // maps codes to [0, 1024] — compact symbol range
 
 auto* ans = p.addStage<ANSStage>();
 p.connect(ans, lrz, "codes");  // must connect to "codes" port, not "output"
@@ -177,7 +177,7 @@ one in every inverse call (to read the header before decoding).
 **Byte-level encoding only.** `ANSStage` operates on `uint8_t` symbols (256-entry
 alphabet).  For multi-byte integer streams (e.g., `uint16_t` quantization codes),
 pair it with `ADMStage` (\ref stage_adm) which remaps the wide symbol space into
-the 8-bit domain before ANS coding — or use `MANSStage` for the fused path.
+the 8-bit domain before ANS coding.
 
 **Compression ratio depends on upstream symbol compactness.** ANS achieves its
 theoretical Shannon entropy bound only when the symbol distribution is known at

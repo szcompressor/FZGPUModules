@@ -143,18 +143,19 @@ __global__ void scatter_add_kernel(
  * scatter_assign_kernel — Quantizer-style scatter.
  *
  * Writes each outlier's original value directly to its position (replaces the
- * placeholder 0 left by the dequantization kernel).
+ * placeholder 0 left by the dequantization kernel). The count `n` is a
+ * register arg (read from the deserialized FZM header on the inverse path),
+ * not a device pointer — the kernel never derefs to find its loop bound.
  */
 template<typename T>
 __global__ void scatter_assign_kernel(
     const T* __restrict__        outlier_values,
     const uint32_t* __restrict__ outlier_indices,
-    const uint32_t* __restrict__ outlier_count_ptr,
+    uint32_t                     n,
     T* __restrict__              output
 ) {
-    uint32_t outlier_count = *outlier_count_ptr;
     size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid < outlier_count) {
+    if (tid < n) {
         output[outlier_indices[tid]] = outlier_values[tid];
     }
 }

@@ -78,9 +78,15 @@ static_assert(sizeof(LorenzoQuantConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoQuant
  * - [0] codes         — quantization codes for all elements (`TCode`)
  * - [1] outlier_errors — prediction errors for outliers (`TInput`)
  * - [2] outlier_indices — outlier element indices (`uint32_t`)
- * - [3] outlier_count  — number of outliers (`uint32_t`, 4 bytes)
  *
- * Inverse (decompression): takes the four forward outputs, produces the
+ * The outlier count is **not** a DAG output port — it lives in a stage-private
+ * 4-byte device scratch (allocated via `pool->allocatePersistentDevice` in
+ * `onFinalize()`), is D2H'd in `postStreamSync()`, and is serialized in the
+ * FZM header. The inverse path receives it as a `uint32_t` kernel-launch
+ * argument (read from the deserialized header), so the inverse kernel never
+ * has to dereference a device pointer to know its loop bound.
+ *
+ * Inverse (decompression): takes the three forward outputs, produces the
  * reconstructed data as a single `TInput` array.
  *
  * @tparam TInput  Floating-point input type (`float` or `double`).
@@ -113,6 +119,7 @@ public:
     };
     
     explicit LorenzoQuantStage(const Config& config = Config());
+    ~LorenzoQuantStage() override;
 
     void execute(
         cudaStream_t stream,
@@ -128,13 +135,23 @@ public:
      * after the stream is synchronized — avoids a mid-pipeline stall.
      */
     void postStreamSync(cudaStream_t stream) override;
-    
+
+    /// Pre-allocate the stage-private 4-byte outlier-count device scratch
+    /// (via `pool->allocatePersistentDevice`) in PREALLOCATE mode. In MINIMAL
+    /// mode this is deferred to the first compress execute(). The 4-byte
+    /// scratch lives for the stage's lifetime.
+    void onFinalize(size_t estimated_inlen, MemoryPool* pool) override;
+
+    size_t estimateDeviceFootprintBytes(size_t /*estimated_inlen*/) const override {
+        return sizeof(uint32_t);
+    }
+
     std::string getName() const override { return "LorenzoQuant"; }
-    size_t getNumInputs()  const override { return is_inverse_ ? 4 : 1; }
-    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 4; }
-    
+    size_t getNumInputs()  const override { return is_inverse_ ? 3 : 1; }
+    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 3; }
+
     std::vector<std::string> getOutputNames() const override {
-        return {"codes", "outlier_errors", "outlier_indices", "outlier_count"};
+        return {"codes", "outlier_errors", "outlier_indices"};
     }
     
     std::vector<size_t> estimateOutputSizes(
@@ -202,7 +219,6 @@ public:
             case 0: return static_cast<uint8_t>(getCodeDataType());      // codes
             case 1: return static_cast<uint8_t>(getInputDataType());     // outlier_errors
             case 2: return static_cast<uint8_t>(DataType::UINT32);       // outlier_indices
-            case 3: return static_cast<uint8_t>(DataType::UINT32);       // outlier_count
             default: return static_cast<uint8_t>(DataType::UINT8);
         }
     }
@@ -315,9 +331,20 @@ private:
     /// Scaling factor used in the conversion: value_range (NOA) or max(|data|) (REL).
     /// Stored so serializeHeader() can embed it in the output stream.
     float computed_value_base_ = 0.0f;
-    /// Device pointer to the outlier_count output buffer.  Set during
-    /// execute() (compress mode) and consumed once by postStreamSync().
-    const void* d_outlier_count_ptr_ = nullptr;
+    /// Stage-private 4-byte device scratch holding the live outlier count.
+    /// Allocated lazily via `pool->allocatePersistentDevice(4, ...)` — see
+    /// `initOutlierCountScratch()`. Used by the forward kernel as the atomic
+    /// counter and D2H'd in `postStreamSync()`. The inverse path does NOT
+    /// touch this — it reads the count from the deserialized FZM header and
+    /// passes it as a `uint32_t` kernel-launch argument.
+    uint32_t* d_outlier_count_scratch_ = nullptr;
+    /// Pool that owns `d_outlier_count_scratch_` — captured at allocation
+    /// time so the destructor can return it to the right pool.
+    MemoryPool* persistent_pool_ = nullptr;
+
+    /// Lazily allocate the 4-byte outlier-count scratch via the pool's
+    /// persistent allocator. Idempotent; no-op if already allocated.
+    void initOutlierCountScratch(MemoryPool* pool);
     
     DataType getInputDataType() const {
         if (std::is_same<TInput, float>::value) return DataType::FLOAT32;
@@ -359,8 +386,8 @@ template<typename TInput, typename TCode>
 void launchLorenzoInverseKernel(
     const TCode* d_codes,
     const TInput* d_outlier_errors, const uint32_t* d_outlier_indices,
-    const uint32_t* d_outlier_count,
-    size_t n, size_t max_outliers,
+    uint32_t outlier_n,
+    size_t n,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
@@ -384,8 +411,8 @@ template<typename TInput, typename TCode>
 void launchLorenzoInverseKernel2D(
     const TCode* d_codes,
     const TInput* d_outlier_errors, const uint32_t* d_outlier_indices,
-    const uint32_t* d_outlier_count,
-    size_t nx, size_t ny, size_t max_outliers,
+    uint32_t outlier_n,
+    size_t nx, size_t ny,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
@@ -409,8 +436,8 @@ template<typename TInput, typename TCode>
 void launchLorenzoInverseKernel3D(
     const TCode* d_codes,
     const TInput* d_outlier_errors, const uint32_t* d_outlier_indices,
-    const uint32_t* d_outlier_count,
-    size_t nx, size_t ny, size_t nz, size_t max_outliers,
+    uint32_t outlier_n,
+    size_t nx, size_t ny, size_t nz,
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,

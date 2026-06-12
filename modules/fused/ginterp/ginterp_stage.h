@@ -24,6 +24,11 @@
 #include <unordered_map>
 #include <vector>
 
+// Forward-declared in the public header so callers don't pull in the
+// cuSZ-Hi type subset. The full definition lives in cusz_type_subset.h,
+// included only inside the stage TU.
+struct INTERPOLATION_PARAMS;
+
 namespace fz {
 
 /**
@@ -31,6 +36,7 @@ namespace fz {
  * Fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
 struct GInterpConfig {
+    // ── identity / dims (40 B) ──────────────────────────────────────────────
     float    error_bound;       ///< Absolute bound used by the decompressor.
     uint32_t quant_radius;      ///< Quantization radius (codes lie in [0, 2*radius)).
     uint32_t num_elements;      ///< Total element count (= dim_x*dim_y*dim_z).
@@ -47,9 +53,21 @@ struct GInterpConfig {
     uint32_t anchor_dim_z;      ///< Anchor grid Z extent.
     float    user_eb;           ///< Original user-specified bound (before mode conversion).
     float    value_base;        ///< value_range (NOA) / max(|data|) (REL) used in conversion.
-    uint8_t  reserved[28];      ///< Future auto-tuning params (alpha/beta/use_md/...).
 
-    // Total: 64 bytes. Comfortable margin under FZM_STAGE_CONFIG_SIZE (128 B).
+    // ── resolved INTERPOLATION_PARAMS (phase 2 auto-tune output, 39 B) ──────
+    // Both encoder and decoder must use the exact same intp_param values, so
+    // the resolved params are written here on compress and consumed on decompress.
+    // Layout chosen to mirror `INTERPOLATION_PARAMS` field-for-field; we don't
+    // memcpy the struct directly because its padding is implementation-defined.
+    double   intp_alpha;        ///< Resolved alpha (auto-tuned from rel_eb or fixed).
+    double   intp_beta;         ///< Resolved beta (default 4.0).
+    uint8_t  intp_use_md[6];    ///< Resolved use_md[level], booleans as u8.
+    uint8_t  intp_use_natural[6];
+    uint8_t  intp_reverse[6];
+    uint8_t  auto_tuning_mode;  ///< 0=off, 1=cheap, 3=full, 4=full+alpha sweep, 5+=manual α/β.
+    uint8_t  pad[8];            ///< Reserved for future fields (alignment also).
+
+    // Total: 88 bytes. Comfortable margin under FZM_STAGE_CONFIG_SIZE (128 B).
 
     GInterpConfig()
         : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
@@ -57,7 +75,12 @@ struct GInterpConfig {
           ndim(3), eb_mode(0),
           dim_x(0), dim_y(1), dim_z(1),
           anchor_dim_x(0), anchor_dim_y(0), anchor_dim_z(0),
-          user_eb(0.0f), value_base(0.0f), reserved{} {}
+          user_eb(0.0f), value_base(0.0f),
+          intp_alpha(1.75), intp_beta(4.0),
+          intp_use_md{1, 1, 0, 0, 0, 0},
+          intp_use_natural{0, 0, 0, 0, 0, 0},
+          intp_reverse{0, 0, 0, 0, 0, 0},
+          auto_tuning_mode(0), pad{} {}
 };
 static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
               "GInterpConfig must fit in FZM_STAGE_CONFIG_SIZE");
@@ -75,9 +98,15 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *   - [1] anchor         — corner anchor values (`TInput`, ~N/4096 elements)
  *   - [2] outlier_vals   — out-of-range residuals (`TInput`)
  *   - [3] outlier_idxs   — outlier element indices (`uint32_t`)
- *   - [4] outlier_count  — outlier count (`uint32_t`, 4 bytes)
  *
- * Inverse: takes the five forward outputs, produces the reconstructed `TInput`
+ * The outlier count is **not** a DAG output port — it lives in a stage-private
+ * 4-byte device scratch (allocated via `pool->allocatePersistentDevice` in
+ * `onFinalize()`), is D2H'd in `postStreamSync()`, and is serialized in the
+ * FZM header. The inverse path consumes it as a `uint32_t` kernel-launch
+ * argument (read from the deserialized header), so the inverse kernel never
+ * has to dereference a device pointer to know its loop bound.
+ *
+ * Inverse: takes the four forward outputs, produces the reconstructed `TInput`
  * volume.
  *
  * ## Error bound and limitations
@@ -141,13 +170,23 @@ public:
         /// Pre-computed value_range (NOA) or max(|data|) (REL). Set to skip
         /// the on-device scan during execute() (required for graph capture).
         float precomputed_value_base = 0.0f;
+        /// `INTERPOLATION_PARAMS` auto-tuning mode (cuSZ-Hi phase 2).
+        ///   0 = off (default, deterministic baseline)
+        ///   1 = cheap profiling — sets `reverse[]` only (~1 ms)
+        ///   3 = full structural profiling — sets `use_md`, `use_natural`,
+        ///       `reverse` per level (~5–15 ms; matches the cuSZ-Hi paper)
+        /// Modes 2, 4, 5+ from cuSZ-Hi are not yet wired (phase 2 follow-up).
+        /// Any non-zero mode forces a host-blocking D2H sync inside execute()
+        /// and is **incompatible with CUDA graph capture**.
+        uint8_t auto_tuning_mode = 0;
 
         Config() = default;
     };
 
     explicit GInterpStage(const Config& cfg = Config()) : config_(cfg) {
-        actual_output_sizes_.resize(5, 0);
+        actual_output_sizes_.resize(4, 0);
     }
+    ~GInterpStage() override;
 
     // ── Stage interface ──────────────────────────────────────────────────────
     void execute(
@@ -160,12 +199,26 @@ public:
 
     void postStreamSync(cudaStream_t stream) override;
 
+    /// In PREALLOCATE mode + auto-tuning > 0, pre-allocate the persistent
+    /// profiling-errors scratch (36 floats device + pinned host) via the pool's
+    /// persistent allocators so they aren't on the per-call stream-ordered
+    /// path. In MINIMAL mode this is deferred to first execute(). Auto-tune off
+    /// is a no-op.
+    void onFinalize(size_t estimated_inlen, MemoryPool* pool) override;
+
+    size_t estimateDeviceFootprintBytes(size_t /*estimated_inlen*/) const override {
+        return (config_.auto_tuning_mode > 0) ? kProfilingErrCount * sizeof(float) : 0;
+    }
+    size_t estimatePinnedFootprintBytes(size_t /*estimated_inlen*/) const override {
+        return (config_.auto_tuning_mode > 0) ? kProfilingErrCount * sizeof(float) : 0;
+    }
+
     std::string getName() const override { return "GInterp"; }
-    size_t getNumInputs()  const override { return is_inverse_ ? 5 : 1; }
-    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 5; }
+    size_t getNumInputs()  const override { return is_inverse_ ? 4 : 1; }
+    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 4; }
 
     std::vector<std::string> getOutputNames() const override {
-        return {"codes", "anchor", "outlier_vals", "outlier_idxs", "outlier_count"};
+        return {"codes", "anchor", "outlier_vals", "outlier_idxs"};
     }
 
     std::vector<size_t> estimateOutputSizes(
@@ -193,6 +246,10 @@ public:
     void setOutlierCapacity(float cap)        { config_.outlier_capacity = cap; }
     void setErrorBoundMode(ErrorBoundMode m)  { config_.eb_mode = m; }
     void setValueBase(float v)                { config_.precomputed_value_base = v; }
+    /// Enable cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning. See
+    /// `Config::auto_tuning_mode` for mode semantics. Default is 0 (off).
+    /// Any non-zero mode disables CUDA graph capture for this stage.
+    void setAutoTuning(uint8_t mode)          { config_.auto_tuning_mode = mode; }
     void setDims(const std::array<size_t, 3>& dims) override;
     void setDims(size_t x, size_t y, size_t z) {
         setDims(std::array<size_t, 3>{x, y, z});
@@ -203,6 +260,7 @@ public:
     float          getOutlierCapacity()  const { return config_.outlier_capacity; }
     ErrorBoundMode getErrorBoundMode()   const { return config_.eb_mode; }
     float          getValueBase()        const { return config_.precomputed_value_base; }
+    uint8_t        getAutoTuningMode()   const { return config_.auto_tuning_mode; }
     std::array<size_t, 3> getDims()      const { return config_.dims; }
 
     void setInverse(bool inv) override { is_inverse_ = inv; }
@@ -226,7 +284,6 @@ public:
             case 1: return static_cast<uint8_t>(inputDataType());   // anchor
             case 2: return static_cast<uint8_t>(inputDataType());   // outlier_vals
             case 3: return static_cast<uint8_t>(DataType::UINT32);  // outlier_idxs
-            case 4: return static_cast<uint8_t>(DataType::UINT32);  // outlier_count
             default: return static_cast<uint8_t>(DataType::UINT8);
         }
     }
@@ -256,8 +313,13 @@ private:
     bool   is_inverse_ = false;
     size_t num_elements_ = 0;
     uint32_t actual_outlier_count_ = 0;
-    /// Stashed during execute() (compress); consumed once by postStreamSync().
-    const void* d_outlier_count_ptr_ = nullptr;
+    /// Stage-private 4-byte device scratch holding the live outlier count.
+    /// Allocated lazily in `initOutlierCountScratch()` via
+    /// `pool->allocatePersistentDevice(4, ...)`, used by the forward kernel
+    /// as the atomic counter, and D2H'd in `postStreamSync()`. The inverse
+    /// path does NOT touch this — it reads the count from the deserialized
+    /// FZM header and passes it as a `uint32_t` kernel-launch argument.
+    uint32_t* d_outlier_count_scratch_ = nullptr;
 
     /// Absolute error bound actually used in kernel launches. For ABS this
     /// equals `config_.error_bound`; for REL/NOA it is the converted value.
@@ -268,6 +330,37 @@ private:
 
     /// Cached anchor grid extent (set by setDims).
     std::array<size_t, 3> anchor_dims_ = {0, 0, 0};
+
+    // ── Phase 2: auto-tuning state ──────────────────────────────────────────
+    /// Persistent profiling scratch (pool-allocated when auto_tuning_mode > 0).
+    /// Lives for the stage lifetime; freed in the destructor.
+    static constexpr size_t kProfilingErrCount = 36;
+    float*   d_profiling_errors_ = nullptr;
+    float*   h_profiling_errors_ = nullptr;
+    /// Pointer to the MemoryPool that owns the persistent scratch above —
+    /// captured in onFinalize() / initProfilingScratch() so the destructor
+    /// can return them to the right pool.
+    MemoryPool* persistent_pool_ = nullptr;
+
+    /// Resolved INTERPOLATION_PARAMS as POD fields. Initialised to cuSZ-Hi
+    /// baseline (matches `INTERPOLATION_PARAMS()` default ctor); overwritten
+    /// by execute() when `auto_tuning_mode > 0` and consumed by both forward
+    /// and inverse launchers.
+    double  resolved_alpha_ = 1.75;
+    double  resolved_beta_  = 4.0;
+    uint8_t resolved_use_md_[6]      = {1, 1, 0, 0, 0, 0};
+    uint8_t resolved_use_natural_[6] = {0, 0, 0, 0, 0, 0};
+    uint8_t resolved_reverse_[6]     = {0, 0, 0, 0, 0, 0};
+
+    /// Lazily allocate the persistent profiling scratch via the pool's
+    /// persistent allocators. No-op if already allocated or auto-tune is off.
+    void initProfilingScratch(MemoryPool* pool);
+    /// Lazily allocate the 4-byte outlier-count device scratch. Idempotent.
+    void initOutlierCountScratch(MemoryPool* pool);
+    /// Build a cuSZ-Hi `INTERPOLATION_PARAMS` from the resolved POD fields,
+    /// for passing to the kernel launchers. Defined in the .cu (which has
+    /// the full struct definition via cusz_type_subset.h).
+    INTERPOLATION_PARAMS buildIntpParam() const;
 
     static DataType inputDataType() {
         if (std::is_same<TInput, float>::value)  return DataType::FLOAT32;

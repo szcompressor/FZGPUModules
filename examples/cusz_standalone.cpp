@@ -10,13 +10,19 @@
  *
  * Demonstrates:
  *   - Constructing a caller-managed MemoryPool for stage scratch
- *   - HuffmanStage::onFinalize() to pre-allocate persistent scratch buffers
- *   - LorenzoQuantStage::execute() — 1 input, 4 outputs
- *       (codes, outlier_errors, outlier_indices, outlier_count)
+ *   - HuffmanStage::onFinalize() and LorenzoQuantStage::onFinalize() to
+ *     pre-allocate persistent scratch (PHF buffers + the 4-byte outlier-count
+ *     scratch) so no allocation happens inside the timed compress loop
+ *   - LorenzoQuantStage::execute() — 1 input, 3 outputs
+ *       (codes, outlier_errors, outlier_indices)
  *   - LorenzoQuantStage::postStreamSync() to read the actual outlier count
+ *     from the stage-private device scratch (no DAG count port)
  *   - HuffmanStage::execute() in compress and decompress direction
  *   - Stage::setInverse(true) to switch to the decompression pass
- *   - LorenzoQuantStage::execute() in decompress mode — 4 inputs, 1 output
+ *   - LorenzoQuantStage::execute() in decompress mode — 3 inputs, 1 output;
+ *     the inverse path reads the outlier count from the stage's internal
+ *     state (populated by postStreamSync on the forward pass; populated by
+ *     deserializeHeader when going via .fzm files)
  *   - Verifying the full compress → decompress round-trip
  *
  * Contrast with the Pipeline DAG path:
@@ -91,6 +97,7 @@ int main() {
     // Size the pool to cover Huffman's full device footprint plus padding.
     MemoryPool pool(MemoryPoolConfig(input_bytes, 4.0f));
     huf.onFinalize(codes_bytes, &pool);  // pre-allocates PHF scratch buffers
+    lq.onFinalize(input_bytes, &pool);   // pre-allocates the 4-byte outlier-count scratch
 
     // ── 4. Intermediate device buffers ────────────────────────────────────────
     //
@@ -99,25 +106,25 @@ int main() {
     void* d_codes            = nullptr;
     void* d_outlier_errors   = nullptr;
     void* d_outlier_indices  = nullptr;
-    void* d_outlier_count    = nullptr;
     void* d_huf_output       = nullptr;
     void* d_reconstructed    = nullptr;
 
     cudaMalloc(&d_codes,           codes_bytes);
     cudaMalloc(&d_outlier_errors,  max_outliers * sizeof(float));
     cudaMalloc(&d_outlier_indices, max_outliers * sizeof(uint32_t));
-    cudaMalloc(&d_outlier_count,   sizeof(uint32_t));
     cudaMalloc(&d_huf_output,      huf_out_cap);
     cudaMalloc(&d_reconstructed,   input_bytes);
     cudaDeviceSynchronize();
 
     // ── 5. Compress: LorenzoQuant → Huffman ───────────────────────────────────
     //
-    // LorenzoQuant compress: 1 input → 4 outputs.
-    // outputs[3] = outlier_count (device uint32_t) — initialized to 0 by execute().
+    // LorenzoQuant compress: 1 input → 3 outputs (codes, outlier_errors,
+    // outlier_indices). The outlier count is held in a stage-private 4-byte
+    // device scratch (allocated by onFinalize() above) and read back by
+    // postStreamSync() — there is no count output port.
     lq.execute(0, &pool,
         {d_input},
-        {d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count},
+        {d_codes, d_outlier_errors, d_outlier_indices},
         {input_bytes});
     cudaDeviceSynchronize();
 
@@ -160,17 +167,17 @@ int main() {
         {compressed_bytes});
     cudaDeviceSynchronize();
 
-    // LorenzoQuant decompress: 4 inputs → 1 output (reconstructed floats).
-    // sizes[1] = outlier_errors_bytes is used to derive max_outliers inside
-    // the kernel, so pass the actual (not max-capacity) sizes.
+    // LorenzoQuant decompress: 3 inputs → 1 output (reconstructed floats).
+    // The outlier count comes from the stage's internal `actual_outlier_count_`
+    // (populated by postStreamSync() above on the forward pass; populated by
+    // deserializeHeader() when going via .fzm files) — not from a port.
     lq.setInverse(true);
     lq.execute(0, &pool,
-        {d_codes, d_outlier_errors, d_outlier_indices, d_outlier_count},
+        {d_codes, d_outlier_errors, d_outlier_indices},
         {d_reconstructed},
         {codes_bytes,
          actual_outlier_errors_bytes,
-         actual_outlier_indices_bytes,
-         sizeof(uint32_t)});
+         actual_outlier_indices_bytes});
     cudaDeviceSynchronize();
 
     // ── 7. Verify ─────────────────────────────────────────────────────────────
@@ -189,9 +196,9 @@ int main() {
     cudaFree(d_codes);
     cudaFree(d_outlier_errors);
     cudaFree(d_outlier_indices);
-    cudaFree(d_outlier_count);
     cudaFree(d_huf_output);
     cudaFree(d_reconstructed);
-    // pool is stack-allocated — its destructor frees Huffman's persistent scratch.
+    // pool is stack-allocated — its destructor frees Huffman's persistent scratch
+    // (and the 4-byte outlier-count scratch owned by LorenzoQuantStage).
     return 0;
 }

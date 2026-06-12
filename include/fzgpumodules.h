@@ -32,4 +32,4 @@
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
 #include "transforms/adm/adm_stage.h"
-#include "predictors/ginterp/ginterp_stage.h"
+#include "fused/ginterp/ginterp_stage.h"

@@ -9,7 +9,7 @@ FZGPUModules is a CUDA library for building composable, high-throughput compress
 
 
 **Key properties:**
-- **Modular** — mix and match stages (Lorenzo, Quantizer, RLE, RZE, Bitshuffle, …)
+- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, Bitshuffle, Huffman, ANS, …)
 - **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **Self-describing files** — FZM format embeds full stage config with CRC32 checksums
@@ -82,15 +82,18 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 |---|---|
 | `LorenzoQuantStage<TInput, TCode>` | Fused float predictor + quantizer (lossy, 1D/2D/3D) |
 | `LorenzoStage<T>` | Plain integer Lorenzo predictor (lossless) |
+| `GInterpStage<TInput, TCode>` | Multi-level spline interpolation predictor + quantizer (lossy, 3D, cuSZ-Hi port) |
 | `QuantizerStage<TInput, TCode>` | Direct-value quantizer (ABS/REL/NOA error modes) |
 | `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |
+| `ADMStage` | Adaptive data mapping — remaps uint16/uint32 streams to a compact 8-bit symbol domain (MANS port) |
 | `RLEStage<T>` | Run-length encoding |
 | `BitshuffleStage` | GPU bit-matrix transpose |
 | `RZEStage` | Recursive zero-byte elimination |
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
-| `HuffmanStage<T>` | GPU Huffman entropy coding (PHF) |
+| `HuffmanStage<T>` | GPU Huffman entropy coding (PHF, cuSZ port) |
+| `ANSStage` | GPU rANS entropy coding (dietGPU port) |
 
 ---
 

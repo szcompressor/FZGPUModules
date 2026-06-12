@@ -363,7 +363,38 @@ QuantizerStage<TInput, TCode>::QuantizerStage(const Config& config)
     : config_(config),
       computed_abs_eb_(static_cast<TInput>(config.error_bound)),
       computed_value_base_(config.precomputed_value_base) {
-    actual_output_sizes_.resize(4, 0);
+    actual_output_sizes_.resize(3, 0);
+}
+
+template<typename TInput, typename TCode>
+QuantizerStage<TInput, TCode>::~QuantizerStage()
+{
+    if (persistent_pool_ != nullptr && d_outlier_count_scratch_ != nullptr) {
+        persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
+    }
+    d_outlier_count_scratch_ = nullptr;
+    persistent_pool_         = nullptr;
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::initOutlierCountScratch(MemoryPool* pool)
+{
+    if (d_outlier_count_scratch_ != nullptr) return;
+    if (isInplaceMode()) return;  // inplace path has no separate count scratch
+    if (pool == nullptr) {
+        throw std::runtime_error(
+            "QuantizerStage: outlier-count scratch requires a MemoryPool");
+    }
+    persistent_pool_ = pool;
+    d_outlier_count_scratch_ = static_cast<uint32_t*>(
+        pool->allocatePersistentDevice(sizeof(uint32_t), "quantizer_outlier_count"));
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::onFinalize(
+    size_t /*estimated_inlen*/, MemoryPool* pool)
+{
+    initOutlierCountScratch(pool);
 }
 
 template<typename TInput, typename TCode>
@@ -371,7 +402,7 @@ std::vector<size_t> QuantizerStage<TInput, TCode>::estimateOutputSizes(
     const std::vector<size_t>& input_sizes
 ) const {
     if (is_inverse_) {
-        // inputs: codes, outlier_vals, outlier_idxs, outlier_count
+        // inputs: codes, outlier_vals, outlier_idxs (count comes from header)
         size_t num_elements = input_sizes.empty() ? 0 : input_sizes[0] / sizeof(TCode);
         return {num_elements * sizeof(TInput)};
     }
@@ -381,8 +412,7 @@ std::vector<size_t> QuantizerStage<TInput, TCode>::estimateOutputSizes(
     return {
         n            * sizeof(TCode),    // codes
         max_outliers * sizeof(TInput),   // outlier_vals
-        max_outliers * sizeof(uint32_t), // outlier_idxs
-        sizeof(uint32_t)                 // outlier_count
+        max_outliers * sizeof(uint32_t)  // outlier_idxs
     };
 }
 
@@ -395,15 +425,15 @@ void QuantizerStage<TInput, TCode>::execute(
     const std::vector<size_t>& sizes
 ) {
     // =========================================================================
-    // DECOMPRESSION MODE — 4 inputs → 1 output (1 input in inplace mode)
+    // DECOMPRESSION MODE — 3 inputs → 1 output (1 input in inplace mode)
     // =========================================================================
     if (is_inverse_) {
-        const size_t expected_inputs = isInplaceMode() ? 1 : 4;
+        const size_t expected_inputs = isInplaceMode() ? 1 : 3;
         if (inputs.size() < expected_inputs || outputs.empty() || sizes.empty()) {
             throw std::runtime_error(
                 isInplaceMode()
                     ? "QuantizerStage (inverse, inplace): requires 1 input and 1 output"
-                    : "QuantizerStage (inverse): requires 4 inputs and 1 output");
+                    : "QuantizerStage (inverse): requires 3 inputs and 1 output");
         }
 
         size_t num_elements = sizes[0] / sizeof(TCode);
@@ -412,8 +442,11 @@ void QuantizerStage<TInput, TCode>::execute(
             return;
         }
 
-        size_t max_outliers = (!isInplaceMode() && sizes.size() > 1)
-                              ? sizes[1] / sizeof(TInput) : 0;
+        // The outlier count comes from the deserialized FZM header
+        // (actual_outlier_count_), not from a DAG port. Inplace mode has no
+        // separate scatter pass.
+        const uint32_t outlier_n =
+            isInplaceMode() ? 0u : actual_outlier_count_;
 
         // Zero output for scatter-based path (outlier positions overwritten by scatter).
         // In-place path writes every element directly — no memset needed.
@@ -471,16 +504,19 @@ void QuantizerStage<TInput, TCode>::execute(
 
         FZ_CUDA_CHECK(cudaGetLastError());
 
-        // Scatter outliers back to their original positions
-        if (max_outliers > 0) {
+        // Scatter outliers back to their original positions. The count is a
+        // register-arg (read from the deserialized header into
+        // actual_outlier_count_), so the kernel never derefs a device pointer
+        // to know its loop bound.
+        if (outlier_n > 0) {
             int sblk  = 256;
             int sgrid = static_cast<int>(
-                (max_outliers + sblk - 1) / sblk);
+                (static_cast<size_t>(outlier_n) + sblk - 1) / sblk);
 
             scatter_assign_kernel<TInput><<<sgrid, sblk, 0, stream>>>(
                 static_cast<const TInput*>(inputs[1]),
                 static_cast<const uint32_t*>(inputs[2]),
-                static_cast<const uint32_t*>(inputs[3]),
+                outlier_n,
                 static_cast<TInput*>(outputs[0])
             );
             FZ_CUDA_CHECK(cudaGetLastError());
@@ -491,15 +527,15 @@ void QuantizerStage<TInput, TCode>::execute(
     }
 
     // =========================================================================
-    // COMPRESSION MODE — 1 input → 4 outputs  (or 1 in inplace mode)
+    // COMPRESSION MODE — 1 input → 3 outputs  (or 1 in inplace mode)
     // =========================================================================
     {
-        const size_t expected_outputs = isInplaceMode() ? 1 : 4;
+        const size_t expected_outputs = isInplaceMode() ? 1 : 3;
         if (inputs.empty() || outputs.size() < expected_outputs || sizes.empty()) {
             throw std::runtime_error(
                 isInplaceMode()
                     ? "QuantizerStage (inplace): requires 1 input and 1 output"
-                    : "QuantizerStage: requires 1 input and 4 outputs");
+                    : "QuantizerStage: requires 1 input and 3 outputs");
         }
     }
 
@@ -513,16 +549,21 @@ void QuantizerStage<TInput, TCode>::execute(
         if (isInplaceMode()) {
             actual_output_sizes_ = {0};
         } else {
-            for (size_t j = 0; j < 4; j++) actual_output_sizes_[j] = 0;
+            for (size_t j = 0; j < 3; j++) actual_output_sizes_[j] = 0;
         }
-        actual_outlier_count_ = 0;
+        // Don't zero actual_outlier_count_: see the matching note below — if
+        // this is a graph-capture warmup, postStreamSync() won't run.
         return;
     }
 
-    // Zero the outlier_count scalar so atomic increments start from 0.
-    // Not needed in inplace mode (no separate outlier counter buffer).
+    // Zero the stage-private outlier-count scratch (kernel uses atomicAdd).
+    // Lazy-allocate it here for MINIMAL mode (PREALLOCATE allocated it in
+    // onFinalize). Inplace mode has no scratch — outliers are encoded
+    // in-place in the codes array.
     if (!isInplaceMode()) {
-        FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream));
+        initOutlierCountScratch(pool);
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
+                                       sizeof(uint32_t), stream));
     }
 
     // ── Resolve absolute error bound ──────────────────────────────────────────
@@ -581,7 +622,7 @@ void QuantizerStage<TInput, TCode>::execute(
             static_cast<TCode*>(outputs[0]),
             static_cast<TInput*>(outputs[1]),
             static_cast<uint32_t*>(outputs[2]),
-            static_cast<uint32_t*>(outputs[3]),
+            d_outlier_count_scratch_,
             max_outliers
         );
     } else {
@@ -608,7 +649,6 @@ void QuantizerStage<TInput, TCode>::execute(
                 static_cast<TCode*>(outputs[0])
             );
             FZ_CUDA_CHECK(cudaGetLastError());
-            d_outlier_count_ptr_ = nullptr;
             actual_output_sizes_ = {num_elements * sizeof(TCode)};
             return;
         }
@@ -621,7 +661,7 @@ void QuantizerStage<TInput, TCode>::execute(
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
-                static_cast<uint32_t*>(outputs[3]),
+                d_outlier_count_scratch_,
                 max_outliers
             );
         } else {
@@ -632,7 +672,7 @@ void QuantizerStage<TInput, TCode>::execute(
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
-                static_cast<uint32_t*>(outputs[3]),
+                d_outlier_count_scratch_,
                 max_outliers
             );
         }
@@ -640,37 +680,29 @@ void QuantizerStage<TInput, TCode>::execute(
 
     FZ_CUDA_CHECK(cudaGetLastError());
 
-    d_outlier_count_ptr_ = outputs[3];
-
-    actual_outlier_count_    = 0;
+    // Don't zero actual_outlier_count_ here: this method may be invoked
+    // during cudaStreamBeginCapture/EndCapture (graph recording), in which
+    // case postStreamSync isn't called and we'd lose the count from the
+    // previous real compress.
     actual_output_sizes_[0]  = num_elements   * sizeof(TCode);
     actual_output_sizes_[1]  = max_outliers   * sizeof(TInput);
     actual_output_sizes_[2]  = max_outliers   * sizeof(uint32_t);
-    actual_output_sizes_[3]  = sizeof(uint32_t);
 }
 
 template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
-    if (is_inverse_ || d_outlier_count_ptr_ == nullptr) return;
+    // Inplace mode never allocates the scratch; nothing to read back.
+    if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
 
     uint32_t h_count = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_count, d_outlier_count_ptr_,
+    FZ_CUDA_CHECK(cudaMemcpy(&h_count, d_outlier_count_scratch_,
                               sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
     // Cap at the allocated capacity: atomicAdd always increments the device
     // counter even when the buffer is full, so h_count may exceed max_outliers.
-    // Only min(h_count, max_outliers) entries were actually written.  Write the
-    // capped value back to the device so the inverse scatter_assign_kernel reads
-    // the correct count (if h_count > cap, the uncapped value would cause OOB).
+    // Only min(h_count, max_outliers) entries were actually written.
     uint32_t cap = static_cast<uint32_t>(getMaxOutlierCount(num_elements_));
     actual_outlier_count_ = (h_count > cap) ? cap : h_count;
-    if (h_count > cap) {
-        FZ_CUDA_CHECK(cudaMemcpy(
-            const_cast<void*>(d_outlier_count_ptr_),
-            &actual_outlier_count_, sizeof(uint32_t),
-            cudaMemcpyHostToDevice));
-    }
-    d_outlier_count_ptr_ = nullptr;
 
     actual_output_sizes_[1] = actual_outlier_count_ * sizeof(TInput);
     actual_output_sizes_[2] = actual_outlier_count_ * sizeof(uint32_t);

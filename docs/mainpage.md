@@ -10,7 +10,7 @@ predictors, quantizers, shufflers, transforms, fused stages, and external stages
 connected and executed entirely on the GPU with stream-ordered memory management.
 
 **Key properties:**
-- **Modular** — mix and match stages (Lorenzo, Quantizer, RLE, RZE, Bitshuffle, …)
+- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, Bitshuffle, Huffman, ANS, …)
 - **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **File format** — FZM format with CRC32 checksums and full stage config serialization
@@ -89,15 +89,18 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | ---------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
 | `LorenzoQuantStage<TInput, TCode>` | `modules/fused/lorenzo_quant/lorenzo_quant.h`      | Fused float predictor + quantizer (lossy)      |
 | `LorenzoStage<T>`                  | `modules/predictors/lorenzo/lorenzo_stage.h`       | Plain integer Lorenzo predictor (lossless)     |
+| `GInterpStage<TInput, TCode>`      | `modules/fused/ginterp/ginterp_stage.h`       | Multi-level spline interpolation predictor + quantizer (lossy, 3D, cuSZ-Hi port) |
 | `QuantizerStage<TInput, TCode>`    | `modules/quantizers/quantizer/quantizer.h`         | Direct-value quantizer (ABS/REL/NOA)           |
 | `RLEStage<T>`                      | `modules/coders/rle/rle.h`                         | Run-length encoding                            |
 | `DifferenceStage<T, TOut>`         | `modules/predictors/diff/diff.h`                   | First-order difference / cumulative-sum coding |
+| `ADMStage`                         | `modules/transforms/adm/adm_stage.h`               | Adaptive data mapping — uint16/32 → 8-bit symbol domain (MANS port) |
 | `BitshuffleStage`                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
 | `RZEStage`                         | `modules/coders/rze/rze_stage.h`                   | Recursive zero-byte elimination                |
 | `ZigzagStage<TIn, TOut>`           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | `NegabinaryStage<TIn, TOut>`       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
 | `BitpackStage<T>`                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
-| `HuffmanStage<T>`                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF)               |
+| `HuffmanStage<T>`                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF, cuSZ port)    |
+| `ANSStage`                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 
 ### Memory Strategies
 

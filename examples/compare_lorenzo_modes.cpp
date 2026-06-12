@@ -173,13 +173,15 @@ static std::vector<uint16_t> run_pass(
     DevBuf d_codes  (est[0]);
     DevBuf d_errors (est[1]);
     DevBuf d_indices(est[2]);
-    DevBuf d_count  (est[3]);
 
     fz::MemoryPoolConfig pool_cfg(in_bytes, 5.0f);
     fz::MemoryPool pool(pool_cfg);
+    // Pre-allocate the stage-private 4-byte outlier-count scratch so it
+    // doesn't get allocated lazily inside execute().
+    stage.onFinalize(in_bytes, &pool);
 
     std::vector<void*>  inputs  = {d_in.ptr};
-    std::vector<void*>  outputs = {d_codes.ptr, d_errors.ptr, d_indices.ptr, d_count.ptr};
+    std::vector<void*>  outputs = {d_codes.ptr, d_errors.ptr, d_indices.ptr};
     std::vector<size_t> sizes   = {in_bytes};
 
     stage.execute(stream, &pool, inputs, outputs, sizes);
@@ -189,11 +191,11 @@ static std::vector<uint16_t> run_pass(
     auto actual       = stage.getActualOutputSizesByName();
     size_t codes_bytes = actual.count("codes") ? actual.at("codes") : est[0];
 
+    // Outlier count is now held internally by the stage — derive it from the
+    // trimmed outlier_indices size (postStreamSync set this to the real count).
     out_n_outliers = 0;
-    if (actual.count("outlier_count") && actual.at("outlier_count") >= sizeof(uint32_t)) {
-        uint32_t oc = 0;
-        CUDA_CHECK(cudaMemcpy(&oc, d_count.ptr, sizeof(uint32_t), cudaMemcpyDeviceToHost));
-        out_n_outliers = oc;
+    if (actual.count("outlier_indices")) {
+        out_n_outliers = actual.at("outlier_indices") / sizeof(uint32_t);
     }
 
     size_t n_codes = codes_bytes / sizeof(uint16_t);

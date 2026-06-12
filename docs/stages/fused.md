@@ -3,6 +3,7 @@
 | Stage | Description |
 |---|---|
 | \subpage stage_lorenzo_quant | Fused float predictor + quantizer (1-D/2-D/3-D) |
+| \subpage stage_ginterp | Multi-level spline interpolation predictor + quantizer (3-D, cuSZ-Hi port) |
 | \ref stage_diff "DifferenceStage (negabinary-fused)" | First-order difference with inline negabinary encoding (`DifferenceStage<T, TOut>` where `TOut != T`) |
 
 > **Note:** `DifferenceStage` with a `TOut != T` template argument fuses a negabinary

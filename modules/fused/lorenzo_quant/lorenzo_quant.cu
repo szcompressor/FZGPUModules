@@ -409,9 +409,8 @@ void launchLorenzoInverseKernel(
     const TCode* quant_codes,
     const TInput* outlier_errors,
     const uint32_t* outlier_indices,
-    const uint32_t* outlier_count_ptr,
+    uint32_t outlier_n,
     size_t n,
-    size_t max_outliers,    // pre-allocated capacity — avoids D2H count read
     TInput ebx2,
     TCode quant_radius,
     TInput* output,
@@ -428,18 +427,16 @@ void launchLorenzoInverseKernel(
     // Step 0: Initialize output array to 0 because we will scatter outliers into it
     FZ_CUDA_CHECK(cudaMemsetAsync(output, 0, n * sizeof(TInput), stream));
 
-    // Step 1: Scatter outliers BEFORE prefix sum.
-    // Launch with the full allocation capacity so no host-side D2H is needed;
-    // scatter_outliers_kernel reads the actual count from the device pointer and
-    // each thread that exceeds it exits immediately.
-    if (outlier_count_ptr != nullptr && max_outliers > 0) {
+    // Step 1: Scatter outliers BEFORE prefix sum.  The count is a register
+    // arg (came from the deserialized header) — no device pointer deref.
+    if (outlier_n > 0) {
         int scatter_block_size = 256;
-        int scatter_grid_size  = (static_cast<int>(max_outliers) + scatter_block_size - 1)
+        int scatter_grid_size  = (static_cast<int>(outlier_n) + scatter_block_size - 1)
                                  / scatter_block_size;
 
         scatter_outliers_kernel<TInput>
             <<<scatter_grid_size, scatter_block_size, 0, stream>>>(
-                outlier_errors, outlier_indices, outlier_count_ptr, output
+                outlier_errors, outlier_indices, outlier_n, output
             );
 
         cudaError_t err = cudaGetLastError();
@@ -482,7 +479,37 @@ LorenzoQuantStage<TInput, TCode>::LorenzoQuantStage(const Config& config)
     : config_(config),
       computed_abs_eb_(static_cast<TInput>(config.error_bound)),
       computed_value_base_(config.precomputed_value_base) {
-    actual_output_sizes_.resize(4, 0);
+    actual_output_sizes_.resize(3, 0);
+}
+
+template<typename TInput, typename TCode>
+LorenzoQuantStage<TInput, TCode>::~LorenzoQuantStage()
+{
+    if (persistent_pool_ != nullptr && d_outlier_count_scratch_ != nullptr) {
+        persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
+    }
+    d_outlier_count_scratch_ = nullptr;
+    persistent_pool_         = nullptr;
+}
+
+template<typename TInput, typename TCode>
+void LorenzoQuantStage<TInput, TCode>::initOutlierCountScratch(MemoryPool* pool)
+{
+    if (d_outlier_count_scratch_ != nullptr) return;
+    if (pool == nullptr) {
+        throw std::runtime_error(
+            "LorenzoQuantStage: outlier-count scratch requires a MemoryPool");
+    }
+    persistent_pool_ = pool;
+    d_outlier_count_scratch_ = static_cast<uint32_t*>(
+        pool->allocatePersistentDevice(sizeof(uint32_t), "lorenzo_outlier_count"));
+}
+
+template<typename TInput, typename TCode>
+void LorenzoQuantStage<TInput, TCode>::onFinalize(
+    size_t /*estimated_inlen*/, MemoryPool* pool)
+{
+    initOutlierCountScratch(pool);
 }
 
 template<typename TInput, typename TCode>
@@ -494,9 +521,9 @@ void LorenzoQuantStage<TInput, TCode>::execute(
     const std::vector<size_t>& sizes
 ) {
     if (is_inverse_) {
-        // ===== DECOMPRESSION MODE: 4 inputs → 1 output =====
-        if (inputs.size() < 4 || outputs.empty() || sizes.size() < 4) {
-            throw std::runtime_error("LorenzoQuantStage (inverse): Requires 4 inputs and 1 output");
+        // ===== DECOMPRESSION MODE: 3 inputs → 1 output =====
+        if (inputs.size() < 3 || outputs.empty() || sizes.size() < 3) {
+            throw std::runtime_error("LorenzoQuantStage (inverse): Requires 3 inputs and 1 output");
         }
 
         size_t codes_size   = sizes[0];
@@ -512,8 +539,9 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         // computed_abs_eb_ was set by deserializeHeader (always the absolute bound).
         TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
 
-        // Derive max outlier capacity from the outlier_errors buffer size.
-        size_t max_outliers = (sizes.size() > 1) ? (sizes[1] / sizeof(TInput)) : 0;
+        // Outlier count comes from the deserialized FZM header (set by
+        // deserializeHeader() into actual_outlier_count_), not from a port.
+        uint32_t outlier_n = actual_outlier_count_;
 
         int eff_ndim = ndim();
 
@@ -527,8 +555,8 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<const TCode*>(inputs[0]),
                 static_cast<const TInput*>(inputs[1]),
                 static_cast<const uint32_t*>(inputs[2]),
-                static_cast<const uint32_t*>(inputs[3]),
-                nx, ny, nz, max_outliers,
+                outlier_n,
+                nx, ny, nz,
                 ebx2, config_.quant_radius,
                 static_cast<TInput*>(outputs[0]),
                 config_.zigzag_codes,
@@ -543,8 +571,8 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<const TCode*>(inputs[0]),
                 static_cast<const TInput*>(inputs[1]),
                 static_cast<const uint32_t*>(inputs[2]),
-                static_cast<const uint32_t*>(inputs[3]),
-                nx, ny, max_outliers,
+                outlier_n,
+                nx, ny,
                 ebx2, config_.quant_radius,
                 static_cast<TInput*>(outputs[0]),
                 config_.zigzag_codes,
@@ -556,9 +584,8 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<const TCode*>(inputs[0]),
                 static_cast<const TInput*>(inputs[1]),
                 static_cast<const uint32_t*>(inputs[2]),
-                static_cast<const uint32_t*>(inputs[3]),
+                outlier_n,
                 num_elements,
-                max_outliers,
                 ebx2,
                 config_.quant_radius,
                 static_cast<TInput*>(outputs[0]),
@@ -582,9 +609,9 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         actual_output_sizes_[0] = num_elements * sizeof(TInput);
         
     } else {
-        // ===== COMPRESSION MODE: 1 input → 4 outputs =====
-        if (inputs.empty() || outputs.size() < 4 || sizes.empty()) {
-            throw std::runtime_error("LorenzoQuantStage: Requires 1 input and 4 outputs");
+        // ===== COMPRESSION MODE: 1 input → 3 outputs =====
+        if (inputs.empty() || outputs.size() < 3 || sizes.empty()) {
+            throw std::runtime_error("LorenzoQuantStage: Requires 1 input and 3 outputs");
         }
 
         size_t input_size  = sizes[0];
@@ -596,15 +623,18 @@ void LorenzoQuantStage<TInput, TCode>::execute(
 
         if (num_elements == 0) {
             // Empty input
-            for (size_t i = 0; i < 4; i++) {
+            for (size_t i = 0; i < 3; i++) {
                 actual_output_sizes_[i] = 0;
             }
             actual_outlier_count_ = 0;
             return;
         }
 
-        // Initialize outlier count to 0
-        FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, sizeof(uint32_t), stream));
+        // Zero the stage-private outlier-count scratch (kernel uses atomicAdd).
+        // Lazy-allocate it here for MINIMAL mode (PREALLOCATE allocated it in onFinalize).
+        initOutlierCountScratch(pool);
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
+                                       sizeof(uint32_t), stream));
 
         // ── Resolve absolute error bound ──────────────────────────────────────
         // For ABS mode: abs_eb = config_.error_bound (no scan needed).
@@ -659,7 +689,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
-                static_cast<uint32_t*>(outputs[3]),
+                d_outlier_count_scratch_,
                 max_outliers, config_.zigzag_codes, stream
             );
         } else if (eff_ndim == 2) {
@@ -673,7 +703,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
-                static_cast<uint32_t*>(outputs[3]),
+                d_outlier_count_scratch_,
                 max_outliers, config_.zigzag_codes, stream
             );
         } else {
@@ -689,7 +719,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
                 static_cast<uint32_t*>(outputs[2]),
-                static_cast<uint32_t*>(outputs[3]),
+                d_outlier_count_scratch_,
                 max_outliers,
                 grid_size,
                 config_.zigzag_codes,
@@ -706,32 +736,28 @@ void LorenzoQuantStage<TInput, TCode>::execute(
             );
         }
 
-        // Store device pointer to the outlier count output so postStreamSync()
-        // can read it back after the stream is fully synchronized by compress().
-        // We must NOT sync here — doing so stalls the entire DAG mid-pipeline.
-        d_outlier_count_ptr_ = outputs[3];
-
-        // Use max-capacity sizes for now; postStreamSync() will trim them to
-        // the real outlier count once the stream is idle.
-        actual_outlier_count_ = 0;
+        // Use max-capacity sizes for now; postStreamSync() will trim them
+        // (and refresh actual_outlier_count_) once the stream is idle. We do
+        // NOT zero actual_outlier_count_ here: this method may be invoked
+        // during cudaStreamBeginCapture/EndCapture (graph recording), in
+        // which case postStreamSync is not called and we'd lose the count
+        // from the previous real compress.
         actual_output_sizes_[0] = num_elements * sizeof(TCode);
         actual_output_sizes_[1] = max_outliers * sizeof(TInput);
         actual_output_sizes_[2] = max_outliers * sizeof(uint32_t);
-        actual_output_sizes_[3] = sizeof(uint32_t);
     }
 }
 
 template<typename TInput, typename TCode>
 void LorenzoQuantStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
-    // Only applies to compression mode and only when execute() set the ptr.
-    if (is_inverse_ || d_outlier_count_ptr_ == nullptr) return;
+    // Only applies to compression mode and only when execute() has run.
+    if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
 
     // The stream is fully synchronized by the time Pipeline::compress() calls
     // us, so a plain (synchronous) cudaMemcpy is safe and adds no extra stall.
     uint32_t h_outlier_count = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_outlier_count, d_outlier_count_ptr_, sizeof(uint32_t),
-               cudaMemcpyDeviceToHost));
-    d_outlier_count_ptr_ = nullptr;
+    FZ_CUDA_CHECK(cudaMemcpy(&h_outlier_count, d_outlier_count_scratch_,
+                              sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
     size_t max_outliers = getMaxOutlierCount(num_elements_);
 
@@ -764,7 +790,7 @@ void LorenzoQuantStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
     actual_outlier_count_      = h_outlier_count;
     actual_output_sizes_[1]    = h_outlier_count * sizeof(TInput);
     actual_output_sizes_[2]    = h_outlier_count * sizeof(uint32_t);
-    // [0] codes and [3] outlier_count are already correct from execute()
+    // [0] codes already correct from execute()
 }
 
 template<typename TInput, typename TCode>
@@ -779,7 +805,6 @@ std::vector<size_t> LorenzoQuantStage<TInput, TCode>::estimateOutputSizes(
         num_elements * sizeof(TCode),        // codes (fixed size)
         max_outliers * sizeof(TInput),       // outlier_errors (max capacity)
         max_outliers * sizeof(uint32_t),     // outlier_indices (max capacity)
-        sizeof(uint32_t)                      // outlier_count (fixed)
     };
 }
 
@@ -806,17 +831,17 @@ template void launchLorenzoKernel<double, uint32_t>(
     uint32_t*, double*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t);
 
 template void launchLorenzoInverseKernel<float, uint16_t>(
-    const uint16_t*, const float*, const uint32_t*, const uint32_t*,
-    size_t, size_t, float, uint16_t, float*, bool, cudaStream_t, MemoryPool*);
+    const uint16_t*, const float*, const uint32_t*, uint32_t,
+    size_t, float, uint16_t, float*, bool, cudaStream_t, MemoryPool*);
 template void launchLorenzoInverseKernel<float, uint8_t>(
-    const uint8_t*, const float*, const uint32_t*, const uint32_t*,
-    size_t, size_t, float, uint8_t, float*, bool, cudaStream_t, MemoryPool*);
+    const uint8_t*, const float*, const uint32_t*, uint32_t,
+    size_t, float, uint8_t, float*, bool, cudaStream_t, MemoryPool*);
 template void launchLorenzoInverseKernel<double, uint16_t>(
-    const uint16_t*, const double*, const uint32_t*, const uint32_t*,
-    size_t, size_t, double, uint16_t, double*, bool, cudaStream_t, MemoryPool*);
+    const uint16_t*, const double*, const uint32_t*, uint32_t,
+    size_t, double, uint16_t, double*, bool, cudaStream_t, MemoryPool*);
 template void launchLorenzoInverseKernel<double, uint32_t>(
-    const uint32_t*, const double*, const uint32_t*, const uint32_t*,
-    size_t, size_t, double, uint32_t, double*, bool, cudaStream_t, MemoryPool*);
+    const uint32_t*, const double*, const uint32_t*, uint32_t,
+    size_t, double, uint32_t, double*, bool, cudaStream_t, MemoryPool*);
 
 } // namespace fz
 // (2-D and 3-D kernels + launchers are in lorenzo_quant_nd.cu)

@@ -22,7 +22,7 @@ domain, dramatically improving the compression ratio of a downstream entropy cod
 - **Inverse:** ADM payload → original integer array (exact reconstruction)
 
 **Algorithm:**  ADM partitions the input into 512-element warp blocks and computes
-a per-block center (mean).  Each element is then encoded as a *(code, unary-signal)*
+a per-block center (mean).  Each element is then encoded as a (code, unary-signal)
 pair relative to the center.  The resulting byte codes have a highly skewed,
 low-entropy distribution ideal for GPU rANS (`ANSStage`) or Huffman coding.
 
