@@ -23,10 +23,20 @@ namespace ginterp {
 
 /**
  * Compute the anchor grid extent for an input volume of size
- * `(nx, ny, nz)`. The 3D-MVP kernel uses a 16³ anchor stride, so the anchor
+ * `(nx, ny, nz)`. The 3D kernel uses a 16³ anchor stride, so the anchor
  * volume is roughly 1/4096 of the input.
  */
 dim3 ginterpAnchorLen3(size_t nx, size_t ny, size_t nz);
+
+/**
+ * Compute the anchor grid extent for a 2-D input of size `(nx, ny)`. The 2-D
+ * tile configuration mirrors the 3-D path with the z axis flattened:
+ * `AnchorBlockSize{X,Y,Z}={16,16,1}` × `numAnchorBlock{X,Y,Z}={1,1,1}`. Each
+ * grid block covers `16×16` input elements and emits one corner anchor, so
+ * the anchor extent is `(ceil(nx/16), ceil(ny/16), 1)` — roughly 1/256 of
+ * the input.
+ */
+dim3 ginterpAnchorLen2(size_t nx, size_t ny);
 
 /**
  * Forward (compress) launcher — predicts via spline interpolation, quantizes
@@ -70,6 +80,43 @@ void launchGInterpForward3D(
  */
 template <typename TInput, typename TCode>
 void launchGInterpInverse3D(
+    const TCode* d_ectrl, dim3 data_len3,
+    const TInput* d_anchor, dim3 anchor_len3,
+    TInput* d_outlier_tmp,
+    TInput* d_out,
+    float eb_r, float ebx2, int radius,
+    const INTERPOLATION_PARAMS& intp_param,
+    cudaStream_t stream);
+
+/**
+ * Forward (compress) launcher for 2-D input. Identical contract to the 3-D
+ * variant — `data_len3.z` is assumed to be `1`. Internally instantiates the
+ * spline kernels with `SPLINE_DIM=2`, `AnchorBlockSize={16,16,1}`,
+ * `numAnchorBlock={1,1,1}` (3-D-like tile, z flattened).
+ *
+ * Pre-conditions:
+ *   - `data_len3.z == 1`
+ *   - `d_anchor` sized `prod(ginterpAnchorLen2(nx,ny)) * sizeof(TInput)`
+ *   - other preconditions identical to the 3-D launcher
+ */
+template <typename TInput, typename TCode>
+void launchGInterpForward2D(
+    const TInput* d_data, dim3 data_len3,
+    TCode* d_ectrl,
+    TInput* d_anchor, dim3 anchor_len3,
+    TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
+    uint32_t* d_outlier_count_scratch,
+    float eb_r, float ebx2, int radius,
+    const INTERPOLATION_PARAMS& intp_param,
+    cudaStream_t stream);
+
+/**
+ * Inverse (decompress) launcher for 2-D input. Mirrors the 3-D variant; the
+ * caller must have pre-scattered outliers into `d_outlier_tmp` already.
+ * `intp_param` must match the value used during compression.
+ */
+template <typename TInput, typename TCode>
+void launchGInterpInverse2D(
     const TCode* d_ectrl, dim3 data_len3,
     const TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_tmp,

@@ -19,6 +19,13 @@
 //     (second half of break handling) was never called from GPU_fine_encode — dead code.
 //   - Removed break parameters (brval/bridx/brnum) from kernel, GPU_fine_encode_phase1_2,
 //     and GPU_fine_encode.
+//   - Guarded post-symbol bit fetch in KERNEL_CUHIP_HF_decode's
+//     single_thread_inflate (line ~298): when total_bw is a multiple of 32 the
+//     speculative input[idx_byte] read after the last emitted symbol fell one
+//     word past the partition slice (and one word past the entire encoded
+//     bitstream allocation on the final partition). Now skipped when
+//     i >= total_bw — the outer while loop catches that on the next iteration.
+//     Surfaced by compute-sanitizer as a 4-byte OOB read at address+1B-past-end.
 
 #include <cstdio>
 #include <numeric>
@@ -287,11 +294,21 @@ __global__ void KERNEL_CUHIP_HF_decode(
             out[idx_out++] = keys[entry[l] + v - first[l]];
             {
                 ++i;
-                idx_byte = i / CELL_BITWIDTH;
-                idx_bit  = i % CELL_BITWIDTH;
-                if (idx_bit == 0) bufr = input[idx_byte];
-                next_bit = ((bufr >> (CELL_BITWIDTH - 1 - idx_bit)) & 0x1);
-                v = 0x0 | next_bit;
+                // Skip the bit fetch when we've consumed the last bit of this
+                // partition: the outer `while (i < total_bw)` exit will catch
+                // it on the next iteration. Without this guard, if total_bw is
+                // an exact multiple of CELL_BITWIDTH the speculative
+                // `input[idx_byte]` reads one word past the partition slice
+                // (and past the encoded bitstream allocation on the final
+                // partition) — caught by compute-sanitizer as an OOB read of
+                // size 4 at the address-after-end.
+                if (i < total_bw) {
+                    idx_byte = i / CELL_BITWIDTH;
+                    idx_bit  = i % CELL_BITWIDTH;
+                    if (idx_bit == 0) bufr = input[idx_byte];
+                    next_bit = ((bufr >> (CELL_BITWIDTH - 1 - idx_bit)) & 0x1);
+                    v = 0x0 | next_bit;
+                }
             }
             l = 1;
         }

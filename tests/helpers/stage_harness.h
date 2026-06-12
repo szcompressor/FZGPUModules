@@ -102,7 +102,14 @@ inline RoundTripResult<T> pipeline_round_trip(
     std::vector<T> h_recon(n_out);
     cudaError_t cp_err = cudaMemcpy(h_recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
     EXPECT_EQ(cp_err, cudaSuccess) << "cudaMemcpy (decompress): " << cudaGetErrorString(cp_err);
-    cudaFree(d_dec);
+    // Ownership matches setPoolManagedDecompOutput(): when pool-managed
+    // (default), `d_dec` is freed by `Pipeline::~Pipeline()` via the pool — a
+    // caller `cudaFree` here would be a double-free and trigger
+    // `cudaErrorInvalidValue` from `cudaFreeAsync` at teardown. Only free
+    // when the pipeline returned a caller-owned `cudaMalloc` pointer.
+    if (!pipeline.isPoolManagedDecompOutput()) {
+        cudaFree(d_dec);
+    }
 
     RoundTripResult<T> r;
     r.data             = std::move(h_recon);

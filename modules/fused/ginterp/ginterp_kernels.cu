@@ -30,28 +30,60 @@
 namespace fz {
 namespace ginterp {
 
-// MVP tile / level configuration (3D path, matches cuSZ-Hi baseline)
+// Shared level / block-size configuration.
 static constexpr int kLevel               = 4;
-static constexpr int kSplineDim           = 3;
-static constexpr int kAnchorBlockSizeX    = 16;
-static constexpr int kAnchorBlockSizeY    = 16;
-static constexpr int kAnchorBlockSizeZ    = 16;
-static constexpr int kNumAnchorBlockX     = 1;
-static constexpr int kNumAnchorBlockY     = 1;
-static constexpr int kNumAnchorBlockZ     = 1;
 static constexpr int kLinearBlockSize     = 384;
 
-// Anchor stride per spatial axis (must match the encode kernel's anchor layout).
-constexpr int kAnchorStride =
-    kAnchorBlockSizeX;  // == AnchorBlockSizeY == AnchorBlockSizeZ in 3D
+// 3-D path: matches cuSZ-Hi baseline (anchor tile 16³, one anchor per grid block).
+static constexpr int kSplineDim3          = 3;
+static constexpr int kAnchorBlockSizeX3   = 16;
+static constexpr int kAnchorBlockSizeY3   = 16;
+static constexpr int kAnchorBlockSizeZ3   = 16;
+static constexpr int kNumAnchorBlockX3    = 1;
+static constexpr int kNumAnchorBlockY3    = 1;
+static constexpr int kNumAnchorBlockZ3    = 1;
+
+// 2-D path: structurally mirrors the 3-D layout (anchor tile 16×16, one anchor
+// per grid block) with the z axis flattened. The upstream cuSZ-Hi default of
+// `AnchorBlockSize={8,8,1}, numAnchorBlock={4,1,1}` would make
+// `c_gather_anchor` write 4× too few anchors per block (it emits one anchor
+// per grid block regardless of numAnchorBlockX; see the
+// `// 2d bug may be here!` comment in ginterp_md.inl c_gather_anchor). Our
+// {16,16,1}/{1,1,1} variant sidesteps that — every grid block gathers exactly
+// the corner anchor that `x_reset_scratch_data` will look for in the inverse
+// path, matching the 3-D contract.
+static constexpr int kSplineDim2          = 2;
+static constexpr int kAnchorBlockSizeX2   = 16;
+static constexpr int kAnchorBlockSizeY2   = 16;
+static constexpr int kAnchorBlockSizeZ2   = 1;
+static constexpr int kNumAnchorBlockX2    = 1;
+static constexpr int kNumAnchorBlockY2    = 1;
+static constexpr int kNumAnchorBlockZ2    = 1;
+
+// Anchor stride per spatial axis for the 3-D path.
+constexpr int kAnchorStride3 =
+    kAnchorBlockSizeX3;  // == AnchorBlockSizeY3 == AnchorBlockSizeZ3 in 3D
 
 dim3 ginterpAnchorLen3(size_t nx, size_t ny, size_t nz) {
     auto div_up = [](size_t a, size_t b) -> unsigned int {
         return static_cast<unsigned int>((a + b - 1) / b);
     };
-    return dim3(div_up(nx, kAnchorStride),
-                div_up(ny, kAnchorStride),
-                div_up(nz, kAnchorStride));
+    return dim3(div_up(nx, kAnchorStride3),
+                div_up(ny, kAnchorStride3),
+                div_up(nz, kAnchorStride3));
+}
+
+dim3 ginterpAnchorLen2(size_t nx, size_t ny) {
+    auto div_up = [](size_t a, size_t b) -> unsigned int {
+        return static_cast<unsigned int>((a + b - 1) / b);
+    };
+    // 2-D tile = AnchorBlockSize × numAnchorBlock = 16×16, one anchor per
+    // grid block. Anchor extent matches the grid extent (same shape as the
+    // 3-D path, just with z=1).
+    return dim3(
+        div_up(nx, kAnchorBlockSizeX2 * kNumAnchorBlockX2),  // 16
+        div_up(ny, kAnchorBlockSizeY2 * kNumAnchorBlockY2),  // 16
+        1u);
 }
 
 dim3 stride3FromLen3(dim3 len3) {
@@ -115,9 +147,9 @@ void launchGInterpForward3D(
     };
 
     dim3 grid_dim(
-        div_up(data_len3.x, kAnchorBlockSizeX * kNumAnchorBlockX),
-        div_up(data_len3.y, kAnchorBlockSizeY * kNumAnchorBlockY),
-        div_up(data_len3.z, kAnchorBlockSizeZ * kNumAnchorBlockZ));
+        div_up(data_len3.x, kAnchorBlockSizeX3 * kNumAnchorBlockX3),
+        div_up(data_len3.y, kAnchorBlockSizeY3 * kNumAnchorBlockY3),
+        div_up(data_len3.z, kAnchorBlockSizeZ3 * kNumAnchorBlockZ3));
 
     dim3 data_st3   = stride3FromLen3(data_len3);
     dim3 ectrl_st3  = data_st3;       // ectrl_len3 == data_len3 in this kernel
@@ -126,9 +158,9 @@ void launchGInterpForward3D(
 
     fz::ginterp::c_spline_infprecis_data<
         TInput*, TCode*, float,
-        kLevel, kSplineDim,
-        kAnchorBlockSizeX, kAnchorBlockSizeY, kAnchorBlockSizeZ,
-        kNumAnchorBlockX, kNumAnchorBlockY, kNumAnchorBlockZ,
+        kLevel, kSplineDim3,
+        kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
+        kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
         kLinearBlockSize>
         <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
             const_cast<TInput*>(d_data), data_len3, data_st3,
@@ -156,9 +188,9 @@ void launchGInterpInverse3D(
     };
 
     dim3 grid_dim(
-        div_up(data_len3.x, kAnchorBlockSizeX * kNumAnchorBlockX),
-        div_up(data_len3.y, kAnchorBlockSizeY * kNumAnchorBlockY),
-        div_up(data_len3.z, kAnchorBlockSizeZ * kNumAnchorBlockZ));
+        div_up(data_len3.x, kAnchorBlockSizeX3 * kNumAnchorBlockX3),
+        div_up(data_len3.y, kAnchorBlockSizeY3 * kNumAnchorBlockY3),
+        div_up(data_len3.z, kAnchorBlockSizeZ3 * kNumAnchorBlockZ3));
 
     dim3 data_st3   = stride3FromLen3(data_len3);
     dim3 ectrl_len3 = data_len3;
@@ -167,9 +199,9 @@ void launchGInterpInverse3D(
 
     fz::ginterp::x_spline_infprecis_data<
         TCode*, TInput*, float,
-        kLevel, kSplineDim,
-        kAnchorBlockSizeX, kAnchorBlockSizeY, kAnchorBlockSizeZ,
-        kNumAnchorBlockX, kNumAnchorBlockY, kNumAnchorBlockZ,
+        kLevel, kSplineDim3,
+        kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
+        kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
         kLinearBlockSize>
         <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
             const_cast<TCode*>(d_ectrl), ectrl_len3, ectrl_st3,
@@ -212,7 +244,7 @@ void launchGInterpProfileMode1(
     dim3 data_st3 = stride3FromLen3(data_len3);
 
     fz::ginterp::c_spline_profiling_data<
-        TInput*, kSplineDim,
+        TInput*, kSplineDim3,
         kProfileBlockSizeX, kProfileBlockSizeY, kProfileBlockSizeZ,
         kProfileNumBlockX, kProfileNumBlockY, kProfileNumBlockZ,
         kLinearBlockSize>
@@ -246,9 +278,9 @@ void launchGInterpProfileMode3(
     // block sizes 16,16,16, numAnchorBlock 1,1,1, LINEAR_BLOCK_SIZE.
     fz::ginterp::pa_spline_infprecis_data<
         TInput*, float,
-        kLevel, kSplineDim,
-        kAnchorBlockSizeX, kAnchorBlockSizeY, kAnchorBlockSizeZ,
-        kNumAnchorBlockX, kNumAnchorBlockY, kNumAnchorBlockZ,
+        kLevel, kSplineDim3,
+        kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
+        kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
         kLinearBlockSize>
         <<<grid, block, 0, stream>>>(
             const_cast<TInput*>(d_data), data_len3, data_st3,
@@ -256,6 +288,91 @@ void launchGInterpProfileMode3(
             eb_r, ebx2, intp_param,
             d_errors,
             /*workflow=*/true);
+}
+
+// ─── forward (compress) launcher — 2-D ───────────────────────────────────────
+
+template <typename TInput, typename TCode>
+void launchGInterpForward2D(
+    const TInput* d_data, dim3 data_len3,
+    TCode* d_ectrl,
+    TInput* d_anchor, dim3 anchor_len3,
+    TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
+    uint32_t* d_outlier_count_scratch,
+    float eb_r, float ebx2, int radius,
+    const INTERPOLATION_PARAMS& intp_param,
+    cudaStream_t stream)
+{
+    auto div_up = [](unsigned int a, unsigned int b) -> unsigned int {
+        return (a + b - 1) / b;
+    };
+
+    // 2-D grid: each block covers AnchorBlockSize*numAnchorBlock = 32×8 input
+    // elements; z dimension is exactly 1.
+    dim3 grid_dim(
+        div_up(data_len3.x, kAnchorBlockSizeX2 * kNumAnchorBlockX2),
+        div_up(data_len3.y, kAnchorBlockSizeY2 * kNumAnchorBlockY2),
+        1u);
+
+    dim3 data_st3   = stride3FromLen3(data_len3);
+    dim3 ectrl_st3  = data_st3;
+    dim3 anchor_st3 = stride3FromLen3(anchor_len3);
+    dim3 ectrl_len3 = data_len3;
+
+    fz::ginterp::c_spline_infprecis_data<
+        TInput*, TCode*, float,
+        kLevel, kSplineDim2,
+        kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
+        kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2,
+        kLinearBlockSize>
+        <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
+            const_cast<TInput*>(d_data), data_len3, data_st3,
+            d_ectrl, ectrl_len3, ectrl_st3,
+            d_anchor, anchor_st3,
+            d_outlier_vals, d_outlier_idxs, d_outlier_count_scratch,
+            eb_r, ebx2, radius,
+            intp_param);
+}
+
+// ─── inverse (decompress) launcher — 2-D ─────────────────────────────────────
+
+template <typename TInput, typename TCode>
+void launchGInterpInverse2D(
+    const TCode* d_ectrl, dim3 data_len3,
+    const TInput* d_anchor, dim3 anchor_len3,
+    TInput* d_outlier_tmp,
+    TInput* d_out,
+    float eb_r, float ebx2, int radius,
+    const INTERPOLATION_PARAMS& intp_param,
+    cudaStream_t stream)
+{
+    auto div_up = [](unsigned int a, unsigned int b) -> unsigned int {
+        return (a + b - 1) / b;
+    };
+
+    dim3 grid_dim(
+        div_up(data_len3.x, kAnchorBlockSizeX2 * kNumAnchorBlockX2),
+        div_up(data_len3.y, kAnchorBlockSizeY2 * kNumAnchorBlockY2),
+        1u);
+
+    dim3 data_st3   = stride3FromLen3(data_len3);
+    dim3 ectrl_len3 = data_len3;
+    dim3 ectrl_st3  = data_st3;
+    dim3 anchor_st3 = stride3FromLen3(anchor_len3);
+
+    fz::ginterp::x_spline_infprecis_data<
+        TCode*, TInput*, float,
+        kLevel, kSplineDim2,
+        kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
+        kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2,
+        kLinearBlockSize>
+        <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
+            const_cast<TCode*>(d_ectrl), ectrl_len3, ectrl_st3,
+            const_cast<TInput*>(d_anchor), anchor_len3, anchor_st3,
+            d_out, data_len3, data_st3,
+            d_outlier_tmp,
+            eb_r, ebx2, radius,
+            intp_param);
 }
 
 // ─── Explicit instantiations ──────────────────────────────────────────────────
@@ -280,6 +397,29 @@ template void launchGInterpInverse3D<float, uint16_t>(
     const uint16_t*, dim3, const float*, dim3, float*, float*,
     float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
 template void launchGInterpInverse3D<float, uint32_t>(
+    const uint32_t*, dim3, const float*, dim3, float*, float*,
+    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
+
+template void launchGInterpForward2D<float, uint8_t>(
+    const float*, dim3, uint8_t*, float*, dim3,
+    float*, uint32_t*, uint32_t*, float, float, int,
+    const INTERPOLATION_PARAMS&, cudaStream_t);
+template void launchGInterpForward2D<float, uint16_t>(
+    const float*, dim3, uint16_t*, float*, dim3,
+    float*, uint32_t*, uint32_t*, float, float, int,
+    const INTERPOLATION_PARAMS&, cudaStream_t);
+template void launchGInterpForward2D<float, uint32_t>(
+    const float*, dim3, uint32_t*, float*, dim3,
+    float*, uint32_t*, uint32_t*, float, float, int,
+    const INTERPOLATION_PARAMS&, cudaStream_t);
+
+template void launchGInterpInverse2D<float, uint8_t>(
+    const uint8_t*, dim3, const float*, dim3, float*, float*,
+    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
+template void launchGInterpInverse2D<float, uint16_t>(
+    const uint16_t*, dim3, const float*, dim3, float*, float*,
+    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
+template void launchGInterpInverse2D<float, uint32_t>(
     const uint32_t*, dim3, const float*, dim3, float*, float*,
     float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
 

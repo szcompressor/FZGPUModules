@@ -261,15 +261,19 @@ void GInterpStage<TInput, TCode>::setDims(const std::array<size_t, 3>& dims) {
     if (dims[0] == 0 || dims[1] == 0 || dims[2] == 0) {
         throw std::runtime_error(
             "GInterpStage::setDims: all three dimensions must be > 0 "
-            "(MVP requires 3-D input — 2-D/1-D in later phases)");
+            "(2-D inputs must still pass dims[2]=1, not 0)");
     }
-    if (dims[2] <= 1) {
+    // 1-D rejection: cuSZ-Hi has no 1-D spline path, and a 2-D kernel with
+    // ny=1 degenerates badly (only one row of anchors, no boundary samples).
+    if (dims[1] <= 1) {
         throw std::runtime_error(
-            "GInterpStage::setDims: dims[2] must be > 1; only 3-D input is "
-            "supported in the MVP (got z=" + std::to_string(dims[2]) + ")");
+            "GInterpStage::setDims: dims[1] must be > 1; 1-D input is not "
+            "supported (got y=" + std::to_string(dims[1]) + ")");
     }
     config_.dims = dims;
-    auto anchor = ginterp::ginterpAnchorLen3(dims[0], dims[1], dims[2]);
+    dim3 anchor = (dims[2] > 1)
+        ? ginterp::ginterpAnchorLen3(dims[0], dims[1], dims[2])
+        : ginterp::ginterpAnchorLen2(dims[0], dims[1]);
     anchor_dims_ = {anchor.x, anchor.y, anchor.z};
 }
 
@@ -315,7 +319,7 @@ void GInterpStage<TInput, TCode>::execute(
             throw std::runtime_error(
                 "GInterpStage (inverse): requires 4 inputs and 1 output");
         }
-        if (config_.dims[0] == 0 || config_.dims[2] <= 1) {
+        if (config_.dims[0] == 0 || config_.dims[1] <= 1) {
             throw std::runtime_error(
                 "GInterpStage (inverse): dims not set — deserializeHeader() "
                 "should have populated them");
@@ -325,6 +329,7 @@ void GInterpStage<TInput, TCode>::execute(
         size_t ny = config_.dims[1];
         size_t nz = config_.dims[2];
         size_t N  = nx * ny * nz;
+        const int dim = ndim();
         if (N == 0) {
             actual_output_sizes_.assign(1, 0);
             return;
@@ -368,14 +373,25 @@ void GInterpStage<TInput, TCode>::execute(
                          static_cast<unsigned>(anchor_dims_[2]));
 
         INTERPOLATION_PARAMS intp_param = buildIntpParam();
-        ginterp::launchGInterpInverse3D<TInput, TCode>(
-            static_cast<const TCode*>(inputs[0]),  data_len3,
-            static_cast<const TInput*>(inputs[1]), anchor_len3,
-            d_outlier_tmp,
-            static_cast<TInput*>(outputs[0]),
-            eb_r, ebx2, static_cast<int>(config_.quant_radius),
-            intp_param,
-            stream);
+        if (dim == 3) {
+            ginterp::launchGInterpInverse3D<TInput, TCode>(
+                static_cast<const TCode*>(inputs[0]),  data_len3,
+                static_cast<const TInput*>(inputs[1]), anchor_len3,
+                d_outlier_tmp,
+                static_cast<TInput*>(outputs[0]),
+                eb_r, ebx2, static_cast<int>(config_.quant_radius),
+                intp_param,
+                stream);
+        } else {
+            ginterp::launchGInterpInverse2D<TInput, TCode>(
+                static_cast<const TCode*>(inputs[0]),  data_len3,
+                static_cast<const TInput*>(inputs[1]), anchor_len3,
+                d_outlier_tmp,
+                static_cast<TInput*>(outputs[0]),
+                eb_r, ebx2, static_cast<int>(config_.quant_radius),
+                intp_param,
+                stream);
+        }
         FZ_CUDA_CHECK(cudaGetLastError());
 
         // 4. Return outlier_tmp to the pool (stream-ordered free).
@@ -390,11 +406,12 @@ void GInterpStage<TInput, TCode>::execute(
         throw std::runtime_error(
             "GInterpStage: requires 1 input and 4 outputs");
     }
-    if (config_.dims[0] == 0 || config_.dims[2] <= 1) {
+    if (config_.dims[0] == 0 || config_.dims[1] <= 1) {
         throw std::runtime_error(
             "GInterpStage: dims not set — call Pipeline::setDims() "
-            "before addStage() (3-D only in MVP)");
+            "before addStage() (1-D not supported)");
     }
+    const int dim = ndim();
 
     size_t input_bytes  = sizes[0];
     size_t N            = input_bytes / sizeof(TInput);
@@ -483,7 +500,17 @@ void GInterpStage<TInput, TCode>::execute(
     // host-blocking syncs to compress(); it's not graph-capture compatible.
     // The resolved params are stored on the stage and embedded in the FZM
     // header so the decompressor uses the same configuration.
-    if (config_.auto_tuning_mode > 0) {
+    //
+    // Modes 1 and 3 wrap the cuSZ-Hi 3-D profiling kernels and are not wired
+    // for 2-D yet (cuSZ-Hi's 2-D-targeted mode 2 is the right hook). For now,
+    // log a warning and fall through to the deterministic baseline.
+    if (config_.auto_tuning_mode > 0 && dim == 2) {
+        FZ_LOG(WARN,
+            "GInterp: setAutoTuning(%u) is wired for the 3-D path only — "
+            "falling back to deterministic baseline for this 2-D input",
+            config_.auto_tuning_mode);
+    }
+    if (config_.auto_tuning_mode > 0 && dim == 3) {
         initProfilingScratch(pool);
 
         // Both modes interpolate alpha from rel_eb; beta stays at 4.0.
@@ -536,16 +563,29 @@ void GInterpStage<TInput, TCode>::execute(
     }
 
     INTERPOLATION_PARAMS intp_param = buildIntpParam();
-    ginterp::launchGInterpForward3D<TInput, TCode>(
-        static_cast<const TInput*>(inputs[0]), data_len3,
-        static_cast<TCode*>(outputs[0]),
-        static_cast<TInput*>(outputs[1]), anchor_len3,
-        static_cast<TInput*>(outputs[2]),
-        static_cast<uint32_t*>(outputs[3]),
-        d_outlier_count_scratch_,
-        eb_r, ebx2, static_cast<int>(config_.quant_radius),
-        intp_param,
-        stream);
+    if (dim == 3) {
+        ginterp::launchGInterpForward3D<TInput, TCode>(
+            static_cast<const TInput*>(inputs[0]), data_len3,
+            static_cast<TCode*>(outputs[0]),
+            static_cast<TInput*>(outputs[1]), anchor_len3,
+            static_cast<TInput*>(outputs[2]),
+            static_cast<uint32_t*>(outputs[3]),
+            d_outlier_count_scratch_,
+            eb_r, ebx2, static_cast<int>(config_.quant_radius),
+            intp_param,
+            stream);
+    } else {
+        ginterp::launchGInterpForward2D<TInput, TCode>(
+            static_cast<const TInput*>(inputs[0]), data_len3,
+            static_cast<TCode*>(outputs[0]),
+            static_cast<TInput*>(outputs[1]), anchor_len3,
+            static_cast<TInput*>(outputs[2]),
+            static_cast<uint32_t*>(outputs[3]),
+            d_outlier_count_scratch_,
+            eb_r, ebx2, static_cast<int>(config_.quant_radius),
+            intp_param,
+            stream);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 
     // Max-capacity placeholders; postStreamSync() trims (and refreshes

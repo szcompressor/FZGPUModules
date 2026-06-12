@@ -4,9 +4,10 @@
  * @file ginterp_stage.h
  * @brief G-Interp spline-interpolation predictor + quantizer (cuSZ-Hi port).
  *
- * MVP (phase 1): 3D-only, no auto-tuning, hard-coded baseline INTERPOLATION_PARAMS.
- * Phase 2 will add `setAutoTuning()` and the profiling pre-pass; phase 3 will
- * add the 2D path. See `memory/new_stages.md` for the full plan.
+ * Supports 2-D and 3-D inputs. 1-D is rejected (cuSZ-Hi has no 1-D path).
+ * `INTERPOLATION_PARAMS` auto-tuning (modes 1 and 3) is currently wired for
+ * the 3-D path only; in 2-D the stage logs a warning and falls back to the
+ * deterministic baseline.
  */
 
 #include "stage/stage.h"
@@ -121,14 +122,16 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *     their neighbours still see compounded interpolation error).
  *
  * Other limitations to be aware of:
- *   - **3-D only** in this MVP; `setDims()` throws for 1-D or 2-D.
- *   - Best results when each `dim` is a multiple of 16 (the anchor tile size).
- *     For ragged dims, edge voxels see slightly worse prediction because
- *     boundary anchors are unavailable.
- *   - cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning is not yet ported; this MVP
- *     uses the upstream deterministic baseline (`alpha=1.75`, `beta=4.0`,
- *     `use_md={t,t,f,f,f,f}`). Real CR may be 10–30% worse than the cuSZ-Hi
- *     paper until phase 2 lands.
+ *   - **2-D and 3-D only**; `setDims()` throws for 1-D input.
+ *   - 3-D path: best results when each `dim` is a multiple of 16 (the 3-D
+ *     anchor tile size). 2-D path: anchor tile is 32×8, so best results when
+ *     `dim_x` is a multiple of 32 and `dim_y` of 8. Ragged dims still work
+ *     but edge elements see slightly worse prediction.
+ *   - `INTERPOLATION_PARAMS` auto-tuning (`setAutoTuning(1)` / `(3)`) is wired
+ *     for the 3-D path only. In 2-D the stage logs a warning and falls back
+ *     to the deterministic baseline (`alpha=1.75`, `beta=4.0`,
+ *     `use_md={t,t,f,f,f,f}`). 2-D auto-tune (cuSZ-Hi `auto_tuning_mode == 2`)
+ *     is a follow-up.
  *
  * ## Radius auto-tune (default behaviour)
  *
@@ -163,8 +166,9 @@ public:
         ///       downstream).
         int   quant_radius       = 0;
         float outlier_capacity   = 0.10f;
-        /// Spatial dimensions `{x, y, z}` where x is fastest. MVP requires
-        /// `dims[2] > 1` — `setDims()` throws otherwise.
+        /// Spatial dimensions `{x, y, z}` where x is fastest. 2-D inputs use
+        /// `dims[2] == 1` (the stage automatically picks the 2-D kernel path).
+        /// 1-D (`dims[1] == 1`) is rejected by `setDims()`.
         std::array<size_t, 3> dims = {0, 0, 0};
         ErrorBoundMode eb_mode   = ErrorBoundMode::ABS;
         /// Pre-computed value_range (NOA) or max(|data|) (REL). Set to skip
@@ -266,7 +270,9 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse()           const override { return is_inverse_; }
 
-    /// Returns the effective spatial dimensionality (3 in MVP).
+    /// Returns the effective spatial dimensionality (2 or 3). 1-D inputs are
+    /// rejected by `setDims()` so this method never returns 1 once the stage
+    /// has been configured.
     int ndim() const {
         if (config_.dims[2] > 1) return 3;
         if (config_.dims[1] > 1) return 2;

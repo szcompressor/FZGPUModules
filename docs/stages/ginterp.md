@@ -168,16 +168,22 @@ practice the maximum element-wise error is:
   can't predict — these are stored exactly via the outlier triplet, but their
   neighbours still see compounded interpolation error).
 
-Other MVP limitations:
+Other limitations:
 
-- **3-D only.** `setDims()` throws for 1-D or 2-D inputs.
-- Best results when each `dim` is a multiple of 16 (the anchor tile size).
-  Ragged dims still work but edge voxels see slightly worse prediction.
+- **2-D and 3-D only.** `setDims()` throws for 1-D input. 2-D inputs set
+  `dims[2] = 1` and pick the 2-D launcher automatically.
+- Best results when each `dim` is a multiple of 16 (the anchor tile size,
+  used by both the 3-D and 2-D paths). Ragged dims still work but edge
+  voxels see slightly worse prediction.
+- **Auto-tuning is 3-D only.** `setAutoTuning(1)` / `(3)` wrap the cuSZ-Hi
+  3-D profiling kernels. On 2-D inputs they log a warning and fall through
+  to the deterministic baseline. cuSZ-Hi `auto_tuning_mode == 2` is the
+  2-D-targeted probe and is a follow-up.
 - cuSZ-Hi `auto_tuning` modes `2`/`4`/`5+` are **not yet ported**. Modes `1`
   (cheap reverse-only profile) and `3` (full structural — the cuSZ-Hi paper
-  mode) are available via `setAutoTuning()`; see the "Auto-tuning" section
-  above. Mode `4` (alpha/beta sweep on top of mode 3) and the 2-D-targeted
-  mode `2` are straightforward follow-ups.
+  mode) are available via `setAutoTuning()` on 3-D data; see the
+  "Auto-tuning" section above. Mode `4` (alpha/beta sweep on top of mode 3)
+  and the 2-D-targeted mode `2` are straightforward follow-ups.
 - `isGraphCompatible()` returns `false` in the MVP. The forward path does no
   D2H during `execute()`, but the auto-tune scan and `postStreamSync()` for the
   outlier count do. End-to-end graph compatibility will be enabled after the
@@ -222,7 +228,7 @@ Four inputs (in the order above) → one output (reconstructed `TInput[N]`).
 
 ```cpp
 Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
-p.setDims(nx, ny, nz);   // 3-D only — call before addStage()
+p.setDims(nx, ny, nz);   // 2-D: pass nz=1. 1-D is not supported.
 
 auto* g = p.addStage<GInterpStage<float, uint16_t>>();
 g->setErrorBound(1e-2f);
