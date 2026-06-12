@@ -174,15 +174,33 @@ public:
         /// Pre-computed value_range (NOA) or max(|data|) (REL). Set to skip
         /// the on-device scan during execute() (required for graph capture).
         float precomputed_value_base = 0.0f;
-        /// `INTERPOLATION_PARAMS` auto-tuning mode (cuSZ-Hi phase 2).
+        /// `INTERPOLATION_PARAMS` auto-tuning mode (cuSZ-Hi).
         ///   0 = off (default, deterministic baseline)
         ///   1 = cheap profiling — sets `reverse[]` only (~1 ms)
         ///   3 = full structural profiling — sets `use_md`, `use_natural`,
         ///       `reverse` per level (~5–15 ms; matches the cuSZ-Hi paper)
-        /// Modes 2, 4, 5+ from cuSZ-Hi are not yet wired (phase 2 follow-up).
-        /// Any non-zero mode forces a host-blocking D2H sync inside execute()
-        /// and is **incompatible with CUDA graph capture**.
+        ///   4 = full structural + alpha/beta sweep (~15–30 ms; on top of
+        ///       mode 3 results, scans 8 (alpha, beta) combos and picks the
+        ///       lowest error)
+        ///   5 = manual alpha/beta override (no profiling). Set `manual_alpha`
+        ///       / `manual_beta` to use them verbatim; otherwise the
+        ///       piecewise-linear `alpha` from `rel_eb` (cuSZ-Hi recipe) is
+        ///       used with `beta=4.0`. The structural flags stay at baseline.
+        /// Modes 1, 3, 4 are 3-D-only; on 2-D inputs they fall back to
+        /// baseline. Mode 5 is dim-agnostic.
+        /// Mode 2 from cuSZ-Hi is not yet wired (3-D-only alternate cheap
+        /// probe — same value as mode 1).
+        /// Any non-zero mode that does profiling (1/3/4) forces a host-blocking
+        /// D2H sync inside execute() and is **incompatible with CUDA graph
+        /// capture**. Mode 5 (manual) is graph-safe.
         uint8_t auto_tuning_mode = 0;
+
+        /// Manual alpha override for `auto_tuning_mode == 5`. Set to a value
+        /// > 0 to use this alpha verbatim; 0.0 (default) defers to the
+        /// cuSZ-Hi piecewise-linear schedule keyed on `rel_eb`.
+        double  manual_alpha = 0.0;
+        /// Manual beta override for `auto_tuning_mode == 5`. Same convention.
+        double  manual_beta  = 0.0;
 
         Config() = default;
     };
@@ -211,10 +229,10 @@ public:
     void onFinalize(size_t estimated_inlen, MemoryPool* pool) override;
 
     size_t estimateDeviceFootprintBytes(size_t /*estimated_inlen*/) const override {
-        return (config_.auto_tuning_mode > 0) ? kProfilingErrCount * sizeof(float) : 0;
+        return needsProfilingScratch() ? kProfilingErrCount * sizeof(float) : 0;
     }
     size_t estimatePinnedFootprintBytes(size_t /*estimated_inlen*/) const override {
-        return (config_.auto_tuning_mode > 0) ? kProfilingErrCount * sizeof(float) : 0;
+        return needsProfilingScratch() ? kProfilingErrCount * sizeof(float) : 0;
     }
 
     std::string getName() const override { return "GInterp"; }
@@ -252,8 +270,17 @@ public:
     void setValueBase(float v)                { config_.precomputed_value_base = v; }
     /// Enable cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning. See
     /// `Config::auto_tuning_mode` for mode semantics. Default is 0 (off).
-    /// Any non-zero mode disables CUDA graph capture for this stage.
+    /// Profiling modes (1/3/4) disable CUDA graph capture for this stage;
+    /// mode 5 (manual override) is graph-safe.
     void setAutoTuning(uint8_t mode)          { config_.auto_tuning_mode = mode; }
+    /// Set the manual alpha/beta override pair used when
+    /// `auto_tuning_mode == 5`. Both must be > 0 to take effect; passing 0
+    /// for either field defers to the cuSZ-Hi piecewise-linear schedule
+    /// (alpha from rel_eb) or the upstream default (beta = 4.0).
+    void setManualAlphaBeta(double alpha, double beta) {
+        config_.manual_alpha = alpha;
+        config_.manual_beta  = beta;
+    }
     void setDims(const std::array<size_t, 3>& dims) override;
     void setDims(size_t x, size_t y, size_t z) {
         setDims(std::array<size_t, 3>{x, y, z});
@@ -357,6 +384,13 @@ private:
     uint8_t resolved_use_md_[6]      = {1, 1, 0, 0, 0, 0};
     uint8_t resolved_use_natural_[6] = {0, 0, 0, 0, 0, 0};
     uint8_t resolved_reverse_[6]     = {0, 0, 0, 0, 0, 0};
+
+    /// True when the configured auto_tuning_mode needs the 36-float
+    /// profiling scratch (modes 1/2/3/4). Modes 0 and 5 don't.
+    bool needsProfilingScratch() const {
+        const uint8_t m = config_.auto_tuning_mode;
+        return m == 1 || m == 2 || m == 3 || m == 4;
+    }
 
     /// Lazily allocate the persistent profiling scratch via the pool's
     /// persistent allocators. No-op if already allocated or auto-tune is off.

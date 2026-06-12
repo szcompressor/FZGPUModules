@@ -36,7 +36,7 @@ __global__ static void adm_decompress_u16(
     const int lane = idx & 0x1f;
     const int warp = idx >> 5;
 
-    if (idx * kDecmpChunk > data_size) return;
+    if (idx * kDecmpChunk >= data_size) return;
     int end = (d_output_lengths[gsize - 1] + last_length) * kBlockThreads;
 
     int w = lane < 16 ? warp * 2 : warp * 2 + 1;
@@ -99,11 +99,22 @@ __global__ static void adm_decompress_u16(
             (code % 2 == 1) ? center - diff : center + diff);
     }
 
-    int4* result_v = reinterpret_cast<int4*>(local_result);
-    int4* out_v    = reinterpret_cast<int4*>(decmp_data + dst_start);
-    #pragma unroll
-    for (int i = 0; i < kDecmpChunk / 8; ++i)
-        out_v[i] = result_v[i];
+    // Vectorised int4 stores cover kDecmpChunk uint16 elements (64 B / thread).
+    // The last thread on an unaligned input has `dst_start + kDecmpChunk >
+    // data_size` — its vector store would write past the user output buffer.
+    // Fall back to a scalar store for that partial chunk; the fast path covers
+    // the common aligned case.
+    if (dst_start + kDecmpChunk <= data_size) {
+        int4* result_v = reinterpret_cast<int4*>(local_result);
+        int4* out_v    = reinterpret_cast<int4*>(decmp_data + dst_start);
+        #pragma unroll
+        for (int i = 0; i < kDecmpChunk / 8; ++i)
+            out_v[i] = result_v[i];
+    } else {
+        int tail_end = min(dst_start + kDecmpChunk, data_size);
+        for (int i = dst_start; i < tail_end; ++i)
+            decmp_data[i] = local_result[i - dst_start];
+    }
 }
 
 

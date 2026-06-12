@@ -126,31 +126,60 @@ Enable auto-tuning to pick those flags per-dataset:
 g->setAutoTuning(3);   // recommended: full structural profiling
 ```
 
-| Mode | Probe kernel | What it sets |
-|---|---|---|
-| `0` | none | (off; baseline) |
-| `1` | `c_spline_profiling_data` (2 errors) | `reverse[0..3]` only (one global bool replicated) |
-| `3` | `pa_spline_infprecis_data` (18 errors) | `use_md` / `use_natural` / `reverse` per level (matches the cuSZ-Hi paper) |
+| Mode | Probe kernel | What it sets | Dim | Graph-safe |
+|---|---|---|---|---|
+| `0` | none | (off; baseline) | 2-D + 3-D | yes |
+| `1` | `c_spline_profiling_data` (2 errors, ~1 ms) | `reverse[0..3]` only (one global bool replicated) | 3-D only | no |
+| `2` | `c_spline_profiling_data_2` (6 errors, ~1 ms) | single `use_natural` × `reverse` replicated across all levels; clears `use_md` | 2-D + 3-D | no |
+| `3` | `pa_spline_infprecis_data` workflow=true (18 errors, ~5–15 ms) | `use_md` / `use_natural` / `reverse` per level (cuSZ-Hi paper mode) | 3-D only | no |
+| `4` | mode 3 + `pa_spline_infprecis_data` workflow=false (+11 errors, ~10–20 ms total) | mode-3 flags **plus** sweeps 11 (alpha, beta) combos and picks the lowest-error | 3-D only | no |
+| `5` | none (manual override) | resolved `alpha` / `beta` (user-supplied or piecewise-linear default); structural flags stay at baseline | 2-D + 3-D | yes |
 
-Modes `2` (2-D-only structural probe), `4` (full + alpha/beta sweep), and
-`5+` (manual alpha/beta override) from cuSZ-Hi are not yet wired —
-straightforward follow-up scope.
+**Mode 2 — alternate cheap probe.** Runs `c_spline_profiling_data_2`, which
+writes 6 errors covering forward/reverse × {cubic, natural} on a tiny
+shared-mem sample. Picks one global `use_natural` (sum-based vote) and one
+global `reverse` (margin-based vote: 3× in 3-D, 2× in 2-D) and replicates both
+across all levels, clearing `use_md`. Cheaper than mode 3 by ~10× and works on
+both 2-D and 3-D inputs (unlike modes 1/3/4). Good middle ground when mode 1's
+single decision feels too coarse but mode 3's cost is too high.
+
+**Mode 4 — alpha/beta sweep.** Adds a second pass on top of mode 3 that probes
+11 (α, β) combinations enumerated by cuSZ-Hi `pre_compute_att` (SPLINE3_AB_ATT):
+`α ∈ {1.0, 1.25, 1.5, 1.75, 2.0}`, `β ∈ {2.0, 3.0, 4.0}` (full grid for α ≥ 1.5;
+β=2.0 only for the lower α values). The combo with the lowest error becomes
+the resolved `α/β`. Use mode 4 for offline workflows where the extra ~10 ms is
+worth the CR improvement vs mode 3 (typically 2–5%).
+
+**Mode 5 — manual alpha/beta override.** No profiling kernel runs, so the path
+is graph-safe and works on both 2-D and 3-D inputs. Set via
+`setManualAlphaBeta(alpha, beta)`. Passing 0 for either field falls back to the
+cuSZ-Hi piecewise-linear `alpha` schedule (keyed on `rel_eb`) or `beta = 4.0`.
+The structural flags (`use_md` / `use_natural` / `reverse`) stay at baseline.
 
 Common patterns:
 
 ```cpp
-// alpha is always interpolated from rel_eb (see cuSZ-Hi spline3.cu:80-103).
-// For ABS mode, the stage scans the data range once to derive rel_eb;
-// REL/NOA reuses the user-supplied eb directly.
+// Recommended for offline CR-critical workflows:
+g->setAutoTuning(4);   // structural probe + alpha/beta sweep
+
+// User has prior knowledge of optimal params — skip profiling entirely:
+g->setAutoTuning(5);
+g->setManualAlphaBeta(1.5, 3.0);
+
+// alpha is always interpolated from rel_eb (see cuSZ-Hi spline3.cu:80-103)
+// in modes 1/3/4. For ABS mode, the stage scans the data range once to derive
+// rel_eb; REL/NOA reuses the user-supplied eb directly.
 g->setErrorBoundMode(ErrorBoundMode::REL);
 g->setErrorBound(1e-3f);
 g->setAutoTuning(3);
 ```
 
-**Auto-tuning is incompatible with CUDA graph capture.** Each profiling
-kernel ends with a D2H of the error array and a `cudaStreamSynchronize`,
-which would error out inside a captured region. `isGraphCompatible()` is
-`false` whether auto-tuning is on or off in the MVP.
+**Profiling modes (1/2/3/4) are incompatible with CUDA graph capture.** Each
+probe ends with a D2H of the error array and a `cudaStreamSynchronize`, which
+would error out inside a captured region. **Mode 5 is graph-safe** since it
+never launches a profile kernel. `isGraphCompatible()` returns `false` in
+either case in the MVP — it'll be relaxed for mode 5 + manual radius once
+end-to-end graph capture is tested.
 
 The resolved `INTERPOLATION_PARAMS` are embedded in the FZM stage header at
 compress time, so the decompressor reuses them verbatim — there is no
@@ -175,19 +204,24 @@ Other limitations:
 - Best results when each `dim` is a multiple of 16 (the anchor tile size,
   used by both the 3-D and 2-D paths). Ragged dims still work but edge
   voxels see slightly worse prediction.
-- **Auto-tuning is 3-D only.** `setAutoTuning(1)` / `(3)` wrap the cuSZ-Hi
-  3-D profiling kernels. On 2-D inputs they log a warning and fall through
-  to the deterministic baseline. cuSZ-Hi `auto_tuning_mode == 2` is the
-  2-D-targeted probe and is a follow-up.
-- cuSZ-Hi `auto_tuning` modes `2`/`4`/`5+` are **not yet ported**. Modes `1`
-  (cheap reverse-only profile) and `3` (full structural — the cuSZ-Hi paper
-  mode) are available via `setAutoTuning()` on 3-D data; see the
-  "Auto-tuning" section above. Mode `4` (alpha/beta sweep on top of mode 3)
-  and the 2-D-targeted mode `2` are straightforward follow-ups.
+- **Profiling auto-tune modes 1/3/4 are 3-D only.** On 2-D inputs they log a
+  warning and fall through to the deterministic baseline. Modes 2 and 5 are
+  dim-agnostic — mode 2 has explicit 2-D / 3-D dispatches in the probe kernel;
+  mode 5 never launches a probe kernel.
 - `isGraphCompatible()` returns `false` in the MVP. The forward path does no
   D2H during `execute()`, but the auto-tune scan and `postStreamSync()` for the
   outlier count do. End-to-end graph compatibility will be enabled after the
   manual-radius graph capture path is tested.
+- **Fixed `LEVEL = 4` (3-D) / `LEVEL = 6` (2-D) and fixed anchor tile size
+  `16 × 16 × 16` (3-D) / `16 × 16` (2-D)** — these match cuSZ-Hi's hardcoded
+  choices and are not user-configurable. Varying them would explode templated
+  kernel instantiations and require encoding the choice in the FZM header.
+  No planned work here unless a workload demonstrates a CR gap.
+- **2-D auto-tune mode 3** (`pa_spline_infprecis_data` SPLINE_DIM==2 branch) is
+  intentionally not wired — the upstream error layout has overlapping BIY slots
+  (e.g. `errors[6+BIY*3+TIX]` indices collide between levels 2 and 1) that the
+  cuSZ-Hi mode-3 2-D path appears to interpret inconsistently. Deferred until
+  the upstream semantics are resolved.
 
 ---
 
@@ -257,7 +291,7 @@ error_bound  = 1e-2
 error_bound_mode = "ABS"    # "ABS", "REL", or "NOA"
 quant_radius = 0            # 0 = auto-tune (default); positive = manual override
 outlier_capacity = 0.10
-auto_tuning  = 0            # 0=off, 1=cheap, 3=full structural
+auto_tuning  = 0            # 0=off, 1=cheap, 2=alt-cheap, 3=full, 4=full+a/b sweep, 5=manual
 ```
 
 ---

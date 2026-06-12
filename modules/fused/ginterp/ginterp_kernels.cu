@@ -15,9 +15,9 @@
  * auto-tuned result of `c_spline_profiling_data` (mode 1) or
  * `pa_spline_infprecis_data` (mode 3) read back via D2H.
  *
- * Mode-2 profiling (`c_spline_profiling_data_2`), mode-4 (alpha/beta sweep
- * inside `pa_spline_infprecis_data` with workflow=false), and the 2-D path
- * are not wired here — they're follow-up scope.
+ * Mode-2 profiling (`c_spline_profiling_data_2` — `auto_tuning==2`), mode-4
+ * (alpha/beta sweep inside `pa_spline_infprecis_data` with workflow=false),
+ * and the 2-D path are all wired here.
  */
 
 #include "fused/ginterp/ginterp_kernels.h"
@@ -253,7 +253,50 @@ void launchGInterpProfileMode1(
             d_errors);
 }
 
-// ─── profiling mode 3 (full structural) ──────────────────────────────────────
+// ─── profiling mode 2 (alternate cheap probe) ────────────────────────────────
+//
+// Runs `c_spline_profiling_data_2`. Single-block launch, writes 6 floats:
+// forward/reverse × {cubic, natural} on a tiny shared-mem sample. Works for
+// both 3-D and 2-D inputs (the kernel is templated on SPLINE_DIM).
+
+template <typename TInput>
+void launchGInterpProfileMode2(
+    const TInput* d_data, dim3 data_len3,
+    int dim,
+    float* d_errors,
+    cudaStream_t stream)
+{
+    dim3 grid(1, 1, 1);
+    dim3 block(kLinearBlockSize, 1, 1);
+    dim3 data_st3 = stride3FromLen3(data_len3);
+
+    if (dim == 3) {
+        fz::ginterp::c_spline_profiling_data_2<
+            TInput*, kSplineDim3,
+            kProfileNumBlockX, kProfileNumBlockY, kProfileNumBlockZ,
+            kLinearBlockSize>
+            <<<grid, block, 0, stream>>>(
+                const_cast<TInput*>(d_data), data_len3, data_st3,
+                d_errors);
+    } else {
+        // 2-D path: PROFILE_NUM_BLOCK_Z = 1 (z axis flattened).
+        fz::ginterp::c_spline_profiling_data_2<
+            TInput*, kSplineDim2,
+            kProfileNumBlockX, kProfileNumBlockY, 1,
+            kLinearBlockSize>
+            <<<grid, block, 0, stream>>>(
+                const_cast<TInput*>(d_data), data_len3, data_st3,
+                d_errors);
+    }
+}
+
+// ─── profiling mode 3 (full structural) / mode 4 (alpha/beta sweep) ──────────
+//
+// The cuSZ-Hi `pa_spline_infprecis_data` kernel handles both probe families:
+//   - `workflow=true`  → mode-3 structural probe: grid.y=9, errors 0..17 (3-D)
+//   - `workflow=false` → mode-4 alpha/beta sweep: grid.y=11, errors 0..10
+// The kernel's internal `pre_compute_att` reads BIY to dispatch the variant
+// for that grid block (see ginterp_md.inl pre_compute_att SPLINE_DIM==3 block).
 
 template <typename TInput>
 void launchGInterpProfileMode3(
@@ -262,15 +305,17 @@ void launchGInterpProfileMode3(
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
+    bool workflow,                // true: mode-3 (structural); false: mode-4 (a/b)
     cudaStream_t stream)
 {
-    // Match cuSZ-Hi 3-D launch (spline3.cu line 217):
-    //   grid = (block_num, 9, 1)   -- workflow=true → 9 variant probes per level
-    // Each grid.y slot writes a distinct error slot in `d_errors`.
+    // grid.y = 9 for workflow=true (mode 3); grid.y = 11 for workflow=false
+    // (mode 4 — 11 alpha/beta combos enumerated in pre_compute_att,
+    // matching cuSZ-Hi spline3.cu line 409 where mode 4 launches with y=11).
     unsigned block_num = sample_block_grid_sizes.x
                         * sample_block_grid_sizes.y
                         * sample_block_grid_sizes.z;
-    dim3 grid(block_num, 9, 1);
+    const unsigned grid_y = workflow ? 9u : 11u;
+    dim3 grid(block_num, grid_y, 1);
     dim3 block(kLinearBlockSize, 1, 1);
     dim3 data_st3 = stride3FromLen3(data_len3);
 
@@ -287,7 +332,7 @@ void launchGInterpProfileMode3(
             sample_starts, sample_block_grid_sizes, sample_strides,
             eb_r, ebx2, intp_param,
             d_errors,
-            /*workflow=*/true);
+            workflow);
 }
 
 // ─── forward (compress) launcher — 2-D ───────────────────────────────────────
@@ -429,9 +474,12 @@ template void launchScatterOutliers<float>(
 template void launchGInterpProfileMode1<float>(
     const float*, dim3, float*, cudaStream_t);
 
+template void launchGInterpProfileMode2<float>(
+    const float*, dim3, int, float*, cudaStream_t);
+
 template void launchGInterpProfileMode3<float>(
     const float*, dim3, dim3, dim3, dim3, float, float,
-    const INTERPOLATION_PARAMS&, float*, cudaStream_t);
+    const INTERPOLATION_PARAMS&, float*, bool, cudaStream_t);
 
 } // namespace ginterp
 } // namespace fz

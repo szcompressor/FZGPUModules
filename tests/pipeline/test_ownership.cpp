@@ -100,7 +100,8 @@ TEST(Ownership, CompressOutputPoolOwnedDataCorrect) {
 
     std::vector<float> h_recon(N);
     FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
-    cudaFree(d_dec);
+    // d_dec is pool-owned by default — Pipeline destructor frees it via the
+    // pool. A caller cudaFree here would double-free.
 
     EXPECT_LE(max_abs_error(h_in, h_recon), EB * 1.01f);
 }
@@ -159,6 +160,10 @@ TEST(Ownership, DecompressDefaultCallerOwned) {
 
     auto h_in = make_random_floats(N, 30);
     auto p = make_pipeline(N);
+    // Test verifies caller-owned-mode contract: opt out of the pool-managed
+    // default so the returned pointer is from a fresh cudaMalloc and can be
+    // legitimately cudaFree'd here.
+    p->setPoolManagedDecompOutput(false);
 
     CudaStream stream;
     CudaBuffer<float> d_in(N);
@@ -414,7 +419,7 @@ TEST(Ownership, ZeroSizeCompressRoundTrip) {
     ASSERT_NO_THROW(p->decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream))
         << "Decompress of zero-size compressed stream must not throw";
 
-    if (d_dec) cudaFree(d_dec);
+    if (d_dec && !p->isPoolManagedDecompOutput()) cudaFree(d_dec);
 }
 
 
@@ -465,7 +470,7 @@ TEST(Ownership, GetLastUncompressedSizeCorrect) {
     std::vector<float> h_recon(N1);
     FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, decomp_bytes, cudaMemcpyDeviceToHost));
     EXPECT_LE(max_abs_error(h_in1, h_recon), EB * 1.01f);
-    cudaFree(d_dec);
+    if (!p->isPoolManagedDecompOutput()) cudaFree(d_dec);
 
     // Value persists across reset().
     p->reset(stream);

@@ -33,6 +33,16 @@ void ADMStage::initScratch(size_t num_elements, MemoryPool* pool)
     const int    sig_bytes   = maxSignalBytes();
     const size_t ctr_bytes   = centerElemBytes();
 
+    // The ADM map kernels each write a full `kBlockElems` slice per grid
+    // block (32 lanes × 16 bytes via vectorised int4 stores into d_codes_;
+    // 32 lanes × 16 × sig_bytes via int2 stores into the signal buffers),
+    // regardless of how many of those elements actually exist in the input.
+    // d_codes_, d_concat_signals_, and d_bit_signals_ therefore need to be
+    // padded up to a full multiple of kBlockElems or the trailing lanes
+    // write past the allocation. Only the first num_elements bytes (resp.
+    // num_elements × sig_bytes) are copied to the user output later.
+    const size_t padded_n = gsize * static_cast<size_t>(adm::kBlockElems);
+
     // Release existing allocations before resizing.
     if (d_signal_length_)  pool->freePersistentDevice(d_signal_length_);
     if (d_output_lengths_) pool->freePersistentDevice(d_output_lengths_);
@@ -54,11 +64,11 @@ void ADMStage::initScratch(size_t num_elements, MemoryPool* pool)
     d_block_flags_    = static_cast<uint32_t*>(pool->allocatePersistentDevice(
         flags_words * sizeof(uint32_t), "adm.block_flags"));
     d_codes_          = static_cast<uint8_t*>(pool->allocatePersistentDevice(
-        num_elements, "adm.codes"));
+        padded_n, "adm.codes"));
     d_concat_signals_ = static_cast<uint8_t*>(pool->allocatePersistentDevice(
-        num_elements * sig_bytes, "adm.concat_signals"));
+        padded_n * sig_bytes, "adm.concat_signals"));
     d_bit_signals_    = static_cast<uint8_t*>(pool->allocatePersistentDevice(
-        num_elements * sig_bytes, "adm.bit_signals"));
+        padded_n * sig_bytes, "adm.bit_signals"));
     d_loc_offset_     = static_cast<int*>(pool->allocatePersistentDevice(
         (gsize + 1) * sizeof(int), "adm.loc_offset"));
     d_prefix_state_   = static_cast<int*>(pool->allocatePersistentDevice(

@@ -146,6 +146,23 @@ void launchGInterpProfileMode1(
     cudaStream_t stream);
 
 /**
+ * Profiling mode 2 — runs the alternate cheap `c_spline_profiling_data_2`
+ * kernel. Writes 6 floats to `d_errors[0..5]` covering forward/reverse × cubic
+ * and natural splines on a tiny shared-mem sample. Used to pick a single
+ * `use_natural` × `reverse` pair replicated across all levels (and clears
+ * `use_md`). Cheaper than mode 3 and works on both 3-D and 2-D inputs.
+ *
+ * `dim` is 3 for 3-D inputs and 2 for 2-D inputs (`data_len3.z == 1`).
+ * Single-block launch — `auto_tuning_grid_dim = dim3(1,1,1)`.
+ */
+template <typename TInput>
+void launchGInterpProfileMode2(
+    const TInput* d_data, dim3 data_len3,
+    int dim,
+    float* d_errors,
+    cudaStream_t stream);
+
+/**
  * Profiling mode 3 — runs the structural `pa_spline_infprecis_data` kernel
  * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks and produces
  * 18 errors for the 3-D path. Caller must `launchGInterpResetErrors` first.
@@ -159,6 +176,11 @@ void launchGInterpProfileMode1(
  * `sample_starts`, `sample_block_grid_sizes`, `sample_strides` are derived
  * from `data_len3` (see cuSZ-Hi `spline3.cu` `calc_start_size` for the recipe;
  * `S_STRIDE = 8 * 16` in 3-D).
+ *
+ * `workflow` selects the probe family:
+ *   - `true`  → structural (mode 3): grid.y=9, errors[0..17] per layout above
+ *   - `false` → alpha/beta sweep (mode 4): grid.y=11, errors[0..10] one per
+ *     `(alpha, beta)` combo enumerated by pre_compute_att (SPLINE3_AB_ATT).
  */
 template <typename TInput>
 void launchGInterpProfileMode3(
@@ -167,6 +189,7 @@ void launchGInterpProfileMode3(
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
+    bool workflow,
     cudaStream_t stream);
 
 /**

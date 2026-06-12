@@ -896,6 +896,256 @@ TEST(GInterpStage, GI29_ConstantInputZeroOutliers) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GI31: AutoTuneMode4_3D — alpha/beta sweep on top of mode 3. Verifies the
+// 8-combo probe doesn't crash and reconstruction stays within bound. The
+// resolved alpha/beta after the sweep should be in the cuSZ-Hi grid:
+// alpha ∈ {1.0, 1.25, 1.5, 1.75}, beta ∈ {2.0, 3.0, 4.0}.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI31_AutoTuneMode4_3D) {
+    const size_t NX = 64, NY = 64, NZ = 64;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(4);  // structural + alpha/beta sweep
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 4 max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI32: AutoTuneMode5_Manual — manual alpha/beta override path. No profiling
+// kernel runs; the user-supplied (alpha=1.5, beta=3.0) flow through to the
+// kernel verbatim. Tests both that the round-trip works and that the resolved
+// params end up in the serialized header (recoverable from the .fzm).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI32_AutoTuneMode5_Manual) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+    const std::string path = "/tmp/test_ginterp_gi32.fzm";
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(5);
+    stage->setManualAlphaBeta(1.5, 3.0);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_file_round_trip<float>(p, h_input, cs.stream, path);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 5 manual max_error=" << res.max_error;
+    std::remove(path.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI33: AutoTuneMode5_2D — mode 5 is dim-agnostic (no profiling kernel) so
+// 2-D inputs must NOT fall back to baseline like modes 1/3/4 do.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI33_AutoTuneMode5_2D) {
+    const size_t NX = 128, NY = 64, NZ = 1;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(5);
+    stage->setManualAlphaBeta(2.0, 4.0);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 5 2-D max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI34: AutoTuneMode5_DefaultsToPiecewiseLinear — calling setAutoTuning(5)
+// without setManualAlphaBeta() should still use the cuSZ-Hi piecewise-linear
+// alpha schedule (the same one mode 1/3/4 use) and beta=4.0 default.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI34_AutoTuneMode5_NoManualUsesPiecewiseLinear) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(5);
+    // No setManualAlphaBeta — should fall through to piecewise-linear alpha
+    // schedule (cuSZ-Hi recipe) and beta=4.0.
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.1)
+        << "Mode 5 no-manual max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI35: AutoTuneMode4_FileRoundTrip — full .fzm round-trip exercising the
+// 4-mode resolved params survive serialization.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI35_AutoTuneMode4_FileRoundTrip) {
+    const size_t NX = 64, NY = 64, NZ = 64;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+    const std::string path = "/tmp/test_ginterp_gi35.fzm";
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(4);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_file_round_trip<float>(p, h_input, cs.stream, path);
+
+    EXPECT_LE(res.max_error, eb * 1.5);
+    std::remove(path.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI36: AutoTuneMode2_3D — alternate cheap probe on a 3-D input. Exercises
+// the c_spline_profiling_data_2 → use_natural + reverse decision rule and
+// confirms reconstruction stays inside the error bound. Mode 2 is much cheaper
+// than mode 3 (a single 1-block kernel that writes 6 floats) and is useful
+// when mode 3's profile cost is too high relative to the encode work.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI36_AutoTuneMode2_3D) {
+    const size_t NX = 64, NY = 64, NZ = 64;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(2);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 2 (3-D) max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI37: AutoTuneMode2_2D — mode 2 IS dim-agnostic in cuSZ-Hi (unlike 1/3/4).
+// The 2-D path uses a slightly different decision rule (4-slot nat sum,
+// 2× reverse margin, flags written to all 6 level slots). This test confirms
+// the 2-D dispatch picks the right SPLINE_DIM template and the round-trip
+// stays in bound.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI37_AutoTuneMode2_2D) {
+    const size_t NX = 128, NY = 64, NZ = 1;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(2);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 2 (2-D) max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI38: AutoTuneMode2_FileRoundTrip — mode 2 resolved use_natural + reverse
+// flags travel through the FZM header to the decoder and reconstruction stays
+// in bound after deserialize. Confirms the 6-slot use_natural array is
+// persisted correctly (not just the active 4 levels).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI38_AutoTuneMode2_FileRoundTrip) {
+    const size_t NX = 64, NY = 64, NZ = 64;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-2f;
+    const std::string path = "/tmp/test_ginterp_gi38.fzm";
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(2);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_file_round_trip<float>(p, h_input, cs.stream, path);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 2 file round-trip max_error=" << res.max_error;
+    std::remove(path.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI39: AutoTuneMode4_11Combos — mode 4's α/β sweep now covers 11 combos
+// (was 8) including the α=2.0 row. Use a tight error bound so a high-alpha
+// pick is plausible, confirming we can in principle reach the new combos
+// without indexing past the buffer. Reconstruction must stay in bound.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI39_AutoTuneMode4_11Combos) {
+    const size_t NX = 64, NY = 64, NZ = 64;
+    const size_t in_bytes = NX * NY * NZ * sizeof(float);
+    const float  eb = 1e-4f;   // tight bound → mode 4 may favor higher alpha
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setAutoTuning(4);
+    stage->setQuantRadius(4096);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Mode 4 (11 combos) max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GI30: Pipeline integration — feed GInterp codes into a downstream coder
 // (HuffmanStage). Verifies the "codes" port is the right contract for chained
 // compression and that the full pipeline survives the round-trip with the

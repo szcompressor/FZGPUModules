@@ -75,7 +75,10 @@ static float round_trip_error(Pipeline& p, const std::vector<float>& h_input,
     std::vector<float> h_recon(h_input.size());
     cudaError_t cpy_err = cudaMemcpy(h_recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
     EXPECT_EQ(cpy_err, cudaSuccess) << "cudaMemcpy failed: " << cudaGetErrorString(cpy_err);
-    cudaFree(d_dec);
+    // d_dec ownership matches setPoolManagedDecompOutput. Pool-managed (the
+    // default) is freed by Pipeline destructor — a caller cudaFree here
+    // would double-free and trigger cudaErrorInvalidValue at teardown.
+    if (!p.isPoolManagedDecompOutput()) cudaFree(d_dec);
 
     return max_abs_error(h_input, h_recon);
 }
