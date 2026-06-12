@@ -330,13 +330,32 @@ public:
         return sizeof(GInterpConfig);
     }
 
-    /// MVP: false. The forward path does no D2H during execute(), and the
-    /// inverse outlier scatter reads `*d_outlier_count` on-device. The only
-    /// host-blocking call is `postStreamSync()` for the outlier count, which
-    /// runs outside the captured region (same pattern as LorenzoQuantStage).
-    /// Keeping this false for the first PR until graph compatibility is
-    /// verified end-to-end with a real capture+replay test.
-    bool isGraphCompatible() const override { return false; }
+    /// Graph-compatible iff `execute()` does no host-blocking work. Four
+    /// scans inside `execute()` can break capture, each conditional:
+    ///   1. `computeValueBase()` (D2H min/max scan) — runs for REL/NOA when
+    ///      `precomputed_value_base <= 0`. Caller must `setValueBase(...)` to
+    ///      skip this.
+    ///   2. Radius auto-tune — runs when `quant_radius == 0`. Caller must
+    ///      `setQuantRadius(...)` to a positive value to skip.
+    ///   3. Auto-tune profile kernels (modes 1/2/3/4) each end with a D2H +
+    ///      `cudaStreamSynchronize` of the error array. Only modes 0
+    ///      (baseline) and 5 (manual α/β override) skip the profile entirely.
+    ///   4. Mode 5 with `manual_alpha <= 0` still computes `rel_eb` to pick α
+    ///      from the piecewise-linear schedule, which (for ABS) goes through
+    ///      the same min/max scan. Caller must `setManualAlphaBeta(α>0, β)` to
+    ///      skip that. (Mode 0 never touches `rel_eb`.)
+    /// `postStreamSync()` runs outside the captured region (same pattern as
+    /// LorenzoQuantStage) so the outlier-count D2H doesn't gate this.
+    bool isGraphCompatible() const override {
+        const bool tune_ok = (config_.auto_tuning_mode == 0 ||
+                              config_.auto_tuning_mode == 5);
+        const bool radius_ok = config_.quant_radius > 0;
+        const bool eb_ok = (config_.eb_mode == ErrorBoundMode::ABS) ||
+                           (config_.precomputed_value_base > 0.0f);
+        const bool mode5_alpha_ok = (config_.auto_tuning_mode != 5) ||
+                                    (config_.manual_alpha > 0.0);
+        return tune_ok && radius_ok && eb_ok && mode5_alpha_ok;
+    }
 
 private:
     Config config_;

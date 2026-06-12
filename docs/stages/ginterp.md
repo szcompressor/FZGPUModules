@@ -63,7 +63,7 @@ to the algorithm — G-Interp ships only as the fused stage.
 
 | Parameter | Constraint |
 |---|---|
-| `TInput` | `float` (MVP — `double` not yet wired) |
+| `TInput` | `float` — `double` is not supported. Upstream cuSZ-Hi has `INIT(f8, …)` instantiations commented out as a placeholder in `src/kernel/spline3.cu`, so this matches upstream. |
 | `TCode`  | `uint8_t`, `uint16_t`, or `uint32_t` |
 
 ## Available instantiations
@@ -85,6 +85,7 @@ Only these types are compiled and linked:
 | `setOutlierCapacity(c)` | `float` | `0.10` | Fraction of `N` reserved for outliers (0.10 ⇒ 10%) |
 | `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (REL); set before graph capture |
 | `setAutoTuning(mode)` | `uint8_t` | `0` | Enable `INTERPOLATION_PARAMS` auto-tuning — see "Auto-tuning" below |
+| `setManualAlphaBeta(α, β)` | `double, double` | `0, 0` | Mode 5 only. Either value `0` falls back to the cuSZ-Hi piecewise-linear α schedule / `β = 4.0` default. Both `> 0` is required for graph-safe mode 5. |
 
 ### Radius auto-tune
 
@@ -131,8 +132,8 @@ g->setAutoTuning(3);   // recommended: full structural profiling
 | `0` | none | (off; baseline) | 2-D + 3-D | yes |
 | `1` | `c_spline_profiling_data` (2 errors, ~1 ms) | `reverse[0..3]` only (one global bool replicated) | 3-D only | no |
 | `2` | `c_spline_profiling_data_2` (6 errors, ~1 ms) | single `use_natural` × `reverse` replicated across all levels; clears `use_md` | 2-D + 3-D | no |
-| `3` | `pa_spline_infprecis_data` workflow=true (18 errors, ~5–15 ms) | `use_md` / `use_natural` / `reverse` per level (cuSZ-Hi paper mode) | 3-D only | no |
-| `4` | mode 3 + `pa_spline_infprecis_data` workflow=false (+11 errors, ~10–20 ms total) | mode-3 flags **plus** sweeps 11 (alpha, beta) combos and picks the lowest-error | 3-D only | no |
+| `3` | `pa_spline_infprecis_data` workflow=true (18 errors 3-D / 27 errors 2-D, ~5–15 ms) | `use_md` / `use_natural` / `reverse` per level (cuSZ-Hi paper mode) | 2-D + 3-D | no |
+| `4` | mode 3 + `pa_spline_infprecis_data` workflow=false (+11 errors, ~10–20 ms total) | mode-3 flags **plus** sweeps 11 (alpha, beta) combos and picks the lowest-error | 2-D + 3-D | no |
 | `5` | none (manual override) | resolved `alpha` / `beta` (user-supplied or piecewise-linear default); structural flags stay at baseline | 2-D + 3-D | yes |
 
 **Mode 2 — alternate cheap probe.** Runs `c_spline_profiling_data_2`, which
@@ -174,7 +175,10 @@ g->setErrorBound(1e-3f);
 g->setAutoTuning(3);
 ```
 
-**Profiling modes (1/2/3/4) are incompatible with CUDA graph capture.** Each
+**Profiling modes (1/2/3/4) are incompatible with CUDA graph capture.** Modes
+0 and 5 are graph-safe when combined with a manual `setQuantRadius(...)` and
+either ABS mode or a `setValueBase(...)` (REL/NOA). For mode 5, also
+`setManualAlphaBeta(α>0, β>0)` to skip the `rel_eb`-based α picker. Each
 probe ends with a D2H of the error array and a `cudaStreamSynchronize`, which
 would error out inside a captured region. **Mode 5 is graph-safe** since it
 never launches a profile kernel. `isGraphCompatible()` returns `false` in
@@ -204,24 +208,29 @@ Other limitations:
 - Best results when each `dim` is a multiple of 16 (the anchor tile size,
   used by both the 3-D and 2-D paths). Ragged dims still work but edge
   voxels see slightly worse prediction.
-- **Profiling auto-tune modes 1/3/4 are 3-D only.** On 2-D inputs they log a
-  warning and fall through to the deterministic baseline. Modes 2 and 5 are
-  dim-agnostic — mode 2 has explicit 2-D / 3-D dispatches in the probe kernel;
-  mode 5 never launches a probe kernel.
-- `isGraphCompatible()` returns `false` in the MVP. The forward path does no
-  D2H during `execute()`, but the auto-tune scan and `postStreamSync()` for the
-  outlier count do. End-to-end graph compatibility will be enabled after the
-  manual-radius graph capture path is tested.
-- **Fixed `LEVEL = 4` (3-D) / `LEVEL = 6` (2-D) and fixed anchor tile size
-  `16 × 16 × 16` (3-D) / `16 × 16` (2-D)** — these match cuSZ-Hi's hardcoded
-  choices and are not user-configurable. Varying them would explode templated
-  kernel instantiations and require encoding the choice in the FZM header.
-  No planned work here unless a workload demonstrates a CR gap.
-- **2-D auto-tune mode 3** (`pa_spline_infprecis_data` SPLINE_DIM==2 branch) is
-  intentionally not wired — the upstream error layout has overlapping BIY slots
-  (e.g. `errors[6+BIY*3+TIX]` indices collide between levels 2 and 1) that the
-  cuSZ-Hi mode-3 2-D path appears to interpret inconsistently. Deferred until
-  the upstream semantics are resolved.
+- **Profiling auto-tune mode 1 is 3-D only.** On 2-D inputs it logs a warning
+  and falls through to the deterministic baseline. Modes 2, 3, 4, 5 all work
+  on both 2-D and 3-D inputs.
+- `isGraphCompatible()` is **mode-aware**: returns `true` for modes 0 and 5
+  when `quant_radius > 0`, the error-bound mode is ABS or a `value_base` is
+  pre-set, and (for mode 5) `manual_alpha > 0`. Modes 1/2/3/4 each end with a
+  D2H + `cudaStreamSynchronize` of the error array, so those remain
+  graph-incompatible.
+- **Fixed `LEVEL = 4` and anchor tile size `16` on every axis** for both
+  3-D (16×16×16) and 2-D (16×16) — these stay aligned with cuSZ-Hi's hardcoded
+  choices for the 3-D path. The 2-D path uses the same `LEVEL=4 / 16×16` tile
+  rather than upstream cuSZ-Hi's `LEVEL=6 / 8×8 × 4`-numAnchorBlocks default
+  (which has a known `c_gather_anchor` off-by-numAnchorBlock bug). Varying
+  LEVEL would explode templated kernel instantiations and require encoding
+  the choice in the FZM header. No planned work here unless a workload
+  demonstrates a CR gap.
+- **2-D auto-tune mode 3** uses a locally patched offset in
+  `pa_spline_infprecis_data`: upstream cuSZ-Hi writes the SPLINE_DIM==2
+  level==0 atomic at `errors+15+BIY` (BIY=5..10 → slots 20..25), which
+  collides with the level==1 BIY=4 write at slot 20. Our copy writes at
+  `errors+16+BIY` to match the host-side analysis loop's expected layout
+  (level_id=0 at errors[21..26]). See the adapter-changes block at the top of
+  `modules/fused/ginterp/ginterp_md.inl`.
 
 ---
 

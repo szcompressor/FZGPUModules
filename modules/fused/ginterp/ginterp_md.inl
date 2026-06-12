@@ -14,6 +14,13 @@
  *     and device helpers and needs neither)
  *   - `cusz/type.h` replaced by the minimal `cusz_type_subset.h` (only `u4`
  *     and `INTERPOLATION_PARAMS` are needed by these kernels)
+ *   - `pa_spline_infprecis_data` SPLINE_DIM==2 level==0 atomic offset fixed
+ *     from `errors + 15 + BIY` to `errors + 16 + BIY`. The upstream offset
+ *     placed BIY=5 at slot 20, which collided with the level==1 BIY=4 write
+ *     to the same slot (level==1 writes `errors + 6 + BIY*3 + TIX` → BIY=4
+ *     fills 18..20). The host-side analysis loop `for(level=3; level<LEVEL;
+ *     ++level) errors[level*6-9 .. level*6-4]` expects level=5 (level_id=0)
+ *     at errors[21..26], so the corrected offset matches the read pattern.
  *
  * The profiling kernels (`c_spline_profiling_data*`, `pa_spline_infprecis_data`,
  * `reset_errors`) and the device-side `auto_tuning*` helpers are kept here
@@ -3054,16 +3061,22 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                 else{
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size, global_starts, eb_r, eb_x2, level, intp_param, shmem_err);
                     if(TIX==0){
-                        atomicAdd(const_cast<T*>(errors + 15 + BIY), shmem_err[0]);
+                        // 2-D level==0 (level_id=0 for LEVEL=6) atomic offset
+                        // was `errors + 15 + BIY` upstream (BIY=5..10 → slots
+                        // 20..25). slot 20 collides with the level==1 BIY=4
+                        // write (level_id=1 fills 18..20). Host analysis reads
+                        // level_id=0 at errors[21..26], so corrected to
+                        // `errors + 16 + BIY`. See adapter-changes comment.
+                        atomicAdd(const_cast<T*>(errors + 16 + BIY), shmem_err[0]);
                     }
                 }
-                
+
             }
             else{
                 fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_AB_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err);
                 if(TIX==0)
                     atomicAdd(const_cast<T*>(errors+BIY),shmem_err[0]);
-            
+
             }
         }
     }

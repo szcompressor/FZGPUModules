@@ -147,7 +147,22 @@ Contact: SZ Team (szlossycompressor@gmail.com)
   `outlier_count` output ports; minimal `cusz_type_subset.h` reproduces
   only the `INTERPOLATION_PARAMS` struct and `u4` typedef from upstream
   `cusz/type.h`. Host-side wrapper, memory-pool integration, outlier-
-  fusion contract, and radius auto-tune are FZGPUModules code.
+  fusion contract, radius auto-tune, and all five auto-tune modes
+  (`setAutoTuning(0..5)`) are FZGPUModules code wrapping the upstream
+  device kernels.
+
+**Bug fix patched locally:** `pa_spline_infprecis_data`'s SPLINE_DIM==2
+level==0 atomic offset was `errors + 15 + BIY` upstream, placing BIY=5
+at slot 20 which collided with the level==1 BIY=4 write to the same
+slot. The host-side analysis loop `for(level=3; level<LEVEL; ++level)
+errors[level*6-9 .. level*6-4]` expects level=5 (level_id=0) at
+`errors[21..26]`, so our copy uses `errors + 16 + BIY`. The fix is
+documented in the adapter-changes comment block at the top of
+`ginterp_md.inl` and in [docs/stages/ginterp.md](docs/stages/ginterp.md).
+
+**Reference copy** of the upstream kernels (unmodified) is in
+`memory/references/spline_cuszhi/` (`spline3.cu`, `spline3_md.inl`,
+`type.h`) for cross-checking against the patched local copy.
 
 **License:**
 

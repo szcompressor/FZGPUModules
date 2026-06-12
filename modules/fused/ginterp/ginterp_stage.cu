@@ -290,7 +290,7 @@ static void runAutoTuneMode3(
 
     fz::ginterp::launchGInterpResetErrors(d_errors, stream);
     fz::ginterp::launchGInterpProfileMode3<TInput>(
-        d_data, data_len3,
+        d_data, data_len3, /*dim=*/3,
         dim3((unsigned)sx_start, (unsigned)sy_start, (unsigned)sz_start),
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
@@ -386,7 +386,7 @@ static void runAutoTuneMode4(
 
     fz::ginterp::launchGInterpResetErrors(d_errors, stream);
     fz::ginterp::launchGInterpProfileMode3<TInput>(
-        d_data, data_len3,
+        d_data, data_len3, /*dim=*/3,
         dim3((unsigned)sx_start, (unsigned)sy_start, (unsigned)sz_start),
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
@@ -421,6 +421,166 @@ static void runAutoTuneMode4(
         h_errors[0], h_errors[1], h_errors[2],  h_errors[3],
         h_errors[4], h_errors[5], h_errors[6],  h_errors[7],
         h_errors[8], h_errors[9], h_errors[10]);
+}
+
+// ─── runAutoTuneMode3_2D: full structural (2-D path) ─────────────────────────
+//
+// Mirrors `runAutoTuneMode3` but for 2-D inputs. The 2-D `pa_spline_infprecis`
+// kernel writes errors[0..26] with a different per-BIY layout (see kernel
+// launcher doc). For our LEVEL=4 / 16×16 anchor tile the BIY=0 errors[0..5]
+// probe kernel-levels 5,4 which are degenerate at this tile size and are
+// ignored. We consume:
+//   errors[6..8]    coarsest probed (kernel level=3) — 3 variants
+//                   (rev off, rev on, use_md) → resolves intp_param[3]
+//   errors[9..14]   kernel level=2 — 6 variants → resolves intp_param[2]
+//   errors[15..20]  kernel level=1 — 6 variants → resolves intp_param[1]
+//   errors[21..26]  kernel level=0 — 6 variants → resolves intp_param[0]
+// Variant decoding follows cuSZ-Hi spline3.cu's 2-D analysis loop
+// (line 344-362): best_idx in [base..base+5] →
+//   use_natural = ((best_idx + 3) % 6) > 2
+//   use_md      = ((best_idx + 3) % 6) == 2 or == 5
+//   reverse     = (best_idx + 3) % 3
+// `S_STRIDE = 20 * AnchorBlockSizeX = 320` matches cuSZ-Hi line 174.
+template <typename TInput, typename TCode>
+static void runAutoTuneMode3_2D(
+    const TInput* d_data,
+    dim3 data_len3,
+    float eb_r, float ebx2,
+    INTERPOLATION_PARAMS intp_param,
+    float* d_errors,
+    float* h_errors,
+    cudaStream_t stream,
+    uint8_t (&out_use_md)[6],
+    uint8_t (&out_use_natural)[6],
+    uint8_t (&out_reverse)[6])
+{
+    constexpr int kBlock16  = 16;
+    const int     S_STRIDE  = 20 * kBlock16;
+
+    auto calc_start_size = [&](int dim, int& s_start, int& s_size, int block_sz) {
+        int mid = dim / 2;
+        int k = (mid - block_sz / 2) / S_STRIDE;
+        int t = (dim - block_sz / 2 - 1 - mid) / S_STRIDE;
+        s_start = mid - k * S_STRIDE;
+        s_size  = k + t + 1;
+        if (s_size < 1) s_size = 1;
+        if (s_start < 0) s_start = 0;
+    };
+    int sx_start, sy_start, sz_start;
+    int sx_size,  sy_size,  sz_size;
+    calc_start_size((int)data_len3.x, sx_start, sx_size, kBlock16);
+    calc_start_size((int)data_len3.y, sy_start, sy_size, kBlock16);
+    // z fixed at 1 for 2-D — calc_start_size with size=1 produces s_start=0, s_size=1.
+    calc_start_size((int)data_len3.z, sz_start, sz_size, kBlock16);
+
+    fz::ginterp::launchGInterpResetErrors(d_errors, stream);
+    fz::ginterp::launchGInterpProfileMode3<TInput>(
+        d_data, data_len3, /*dim=*/2,
+        dim3((unsigned)sx_start, (unsigned)sy_start, (unsigned)sz_start),
+        dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
+        dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
+        eb_r, ebx2, intp_param,
+        d_errors, /*workflow=*/true, stream);
+    FZ_CUDA_CHECK(cudaGetLastError());
+    FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 27 * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Level 3 (kernel coarsest, errors[6..8]): 3 variants — rev off, rev on, use_md.
+    float best;
+    if (h_errors[6] > h_errors[7]) { best = h_errors[7]; out_reverse[3] = 1; }
+    else                            { best = h_errors[6]; out_reverse[3] = 0; }
+    out_use_md[3] = (h_errors[8] < best) ? 1 : 0;
+
+    // Helper for the 6-variant decode used by levels 2, 1, 0 (cuSZ-Hi 2-D loop).
+    auto decode_6 = [](const float* e, uint8_t& um, uint8_t& un, uint8_t& rv) {
+        int best_idx = 0;
+        float bv = e[0];
+        for (int i = 1; i < 6; ++i) if (e[i] < bv) { bv = e[i]; best_idx = i; }
+        const int adj = (best_idx + 3) % 6;
+        un = (adj > 2) ? 1 : 0;
+        um = (adj == 2 || adj == 5) ? 1 : 0;
+        rv = static_cast<uint8_t>((best_idx + 3) % 3);
+    };
+
+    decode_6(&h_errors[9],  out_use_md[2], out_use_natural[2], out_reverse[2]);
+    decode_6(&h_errors[15], out_use_md[1], out_use_natural[1], out_reverse[1]);
+    decode_6(&h_errors[21], out_use_md[0], out_use_natural[0], out_reverse[0]);
+
+    FZ_LOG(DEBUG,
+        "GInterp auto-tune mode 3 (2-D): lvl{3,2,1,0} reverse={%d,%d,%d,%d} "
+        "use_md={%d,%d,%d,%d} use_nat={%d,%d,%d,%d}",
+        (int)out_reverse[3], (int)out_reverse[2], (int)out_reverse[1], (int)out_reverse[0],
+        (int)out_use_md[3],  (int)out_use_md[2],  (int)out_use_md[1],  (int)out_use_md[0],
+        (int)out_use_natural[3], (int)out_use_natural[2],
+        (int)out_use_natural[1], (int)out_use_natural[0]);
+}
+
+// ─── runAutoTuneMode4_2D: alpha/beta sweep (2-D path) ────────────────────────
+//
+// Same 11-(α,β)-combo sweep as `runAutoTuneMode4` but for 2-D. The kernel's
+// SPLINE_DIM==2 SPLINE3_AB_ATT pre_compute_att enumerates the same BIY=0..10
+// alpha/beta mapping (cuSZ-Hi spline3.cu line 2063-2076 in ginterp_md.inl).
+template <typename TInput, typename TCode>
+static void runAutoTuneMode4_2D(
+    const TInput* d_data,
+    dim3 data_len3,
+    float eb_r, float ebx2,
+    INTERPOLATION_PARAMS intp_param,
+    float* d_errors,
+    float* h_errors,
+    cudaStream_t stream,
+    double& out_alpha,
+    double& out_beta)
+{
+    constexpr int kBlock16 = 16;
+    const int     S_STRIDE = 20 * kBlock16;
+
+    auto calc_start_size = [&](int dim, int& s_start, int& s_size, int block_sz) {
+        int mid = dim / 2;
+        int k = (mid - block_sz / 2) / S_STRIDE;
+        int t = (dim - block_sz / 2 - 1 - mid) / S_STRIDE;
+        s_start = mid - k * S_STRIDE;
+        s_size  = k + t + 1;
+        if (s_size < 1) s_size = 1;
+        if (s_start < 0) s_start = 0;
+    };
+    int sx_start, sy_start, sz_start;
+    int sx_size,  sy_size,  sz_size;
+    calc_start_size((int)data_len3.x, sx_start, sx_size, kBlock16);
+    calc_start_size((int)data_len3.y, sy_start, sy_size, kBlock16);
+    calc_start_size((int)data_len3.z, sz_start, sz_size, kBlock16);
+
+    fz::ginterp::launchGInterpResetErrors(d_errors, stream);
+    fz::ginterp::launchGInterpProfileMode3<TInput>(
+        d_data, data_len3, /*dim=*/2,
+        dim3((unsigned)sx_start, (unsigned)sy_start, (unsigned)sz_start),
+        dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
+        dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
+        eb_r, ebx2, intp_param,
+        d_errors, /*workflow=*/false, stream);
+    FZ_CUDA_CHECK(cudaGetLastError());
+    FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
+                                   cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    static constexpr double kAlphaBeta[11][2] = {
+        {1.0,  2.0}, {1.25, 2.0},
+        {1.5,  2.0}, {1.5,  3.0}, {1.5,  4.0},
+        {1.75, 2.0}, {1.75, 3.0}, {1.75, 4.0},
+        {2.0,  2.0}, {2.0,  3.0}, {2.0,  4.0},
+    };
+    int best_idx = 0;
+    float best   = h_errors[0];
+    for (int i = 1; i < 11; ++i) {
+        if (h_errors[i] < best) { best = h_errors[i]; best_idx = i; }
+    }
+    out_alpha = kAlphaBeta[best_idx][0];
+    out_beta  = kAlphaBeta[best_idx][1];
+
+    FZ_LOG(DEBUG,
+        "GInterp auto-tune mode 4 (2-D): best combo idx=%d → alpha=%.3f beta=%.3f",
+        best_idx, out_alpha, out_beta);
 }
 
 // ─── setDims ─────────────────────────────────────────────────────────────────
@@ -667,24 +827,20 @@ void GInterpStage<TInput, TCode>::execute(
     //   0 : off (deterministic baseline) — also falls through here
     //   1 : cheap reverse-only probe (3-D only; D2H sync)
     //   2 : alternate cheap probe — use_natural × reverse (dim-agnostic; D2H sync)
-    //   3 : full structural probe (3-D only; D2H sync)
-    //   4 : mode 3 + alpha/beta sweep (3-D only; 2 D2H syncs)
+    //   3 : full structural probe (dim-agnostic; D2H sync)
+    //   4 : mode 3 + alpha/beta sweep (dim-agnostic; 2 D2H syncs)
     //   5 : manual alpha/beta override, no profiling (dim-agnostic, graph-safe)
-    // Modes 1/3/4 are 3-D-only because their probe kernels only have a
-    // SPLINE_DIM==3 branch wired in this stage (see ginterp_md.inl
-    // pa_spline_infprecis_data 2-D path — error layout ambiguous upstream).
-    // On 2-D inputs we warn and fall back to baseline. Modes 2 and 5 work
-    // on both dims (mode 2 has explicit 2-D / 3-D dispatches in upstream
-    // cuSZ-Hi; mode 5 never launches a profile kernel).
+    // Mode 1 is 3-D only (`c_spline_profiling_data` has no SPLINE_DIM==2
+    // branch). Modes 2/3/4/5 work on both dims. On 2-D mode 1 we warn and
+    // fall back to baseline.
     const bool needs_profiling =
         (config_.auto_tuning_mode == 1 || config_.auto_tuning_mode == 3 ||
          config_.auto_tuning_mode == 4);
-    if (needs_profiling && dim == 2) {
+    if (config_.auto_tuning_mode == 1 && dim == 2) {
         FZ_LOG(WARN,
-            "GInterp: setAutoTuning(%u) is wired for the 3-D path only — "
+            "GInterp: setAutoTuning(1) is wired for the 3-D path only — "
             "falling back to deterministic baseline for this 2-D input "
-            "(try mode 2 or mode 5 for 2-D auto-tuning)",
-            config_.auto_tuning_mode);
+            "(try mode 2, 3, 4, or 5 for 2-D auto-tuning)");
     }
 
     // Compute rel_eb (needed for the piecewise-linear alpha schedule) for
@@ -712,7 +868,11 @@ void GInterpStage<TInput, TCode>::execute(
         std::memset(resolved_reverse_,     0, sizeof(resolved_reverse_));
         resolved_use_md_[0] = resolved_use_md_[1] = 1;
 
-        const double rel_eb = compute_rel_eb();
+        // Defer compute_rel_eb() until we know it's needed — the rel_eb scan
+        // would break CUDA Graph capture, but with user-supplied alpha+beta
+        // we never look at it.
+        const bool need_rel_eb_for_alpha = (config_.manual_alpha <= 0.0);
+        const double rel_eb = need_rel_eb_for_alpha ? compute_rel_eb() : 0.0;
         resolved_alpha_ = (config_.manual_alpha > 0.0)
             ? config_.manual_alpha
             : pickAlphaFromRelEb(rel_eb);
@@ -749,7 +909,8 @@ void GInterpStage<TInput, TCode>::execute(
                 d_profiling_errors_, h_profiling_errors_, stream,
                 resolved_use_md_, resolved_use_natural_, resolved_reverse_);
         }
-    } else if (needs_profiling && dim == 3) {
+    } else if (needs_profiling && (dim == 3 ||
+                                   (dim == 2 && config_.auto_tuning_mode != 1))) {
         initProfilingScratch(pool);
 
         const double rel_eb = compute_rel_eb();
@@ -763,6 +924,7 @@ void GInterpStage<TInput, TCode>::execute(
         resolved_use_md_[0] = resolved_use_md_[1] = 1;
 
         if (config_.auto_tuning_mode == 1) {
+            // 3-D only (caught by the 2-D fallback warning above).
             runAutoTuneMode1<TInput, TCode>(
                 static_cast<const TInput*>(inputs[0]), data_len3,
                 d_profiling_errors_, h_profiling_errors_, stream,
@@ -772,11 +934,19 @@ void GInterpStage<TInput, TCode>::execute(
             INTERPOLATION_PARAMS profile_param = buildIntpParam();
             profile_param.alpha = resolved_alpha_;
             profile_param.beta  = resolved_beta_;
-            runAutoTuneMode3<TInput, TCode>(
-                static_cast<const TInput*>(inputs[0]), data_len3,
-                eb_r, ebx2, profile_param,
-                d_profiling_errors_, h_profiling_errors_, stream,
-                resolved_use_md_, resolved_use_natural_, resolved_reverse_);
+            if (dim == 3) {
+                runAutoTuneMode3<TInput, TCode>(
+                    static_cast<const TInput*>(inputs[0]), data_len3,
+                    eb_r, ebx2, profile_param,
+                    d_profiling_errors_, h_profiling_errors_, stream,
+                    resolved_use_md_, resolved_use_natural_, resolved_reverse_);
+            } else {
+                runAutoTuneMode3_2D<TInput, TCode>(
+                    static_cast<const TInput*>(inputs[0]), data_len3,
+                    eb_r, ebx2, profile_param,
+                    d_profiling_errors_, h_profiling_errors_, stream,
+                    resolved_use_md_, resolved_use_natural_, resolved_reverse_);
+            }
             if (config_.auto_tuning_mode == 4) {
                 // Mode 4: take the mode-3-resolved flags and sweep alpha/beta
                 // on top of them. profile_param needs the structural flags
@@ -785,11 +955,19 @@ void GInterpStage<TInput, TCode>::execute(
                 INTERPOLATION_PARAMS sweep_param = buildIntpParam();
                 sweep_param.alpha = resolved_alpha_;
                 sweep_param.beta  = resolved_beta_;
-                runAutoTuneMode4<TInput, TCode>(
-                    static_cast<const TInput*>(inputs[0]), data_len3,
-                    eb_r, ebx2, sweep_param,
-                    d_profiling_errors_, h_profiling_errors_, stream,
-                    resolved_alpha_, resolved_beta_);
+                if (dim == 3) {
+                    runAutoTuneMode4<TInput, TCode>(
+                        static_cast<const TInput*>(inputs[0]), data_len3,
+                        eb_r, ebx2, sweep_param,
+                        d_profiling_errors_, h_profiling_errors_, stream,
+                        resolved_alpha_, resolved_beta_);
+                } else {
+                    runAutoTuneMode4_2D<TInput, TCode>(
+                        static_cast<const TInput*>(inputs[0]), data_len3,
+                        eb_r, ebx2, sweep_param,
+                        d_profiling_errors_, h_profiling_errors_, stream,
+                        resolved_alpha_, resolved_beta_);
+                }
             }
         }
     } else if (config_.auto_tuning_mode > 0 &&

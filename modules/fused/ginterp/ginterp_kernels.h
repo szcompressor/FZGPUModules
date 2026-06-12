@@ -164,27 +164,39 @@ void launchGInterpProfileMode2(
 
 /**
  * Profiling mode 3 — runs the structural `pa_spline_infprecis_data` kernel
- * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks and produces
- * 18 errors for the 3-D path. Caller must `launchGInterpResetErrors` first.
+ * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks. Caller
+ * must `launchGInterpResetErrors` first.
  *
- * Outputs (3-D, LEVEL=4, written to `d_errors[0..17]`):
- *   - errors[0..2]   level 3 variants (reverse off, reverse on, use_md)
- *   - errors[3..5]   level 2 variants (same triad)
- *   - errors[6..11]  level 1 (6 variants: rev×{off,on}, use_md×{0,1}, use_nat×{0,1})
- *   - errors[12..17] level 0 (same 6 variants)
+ * `dim` selects the spline-kernel branch (3 → SPLINE_DIM=3, 2 → SPLINE_DIM=2).
+ *
+ * Outputs depend on `dim`:
+ *   - 3-D, LEVEL=4, errors[0..17] (workflow=true):
+ *       errors[0..2]   level 3 variants (reverse off, reverse on, use_md)
+ *       errors[3..5]   level 2 variants (same triad)
+ *       errors[6..11]  level 1 (6 variants: rev×{off,on}, use_md×{0,1}, use_nat×{0,1})
+ *       errors[12..17] level 0 (same 6 variants)
+ *   - 2-D, LEVEL=4, errors[6..26] (workflow=true; [0..5] are degenerate at
+ *     this tile size and ignored by the host analysis):
+ *       errors[6..8]    coarsest probed level (kernel level=3) — 3 variants
+ *       errors[9..14]   kernel level=2 (intp_param[2]) — 6 variants
+ *       errors[15..20]  kernel level=1 (intp_param[1]) — 6 variants
+ *       errors[21..26]  kernel level=0 (intp_param[0]) — 6 variants
+ *     The level=0 atomic offset is locally patched from `errors+15+BIY` to
+ *     `errors+16+BIY` (see adapter-changes block at top of ginterp_md.inl).
  *
  * `sample_starts`, `sample_block_grid_sizes`, `sample_strides` are derived
  * from `data_len3` (see cuSZ-Hi `spline3.cu` `calc_start_size` for the recipe;
- * `S_STRIDE = 8 * 16` in 3-D).
+ * `S_STRIDE = 8 * 16` in 3-D, `20 * AnchorBlockSize` in 2-D).
  *
  * `workflow` selects the probe family:
- *   - `true`  → structural (mode 3): grid.y=9, errors[0..17] per layout above
+ *   - `true`  → structural (mode 3): grid.y=9 (3-D) / 11 (2-D)
  *   - `false` → alpha/beta sweep (mode 4): grid.y=11, errors[0..10] one per
  *     `(alpha, beta)` combo enumerated by pre_compute_att (SPLINE3_AB_ATT).
  */
 template <typename TInput>
 void launchGInterpProfileMode3(
     const TInput* d_data, dim3 data_len3,
+    int dim,
     dim3 sample_starts, dim3 sample_block_grid_sizes, dim3 sample_strides,
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,

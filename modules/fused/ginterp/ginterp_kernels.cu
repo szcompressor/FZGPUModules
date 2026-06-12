@@ -301,6 +301,7 @@ void launchGInterpProfileMode2(
 template <typename TInput>
 void launchGInterpProfileMode3(
     const TInput* d_data, dim3 data_len3,
+    int dim,
     dim3 sample_starts, dim3 sample_block_grid_sizes, dim3 sample_strides,
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,
@@ -308,31 +309,55 @@ void launchGInterpProfileMode3(
     bool workflow,                // true: mode-3 (structural); false: mode-4 (a/b)
     cudaStream_t stream)
 {
-    // grid.y = 9 for workflow=true (mode 3); grid.y = 11 for workflow=false
-    // (mode 4 — 11 alpha/beta combos enumerated in pre_compute_att,
-    // matching cuSZ-Hi spline3.cu line 409 where mode 4 launches with y=11).
+    // grid.y: workflow=true mode 3 — 9 for 3-D (cuSZ-Hi spline3.cu line 217),
+    // 11 for 2-D (cuSZ-Hi line 294). workflow=false mode 4 — 11 in both
+    // (cuSZ-Hi line 409/421). Internal pre_compute_att reads BIY to dispatch
+    // each variant; out-of-range BIY values are degenerate (level=5,4 at
+    // LEVEL=4 read zero).
     unsigned block_num = sample_block_grid_sizes.x
                         * sample_block_grid_sizes.y
                         * sample_block_grid_sizes.z;
-    const unsigned grid_y = workflow ? 9u : 11u;
+    unsigned grid_y;
+    if (workflow) grid_y = (dim == 3) ? 9u : 11u;
+    else          grid_y = 11u;
     dim3 grid(block_num, grid_y, 1);
     dim3 block(kLinearBlockSize, 1, 1);
     dim3 data_st3 = stride3FromLen3(data_len3);
 
-    // pa_spline_infprecis_data is templated on TITER, FP, LEVEL=4, SPLINE_DIM=3,
-    // block sizes 16,16,16, numAnchorBlock 1,1,1, LINEAR_BLOCK_SIZE.
-    fz::ginterp::pa_spline_infprecis_data<
-        TInput*, float,
-        kLevel, kSplineDim3,
-        kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
-        kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
-        kLinearBlockSize>
-        <<<grid, block, 0, stream>>>(
-            const_cast<TInput*>(d_data), data_len3, data_st3,
-            sample_starts, sample_block_grid_sizes, sample_strides,
-            eb_r, ebx2, intp_param,
-            d_errors,
-            workflow);
+    if (dim == 3) {
+        // 3-D: LEVEL=4, AnchorBlockSize=16³, numAnchorBlock=1³.
+        fz::ginterp::pa_spline_infprecis_data<
+            TInput*, float,
+            kLevel, kSplineDim3,
+            kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
+            kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
+            kLinearBlockSize>
+            <<<grid, block, 0, stream>>>(
+                const_cast<TInput*>(d_data), data_len3, data_st3,
+                sample_starts, sample_block_grid_sizes, sample_strides,
+                eb_r, ebx2, intp_param,
+                d_errors,
+                workflow);
+    } else {
+        // 2-D: LEVEL=4, AnchorBlockSize=16×16×1, numAnchorBlock=1×1×1.
+        // Same LEVEL as 3-D so we can reuse the 16×16 anchor tile choice
+        // (matches our 2-D forward/inverse path). BIY=0 in pa_spline_infprecis
+        // probes kernel-levels {5,4,3} — at LEVEL=4 the first two are
+        // degenerate (unit > tile size). Host analysis only consumes
+        // errors[6..26].
+        fz::ginterp::pa_spline_infprecis_data<
+            TInput*, float,
+            kLevel, kSplineDim2,
+            kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
+            kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2,
+            kLinearBlockSize>
+            <<<grid, block, 0, stream>>>(
+                const_cast<TInput*>(d_data), data_len3, data_st3,
+                sample_starts, sample_block_grid_sizes, sample_strides,
+                eb_r, ebx2, intp_param,
+                d_errors,
+                workflow);
+    }
 }
 
 // ─── forward (compress) launcher — 2-D ───────────────────────────────────────
@@ -478,7 +503,7 @@ template void launchGInterpProfileMode2<float>(
     const float*, dim3, int, float*, cudaStream_t);
 
 template void launchGInterpProfileMode3<float>(
-    const float*, dim3, dim3, dim3, dim3, float, float,
+    const float*, dim3, int, dim3, dim3, dim3, float, float,
     const INTERPOLATION_PARAMS&, float*, bool, cudaStream_t);
 
 } // namespace ginterp

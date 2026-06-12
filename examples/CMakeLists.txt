@@ -83,3 +83,9 @@ add_executable(cusz_huffman_vs_ans cusz_huffman_vs_ans.cpp)
 target_link_libraries(cusz_huffman_vs_ans PRIVATE fzgmod)
 set_target_properties(cusz_huffman_vs_ans PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── Predictor comparison: LorenzoQuant vs GInterp (cuSZ-Hi port) ──────────────
+add_executable(compare_predictors compare_predictors.cpp)
+target_link_libraries(compare_predictors PRIVATE fzgmod)
+set_target_properties(compare_predictors PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
