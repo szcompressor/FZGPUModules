@@ -70,14 +70,29 @@ void BitplaneRLEStage::execute(
         const uint8_t* d_bitstream =
             archive + header.entry[bprle::BPRLE_HDR_BITSTREAM];
 
-        auto* d_out = static_cast<uint16_t*>(outputs[0]);
-        bprle::launchDecode(d_bitstream, d_bitflag, d_start_pos, d_out, cfg,
-                            stream);
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        const size_t out_bytes = data_len * sizeof(uint16_t);
+        const size_t pad_bytes = cfg.pad_len * sizeof(uint16_t);
+        if (pad_bytes == out_bytes) {
+            // Aligned: the kernel writes exactly the output length.
+            bprle::launchDecode(d_bitstream, d_bitflag, d_start_pos,
+                                static_cast<uint16_t*>(outputs[0]), cfg, stream);
+            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        } else {
+            // Unaligned: the decode kernel always writes the full padded length,
+            // which exceeds the (unpadded) terminal output buffer. Decode into a
+            // padded scratch, then copy back only the original-length prefix.
+            auto* d_out_pad = static_cast<uint16_t*>(
+                pool->allocate(pad_bytes, stream, "bprle_out_pad"));
+            bprle::launchDecode(d_bitstream, d_bitflag, d_start_pos, d_out_pad,
+                                cfg, stream);
+            FZ_CUDA_CHECK(cudaMemcpyAsync(outputs[0], d_out_pad, out_bytes,
+                                          cudaMemcpyDeviceToDevice, stream));
+            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+            pool->free(d_out_pad, stream);
+        }
 
-        // Report the pre-pad original size; the buffer holds pad_len symbols,
-        // the tail beyond data_len being reconstructed padding zeros.
-        actual_output_size_ = data_len * sizeof(uint16_t);
+        // Report the pre-pad original size.
+        actual_output_size_ = out_bytes;
         return;
     }
 
