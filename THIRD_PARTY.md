@@ -132,6 +132,38 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 ---
 
+## FZ-GPU
+
+**Used by:** `BitplaneRLEStage` (`modules/fused/bitplane_rle/`)
+
+**Relationship:**
+- `BitplaneRLEStage` (`modules/fused/bitplane_rle/`) — the fused
+  bitplane-transpose + zero-byte run-length encode/decode kernels
+  (`bitplane_rle_encode.inl`, `bitplane_rle_decode.inl`) are adapted from
+  `KERNEL_CUHIP_fz_fused_encode` / `KERNEL_CUHIP_fz_fused_decode` of the
+  FZ-GPU lossless codec, as vendored in `origin/v1.1.0_dev` of the cuSZ
+  repository (`modules/codec/fzg/`). Changes from the original:
+  `namespace fzgpu` → `namespace fz::bitplane_rle`; `err.hh` / `CHECK_GPU`
+  stripped; the `fzgpu::Buf` allocation/`alloc_test_buf` path is dropped and
+  all device memory is routed through the FZGPUModules `MemoryPool`; the
+  128-byte self-describing archive header (`fzg_header`) is reproduced as
+  `ArchiveHeader`. The kernel bodies are preserved verbatim. Host-side
+  wrapper, memory-pool integration, and the padded-input handling are
+  FZGPUModules code.
+
+  Original authors: Boyuan Zhang (kernel), Jiannan Tian (refactor).
+  Paper: Boyuan Zhang, Jiannan Tian, Sheng Di, Xiaodong Yu, Yunhe Feng,
+  Xin Liang, Dingwen Tao, Franck Cappello, "FZ-GPU: A Fast and High-Ratio
+  Lossy Compressor for Scientific Computing Applications on GPUs", HPDC '23.
+
+**Reference copy** of the upstream files (unmodified) is in
+`memory/references/dictionary/` for cross-checking.
+
+**License:** vendored from the cuSZ repository — same OPEN SOURCE LICENSE as
+the [cuSZ / PHF](#cusz--phf) section above.
+
+---
+
 ## cuSZ-Hi
 
 **Used by:** `GInterpStage` (`modules/fused/ginterp/`)

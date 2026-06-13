@@ -151,3 +151,11 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+# ─── BitplaneRLE stage (FZ-GPU fused bitplane transpose + zero-byte RLE) ───────
+fz_add_test(
+    NAME    test_bitplane_rle
+    SOURCES test_bitplane_rle.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)

@@ -45,6 +45,7 @@
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
 #include "fused/ginterp/ginterp_stage.h"
+#include "fused/bitplane_rle/bitplane_rle_stage.h"
 
 #include <fstream>
 #include <iomanip>
@@ -335,6 +336,11 @@ static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
     return rze;
 }
 
+static Stage* addBitplaneRLEStage(Pipeline& p, const toml::table& t) {
+    (void)t;  // no tunable parameters — config is derived from input length
+    return p.addStage<BitplaneRLEStage>();
+}
+
 static Stage* addANSStage(Pipeline& p, const toml::table& t) {
     auto* s = p.addStage<ANSStage>();
     s->setProbBits(static_cast<uint8_t>(optInt(t, "prob_bits", 10)));
@@ -456,6 +462,10 @@ static void saveRZEStage(Stage* s, std::ostringstream& out) {
     auto* rze = static_cast<RZEStage*>(s);
     out << "chunk_size = " << static_cast<int64_t>(rze->getChunkSize()) << "\n";
     out << "levels = "     << static_cast<int64_t>(rze->getLevels())    << "\n";
+}
+
+static void saveBitplaneRLEStage(Stage* s, std::ostringstream& out) {
+    (void)s; (void)out;  // no tunable parameters to persist
 }
 
 static void saveRLEStage(Stage* s, std::ostringstream& out) {
@@ -613,6 +623,7 @@ static const StageEntry kStageRegistry[] = {
     { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
     { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
     { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
+    { "BitplaneRLE",  StageType::BITPLANE_RLE, addBitplaneRLEStage,  saveBitplaneRLEStage  },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

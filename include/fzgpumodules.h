@@ -33,3 +33,4 @@
 #include "coders/ans/ans_stage.h"
 #include "transforms/adm/adm_stage.h"
 #include "fused/ginterp/ginterp_stage.h"
+#include "fused/bitplane_rle/bitplane_rle_stage.h"
