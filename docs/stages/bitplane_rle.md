@@ -17,7 +17,7 @@ words), the forward kernel:
    each chunk. This is a bitshuffle at 4-byte element width: bit *i* of all 32
    words in a row is gathered into one output word.
 2. **Zero-byte elimination** — a per-byte *byteflag* and per-32-byte *bitflag*
-   bitmap mark which bytes survive; a block-local Blelloch prefix sum compacts
+   bitmap mark which bytes survive; a block-local prefix sum compacts
    the non-zero 4-byte groups, and a single global `atomicAdd` reserves each
    block's slice of the output bitstream.
 
@@ -27,7 +27,7 @@ FZ-GPU's quantizer codes. The transpose is **built in**, so a separate
 
 The output is a self-describing byte archive (`uint8_t`).
 
-## Relationship to `BitshuffleStage` + `RZEStage`
+## Relationship to BitshuffleStage + RZEStage
 
 This stage is functionally close to
 `BitshuffleStage(element_width=4) → RZEStage(levels=1)`, but it is **not**
@@ -40,10 +40,6 @@ archive) and **throughput**:
 | **Memory traffic** | Transpose result stays in shared memory; only the compacted bitstream reaches DRAM. One pass. | Full transposed buffer is materialized in global memory, read back, then zero-eliminated. ~2× the global-memory traffic for this segment. |
 | **Zero-elim granularity** | Compacts **4-byte groups** | RZE compacts **single bytes**, and can recurse (levels 2–4). Different CR on identical input. |
 | **Archive format** | FZ-GPU's exact self-describing archive (per-block atomic start positions + 128-byte header) | The generic Bitshuffle + RZE stream layout |
-
-If you only want a *similar* compression ratio and don't need FZ-GPU fidelity
-or peak throughput, the `Bitshuffle → RZE` pair already covers the functional
-ground.
 
 ## Template parameters
 

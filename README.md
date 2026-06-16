@@ -94,6 +94,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
 | `HuffmanStage<T>` | GPU Huffman entropy coding (PHF, cuSZ port) |
 | `ANSStage` | GPU rANS entropy coding (dietGPU port) |
+| `BitplaneRLEStage` | Fused bitplane transpose + zero-byte RLE lossless encoder (FZ-GPU port) |
 
 ---
 

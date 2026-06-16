@@ -101,6 +101,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
 | \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF, cuSZ port)    |
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
+| \ref stage_bitplane_rle "BitplaneRLEStage"        | `modules/fused/bitplane_rle/bitplane_rle_stage.h`  | Fused bitplane transpose + zero-byte RLE lossless encoder (FZ-GPU port) |
 
 ### Memory Strategies
 
