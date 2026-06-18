@@ -2,6 +2,7 @@
 // readHeader, loadCompressedData, decompressFromFile, getOutputBuffers.
 #include "pipeline/compressor.h"
 #include "pipeline_utils.h"
+#include "dag_event_timer.h"
 #include "fzm_format.h"
 #include "log.h"
 #include "cuda_check.h"
@@ -608,8 +609,11 @@ void Pipeline::decompressFromFile(
                inv_dag->getLevels().size(), inv_dag->getMaxParallelism());
 
         // ── Execute ───────────────────────────────────────────────────────────
+        DagEventTimer dag_timer(do_profile);
         auto t_compute_start = std::chrono::steady_clock::now();
+        dag_timer.recordStart(stream);
         inv_dag->execute(stream);
+        dag_timer.recordStop(stream);
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         for (auto& stage_ptr : owned_stages) {
@@ -675,8 +679,9 @@ void Pipeline::decompressFromFile(
         // ── Perf result ───────────────────────────────────────────────────────
         if (perf_out) {
             auto log_levels = buildLevelTimings(stage_timings);
-            float dag_ms = 0.0f;
-            for (const auto& lv : log_levels) dag_ms += lv.elapsed_ms;
+            // Device wall time via CUDA events bracketing inv_dag->execute();
+            // fall back to the host compute span if the event timer is unavailable.
+            float dag_ms = dag_timer.elapsedMs();
             if (dag_ms <= 0.0f) dag_ms = compute_ms;
 
             perf_out->is_compress     = false;

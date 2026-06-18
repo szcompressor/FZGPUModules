@@ -209,6 +209,74 @@ TEST(CLI, PipelineFromConfigWorksWithOverride) {
     ASSERT_GT(std::filesystem::file_size(override_output_path), 0u);
 }
 
+static std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return {};
+    return std::string((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+}
+
+TEST(CLI, ReportJsonCompressEmitsValidFile) {
+    TempWorkspace tmp;
+
+    constexpr size_t kN = 1 << 12;  // 4096 floats -> 16384 bytes
+    std::vector<float> input = fz_test::make_sine_floats(kN, 0.01f, 5.0f);
+    const auto input_path = tmp.file("rj_input.f32");
+    const auto compressed_path = tmp.file("rj_out.fzm");
+    const auto report_path = tmp.file("rj_report.json");
+    write_float_file(input_path, input);
+
+    const int rc = run_cli({
+        "fzgmod-cli", "-z",
+        "-i", input_path.string(),
+        "-o", compressed_path.string(),
+        "--stages", "lorenzo->bitshuffle->rze",
+        "-m", "abs", "-e", "1e-3", "--strategy", "minimal",
+        "--report-json", report_path.string()
+    });
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(std::filesystem::exists(report_path));
+
+    const std::string json = read_text_file(report_path);
+    EXPECT_NE(json.find("\"schema_version\": \"1.0\""), std::string::npos);
+    EXPECT_NE(json.find("\"status\": \"ok\""), std::string::npos);
+    EXPECT_NE(json.find("\"operation\": \"compress\""), std::string::npos);
+    // Raw count must be present and exact so the harness can recompute ratio.
+    EXPECT_NE(json.find("\"original_bytes\": " + std::to_string(kN * sizeof(float))),
+              std::string::npos);
+    EXPECT_NE(json.find("\"timing_method\": \"cuda_events_dag\""), std::string::npos);
+    EXPECT_NE(json.find("\"compress\""), std::string::npos);
+    EXPECT_NE(json.find("\"device_ms\""), std::string::npos);
+    EXPECT_NE(json.find("\"stages\""), std::string::npos);
+}
+
+TEST(CLI, ReportJsonErrorStillEmitsValidJsonAndNonZeroExit) {
+    TempWorkspace tmp;
+
+    constexpr size_t kN = 1 << 12;
+    std::vector<float> input = fz_test::make_sine_floats(kN, 0.01f, 5.0f);
+    const auto input_path = tmp.file("rj_err_input.f32");
+    const auto report_path = tmp.file("rj_err_report.json");
+    write_float_file(input_path, input);
+
+    // Dimensions that do not match the element count force a failure.
+    const int rc = run_cli({
+        "fzgmod-cli", "-z",
+        "-i", input_path.string(),
+        "-o", tmp.file("rj_err_out.fzm").string(),
+        "-l", "999x999",
+        "--report-json", report_path.string()
+    });
+    EXPECT_NE(rc, 0);
+    ASSERT_TRUE(std::filesystem::exists(report_path));
+
+    const std::string json = read_text_file(report_path);
+    EXPECT_NE(json.find("\"status\": \"error\""), std::string::npos);
+    EXPECT_NE(json.find("\"error_message\""), std::string::npos);
+    // error_message must be a non-null string.
+    EXPECT_EQ(json.find("\"error_message\": null"), std::string::npos);
+}
+
 TEST(CLI, BenchmarkCompressSingleRunWorks) {
     TempWorkspace tmp;
 

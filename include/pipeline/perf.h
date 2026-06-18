@@ -57,11 +57,19 @@ struct LevelTimingResult {
  *                      such as buffer metadata collection, concat, and any
  *                      pipeline construction (e.g. decompressFromFile setup).
  *                      Useful for end-to-end benchmarking but not throughput.
- *   dag_elapsed_ms   — time spent solely inside dag->execute() (GPU compute, ms)
- *                      i.e. the actual GPU compute excluding all host setup.
- *                      This is the denominator for throughput_gbs().
+ *   dag_elapsed_ms   — device wall time of the DAG execution, measured by a CUDA
+ *                      event pair bracketing dag->execute() (ms).  Spans from when
+ *                      the stream reaches the start marker until every kernel —
+ *                      including those joined back from internal streams at the end
+ *                      of execute() — has finished.  Excludes host setup and PCIe
+ *                      transfers issued outside the bracket.  This is the
+ *                      denominator for throughput_gbs().
+ *                      (Only populated when profiling is enabled; without profiling
+ *                      it falls back to a rough host-side enqueue estimate.)
  *   stage elapsed_ms — per-stage GPU time from paired CUDA events; most accurate
- *                      for isolating individual kernel costs.
+ *                      for isolating individual kernel costs.  Summing the per-level
+ *                      critical paths gives a compute-only total that excludes the
+ *                      host launch gaps captured by dag_elapsed_ms.
  *
  * Throughput is always reported as uncompressed data size / dag_elapsed_ms:
  *   compress:   uncompressed_bytes = input_bytes

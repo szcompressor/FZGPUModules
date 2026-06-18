@@ -306,6 +306,7 @@ add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
 #### Combined Library
 add_library(fzgmod
   src/utils/cli/cli.cpp
+  src/utils/cli/report_json.cpp
 )
 target_link_libraries(fzgmod
   PUBLIC
@@ -315,6 +316,19 @@ target_link_libraries(fzgmod
   fzgmod_pipeline
   CUDA::cudart
 )
+
+# Tool identity for the --report-json artifact.
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  OUTPUT_VARIABLE FZGMOD_GIT_SHA
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+target_compile_definitions(fzgmod PRIVATE FZGMOD_VERSION="${PROJECT_VERSION}")
+if(FZGMOD_GIT_SHA)
+  target_compile_definitions(fzgmod PRIVATE FZGMOD_GIT_SHA="${FZGMOD_GIT_SHA}")
+endif()
 add_library(FZGMOD::fzgmod ALIAS fzgmod)
 
 # Shared library versioning — creates libfzgmod.so.2 → libfzgmod.so.2.0.0

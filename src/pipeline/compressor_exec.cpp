@@ -1,6 +1,7 @@
 // compressor_exec.cpp — in-memory compress / decompress execution
 #include "pipeline/compressor.h"
 #include "pipeline_utils.h"
+#include "dag_event_timer.h"
 #include "log.h"
 #include "cuda_check.h"
 #include <chrono>
@@ -105,15 +106,20 @@ void Pipeline::compress(
 
     buffer_metadata_.clear();
 
+    // Device wall time via CUDA events (profiling path only); host markers are a
+    // fallback for the log line when profiling is off.
+    DagEventTimer dag_timer(profiling_enabled_);
     std::vector<StageTimingResult> stage_timings;
     auto t_dag_start = std::chrono::steady_clock::now();
     auto t_dag_end   = t_dag_start;
     try {
+        dag_timer.recordStart(stream);
         if (graph_captured_) {
             FZ_CUDA_CHECK(cudaGraphLaunch(graph_exec_, stream));
         } else {
             dag_->execute(stream);
         }
+        dag_timer.recordStop(stream);
         t_dag_end = std::chrono::steady_clock::now();
 
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -175,7 +181,11 @@ void Pipeline::compress(
     auto t_host_end = std::chrono::steady_clock::now();
 
     float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
-    float dag_ms  = std::chrono::duration<float, std::milli>(t_dag_end  - t_dag_start ).count();
+    // dag_ms is true device wall time when profiling (CUDA events); otherwise a
+    // rough host-side enqueue estimate just for the log line.
+    float dag_ms  = profiling_enabled_
+        ? dag_timer.elapsedMs()
+        : std::chrono::duration<float, std::milli>(t_dag_end - t_dag_start).count();
 
     if (profiling_enabled_) {
         PipelinePerfResult r;
@@ -297,8 +307,11 @@ void Pipeline::decompress(
     }
     inv_dag.setExternalPointer(res_buf_id, d_final);
 
+    DagEventTimer dag_timer(profiling_enabled_);
     auto t_dag_start = std::chrono::steady_clock::now();
+    dag_timer.recordStart(stream);
     inv_dag.execute(stream);
+    dag_timer.recordStop(stream);
     auto t_dag_end = std::chrono::steady_clock::now();
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -334,7 +347,10 @@ void Pipeline::decompress(
 
     auto t_host_end = std::chrono::steady_clock::now();
     float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
-    float dag_ms  = std::chrono::duration<float, std::milli>(t_dag_end  - t_dag_start ).count();
+    // True device wall time via CUDA events when profiling; host fallback otherwise.
+    float dag_ms  = profiling_enabled_
+        ? dag_timer.elapsedMs()
+        : std::chrono::duration<float, std::milli>(t_dag_end - t_dag_start).count();
 
     if (profiling_enabled_) {
         PipelinePerfResult r;
