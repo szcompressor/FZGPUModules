@@ -39,6 +39,7 @@
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
+#include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
 #include "transforms/adm/adm_stage.h"
@@ -341,6 +342,24 @@ static Stage* addBitplaneRLEStage(Pipeline& p, const toml::table& t) {
     return p.addStage<BitplaneRLEStage>();
 }
 
+static Stage* addAdaptiveBitpackStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "input_type", "int32"));
+    uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 32));
+    bool outlier = optBool(t, "outlier_selection", false);
+    if (dt == DataType::INT16) {
+        auto* s = p.addStage<AdaptiveBitpackStage<int16_t>>();
+        s->setBlockSize(block_size);
+        s->setOutlierSelection(outlier);
+        return s;
+    } else if (dt == DataType::INT32) {
+        auto* s = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        s->setBlockSize(block_size);
+        s->setOutlierSelection(outlier);
+        return s;
+    }
+    throw std::runtime_error("loadConfig: unsupported AdaptiveBitpack input_type");
+}
+
 static Stage* addANSStage(Pipeline& p, const toml::table& t) {
     auto* s = p.addStage<ANSStage>();
     s->setProbBits(static_cast<uint8_t>(optInt(t, "prob_bits", 10)));
@@ -466,6 +485,16 @@ static void saveRZEStage(Stage* s, std::ostringstream& out) {
 
 static void saveBitplaneRLEStage(Stage* s, std::ostringstream& out) {
     (void)s; (void)out;  // no tunable parameters to persist
+}
+
+static void saveAdaptiveBitpackStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(AdaptiveBitpackConfig)] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    AdaptiveBitpackConfig cfg;
+    if (sz >= sizeof(cfg)) std::memcpy(&cfg, buf, sizeof(cfg));
+    out << "input_type = \"" << dataTypeToString(cfg.data_type) << "\"\n";
+    out << "block_size = "   << static_cast<int64_t>(cfg.block_size) << "\n";
+    out << "outlier_selection = " << (cfg.outlier_selection ? "true" : "false") << "\n";
 }
 
 static void saveRLEStage(Stage* s, std::ostringstream& out) {
@@ -624,6 +653,7 @@ static const StageEntry kStageRegistry[] = {
     { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
     { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
     { "BitplaneRLE",  StageType::BITPLANE_RLE, addBitplaneRLEStage,  saveBitplaneRLEStage  },
+    { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

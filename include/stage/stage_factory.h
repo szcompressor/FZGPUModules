@@ -16,6 +16,7 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
+#include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
 #include "transforms/adm/adm_stage.h"
@@ -294,6 +295,20 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             auto* s = new BitplaneRLEStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+            break;
+        }
+
+        case StageType::ADAPTIVE_BITPACK: {
+            // config[0] holds the DataType of T (INT16 / INT32).
+            DataType dt = (config_size > 0)
+                ? static_cast<DataType>(config[0])
+                : DataType::INT32;
+            if      (dt == DataType::INT16) stage = new AdaptiveBitpackStage<int16_t>();
+            else if (dt == DataType::INT32) stage = new AdaptiveBitpackStage<int32_t>();
+            else throw std::runtime_error(
+                    "Unsupported AdaptiveBitpackStage DataType: "
+                    + std::to_string(static_cast<int>(dt)));
+            stage->deserializeHeader(config, config_size);
             break;
         }
 

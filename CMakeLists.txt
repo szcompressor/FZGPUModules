@@ -243,6 +243,8 @@ add_library(fzgmod_modules
   modules/coders/rle/rle.cu
   modules/coders/rze/rze_stage.cu
   modules/coders/bitpack/bitpack_stage.cu
+  modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu
+  modules/coders/adaptive_bitpack/adaptive_bitpack_stage.cu
   modules/shufflers/bitshuffle/bitshuffle_stage.cu
   modules/fused/lorenzo_quant/lorenzo_quant.cu
   modules/fused/lorenzo_quant/lorenzo_quant_nd.cu

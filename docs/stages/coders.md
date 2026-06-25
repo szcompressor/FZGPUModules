@@ -7,3 +7,4 @@
 | \subpage stage_rle | Run-length encoding |
 | \subpage stage_rze | Recursive zero-byte elimination |
 | \subpage stage_bitpack | Dense bit-packing of fixed-width integers |
+| \subpage stage_adaptive_bitpack | Per-block adaptive fixed-rate bit-plane coding (cuSZp plain mode) |

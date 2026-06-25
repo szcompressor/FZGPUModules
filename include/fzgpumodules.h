@@ -22,6 +22,7 @@
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "coders/rle/rle.h"
 #include "coders/bitpack/bitpack_stage.h"
+#include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/rze/rze_stage.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "quantizers/quantizer/quantizer.h"

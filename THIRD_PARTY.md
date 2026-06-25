@@ -164,6 +164,35 @@ the [cuSZ / PHF](#cusz--phf) section above.
 
 ---
 
+## cuSZp
+
+**Used by:** `AdaptiveBitpackStage` (`modules/coders/adaptive_bitpack/`),
+and the `linear` mode of `QuantizerStage` + the `setBlockSize` option of
+`LorenzoStage`.
+
+**Relationship:**
+- These are **independent reimplementations of published cuSZp schemes — no
+  cuSZp source code is copied.** `AdaptiveBitpackStage` implements cuSZp's
+  per-block adaptive fixed-rate bit-plane "plain" encoding with a byte-granular
+  layout, one-thread-per-block kernels, and an ordinary CUB `DeviceScan` for the
+  per-block offsets (cuSZp uses a fused single kernel with a decoupled look-back
+  scan; that fusion is left to a downstream compiler). `QuantizerStage`'s linear
+  mode reproduces cuSZp's `q = round(x / 2·eb)` mapping with no radius/outlier
+  fallback, and `LorenzoStage::setBlockSize` reproduces cuSZp's block-local 1-D
+  delta. The reference codebase (for cross-checking only, not vendored) lives at
+  `compressors/cuSZp2/`; design notes are in `memory/cuszp_stages.md`.
+
+  Original authors: Yafan Huang et al.
+  Papers: Yafan Huang, Sheng Di, Xiaodong Yu, Guanpeng Li, Franck Cappello,
+  "cuSZp: An Ultra-fast GPU Error-bounded Lossy Compression Framework with
+  Optimized End-to-End Performance", SC '23; and "cuSZp2: A GPU Lossy Compressor
+  with Extreme Throughput and Optimized Compression Ratio", SC '24.
+
+**License:** cuSZp is BSD-3-Clause (Argonne National Laboratory / University of
+Iowa). As no source is copied, this is an algorithmic attribution.
+
+---
+
 ## cuSZ-Hi
 
 **Used by:** `GInterpStage` (`modules/fused/ginterp/`)

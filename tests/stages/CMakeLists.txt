@@ -92,6 +92,14 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── Adaptive bit-plane coder (cuSZp plain mode) ──────────────────────────────
+fz_add_test(
+    NAME    test_adaptive_bitpack
+    SOURCES test_adaptive_bitpack.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── Lorenzo predictor ────────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_lorenzo

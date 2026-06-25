@@ -94,6 +94,7 @@ enum class StageType : uint16_t {
     ADM        = 19,   ///< Adaptive Data Mapping transform (MANS)
     G_INTERP   = 22,   ///< Spline interpolation predictor + quantizer (cuSZ-Hi G-Interp)
     BITPLANE_RLE = 23, ///< Fused bitplane transpose + zero-byte RLE (FZ-GPU lossless encoder)
+    ADAPTIVE_BITPACK = 24, ///< Per-block adaptive fixed-rate bit-plane coder (cuSZp plain mode)
 };
 
 /**
@@ -319,6 +320,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::ADM:  return "ADM";
         case StageType::G_INTERP:    return "GInterp";
         case StageType::BITPLANE_RLE: return "BitplaneRLE";
+        case StageType::ADAPTIVE_BITPACK: return "AdaptiveBitpack";
         default:                     return "Unknown";
     }
 }
