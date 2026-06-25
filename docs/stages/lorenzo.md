@@ -39,8 +39,25 @@ Using any other type will result in a linker error. Common choice: `LorenzoStage
 
 ## Stage settings
 
-No stage-specific setters. Spatial dimensions are supplied via `Pipeline::setDims()`
-or by calling `stage->setDims()` directly after `addStage()`.
+| Setting | Purpose | Notes |
+|---|---|---|
+| `setDims(x[,y,z])` | Spatial dimensions | Or via `Pipeline::setDims()`; selects 1-/2-/3-D delta |
+| `setBlockSize(n)` | 1-D block-local reset period | `0` = default; `n>0` = cuSZp-style, see below |
+
+By default (`block_size == 0`) the predictor uses the N-D inclusion-exclusion delta
+selected by `dims_` (and the 1-D path already resets per launch block of 256).
+
+`setBlockSize(n)` with `n > 0` forces the **1-D** path over the flattened array and
+restarts the prediction chain (`prev = 0`) every `n` elements, independent of the
+launch configuration and of `dims_`. This is the cuSZp predictor (it uses `n = 32`).
+`n` must be in `[1, 1024]` (the inverse scans one segment per CUDA block of `n`
+threads). Block mode is graph-compatible. The `block_size` is serialized in the FZM
+stage header (legacy 16-byte headers default it to 0).
+
+```cpp
+auto* lrz = p.addStage<LorenzoStage<int32_t>>();
+lrz->setBlockSize(32);   // cuSZp block-local 1-D delta
+```
 
 ---
 
@@ -75,13 +92,19 @@ auto* lrz = p.addStage<LorenzoStage<int32_t>>();
 
 ## Typical pipeline (cuSZp-style)
 
-```cpp
-p.setDims(nx);
-auto* quant = p.addStage<QuantizerStage<float, int32_t>>();
-auto* lrz   = p.addStage<LorenzoStage<int32_t>>();
-auto* bpack = p.addStage<BitpackStage<uint32_t>>();
+The cuSZp front-end pairs the linear quantizer (signed codes, no outliers) with a
+block-local Lorenzo predictor:
 
-p.connect(lrz,   quant, "codes");
-p.connect(bpack, lrz);
+```cpp
+auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
+quant->setErrorBound(1e-3f);
+quant->setErrorBoundMode(ErrorBoundMode::ABS);
+quant->setLinearMode(true);          // signed INT32 codes, no outliers
+
+auto* lrz = p.addStage<LorenzoStage<int32_t>>();
+lrz->setBlockSize(32);               // block-local 1-D delta (cuSZp)
+
+p.connect(lrz, quant, "codes");
+// downstream coder (AdaptiveBitpackStage, forthcoming) connects to lrz
 p.finalize();
 ```

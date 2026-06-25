@@ -46,6 +46,7 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | `setZigzagCodes(enable)` | Zigzag-encode codes | ABS/NOA only; improves compressibility |
 | `setOutlierThreshold(t)` | Force outliers | ABS/NOA only; `|x| >= t` -> outlier |
 | `setInplaceOutliers(enable)` | Embed outliers in codes | ABS/NOA only; see constraints below |
+| `setLinearMode(enable)` | Signed codes, no outliers | ABS/NOA only; cuSZp-style; see below |
 | `setValueBase(v)` | Precomputed value range | NOA only; optional, see below |
 
 ```cpp
@@ -92,6 +93,43 @@ p.connect(next_stage, quant, "codes");
 When `setInplaceOutliers(true)` is active, outliers are embedded directly in
 the codes array using their raw IEEE-754 bit pattern.  Only the `"codes"` port
 exists; the scatter buffers and outlier-count scratch are absent.
+
+### Linear / no-outlier mode (1 output)
+
+When `setLinearMode(true)` is active there is a single `"codes"` port and **no
+outlier mechanism at all**.
+
+---
+
+## Linear / no-outlier mode (ABS/NOA only)
+
+`setLinearMode(true)` selects a cuSZp-style quantizer: each value is mapped to
+`q = round(x / (2 · eb))` and stored as two's-complement in `TCode`, with **no
+radius clamp, no outlier ports, no zigzag**. The forward kernel is a pure
+memory-bound map — the only atomic and the only divergent branch of the regular
+forward kernel (the outlier path) are removed — so it is strictly faster and is
+fully **graph-compatible** in ABS mode (no D2H, no outlier-count readback).
+
+Because there is no outlier fallback, a bin that overflows `TCode` simply wraps;
+**size `TCode` wide enough for the data** (use `uint32_t`). The codes are
+*declared* by the stage as the **signed** DataType (`UINT16→INT16`,
+`UINT32→INT32`) so they connect directly to a downstream `LorenzoStage<intN>`.
+
+Constraints (each throws at the first `compress()` if violated):
+- Valid only with `ABS` and `NOA` error-bound modes (not `REL`).
+- Mutually exclusive with `setInplaceOutliers(true)` and `setZigzagCodes(true)`.
+
+Intended front-end for the cuSZp-style modular pipeline:
+
+```cpp
+auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
+quant->setErrorBound(1e-3f);
+quant->setErrorBoundMode(ErrorBoundMode::ABS);
+quant->setLinearMode(true);                 // signed INT32 codes, no outliers
+auto* lrz = p.addStage<LorenzoStage<int32_t>>();
+// lrz->setBlockSize(32);                    // (7.2) block-local 1-D delta, cuSZp uses 32
+p.connect(lrz, quant, "codes");
+```
 
 ---
 

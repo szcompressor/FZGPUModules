@@ -8,6 +8,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -31,10 +32,11 @@ struct LorenzoConfig {
     uint32_t dim_x;       ///< X (fast) dimension.
     uint32_t dim_y;       ///< Y dimension (1 for 1-D).
     uint32_t dim_z;       ///< Z dimension (1 for 1-D/2-D).
+    uint32_t block_size;  ///< 1-D block-local reset period; 0 = default N-D behavior.
 
     LorenzoConfig()
         : data_type(DataType::INT32), ndim(1), reserved{0, 0},
-          dim_x(0), dim_y(1), dim_z(1) {}
+          dim_x(0), dim_y(1), dim_z(1), block_size(0) {}
 };
 static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
               "LorenzoConfig must fit in FZM_STAGE_CONFIG_SIZE");
@@ -60,6 +62,27 @@ public:
     void setDims(const std::array<size_t, 3>& dims) override { dims_ = dims; }
     void setDims(size_t x, size_t y = 1, size_t z = 1) { dims_ = {x, y, z}; }
     std::array<size_t, 3> getDims() const { return dims_; }
+
+    /**
+     * Set an explicit 1-D block-local reset period (cuSZp-style).
+     *
+     * `n == 0` (default): keep the current behavior — 1-D delta resets every
+     * launch block (256), 2-D/3-D use the N-D inclusion-exclusion delta.
+     * `n > 0`: force the **1-D** path over the flattened array, restarting the
+     * prediction chain (`prev = 0`) every `n` elements, independent of the launch
+     * configuration and of `dims_`. cuSZp uses `n = 32`.
+     *
+     * Must be in [1, 1024] (CUDA block limit; the inverse scans one segment per
+     * CUDA block of `n` threads).
+     */
+    void setBlockSize(uint32_t n) {
+        if (n > 1024)
+            throw std::invalid_argument(
+                "LorenzoStage::setBlockSize: n must be in [0, 1024], got "
+                + std::to_string(n));
+        block_size_ = n;
+    }
+    uint32_t getBlockSize() const { return block_size_; }
 
     int ndim() const {
         if (dims_[2] > 1) return 3;
@@ -115,19 +138,23 @@ public:
         cfg.dim_x     = static_cast<uint32_t>(dims_[0]);
         cfg.dim_y     = static_cast<uint32_t>(dims_[1]);
         cfg.dim_z     = static_cast<uint32_t>(dims_[2]);
+        cfg.block_size = block_size_;
         std::memcpy(buf, &cfg, sizeof(LorenzoConfig));
         return sizeof(LorenzoConfig);
     }
 
     void deserializeHeader(const uint8_t* buf, size_t size) override {
-        if (size < sizeof(LorenzoConfig))
+        // Accept legacy 16-byte headers (no block_size field).
+        constexpr size_t kMinSize = 16;
+        if (size < kMinSize)
             throw std::runtime_error("LorenzoStage: header too small");
-        LorenzoConfig cfg;
-        std::memcpy(&cfg, buf, sizeof(LorenzoConfig));
+        LorenzoConfig cfg;  // default-constructed: block_size = 0
+        std::memcpy(&cfg, buf, std::min(size, sizeof(LorenzoConfig)));
         int eff_ndim = (cfg.ndim == 0) ? 1 : static_cast<int>(cfg.ndim);
         dims_[0] = cfg.dim_x;
         dims_[1] = (eff_ndim >= 2) ? cfg.dim_y : 1;
         dims_[2] = (eff_ndim >= 3) ? cfg.dim_z : 1;
+        block_size_ = (size >= sizeof(LorenzoConfig)) ? cfg.block_size : 0;
     }
 
     size_t getMaxHeaderSize(size_t /*output_index*/) const override {
@@ -138,6 +165,7 @@ private:
     bool is_inverse_         = false;
     size_t actual_output_size_ = 0;
     std::array<size_t, 3> dims_ = {0, 1, 1};
+    uint32_t block_size_ = 0;  ///< 0 = default N-D behavior; >0 = 1-D block-local reset.
 
     static DataType getElementDataType() {
         if (std::is_same<T, int8_t>::value)  return DataType::INT8;
@@ -157,11 +185,13 @@ extern template class LorenzoStage<int64_t>;
 
 template<typename T>
 void launchLorenzoDeltaKernel1D(
-    const T* d_input, T* d_output, size_t n, cudaStream_t stream);
+    const T* d_input, T* d_output, size_t n, cudaStream_t stream,
+    unsigned block_threads = 256);
 
 template<typename T>
 void launchLorenzoPrefixSumKernel1D(
-    const T* d_input, T* d_output, size_t n, cudaStream_t stream);
+    const T* d_input, T* d_output, size_t n, cudaStream_t stream,
+    unsigned block_threads = 256);
 
 template<typename T>
 void launchLorenzoDeltaKernel2D(

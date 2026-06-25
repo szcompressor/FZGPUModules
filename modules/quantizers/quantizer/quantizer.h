@@ -35,7 +35,8 @@ struct QuantizerConfig {
     uint8_t  zigzag_codes;      ///< 1 if ABS/NOA codes are zigzag-encoded.
     float    outlier_threshold; ///< ABS/NOA: |x| >= threshold → forced outlier (inf = disabled).
     uint8_t  inplace_outliers;  ///< 1 if outliers are encoded in-place in the codes array.
-    uint8_t  _pad[3];           ///< Alignment padding — must be zero.
+    uint8_t  linear_mode;       ///< 1 if linear/no-outlier mode (signed codes, no outlier ports).
+    uint8_t  _pad[2];           ///< Alignment padding — must be zero.
 
     QuantizerConfig()
         : abs_error_bound(0.0f), user_error_bound(0.0f), value_base(0.0f),
@@ -43,7 +44,7 @@ struct QuantizerConfig {
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           eb_mode(0), zigzag_codes(0),
           outlier_threshold(std::numeric_limits<float>::infinity()),
-          inplace_outliers(0), _pad{} {}
+          inplace_outliers(0), linear_mode(0), _pad{} {}
 };
 static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
               "QuantizerConfig must fit in FZM_STAGE_CONFIG_SIZE");
@@ -122,6 +123,13 @@ public:
         /// Removes the scatter buffers; inverse checks `(code >> 1) >= quant_radius`.
         /// Must NOT be used with REL mode.
         bool  inplace_outliers       = false;
+        /// ABS/NOA: linear / no-outlier mode (cuSZp-style). Emits raw signed codes
+        /// (q = round(x / 2·eb), stored two's-complement in TCode and *declared* as the
+        /// signed DataType), with NO radius clamp, NO outlier ports, NO zigzag — a value
+        /// outside TCode range simply wraps, so size TCode wide enough (use uint32_t).
+        /// Intended front-end for `→ LorenzoStage(blockSize=32) → AdaptiveBitpackStage`.
+        /// Mutually exclusive with REL, inplace_outliers, and zigzag_codes.
+        bool  linear_mode            = false;
 
         Config() = default;
         Config(TInput eb, ErrorBoundMode mode = ErrorBoundMode::ABS,
@@ -150,23 +158,23 @@ public:
     void onFinalize(size_t estimated_inlen, MemoryPool* pool) override;
 
     size_t estimateDeviceFootprintBytes(size_t /*estimated_inlen*/) const override {
-        return isInplaceMode() ? 0 : sizeof(uint32_t);
+        return (isLinearMode() || isInplaceMode()) ? 0 : sizeof(uint32_t);
     }
 
     std::string getName() const override { return "Quantizer"; }
 
     size_t getNumInputs() const override {
         if (!is_inverse_) return 1;
-        return isInplaceMode() ? 1 : 3;
+        return (isLinearMode() || isInplaceMode()) ? 1 : 3;
     }
     size_t getNumOutputs() const override {
         if (is_inverse_) return 1;
-        return isInplaceMode() ? 1 : 3;
+        return (isLinearMode() || isInplaceMode()) ? 1 : 3;
     }
 
     std::vector<std::string> getOutputNames() const override {
         if (is_inverse_) return {"reconstructed"};
-        if (isInplaceMode()) return {"codes"};
+        if (isLinearMode() || isInplaceMode()) return {"codes"};
         return {"codes", "outlier_vals", "outlier_idxs"};
     }
 
@@ -195,6 +203,9 @@ public:
 
     uint8_t getOutputDataType(size_t output_index) const override {
         if (is_inverse_) return static_cast<uint8_t>(getInputDataType());
+        // Linear mode: codes hold two's-complement signed q — declare the signed type
+        // so the DAG connects cleanly to LorenzoStage<intN>.
+        if (isLinearMode()) return static_cast<uint8_t>(signedOf(getCodeDataType()));
         if (isInplaceMode()) return static_cast<uint8_t>(getCodeDataType()); // only codes
         switch (output_index) {
             case 0: return static_cast<uint8_t>(getCodeDataType());
@@ -240,6 +251,8 @@ public:
     void setOutlierThreshold(float t)        { config_.outlier_threshold = t; }
     /// ABS/NOA: encode outliers in-place (raw float bits in codes array; no scatter buffers).
     void setInplaceOutliers(bool enable)     { config_.inplace_outliers = enable; }
+    /// ABS/NOA: linear / no-outlier mode (cuSZp-style signed codes; see Config::linear_mode).
+    void setLinearMode(bool enable)          { config_.linear_mode = enable; }
 
     TInput         getErrorBound()        const { return static_cast<TInput>(config_.error_bound); }
     int            getQuantRadius()       const { return config_.quant_radius; }
@@ -249,6 +262,7 @@ public:
     bool           getZigzagCodes()       const { return config_.zigzag_codes; }
     float          getOutlierThreshold()  const { return config_.outlier_threshold; }
     bool           getInplaceOutliers()   const { return config_.inplace_outliers; }
+    bool           getLinearMode()        const { return config_.linear_mode; }
 
 private:
     Config config_;
@@ -284,6 +298,19 @@ private:
     bool isInplaceMode() const {
         return config_.inplace_outliers
             && config_.eb_mode != ErrorBoundMode::REL;
+    }
+
+    bool isLinearMode() const { return config_.linear_mode; }
+
+    /// Signed DataType corresponding to an unsigned code type (UINT16→INT16, etc.).
+    /// Linear-mode codes are two's-complement signed values stored in an unsigned TCode.
+    static DataType signedOf(DataType d) {
+        switch (d) {
+            case DataType::UINT8:  return DataType::INT8;
+            case DataType::UINT16: return DataType::INT16;
+            case DataType::UINT32: return DataType::INT32;
+            default:               return d;
+        }
     }
 
     DataType getInputDataType() const {

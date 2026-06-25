@@ -1392,3 +1392,183 @@ TEST(QuantizerTypeMatrix, DoubleUint32_PipelineRoundTrip) {
     EXPECT_LE(max_err, EB * 1.01)
         << "QuantizerStage<double,uint32_t> round-trip max_err=" << max_err;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QZ-L1..L6: Linear / no-outlier mode (cuSZp-style signed codes)
+//   QL1  QuantizerLinear/ABSRoundTrip          — signed codes, no outliers, within eb
+//   QL2  QuantizerLinear/NOARoundTrip          — linear + NOA range scan
+//   QL3  QuantizerLinear/PortAndTypeContract   — 1 output "codes" declared INT32; inverse 1 input
+//   QL4  QuantizerLinear/HeaderRoundTrip       — linear_mode flag survives serialize/deserialize
+//   QL5  QuantizerLinear/IncompatibleModesThrow — REL/inplace/zigzag + linear each throw
+//   QL6  QuantizerLinear/Pipeline              — Quantizer(linear) → Lorenzo(block) end-to-end
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Linear forward: single "codes" output (no outlier triplet).
+static std::vector<uint8_t> run_linear_forward(
+    QuantizerStage<float, uint32_t>& stage,
+    const std::vector<float>&        h_input,
+    cudaStream_t                     stream,
+    fz::MemoryPool&                  pool,
+    size_t*                          codes_bytes = nullptr)
+{
+    size_t n = h_input.size();
+    size_t in_bytes = n * sizeof(float);
+    CudaBuffer<float> d_in(n);
+    d_in.upload(h_input, stream);
+    stage.onFinalize(in_bytes, &pool);
+
+    auto est = stage.estimateOutputSizes({in_bytes});
+    EXPECT_EQ(est.size(), 1u) << "linear forward must estimate a single output";
+
+    CudaBuffer<uint8_t> d_codes(est[0]);
+    std::vector<void*>  inputs  = {d_in.void_ptr()};
+    std::vector<void*>  outputs = {d_codes.void_ptr()};
+    std::vector<size_t> sizes   = {in_bytes};
+    stage.execute(stream, &pool, inputs, outputs, sizes);
+    cudaStreamSynchronize(stream);
+    stage.postStreamSync(stream);
+
+    auto actual = stage.getActualOutputSizesByName();
+    size_t cb = actual.count("codes") ? actual.at("codes") : est[0];
+    if (codes_bytes) *codes_bytes = cb;
+    return d_codes.download_bytes(cb, stream);
+}
+
+static std::vector<float> run_linear_inverse(
+    QuantizerStage<float, uint32_t>& stage,
+    const std::vector<uint8_t>&      codes_raw,
+    size_t                           n,
+    cudaStream_t                     stream,
+    fz::MemoryPool&                  pool)
+{
+    CudaBuffer<uint8_t> d_codes(codes_raw.size());
+    d_codes.upload(codes_raw, stream);
+    CudaBuffer<float> d_out(n);
+    std::vector<void*>  inputs  = {d_codes.void_ptr()};
+    std::vector<void*>  outputs = {d_out.void_ptr()};
+    std::vector<size_t> sizes   = {codes_raw.size()};
+    stage.execute(stream, &pool, inputs, outputs, sizes);
+    cudaStreamSynchronize(stream);
+    return d_out.download(stream);
+}
+
+TEST(QuantizerLinear, ABSRoundTrip) {
+    CudaStream stream;
+    constexpr size_t N  = 4096;
+    constexpr float  EB = 1e-2f;
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setLinearMode(true);
+
+    size_t codes_bytes = 0;
+    auto codes = run_linear_forward(fwd, h_input, stream, *pool, &codes_bytes);
+    EXPECT_EQ(codes_bytes, N * sizeof(uint32_t)) << "linear codes are one per element";
+
+    QuantizerStage<float, uint32_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+    EXPECT_TRUE(inv.getLinearMode());
+
+    auto h_recon = run_linear_inverse(inv, codes, N, stream, *pool);
+    ASSERT_EQ(h_recon.size(), N);
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "linear ABS round-trip max_err=" << max_err << " exceeds bound " << EB;
+}
+
+TEST(QuantizerLinear, NOARoundTrip) {
+    CudaStream stream;
+    constexpr size_t N       = 2048;
+    constexpr float  USER_EB = 0.01f;
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+    float vmin = *std::min_element(h_input.begin(), h_input.end());
+    float vmax = *std::max_element(h_input.begin(), h_input.end());
+    float expected_abs_eb = USER_EB * (vmax - vmin);
+
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(USER_EB);
+    fwd.setErrorBoundMode(ErrorBoundMode::NOA);
+    fwd.setLinearMode(true);
+
+    auto codes = run_linear_forward(fwd, h_input, stream, *pool);
+
+    QuantizerStage<float, uint32_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+    auto h_recon = run_linear_inverse(inv, codes, N, stream, *pool);
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, expected_abs_eb * 1.02f)
+        << "linear NOA round-trip max_err=" << max_err << " exceeds bound " << expected_abs_eb;
+}
+
+TEST(QuantizerLinear, PortAndTypeContract) {
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setLinearMode(true);
+    EXPECT_EQ(fwd.getNumInputs(), 1u);
+    EXPECT_EQ(fwd.getNumOutputs(), 1u);
+    auto names = fwd.getOutputNames();
+    ASSERT_EQ(names.size(), 1u);
+    EXPECT_EQ(names[0], "codes");
+    EXPECT_EQ(fwd.getOutputDataType(0), static_cast<uint8_t>(DataType::INT32))
+        << "linear codes must be declared as the signed type for LorenzoStage<int32_t>";
+    EXPECT_EQ(fwd.estimateDeviceFootprintBytes(1024), 0u)
+        << "linear mode allocates no outlier-count scratch";
+
+    QuantizerStage<float, uint32_t> inv;
+    inv.setLinearMode(true);
+    inv.setInverse(true);
+    EXPECT_EQ(inv.getNumInputs(), 1u) << "linear inverse takes a single codes input";
+}
+
+TEST(QuantizerLinear, HeaderRoundTrip) {
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(3e-3f);
+    fwd.setLinearMode(true);
+
+    uint8_t buf[128] = {};
+    size_t sz = fwd.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(sz, sizeof(QuantizerConfig));
+
+    QuantizerStage<float, uint32_t> dst;
+    dst.deserializeHeader(buf, sz);
+    EXPECT_TRUE(dst.getLinearMode());
+    EXPECT_FLOAT_EQ(dst.getErrorBound(), 3e-3f);
+}
+
+TEST(QuantizerLinear, IncompatibleModesThrow) {
+    CudaStream stream;
+    constexpr size_t N = 256;
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    // REL + linear → throw
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setLinearMode(true);
+        s.setErrorBoundMode(ErrorBoundMode::REL);
+        EXPECT_THROW(run_linear_forward(s, h_input, stream, *pool), std::runtime_error);
+    }
+    // inplace + linear → throw
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setLinearMode(true);
+        s.setInplaceOutliers(true);
+        EXPECT_THROW(run_linear_forward(s, h_input, stream, *pool), std::runtime_error);
+    }
+    // zigzag + linear → throw
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setLinearMode(true);
+        s.setZigzagCodes(true);
+        EXPECT_THROW(run_linear_forward(s, h_input, stream, *pool), std::runtime_error);
+    }
+}

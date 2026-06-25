@@ -59,12 +59,17 @@ __global__ void lorenzo_scan_1d_kernel(
     if (gid < n) out[gid] = s[tid];
 }
 
+// `block_threads` is both the launch block size and the prediction-reset period:
+// the delta/scan kernels reset per CUDA block, so launching with blockDim == n
+// makes every n-element segment an independent chain (cuSZp uses n = 32). The
+// default 256 reproduces the historical launch-block-local behavior.
 template<typename T>
 void launchLorenzoDeltaKernel1D(
-    const T* d_input, T* d_output, size_t n, cudaStream_t stream)
+    const T* d_input, T* d_output, size_t n, cudaStream_t stream,
+    unsigned block_threads)
 {
     if (n == 0) return;
-    constexpr int kBlock = 256;
+    const int kBlock = static_cast<int>(block_threads);
     const int grid = static_cast<int>((n + kBlock - 1) / kBlock);
     lorenzo_delta_1d_kernel<T><<<grid, kBlock, 0, stream>>>(d_input, d_output, n);
     FZ_CUDA_CHECK(cudaGetLastError());
@@ -72,10 +77,11 @@ void launchLorenzoDeltaKernel1D(
 
 template<typename T>
 void launchLorenzoPrefixSumKernel1D(
-    const T* d_input, T* d_output, size_t n, cudaStream_t stream)
+    const T* d_input, T* d_output, size_t n, cudaStream_t stream,
+    unsigned block_threads)
 {
     if (n == 0) return;
-    constexpr int kBlock = 256;
+    const int kBlock = static_cast<int>(block_threads);
     const int grid = static_cast<int>((n + kBlock - 1) / kBlock);
     lorenzo_scan_1d_kernel<T>
         <<<grid, kBlock, kBlock * sizeof(T), stream>>>(d_input, d_output, n);
@@ -386,6 +392,16 @@ void LorenzoStage<T>::execute(
     size_t ny = dims_[1];
     size_t nz = dims_[2];
 
+    // Explicit block mode (cuSZp-style): force the 1-D path over the flattened
+    // array, resetting the prediction chain every block_size_ elements.
+    if (block_size_ > 0) {
+        const unsigned bt = block_size_;
+        if (!is_inverse_) launchLorenzoDeltaKernel1D<T>(in, out, n, stream, bt);
+        else              launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream, bt);
+        actual_output_size_ = byte_size;
+        return;
+    }
+
     int eff_ndim = ndim();
 
     if (!is_inverse_) {
@@ -410,15 +426,15 @@ template class LorenzoStage<int16_t>;
 template class LorenzoStage<int32_t>;
 template class LorenzoStage<int64_t>;
 
-template void launchLorenzoDeltaKernel1D<int8_t> (const int8_t*,  int8_t*,  size_t, cudaStream_t);
-template void launchLorenzoDeltaKernel1D<int16_t>(const int16_t*, int16_t*, size_t, cudaStream_t);
-template void launchLorenzoDeltaKernel1D<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t);
-template void launchLorenzoDeltaKernel1D<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t);
+template void launchLorenzoDeltaKernel1D<int8_t> (const int8_t*,  int8_t*,  size_t, cudaStream_t, unsigned);
+template void launchLorenzoDeltaKernel1D<int16_t>(const int16_t*, int16_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzoDeltaKernel1D<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzoDeltaKernel1D<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t, unsigned);
 
-template void launchLorenzoPrefixSumKernel1D<int8_t> (const int8_t*,  int8_t*,  size_t, cudaStream_t);
-template void launchLorenzoPrefixSumKernel1D<int16_t>(const int16_t*, int16_t*, size_t, cudaStream_t);
-template void launchLorenzoPrefixSumKernel1D<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t);
-template void launchLorenzoPrefixSumKernel1D<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t);
+template void launchLorenzoPrefixSumKernel1D<int8_t> (const int8_t*,  int8_t*,  size_t, cudaStream_t, unsigned);
+template void launchLorenzoPrefixSumKernel1D<int16_t>(const int16_t*, int16_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzoPrefixSumKernel1D<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzoPrefixSumKernel1D<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t, unsigned);
 
 template void launchLorenzoDeltaKernel2D<int8_t> (const int8_t*,  int8_t*,  size_t, size_t, cudaStream_t);
 template void launchLorenzoDeltaKernel2D<int16_t>(const int16_t*, int16_t*, size_t, size_t, cudaStream_t);

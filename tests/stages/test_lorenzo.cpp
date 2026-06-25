@@ -240,3 +240,113 @@ TEST(LorenzoStage, QuantizerLorenzoPipelineRoundTrip) {
     float max_err = max_abs_error(h_input, h_recon);
     EXPECT_LT(max_err, 0.011f);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LZ10-LZ14: setBlockSize — explicit 1-D block-local reset period (cuSZp-style)
+//   LZ10  LorenzoStage/BlockSizeRoundTrip1D       — block_size=32 ramp, exact
+//   LZ11  LorenzoStage/BlockSizePartialFinalBlock — N not a multiple of block_size, exact
+//   LZ12  LorenzoStage/BlockSizeSerializeDeserialize — block_size survives header
+//   LZ13  LorenzoStage/SetBlockSizeRejectsTooLarge   — n>1024 throws
+//   LZ14  LorenzoStage/CuSZpFrontEndPipeline       — Quantizer(linear)→Lorenzo(block=32)
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(LorenzoStage, BlockSizeRoundTrip1D) {
+    const size_t N = 4096;
+    const size_t in_bytes = N * sizeof(int32_t);
+
+    std::vector<int32_t> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = static_cast<int32_t>((i * 7) % 1000) - 500;
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    auto* stage = p.addStage<LorenzoStage<int32_t>>();
+    stage->setBlockSize(32);   // cuSZp block-local reset
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<int32_t>(p, h_input, cs.stream);
+    EXPECT_EQ(res.max_error, 0.0f);
+}
+
+TEST(LorenzoStage, BlockSizePartialFinalBlock) {
+    const size_t N = 1000;   // not a multiple of 32 → ragged final block
+    const size_t in_bytes = N * sizeof(int32_t);
+
+    std::vector<int32_t> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = static_cast<int32_t>((i * 3) % 257);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    auto* stage = p.addStage<LorenzoStage<int32_t>>();
+    stage->setBlockSize(32);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<int32_t>(p, h_input, cs.stream);
+    EXPECT_EQ(res.max_error, 0.0f);
+}
+
+TEST(LorenzoStage, BlockSizeSerializeDeserialize) {
+    LorenzoStage<int32_t> original;
+    original.setBlockSize(32);
+
+    uint8_t buf[128] = {};
+    size_t written = original.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(written, sizeof(LorenzoConfig));
+
+    LorenzoStage<int32_t> restored;
+    restored.deserializeHeader(buf, written);
+    EXPECT_EQ(restored.getBlockSize(), 32u);
+
+    // Legacy 16-byte header (no block_size) → defaults to 0.
+    LorenzoStage<int32_t> legacy;
+    legacy.deserializeHeader(buf, 16);
+    EXPECT_EQ(legacy.getBlockSize(), 0u);
+}
+
+TEST(LorenzoStage, SetBlockSizeRejectsTooLarge) {
+    LorenzoStage<int32_t> stage;
+    EXPECT_THROW(stage.setBlockSize(2048), std::invalid_argument);
+    EXPECT_NO_THROW(stage.setBlockSize(1024));
+    EXPECT_NO_THROW(stage.setBlockSize(0));   // 0 = default behavior
+}
+
+TEST(LorenzoStage, CuSZpFrontEndPipeline) {
+    // The cuSZp modular front-end: linear quantizer (signed codes, no outliers)
+    // feeding a block-local Lorenzo predictor.
+    const size_t N = 4096;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth_data<float>(N);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+
+    auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
+    quant->setErrorBound(0.01f);
+    quant->setErrorBoundMode(ErrorBoundMode::ABS);
+    quant->setLinearMode(true);           // signed INT32 codes, no outliers
+
+    auto* lrz = p.addStage<LorenzoStage<int32_t>>();
+    lrz->setBlockSize(32);                // cuSZp block-local 1-D delta
+    p.connect(lrz, quant, "codes");
+    p.finalize();
+
+    CudaBuffer<float> d_in(N);
+    CudaStream cs;
+    d_in.upload(h_input, cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    void* d_comp = nullptr; size_t comp_sz = 0;
+    p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    void* d_dec = nullptr; size_t dec_sz = 0;
+    p.decompress(nullptr, comp_sz, &d_dec, &dec_sz, cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    ASSERT_EQ(dec_sz, in_bytes);
+    std::vector<float> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
+
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, 0.01f * 1.01f);
+}
