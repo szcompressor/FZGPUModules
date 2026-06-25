@@ -65,9 +65,25 @@ first element of each block is a delta-vs-0 (a full magnitude) that would inflat
 the whole block's bit width. Per-block metadata grows from 1 to 2 bytes
 (`[rate][sel]`, where `sel` bit 0 = is-outlier and bits 1-2 = outlier byte count
 − 1). The mode is recorded in the FZM header, so a cold decompress selects the
-right path automatically. This is the cuSZp **outlier** mode (SC'24); cuSZp packs
-the same flags into a single rate byte, which we widen to two bytes so the full
-`int32` rate range stays representable.
+right path automatically.
+
+#### Metadata difference from cuSZp2 (intentional)
+
+cuSZp2 packs the per-block outlier metadata into a **single byte** — bit 7 =
+outlier flag, bits 5-6 = outlier byte count − 1, bits 0-4 = rate — which caps the
+per-block bit width at **31** (its decoder masks the rate with `0x1f`). That is
+safe for cuSZp's own f32→quant→Lorenzo pipeline, but this stage is a general
+signed-integer coder: an `int32` block can legitimately need a bit width of 32
+(e.g. a magnitude of `2^31`, as from `INT32_MIN`), which does not fit in 5 bits.
+To stay correct for arbitrary `int32` input we use **two bytes** per block — a
+full 8-bit rate plus a separate selection byte — instead of cuSZp2's packed byte.
+
+The cost is one extra metadata byte per block, which slightly lowers the
+compression ratio versus the reference on outlier-heavy data (measured: CLDHGH at
+abs eb=1e-3 → 8.49x here vs 9.09x for reference cuSZp2; plain mode matches the
+reference, 3.88x vs 3.88x). The error bound is respected identically. If exact
+cuSZp2 ratio parity is needed, the packed 1-byte layout can be restored for
+`int16` (rate ≤ 16 always fits) or for `int32` with a rate-overflow sentinel.
 
 ---
 

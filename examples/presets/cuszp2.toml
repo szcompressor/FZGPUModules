@@ -1,0 +1,52 @@
+[pipeline]
+# cuSZp2 (outlier mode) — modular reconstruction
+#
+# Same pipeline as cuszp.toml (linear quantizer → block-local Lorenzo →
+# adaptive bit-plane coder) but with the cuSZp2 per-block outlier selection
+# enabled (Huang et al., SC'24).
+#
+# What outlier selection does
+# ─────────────────────────────────────────────────────────────────────────────
+# With a block-local predictor, element 0 of each block is a delta-vs-0 (a full
+# magnitude) that would inflate the whole block's bit width. In outlier mode each
+# block independently picks the cheaper of:
+#   - plain: pack all elements, or
+#   - outlier: store element 0 as a raw 1..4-byte magnitude and pack only the rest.
+# Per-block metadata grows from 1 to 2 bytes. Best on non-sparse, high-smoothness
+# data; on sparse data prefer cuszp.toml (plain).
+#
+# Notes
+# ─────────────────────────────────────────────────────────────────────────────
+# - This reimplementation uses 2-byte per-block metadata (vs cuSZp's bit-packed
+#   1 byte) so the full int32 rate range stays representable; compression ratio
+#   is therefore a few percent below the reference (e.g. CLDHGH at abs eb=1e-3:
+#   ours 8.49x vs reference 9.09x), with the same error bound respected.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/cuszp2.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "ABS"
+linear_mode = true
+
+[[stage]]
+name = "lrz"
+type = "Lorenzo"
+data_type = "int32"
+block_size = 32
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "ab"
+type = "AdaptiveBitpack"
+input_type = "int32"
+block_size = 32
+outlier_selection = true
+inputs = [{from = "lrz"}]

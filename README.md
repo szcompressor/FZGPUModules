@@ -92,6 +92,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
+| `AdaptiveBitpackStage<T>` | Per-block adaptive fixed-rate bit-plane coding (cuSZp/cuSZp2 port) |
 | `HuffmanStage<T>` | GPU Huffman entropy coding (PHF, cuSZ port) |
 | `ANSStage` | GPU rANS entropy coding (dietGPU port) |
 | `BitplaneRLEStage` | Fused bitplane transpose + zero-byte RLE lossless encoder (FZ-GPU port) |

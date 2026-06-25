@@ -151,6 +151,7 @@ static Stage* addLorenzoStage(Pipeline& p, const toml::table& t) {
 
     Stage* s = nullptr;
     auto configure = [&](auto* lrz) {
+        lrz->setBlockSize(static_cast<uint32_t>(optInt(t, "block_size", 0)));
         s = lrz;
     };
 
@@ -209,19 +210,23 @@ static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
 
     Stage* s = nullptr;
 
+    bool linear = optBool(t, "linear_mode", false);
     auto configure = [&](auto* quant) {
         quant->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
         quant->setErrorBoundMode(ebModeFromString(optStr(t, "error_bound_mode", "REL")));
         quant->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 32768)));
         quant->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.05)));
-        quant->setZigzagCodes(optBool(t, "zigzag_codes", true));
-        
+        // Linear mode produces raw signed codes — zigzag is incompatible, so it
+        // defaults off when linear mode is on.
+        quant->setZigzagCodes(optBool(t, "zigzag_codes", !linear));
+
         float threshold = static_cast<float>(optDbl(t, "outlier_threshold", std::numeric_limits<float>::infinity()));
         if (std::isfinite(threshold)) {
             quant->setOutlierThreshold(threshold);
         }
-        
+
         quant->setInplaceOutliers(optBool(t, "inplace_outliers", false));
+        quant->setLinearMode(linear);
         s = quant;
     };
 
@@ -399,6 +404,13 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
 static void saveLorenzoStage(Stage* s, std::ostringstream& out) {
     DataType dt = static_cast<DataType>(s->getOutputDataType(0));
     out << "data_type = \"" << dataTypeToString(dt) << "\"\n";
+    uint8_t buf[sizeof(LorenzoConfig)] = {};
+    if (s->serializeHeader(0, buf, sizeof(buf)) >= sizeof(LorenzoConfig)) {
+        LorenzoConfig lc;
+        std::memcpy(&lc, buf, sizeof(lc));
+        if (lc.block_size > 0)
+            out << "block_size = " << static_cast<int64_t>(lc.block_size) << "\n";
+    }
 }
 
 static void saveLorenzoQuantStage(Stage* s, std::ostringstream& out) {
@@ -464,6 +476,7 @@ static void saveQuantizerStage(Stage* s, std::ostringstream& out) {
         float thr = q->getOutlierThreshold();
         if (std::isfinite(thr)) out << "outlier_threshold = " << thr << "\n";
         if (q->getInplaceOutliers())  out << "inplace_outliers = true\n";
+        if (q->getLinearMode())       out << "linear_mode = true\n";
     };
     if      (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) write(static_cast<QuantizerStage<float,  uint16_t>*>(s));
     else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT32) write(static_cast<QuantizerStage<float,  uint32_t>*>(s));
