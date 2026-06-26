@@ -1,19 +1,12 @@
 [pipeline]
-# cuSZp3 (fixed mode) — modular reconstruction
+# cuSZp3 (fixed) — Quantizer(linear) → AdaptiveBitpack
 #
-# The cuSZp3 "fixed" mode: integer quantization + fixed-length encoding with NO
-# delta. Drop the predictor entirely:
+#   Quantizer        linear_mode: q = round(x/2eb), signed codes
+#   AdaptiveBitpack  block_size=64: per-block rate byte + sign bitmap + bit-planes
 #
-#   Quantizer(linear)  ->  AdaptiveBitpack(block=64)
-#       q = round(x/2eb)     per-block fixed-rate bit-plane packing
-#
-# Best for unsmooth / unstructured scientific data or ML weights/tokens, where a
-# spatial delta does not help (and can hurt). For locally-smooth or sparse data
-# use cuszp3.toml (plain); for non-sparse globally-smooth data use
-# cuszp3_outlier.toml.
-#
-# block_size is independent of any tile here (no predictor) — 64 matches the
-# cuSZp3 2-D/3-D block; use 32 to match the 1-D block.
+# No delta (no predictor): integer quantization + fixed-length encoding only.
+# Best on unsmooth/unstructured data or ML weights. For smooth data use
+# cuszp3.toml (plain) or cuszp3_outlier.toml. cuSZp3: Huang et al., SC'25.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/cuszp3_fixed.toml \

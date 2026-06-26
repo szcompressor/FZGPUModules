@@ -1,26 +1,11 @@
 [pipeline]
-# cuSZp2 (outlier mode) — modular reconstruction
+# cuSZp2 (outlier) — cuszp.toml plus per-block outlier selection
 #
-# Same pipeline as cuszp.toml (linear quantizer → block-local Lorenzo →
-# adaptive bit-plane coder) but with the cuSZp2 per-block outlier selection
-# enabled (Huang et al., SC'24).
-#
-# What outlier selection does
-# ─────────────────────────────────────────────────────────────────────────────
-# With a block-local predictor, element 0 of each block is a delta-vs-0 (a full
-# magnitude) that would inflate the whole block's bit width. In outlier mode each
-# block independently picks the cheaper of:
-#   - plain: pack all elements, or
-#   - outlier: store element 0 as a raw 1..4-byte magnitude and pack only the rest.
-# Per-block metadata grows from 1 to 2 bytes. Best on non-sparse, high-smoothness
-# data; on sparse data prefer cuszp.toml (plain).
-#
-# Notes
-# ─────────────────────────────────────────────────────────────────────────────
-# - This reimplementation uses 2-byte per-block metadata (vs cuSZp's bit-packed
-#   1 byte) so the full int32 rate range stays representable; compression ratio
-#   is therefore a few percent below the reference (e.g. CLDHGH at abs eb=1e-3:
-#   ours 8.49x vs reference 9.09x), with the same error bound respected.
+# Same pipeline as cuszp.toml (Quantizer(linear) → Lorenzo(block=32) →
+# AdaptiveBitpack), with AdaptiveBitpack outlier_selection = true: each block may
+# instead store element 0 as a raw 1..4-byte outlier and pack only the rest,
+# whichever is smaller. Best on non-sparse, high-smoothness data.
+# cuSZp2: Huang et al., SC'24.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/cuszp2.toml \

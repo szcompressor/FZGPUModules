@@ -36,11 +36,11 @@ fixed-rate coder: pair this stage with
 coder block — reproducing cuSZp3's per-tile fixed-rate layout with the coder
 unchanged. The inverse un-tiles back to the original natural (row-major) order.
 
-> This stage is a *separate* stage rather than a `LorenzoStage` mode precisely
-> because the tile-major reshape + padding break LorenzoStage's "same size, same
-> layout" contract, and the separable formula differs from LorenzoStage's N-D
-> inclusion-exclusion delta. (Same reasoning as `AdaptiveBitpackStage` vs
-> `BitpackStage`.)
+This stage is a *separate* stage rather than a `LorenzoStage` mode precisely
+because the tile-major reshape + padding break LorenzoStage's "same size, same
+layout" contract, and the separable formula differs from LorenzoStage's N-D
+inclusion-exclusion delta. (Same reasoning as `AdaptiveBitpackStage` vs
+`BitpackStage`.)
 
 ---
 

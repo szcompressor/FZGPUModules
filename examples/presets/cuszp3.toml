@@ -1,26 +1,13 @@
 [pipeline]
-# cuSZp3 (plain mode, 2-D) — modular reconstruction
+# cuSZp3 (plain, 2-D) — Quantizer(linear) → TiledLorenzo(8x8) → AdaptiveBitpack(64)
 #
-# cuSZp3 (Huang et al., SC'25) generalizes cuSZp2 to 1-D/2-D/3-D with a
-# dimension-aware (tiled separable) delta. This preset is the 2-D "plain" mode:
+#   Quantizer        linear_mode: q = round(x/2eb), signed codes
+#   TiledLorenzo     8x8 tiles: dimension-aware separable delta, tile-major output
+#   AdaptiveBitpack  block_size=64: one block per tile (= tile_x*tile_y)
 #
-#   Quantizer(linear)  ->  TiledLorenzo(8x8)  ->  AdaptiveBitpack(block=64)
-#       q = round(x/2eb)     separable per-tile     per-tile fixed-rate bit-plane
-#                            delta, tile-major out   packing (one block per tile)
-#
-# Modes
-# ─────────────────────────────────────────────────────────────────────────────
-# - fixed   : drop the TiledLorenzo stage (Quantizer -> AdaptiveBitpack).
-# - plain   : this file.
-# - outlier : this file + outlier_selection = true on AdaptiveBitpack
-#             (see cuszp3_outlier.toml).
-#
-# Notes
-# ─────────────────────────────────────────────────────────────────────────────
-# - TiledLorenzo emits tile-major output (each 8x8 tile contiguous, edge tiles
-#   zero-padded) so AdaptiveBitpack's 64-element blocks line up with the tiles —
-#   reproducing cuSZp3's per-tile layout. block_size must equal tile_x*tile_y.
-# - For 3-D data use tile_x=4, tile_y=4, tile_z=4 (block_size stays 64).
+# For 3-D data use tile_x=tile_y=tile_z=4 (block_size stays 64). Other modes:
+# cuszp3_fixed.toml (no delta), cuszp3_outlier.toml (+ outlier selection).
+# cuSZp3: Huang et al., SC'25.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/cuszp3.toml \

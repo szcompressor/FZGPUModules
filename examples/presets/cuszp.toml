@@ -1,33 +1,12 @@
 [pipeline]
-# cuSZp (plain mode) — modular reconstruction
+# cuSZp (plain) — Quantizer(linear) → Lorenzo(block) → AdaptiveBitpack
 #
-# Linear quantizer → block-local Lorenzo → adaptive fixed-rate bit-plane coder.
-# Reproduces the cuSZp fixed-length pipeline (Huang et al.; quantization +
-# block-local Lorenzo + fixed-length encoding from cuSZp SC'23, in the
-# bit-shuffle-free "plain" form that cuSZp2 SC'24 names) as composable stages
-# rather than one fused kernel — kernel fusion is left to a downstream compiler.
-# Note: the original SC'23 cuSZp also applied a block bit-shuffle, which this
-# modular reconstruction omits; see cuszp2.toml for the per-block outlier mode.
+#   Quantizer        linear_mode: q = round(x/2eb), signed codes, no outliers
+#   Lorenzo          block_size=32: 1-D delta, resets every 32 elements
+#   AdaptiveBitpack  block_size=32: per-block rate byte + sign bitmap + bit-planes
 #
-# Stages
-# ─────────────────────────────────────────────────────────────────────────────
-# - Quantizer (linear_mode): q = round(x / 2·eb), raw signed codes, NO radius /
-#   outliers / zigzag. Declares its codes as the signed type so they connect
-#   straight to the int32 Lorenzo. Graph-compatible in ABS mode.
-# - Lorenzo (block_size = 32): 1-D delta that resets every 32 elements (cuSZp's
-#   block-local predictor), independent of dims.
-# - AdaptiveBitpack (block_size = 32): per 32-element block, store a rate byte
-#   (bit width of the block's largest magnitude) + sign bitmap + that many
-#   bit-planes. Offsets via a device-wide scan.
-#
-# Notes
-# ─────────────────────────────────────────────────────────────────────────────
-# - block_size must match between Lorenzo and AdaptiveBitpack for faithful cuSZp
-#   (both 32); they are independent otherwise.
-# - Best on sparse data (lots of zeros). For non-sparse / high-smoothness data,
-#   use cuszp2.toml (per-block outlier selection).
-# - Matches the reference cuSZp compression ratio closely (e.g. CLDHGH at
-#   abs eb=1e-3: ours 3.88x vs reference 3.88x).
+# block_size matches between Lorenzo and AdaptiveBitpack (both 32). Best on sparse
+# data; for non-sparse data use cuszp2.toml. cuSZp: Huang et al., SC'23.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/cuszp.toml \

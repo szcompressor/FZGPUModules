@@ -44,7 +44,7 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | `setQuantRadius(r)` | Quantization radius | Used by ABS/NOA modes |
 | `setOutlierCapacity(f)` | Outlier reserve fraction | 0.0-1.0 of element count |
 | `setZigzagCodes(enable)` | Zigzag-encode codes | ABS/NOA only; improves compressibility |
-| `setOutlierThreshold(t)` | Force outliers | ABS/NOA only; `|x| >= t` -> outlier |
+| `setOutlierThreshold(t)` | Force outliers | ABS/NOA only; `abs(x) >= t` -> outlier |
 | `setInplaceOutliers(enable)` | Embed outliers in codes | ABS/NOA only; see constraints below |
 | `setLinearMode(enable)` | Signed codes, no outliers | ABS/NOA only; cuSZp-style; see below |
 | `setValueBase(v)` | Precomputed value range | NOA only; optional, see below |
