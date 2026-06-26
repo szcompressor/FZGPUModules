@@ -82,6 +82,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 |---|---|
 | `LorenzoQuantStage<TInput, TCode>` | Fused float predictor + quantizer (lossy, 1D/2D/3D) |
 | `LorenzoStage<T>` | Plain integer Lorenzo predictor (lossless) |
+| `TiledLorenzoStage<T>` | Dimension-aware (tiled separable) Lorenzo predictor (lossless, 2D/3D, cuSZp3 delta) |
 | `GInterpStage<TInput, TCode>` | Multi-level spline interpolation predictor + quantizer (lossy, 3D, cuSZ-Hi port) |
 | `QuantizerStage<TInput, TCode>` | Direct-value quantizer (ABS/REL/NOA error modes) |
 | `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |

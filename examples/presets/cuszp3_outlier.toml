@@ -1,0 +1,45 @@
+[pipeline]
+# cuSZp3 (outlier mode, 2-D) — modular reconstruction
+#
+# Same as cuszp3.toml (linear quantizer -> tiled separable delta -> adaptive
+# bit-plane coder) but with the per-block outlier selection enabled. With the
+# tiled predictor, each tile's origin element is a delta-vs-0 (a full magnitude)
+# that would inflate the whole tile's bit width; outlier mode lets each tile
+# pick the cheaper of plain packing vs. extracting that element as a raw
+# 1..4-byte outlier. Best on non-sparse, high-smoothness data.
+#
+# Note: this reimplementation uses 2-byte per-block metadata (vs cuSZp's bit-
+# packed 1 byte) so the full int32 rate range stays representable; compression
+# ratio is therefore a few percent below the reference, with the same error
+# bound respected.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/cuszp3_outlier.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "ABS"
+linear_mode = true
+
+[[stage]]
+name = "tl"
+type = "TiledLorenzo"
+data_type = "int32"
+tile_x = 8
+tile_y = 8
+tile_z = 1
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "ab"
+type = "AdaptiveBitpack"
+input_type = "int32"
+block_size = 64
+outlier_selection = true
+inputs = [{from = "tl"}]

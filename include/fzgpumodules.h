@@ -20,6 +20,7 @@
 
 #include "predictors/diff/diff.h"
 #include "predictors/lorenzo/lorenzo_stage.h"
+#include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
 #include "coders/rle/rle.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"

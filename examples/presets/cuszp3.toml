@@ -1,0 +1,53 @@
+[pipeline]
+# cuSZp3 (plain mode, 2-D) — modular reconstruction
+#
+# cuSZp3 (Huang et al., SC'25) generalizes cuSZp2 to 1-D/2-D/3-D with a
+# dimension-aware (tiled separable) delta. This preset is the 2-D "plain" mode:
+#
+#   Quantizer(linear)  ->  TiledLorenzo(8x8)  ->  AdaptiveBitpack(block=64)
+#       q = round(x/2eb)     separable per-tile     per-tile fixed-rate bit-plane
+#                            delta, tile-major out   packing (one block per tile)
+#
+# Modes
+# ─────────────────────────────────────────────────────────────────────────────
+# - fixed   : drop the TiledLorenzo stage (Quantizer -> AdaptiveBitpack).
+# - plain   : this file.
+# - outlier : this file + outlier_selection = true on AdaptiveBitpack
+#             (see cuszp3_outlier.toml).
+#
+# Notes
+# ─────────────────────────────────────────────────────────────────────────────
+# - TiledLorenzo emits tile-major output (each 8x8 tile contiguous, edge tiles
+#   zero-padded) so AdaptiveBitpack's 64-element blocks line up with the tiles —
+#   reproducing cuSZp3's per-tile layout. block_size must equal tile_x*tile_y.
+# - For 3-D data use tile_x=4, tile_y=4, tile_z=4 (block_size stays 64).
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/cuszp3.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "ABS"
+linear_mode = true
+
+[[stage]]
+name = "tl"
+type = "TiledLorenzo"
+data_type = "int32"
+tile_x = 8
+tile_y = 8
+tile_z = 1
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "ab"
+type = "AdaptiveBitpack"
+input_type = "int32"
+block_size = 64
+inputs = [{from = "tl"}]

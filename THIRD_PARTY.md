@@ -164,32 +164,54 @@ the [cuSZ / PHF](#cusz--phf) section above.
 
 ---
 
-## cuSZp
+## cuSZp / cuSZp2 / cuSZp3
+
+**Repository:** https://github.com/szcompressor/cuSZp (the single repo hosts all
+three generations; the current `main` is the cuSZp3 / VGC generation).
 
 **Used by:** `AdaptiveBitpackStage` (`modules/coders/adaptive_bitpack/`),
-and the `linear` mode of `QuantizerStage` + the `setBlockSize` option of
-`LorenzoStage`.
+`TiledLorenzoStage` (`modules/predictors/tiled_lorenzo/`), and the `linear` mode
+of `QuantizerStage` + the `setBlockSize` option of `LorenzoStage`.
 
-**Relationship:**
-- These are **independent reimplementations of published cuSZp schemes — no
-  cuSZp source code is copied.** `AdaptiveBitpackStage` implements cuSZp's
-  per-block adaptive fixed-rate bit-plane "plain" encoding with a byte-granular
-  layout, one-thread-per-block kernels, and an ordinary CUB `DeviceScan` for the
-  per-block offsets (cuSZp uses a fused single kernel with a decoupled look-back
-  scan; that fusion is left to a downstream compiler). `QuantizerStage`'s linear
-  mode reproduces cuSZp's `q = round(x / 2·eb)` mapping with no radius/outlier
-  fallback, and `LorenzoStage::setBlockSize` reproduces cuSZp's block-local 1-D
-  delta. The reference codebase (for cross-checking only, not vendored) lives at
-  `compressors/cuSZp2/`; design notes are in `memory/cuszp_stages.md`.
+**Relationship:** These are **independent reimplementations of published cuSZp
+schemes — no cuSZp source code is copied.** Mapping our pieces to the papers:
 
-  Original authors: Yafan Huang et al.
-  Papers: Yafan Huang, Sheng Di, Xiaodong Yu, Guanpeng Li, Franck Cappello,
-  "cuSZp: An Ultra-fast GPU Error-bounded Lossy Compression Framework with
-  Optimized End-to-End Performance", SC '23; and "cuSZp2: A GPU Lossy Compressor
-  with Extreme Throughput and Optimized Compression Ratio", SC '24.
+- **cuSZp (SC'23)** — the family's core: linear error-bounded quantization,
+  block-local 1-D Lorenzo, fixed-length (per-block fixed-rate bit-plane)
+  encoding, and a block bit-shuffle. We reimplement the first three:
+  `QuantizerStage`'s linear mode reproduces `q = round(x / 2·eb)` (no
+  radius/outlier fallback); `LorenzoStage::setBlockSize` reproduces the
+  block-local 1-D delta; `AdaptiveBitpackStage` reproduces the fixed-length
+  encoding (byte-granular layout, one-thread-per-block kernels, an ordinary CUB
+  `DeviceScan` for per-block offsets where cuSZp fuses a decoupled look-back scan
+  into one kernel — that fusion is left to a downstream compiler). The SC'23
+  **block bit-shuffle is not reproduced** as a cuSZp stage (FZGPUModules has a
+  separate LC-framework `BitshuffleStage`).
+- **cuSZp2 (SC'24)** — adds the per-block **plain vs. outlier** selection over
+  the fixed-length backend. `AdaptiveBitpackStage`'s default plain mode and its
+  `setOutlierSelection(true)` reproduce these two modes.
+- **cuSZp3 / VGC (SC'25)** — adds **dimension-aware (1-D/2-D/3-D) delta** with
+  three modes (fixed = no delta, plain = delta, outlier = delta + outlier).
+  `TiledLorenzoStage` reproduces the 2-D/3-D tiled separable delta; combined with
+  the stages above it yields all three modes (1-D delta is `LorenzoStage`'s block
+  mode). cuSZp3's **memory-efficient compression** and **selective decompression**
+  features are **not ported** (they don't map cleanly onto the staged pipeline).
 
-**License:** cuSZp is BSD-3-Clause (Argonne National Laboratory / University of
-Iowa). As no source is copied, this is an algorithmic attribution.
+The reference codebases (for cross-checking only, not vendored) live at
+`compressors/cuSZp2/` and `compressors/cuSZp3/`; design notes are in
+`memory/cuszp_stages.md`.
+
+**Papers** (all Argonne National Laboratory / University of Iowa):
+- Yafan Huang, Sheng Di, Xiaodong Yu, Guanpeng Li, Franck Cappello, "cuSZp: An
+  Ultra-fast GPU Error-bounded Lossy Compression Framework with Optimized
+  End-to-End Performance", SC '23.
+- Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello, "cuSZp2: A GPU Lossy
+  Compressor with Extreme Throughput and Optimized Compression Ratio", SC '24.
+- Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello, "GPU Lossy Compression for
+  HPC Can Be Versatile and Ultra-Fast" (cuSZp3 / VGC), SC '25.
+
+**License:** cuSZp is BSD-3-Clause. As no source is copied, this is an
+algorithmic attribution.
 
 ---
 

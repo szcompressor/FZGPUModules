@@ -143,7 +143,8 @@ outlier_selection = false   # true = cuSZp2 per-block plain/outlier selection
 
 ## Acknowledgements
 
-The per-block adaptive fixed-rate bit-plane scheme is from cuSZp (Yafan Huang et
-al., SC'23/SC'24). This is an independent reimplementation of the published
-scheme — no cuSZp source is copied. See `THIRD_PARTY.md` and
-`memory/cuszp_stages.md`.
+The per-block fixed-rate ("fixed-length") bit-plane scheme originates in cuSZp
+(Yafan Huang et al., SC'23); the per-block plain/outlier selection is the cuSZp2
+contribution (SC'24). This is an independent reimplementation of the published
+schemes — no cuSZp source is copied. Repo: https://github.com/szcompressor/cuSZp.
+See `THIRD_PARTY.md` and `memory/cuszp_stages.md`.

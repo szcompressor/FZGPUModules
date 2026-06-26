@@ -33,6 +33,7 @@
 // All stage types supported by loadConfig / saveConfig
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/lorenzo/lorenzo_stage.h"
+#include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
 #include "quantizers/quantizer/quantizer.h"
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
@@ -365,6 +366,21 @@ static Stage* addAdaptiveBitpackStage(Pipeline& p, const toml::table& t) {
     throw std::runtime_error("loadConfig: unsupported AdaptiveBitpack input_type");
 }
 
+static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "int32"));
+    uint32_t tx = static_cast<uint32_t>(optInt(t, "tile_x", 0));
+    uint32_t ty = static_cast<uint32_t>(optInt(t, "tile_y", 0));
+    uint32_t tz = static_cast<uint32_t>(optInt(t, "tile_z", 0));
+    auto configure = [&](auto* s) {
+        if (tx || ty || tz)
+            s->setTileShape(tx ? tx : 1, ty ? ty : 1, tz ? tz : 1);
+        return s;
+    };
+    if (dt == DataType::INT16) return configure(p.addStage<TiledLorenzoStage<int16_t>>());
+    if (dt == DataType::INT32) return configure(p.addStage<TiledLorenzoStage<int32_t>>());
+    throw std::runtime_error("loadConfig: unsupported TiledLorenzo data_type");
+}
+
 static Stage* addANSStage(Pipeline& p, const toml::table& t) {
     auto* s = p.addStage<ANSStage>();
     s->setProbBits(static_cast<uint8_t>(optInt(t, "prob_bits", 10)));
@@ -508,6 +524,17 @@ static void saveAdaptiveBitpackStage(Stage* s, std::ostringstream& out) {
     out << "input_type = \"" << dataTypeToString(cfg.data_type) << "\"\n";
     out << "block_size = "   << static_cast<int64_t>(cfg.block_size) << "\n";
     out << "outlier_selection = " << (cfg.outlier_selection ? "true" : "false") << "\n";
+}
+
+static void saveTiledLorenzoStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(TiledLorenzoConfig)] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    TiledLorenzoConfig cfg;
+    if (sz >= sizeof(cfg)) std::memcpy(&cfg, buf, sizeof(cfg));
+    out << "data_type = \"" << dataTypeToString(cfg.data_type) << "\"\n";
+    out << "tile_x = " << static_cast<int64_t>(cfg.tile_x) << "\n";
+    out << "tile_y = " << static_cast<int64_t>(cfg.tile_y) << "\n";
+    out << "tile_z = " << static_cast<int64_t>(cfg.tile_z) << "\n";
 }
 
 static void saveRLEStage(Stage* s, std::ostringstream& out) {
@@ -667,6 +694,7 @@ static const StageEntry kStageRegistry[] = {
     { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
     { "BitplaneRLE",  StageType::BITPLANE_RLE, addBitplaneRLEStage,  saveBitplaneRLEStage  },
     { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage },
+    { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

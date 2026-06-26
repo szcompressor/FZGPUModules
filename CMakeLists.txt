@@ -237,6 +237,7 @@ add_library(FZGMOD::utils ALIAS fzgmod_utils)
 add_library(fzgmod_modules
   modules/predictors/diff/diff.cu
   modules/predictors/lorenzo/lorenzo_stage.cu
+  modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
   modules/transforms/zigzag/zigzag_stage.cu
   modules/transforms/negabinary/negabinary_stage.cu
   modules/quantizers/quantizer/quantizer.cu

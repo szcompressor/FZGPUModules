@@ -95,6 +95,7 @@ enum class StageType : uint16_t {
     G_INTERP   = 22,   ///< Spline interpolation predictor + quantizer (cuSZ-Hi G-Interp)
     BITPLANE_RLE = 23, ///< Fused bitplane transpose + zero-byte RLE (FZ-GPU lossless encoder)
     ADAPTIVE_BITPACK = 24, ///< Per-block adaptive fixed-rate bit-plane coder (cuSZp plain mode)
+    TILED_LORENZO = 25, ///< Dimension-aware (tiled separable) Lorenzo predictor (cuSZp3 delta)
 };
 
 /**
@@ -321,6 +322,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::G_INTERP:    return "GInterp";
         case StageType::BITPLANE_RLE: return "BitplaneRLE";
         case StageType::ADAPTIVE_BITPACK: return "AdaptiveBitpack";
+        case StageType::TILED_LORENZO: return "TiledLorenzo";
         default:                     return "Unknown";
     }
 }

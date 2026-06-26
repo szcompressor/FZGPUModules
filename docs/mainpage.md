@@ -89,6 +89,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | ---------------------------------- | -------------------------------------------------- | ---------------------------------------------- |
 | \ref stage_lorenzo_quant "LorenzoQuantStage<TInput, TCode>" | `modules/fused/lorenzo_quant/lorenzo_quant.h`      | Fused float predictor + quantizer (lossy)      |
 | \ref stage_lorenzo "LorenzoStage<T>"                  | `modules/predictors/lorenzo/lorenzo_stage.h`       | Plain integer Lorenzo predictor (lossless)     |
+| \ref stage_tiled_lorenzo "TiledLorenzoStage<T>"       | `modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.h` | Dimension-aware (tiled separable) Lorenzo predictor (lossless, 2D/3D, cuSZp3 delta) |
 | \ref stage_ginterp "GInterpStage<TInput, TCode>"      | `modules/fused/ginterp/ginterp_stage.h`       | Multi-level spline interpolation predictor + quantizer (lossy, 3D, cuSZ-Hi port) |
 | \ref stage_quantizer "QuantizerStage<TInput, TCode>"    | `modules/quantizers/quantizer/quantizer.h`         | Direct-value quantizer (ABS/REL/NOA)           |
 | \ref stage_rle "RLEStage<T>"                      | `modules/coders/rle/rle.h`                         | Run-length encoding                            |

@@ -108,6 +108,14 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── Tiled (dimension-aware) Lorenzo predictor (cuSZp3 delta) ─────────────────
+fz_add_test(
+    NAME    test_tiled_lorenzo
+    SOURCES test_tiled_lorenzo.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── Quantizer predictor ─────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_quantizer

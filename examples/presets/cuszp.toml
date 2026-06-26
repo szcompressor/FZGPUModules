@@ -2,8 +2,12 @@
 # cuSZp (plain mode) — modular reconstruction
 #
 # Linear quantizer → block-local Lorenzo → adaptive fixed-rate bit-plane coder.
-# Reproduces cuSZp's "plain" pipeline (Huang et al., SC'23) as composable stages
+# Reproduces the cuSZp fixed-length pipeline (Huang et al.; quantization +
+# block-local Lorenzo + fixed-length encoding from cuSZp SC'23, in the
+# bit-shuffle-free "plain" form that cuSZp2 SC'24 names) as composable stages
 # rather than one fused kernel — kernel fusion is left to a downstream compiler.
+# Note: the original SC'23 cuSZp also applied a block bit-shuffle, which this
+# modular reconstruction omits; see cuszp2.toml for the per-block outlier mode.
 #
 # Stages
 # ─────────────────────────────────────────────────────────────────────────────

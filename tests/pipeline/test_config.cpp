@@ -36,6 +36,7 @@
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
 
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -598,6 +599,93 @@ inputs    = [{from = "quant", port = "codes"}]
 )");
 
     auto h_input = make_smooth_data<float>(N);
+
+    Pipeline p;
+    ASSERT_NO_THROW(p.loadConfig(path));
+
+    CudaStream cs;
+    float err = round_trip_error(p, h_input, cs);
+
+    EXPECT_LT(err, EB * 1.1f);
+    std::remove(path.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CL13: ConfigSave/TiledLorenzoSaveLoad — TiledLorenzo save→load round-trip
+// (exercises addTiledLorenzoStage + saveTiledLorenzoStage TOML paths)
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(ConfigSave, TiledLorenzoSaveLoad) {
+    const std::string cfg_path = "/tmp/fzgmod_tiled_lorenzo_save.toml";
+
+    Pipeline p1(64 * 48 * sizeof(int32_t), MemoryStrategy::PREALLOCATE);
+    p1.setDims(64, 48);
+    auto* tl = p1.addStage<TiledLorenzoStage<int32_t>>();
+    tl->setTileShape(8, 8);
+    p1.finalize();
+
+    ASSERT_NO_THROW(p1.saveConfig(cfg_path));
+
+    auto tbl = toml::parse_file(cfg_path);
+    auto* stages = tbl["stage"].as_array();
+    ASSERT_NE(stages, nullptr);
+    ASSERT_GE(stages->size(), 1u);
+    auto* s0 = (*stages)[0].as_table();
+    ASSERT_NE(s0, nullptr);
+    EXPECT_EQ((*s0)["type"].value_or<std::string>(""), "TiledLorenzo");
+    EXPECT_EQ((*s0)["data_type"].value_or<std::string>(""), "int32");
+    EXPECT_EQ((*s0)["tile_x"].value_or<int64_t>(0), 8);
+    EXPECT_EQ((*s0)["tile_y"].value_or<int64_t>(0), 8);
+
+    Pipeline p2;
+    EXPECT_NO_THROW(p2.loadConfig(cfg_path));
+
+    std::remove(cfg_path.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CL14: ConfigLoad/CuSZp3PipelineRoundTrip — full cuSZp3 plain pipeline via TOML
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(ConfigLoad, CuSZp3PipelineRoundTrip) {
+    constexpr size_t NX = 128, NY = 96, N = NX * NY;
+    constexpr float  EB = 1e-2f;
+
+    std::string path = write_toml("cuszp3_plain", R"(
+[pipeline]
+input_size = 49152
+dims = [128, 96, 1]
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name             = "quant"
+type             = "Quantizer"
+input_type       = "float32"
+code_type        = "uint32"
+error_bound      = 0.01
+error_bound_mode = "ABS"
+linear_mode      = true
+
+[[stage]]
+name      = "tl"
+type      = "TiledLorenzo"
+data_type = "int32"
+tile_x    = 8
+tile_y    = 8
+tile_z    = 1
+inputs    = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name       = "ab"
+type       = "AdaptiveBitpack"
+input_type = "int32"
+block_size = 64
+inputs     = [{from = "tl"}]
+)");
+
+    std::vector<float> h_input(N);
+    for (size_t y = 0; y < NY; ++y)
+        for (size_t x = 0; x < NX; ++x)
+            h_input[y * NX + x] =
+                std::sin(x * 0.05f) * std::cos(y * 0.04f) * 10.0f;
 
     Pipeline p;
     ASSERT_NO_THROW(p.loadConfig(path));
