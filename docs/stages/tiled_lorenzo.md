@@ -137,8 +137,12 @@ Dimensions come from the pipeline (`setDims` / the CLI `--dims`), not the stage 
 
 The dimension-aware separable delta is the cuSZp3 / VGC design (Yafan Huang,
 Sheng Di, Guanpeng Li, Franck Cappello, "GPU Lossy Compression for HPC Can Be
-Versatile and Ultra-Fast", SC'25). This is an independent reimplementation of the
-published scheme — no cuSZp source is copied. cuSZp3's memory-efficient
-compression and selective decompression features are not ported. Repo:
-https://github.com/szcompressor/cuSZp. See `THIRD_PARTY.md` and
+Versatile and Ultra-Fast", SC'25, https://doi.org/10.1145/3712285.3759817).
+This stage is a **direct port of the cuSZp3 tiled separable delta kernel logic**
+(from `cuSZp_kernels_{2D,3D}_f32.cu`), re-expressed as a standalone integer
+predictor with a tile-major output reshape; the tile-major decomposition, FZM
+header, and `MemoryPool` integration are FZGPUModules code. cuSZp3 is
+BSD-3-Clause (copyright reproduced verbatim in `THIRD_PARTY.md`); its
+memory-efficient compression and selective decompression features are not ported.
+Repo: https://github.com/szcompressor/cuSZp. See `THIRD_PARTY.md` and
 `memory/cuszp_stages.md` (Part 8).

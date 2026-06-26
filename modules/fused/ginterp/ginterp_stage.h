@@ -37,8 +37,9 @@ namespace fz {
  * Fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
 struct GInterpConfig {
-    // ── identity / dims (40 B) ──────────────────────────────────────────────
-    float    error_bound;       ///< Absolute bound used by the decompressor.
+    // ── identity / dims ─────────────────────────────────────────────────────
+    double   error_bound;       ///< Absolute bound used by the decompressor.
+                                ///< Double so `double` inputs keep full precision.
     uint32_t quant_radius;      ///< Quantization radius (codes lie in [0, 2*radius)).
     uint32_t num_elements;      ///< Total element count (= dim_x*dim_y*dim_z).
     uint32_t outlier_count;     ///< Actual outlier count (post-execute).
@@ -68,10 +69,11 @@ struct GInterpConfig {
     uint8_t  auto_tuning_mode;  ///< 0=off, 1=cheap, 3=full, 4=full+alpha sweep, 5+=manual α/β.
     uint8_t  pad[8];            ///< Reserved for future fields (alignment also).
 
-    // Total: 88 bytes. Comfortable margin under FZM_STAGE_CONFIG_SIZE (128 B).
+    // ~96 bytes. Comfortable margin under FZM_STAGE_CONFIG_SIZE (128 B);
+    // the static_assert below is the source of truth.
 
     GInterpConfig()
-        : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
+        : error_bound(0.0), quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           ndim(3), eb_mode(0),
           dim_x(0), dim_y(1), dim_z(1),
@@ -121,6 +123,22 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *     can't predict — these are stored exactly via the outlier triplet, but
  *     their neighbours still see compounded interpolation error).
  *
+ * ### Error-bound modes (REL is NOT exact PFPL per-element)
+ *
+ * `setErrorBoundMode()` accepts `ABS`, `REL`, and `NOA`, but — like
+ * `LorenzoQuantStage` and unlike `QuantizerStage` — this stage resolves
+ * **all** modes to a single absolute bound before quantizing:
+ *   - **ABS** — `abs_eb = eb` directly.
+ *   - **REL** — *global-approximate* point-wise relative: `abs_eb = eb *
+ *     max(|data|)` (one min/max scan, then treated as ABS). This is **not**
+ *     the exact per-element PFPL relative bound `|error| / |x| <= eb`.
+ *   - **NOA** — value-range relative: `abs_eb = eb * (max(data) - min(data))`.
+ *
+ * The interpolation tree predicts each element against a fixed absolute
+ * tolerance, so a per-element varying bound cannot be threaded through it.
+ * For an **exact** point-wise relative bound use `QuantizerStage` with
+ * `ErrorBoundMode::REL` (log-space encoding); see `quantizer.h`.
+ *
  * Other limitations to be aware of:
  *   - **2-D and 3-D only**; `setDims()` throws for 1-D input.
  *   - 3-D path: best results when each `dim` is a multiple of 16 (the 3-D
@@ -132,6 +150,37 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *     to the deterministic baseline (`alpha=1.75`, `beta=4.0`,
  *     `use_md={t,t,f,f,f,f}`). 2-D auto-tune (cuSZ-Hi `auto_tuning_mode == 2`)
  *     is a follow-up.
+ *
+ * ## Precision (`float` / `double`) and shared memory
+ *
+ * Both `float` and `double` inputs are supported, and **both run the exact same
+ * encode/decode kernels** — `c_spline_infprecis_data` / `x_spline_infprecis_data`
+ * are single templates parameterised on the data type, so there is no separate
+ * "float path" and "double path".
+ *
+ * Those two kernels stage two working tiles (data + ectrl) in **dynamic** shared
+ * memory (`extern __shared__`, sized by the launcher) rather than static
+ * `__shared__`. This is unconditional — it is *not* a double-only branch:
+ *   - The 3-D tile is `(16+1)³ = 4913` elements × 2 buffers. In `double` that is
+ *     ~77 KB, over the 48 KB static `__shared__` cap, which is *why* dynamic
+ *     shared memory is used. `float` is ~38.5 KB — comfortably under the cap, but
+ *     it goes through the same dynamic-shmem code path.
+ *   - The launcher (`ginterpRaiseSmemIfNeeded`) only calls
+ *     `cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, …)`
+ *     when the tile exceeds 48 KB. So in practice the opt-in fires **only for the
+ *     3-D `double` path**; `float` (and all 2-D) use the default dynamic region
+ *     and never touch the attribute.
+ *   - Performance impact on `float` is expected to be negligible: the requested
+ *     shared-memory size, occupancy, and in-kernel access pattern are unchanged
+ *     versus the previous static-`__shared__` version; only the tile base
+ *     address is now a launch-time value.
+ *   - The 3-D `double` path therefore needs a GPU whose opt-in max dynamic
+ *     shared memory is ≥ ~77 KB (Volta and newer). On older GPUs capped at 48 KB
+ *     the `cudaFuncSetAttribute` call fails and the launch surfaces the error;
+ *     2-D `double` and all `float` configs are unaffected.
+ *   - Auto-tuning (profiling modes 1-4) is **`float`-only**; `double` inputs with
+ *     a profiling mode set fall back to the deterministic baseline with a warning
+ *     (mode 5 manual `alpha`/`beta` is still honored for `double`).
  *
  * ## Radius auto-tune (default behaviour)
  *
@@ -145,7 +194,10 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  * climate-style data where the user wants extremes routed to the outlier
  * triplet for downstream handling).
  *
- * @tparam TInput  Floating-point input type (`float` only in MVP).
+ * @tparam TInput  Floating-point input type (`float` or `double`). Both use the
+ *                 same dynamic-shared-memory kernels; see "Precision and shared
+ *                 memory" above. The 3-D `double` path needs a GPU whose opt-in
+ *                 max dynamic shared memory is ≥ ~77 KB (Volta+).
  * @tparam TCode   Quantization code type (`uint8_t`, `uint16_t`, or `uint32_t`).
  */
 template <typename TInput = float, typename TCode = uint16_t>
@@ -266,6 +318,9 @@ public:
     void setErrorBound(float eb)              { config_.error_bound = eb; }
     void setQuantRadius(int radius)           { config_.quant_radius = radius; }
     void setOutlierCapacity(float cap)        { config_.outlier_capacity = cap; }
+    /// REL here is *global-approximate* (`abs_eb = eb * max(|data|)`), NOT the
+    /// exact per-element PFPL bound — use `QuantizerStage` REL for that. See the
+    /// "Error-bound modes" section in the class doc.
     void setErrorBoundMode(ErrorBoundMode m)  { config_.eb_mode = m; }
     void setValueBase(float v)                { config_.precomputed_value_base = v; }
     /// Enable cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning. See
@@ -440,5 +495,8 @@ private:
 extern template class GInterpStage<float, uint8_t>;
 extern template class GInterpStage<float, uint16_t>;
 extern template class GInterpStage<float, uint32_t>;
+extern template class GInterpStage<double, uint8_t>;
+extern template class GInterpStage<double, uint16_t>;
+extern template class GInterpStage<double, uint32_t>;
 
 } // namespace fz

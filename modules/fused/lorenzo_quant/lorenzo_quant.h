@@ -183,6 +183,9 @@ public:
     void setQuantRadius(TCode radius) { config_.quant_radius = radius; }
     void setOutlierCapacity(float capacity) { config_.outlier_capacity = capacity; }
     void setDims(const std::array<size_t, 3>& dims) override { config_.dims = dims; }
+    /// REL here is *global-approximate* (`abs_eb = eb * max(|data|)`), NOT the
+    /// exact per-element PFPL bound — use `QuantizerStage` REL for that. See the
+    /// error-bound mode notes in the file-level doc.
     void setErrorBoundMode(ErrorBoundMode mode) { config_.eb_mode = mode; }
     // Provide a pre-computed value_range (NOA) or max(|data|) (REL) to skip
     // the internal data scan during execute().  Pass 0 to re-enable auto-scan.

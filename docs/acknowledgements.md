@@ -17,7 +17,7 @@ see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
 | [cuSZ / PHF](#cusz--phf) | BSD-3-Clause | Algorithm follow / vendored PHF headers | `LorenzoQuantStage`, `HuffmanStage` |
 | [FZ-GPU](#fz-gpu) | BSD-3-Clause | Direct port of fused kernels | `BitplaneRLEStage` |
 | [cuSZ-Hi](#cusz-hi) | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
-| [cuSZp / cuSZp2 / cuSZp3](#cuszp--cuszp2--cuszp3) | BSD-3-Clause | Algorithmic reimplementation (no source copied) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
+| [cuSZp / cuSZp2 / cuSZp3](#cuszp--cuszp2--cuszp3) | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | [MANS](#mans) | BSD-3-Clause | Direct port of kernels | `ADMStage` |
 | [dietGPU](#dietgpu) | MIT | Vendored headers | `ANSStage` |
 
@@ -129,33 +129,44 @@ HPDC '23. https://doi.org/10.1145/3588195.3592994
 
 **Citation:**
 
-Shixun Wu, Yitong Ding, Jinzhen Wang, Siyi Ji, Kai Zhao, Zizhong Chen, Franck Cappello.
-*cuSZ-Hi: Optimizing Error-Bounded Lossy Compression for Scientific Data on GPUs.*
-ICS '24. https://doi.org/10.1145/3650200.3656619
+Shixun Wu, Jinwen Pan, Jinyang Liu, Jiannan Tian, Ziwei Qiu, Jiajun Huang, Kai Zhao,
+Xin Liang, Sheng Di, Zizhong Chen, Franck Cappello.
+*Boosting Scientific Error-Bounded Lossy Compression through Optimized Synergistic
+Lossy-Lossless Orchestration* (cuSZ-Hi).
+SC '25. https://doi.org/10.1145/3712285.3759798
 
 ---
 
 ## cuSZp / cuSZp2 / cuSZp3
 
 **Repository:** https://github.com/szcompressor/cuSZp  
-**License:** BSD-3-Clause (algorithmic attribution — no source copied)  
+**License:** BSD-3-Clause (verbatim copyright reproduced in `THIRD_PARTY.md`)  
 **Authors/Affiliations:** Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello
 (Argonne National Laboratory / University of Iowa)
 
-These stages are **independent reimplementations** of published cuSZp schemes.
-No cuSZp source code is copied or vendored.
+**Mixed relationship:** two stages contain **direct ports of cuSZp kernel source**
+(`AdaptiveBitpackStage`, `TiledLorenzoStage`); two are **independent
+reimplementations** with no source copied (`LorenzoStage` block mode,
+`QuantizerStage` linear mode).
 
 **Stages:**
 
-- **`AdaptiveBitpackStage`** (`modules/coders/adaptive_bitpack/`) — reproduces the
-  fixed-length (per-block fixed-rate bit-plane) encoding from cuSZp (SC'23) and the
-  plain vs. outlier selection mode from cuSZp2 (SC'24). Uses an ordinary CUB `DeviceScan`
-  for per-block offsets where cuSZp fuses a decoupled look-back scan; that fusion is not
-  reproduced.
-- **`TiledLorenzoStage`** (`modules/predictors/tiled_lorenzo/`) — reproduces the
-  dimension-aware (2-D/3-D tiled separable) delta predictor from cuSZp3 / VGC (SC'25).
-- **`LorenzoStage::setBlockSize`** — reproduces the block-local 1-D delta from cuSZp (SC'23).
-- **`QuantizerStage` linear mode** — reproduces `q = round(x / 2·eb)` from cuSZp (SC'23).
+- **`AdaptiveBitpackStage`** (`modules/coders/adaptive_bitpack/`) — **direct port**
+  of the cuSZp fixed-length (per-block fixed-rate bit-plane) encode/decode kernel
+  logic from cuSZp (SC'23), plus the plain vs. outlier selection mode from cuSZp2
+  (SC'24). Re-expressed one-thread-per-block with a byte-granular layout and an
+  ordinary CUB `DeviceScan` for per-block offsets where cuSZp fuses a decoupled
+  look-back scan (that fusion is not reproduced); `MemoryPool` integration and FZM
+  scaffolding are FZGPUModules code.
+- **`TiledLorenzoStage`** (`modules/predictors/tiled_lorenzo/`) — **direct port** of
+  the cuSZp3 / VGC (SC'25) dimension-aware (2-D/3-D tiled separable) delta kernel
+  logic, re-expressed as a standalone integer predictor with a tile-major output
+  reshape; the tile-major decomposition, FZM header, and `MemoryPool` integration
+  are FZGPUModules code.
+- **`LorenzoStage::setBlockSize`** — **independent reimplementation** of the
+  block-local 1-D delta from cuSZp (SC'23).
+- **`QuantizerStage` linear mode** — **independent reimplementation** of
+  `q = round(x / 2·eb)` from cuSZp (SC'23).
 
 cuSZp3's **memory-efficient compression** and **selective decompression** features are not
 ported; they don't map cleanly onto the staged pipeline model.
@@ -172,7 +183,7 @@ SC '24.
 
 Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello.
 *GPU Lossy Compression for HPC Can Be Versatile and Ultra-Fast* (cuSZp3 / VGC).
-SC '25.
+SC '25. https://doi.org/10.1145/3712285.3759817
 
 ---
 

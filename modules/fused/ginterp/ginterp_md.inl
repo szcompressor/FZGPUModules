@@ -133,8 +133,7 @@ __global__ void c_spline_infprecis_data(
     FP      eb_r,
     FP      ebx2,
     int     radius,
-    INTERPOLATION_PARAMS intp_param,
-    TITER errors);
+    INTERPOLATION_PARAMS intp_param);
 
 template <
     typename EITER,
@@ -158,6 +157,7 @@ __global__ void x_spline_infprecis_data(
     TITER   data,         // output
     DIM3    data_size,    //
     STRIDE3 data_leap,    //
+    TITER   outlier_tmp,
     FP      eb_r,
     FP      ebx2,
     int     radius,
@@ -1884,16 +1884,19 @@ __global__ void fz::ginterp::c_spline_infprecis_data(
     using E = typename std::remove_pointer<EITER>::type;
 
     {
-        // __shared__ struct {
-            __shared__ T shmem_data[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
-             [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
-             [AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)];
-             __shared__ T shmem_ectrl[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
-                    [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
-                    [AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)];
-                __shared__ size_t shmem_grid_leaps[LEVEL + 1][2];
-                __shared__ size_t shmem_prefix_nums[LEVEL + 1];
-        // } shmem;
+        // Dynamic shared memory: two T tiles (data + ectrl). Two 17^3 double
+        // tiles are ~77 KB, over the 48 KB static __shared__ cap, so we carve
+        // them from the dynamic region instead. The launcher sizes it as
+        // 2 * tile_elems * sizeof(T) and raises the opt-in max for big tiles.
+        constexpr int kTileZ = AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3);
+        constexpr int kTileY = AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2);
+        constexpr int kTileX = AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1);
+        extern __shared__ __align__(16) unsigned char ginterp_smem_raw[];
+        auto shmem_data  = reinterpret_cast<T(*)[kTileY][kTileX]>(ginterp_smem_raw);
+        auto shmem_ectrl = reinterpret_cast<T(*)[kTileY][kTileX]>(
+            ginterp_smem_raw + sizeof(T) * kTileZ * kTileY * kTileX);
+        __shared__ size_t shmem_grid_leaps[LEVEL + 1][2];
+        __shared__ size_t shmem_prefix_nums[LEVEL + 1];
 
    
         pre_compute<LEVEL>(ectrl_size, shmem_grid_leaps, shmem_prefix_nums);
@@ -1952,12 +1955,16 @@ __global__ void fz::ginterp::x_spline_infprecis_data(
     //     size_t prefix_nums[LEVEL + 1];
     // } shmem;
 
-    __shared__ T shmem_data[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
-    [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
-    [AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)];
-    __shared__ T shmem_ectrl[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
-           [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
-           [AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)];
+    // Dynamic shared memory: two T tiles (data + ectrl). See the matching
+    // comment in c_spline_infprecis_data — double 17^3 tiles exceed the 48 KB
+    // static cap, so the launcher passes the size dynamically.
+    constexpr int kTileZ = AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3);
+    constexpr int kTileY = AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2);
+    constexpr int kTileX = AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1);
+    extern __shared__ __align__(16) unsigned char ginterp_smem_raw[];
+    auto shmem_data  = reinterpret_cast<T(*)[kTileY][kTileX]>(ginterp_smem_raw);
+    auto shmem_ectrl = reinterpret_cast<T(*)[kTileY][kTileX]>(
+        ginterp_smem_raw + sizeof(T) * kTileZ * kTileY * kTileX);
     __shared__ size_t shmem_grid_leaps[LEVEL + 1][2];
     __shared__ size_t shmem_prefix_nums[LEVEL + 1];
 

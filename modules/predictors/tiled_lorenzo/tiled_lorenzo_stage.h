@@ -58,10 +58,11 @@ static_assert(sizeof(TiledLorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
  * Dimension-aware (tiled separable) Lorenzo predictor (cuSZp3). Lossless.
  *
  * @note **Prior work:** the dimension-aware separable delta is the cuSZp3 design
- *       (Yafan Huang et al., SC'25, BSD-3-Clause). This is an independent
- *       reimplementation — no cuSZp source is copied. The tile-major modular
- *       decomposition is FZGPUModules code. See `THIRD_PARTY.md` and
- *       `memory/cuszp_stages.md` (Part 8).
+ *       (Yafan Huang et al., SC'25, BSD-3-Clause). This stage is a **direct port
+ *       of the cuSZp3 delta kernel logic** (cuSZp_kernels_{2D,3D}_f32.cu); the
+ *       tile-major modular decomposition, FZM header, and MemoryPool integration
+ *       are FZGPUModules code. The cuSZp BSD-3-Clause copyright is reproduced in
+ *       `THIRD_PARTY.md`. See also `memory/cuszp_stages.md` (Part 8).
  *
  * @tparam T  Signed element type: `int16_t` or `int32_t`.
  */

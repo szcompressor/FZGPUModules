@@ -668,8 +668,9 @@ void GInterpStage<TInput, TCode>::execute(
         // quantizer at ginterp_md.inl:865 does `int(code/2)`, which combined
         // with `eb_r = 1/eb` gives the canonical `round(err / (2*eb))` mapping.
         TInput abs_eb = computed_abs_eb_;
-        float  ebx2   = static_cast<float>(2.0 * abs_eb);
-        float  eb_r   = (abs_eb > TInput(0)) ? (1.0f / static_cast<float>(abs_eb)) : 0.0f;
+        double ebx2   = 2.0 * static_cast<double>(abs_eb);
+        double eb_r   = (abs_eb > TInput(0))
+                        ? (1.0 / static_cast<double>(abs_eb)) : 0.0;
 
         // Outlier count comes from the deserialized FZM header (set by
         // deserializeHeader() into actual_outlier_count_), not from a port.
@@ -784,9 +785,15 @@ void GInterpStage<TInput, TCode>::execute(
     }
 
     // cuSZ-Hi convention: eb_r = 1/eb (see inverse path comment above).
+    // Float copies feed the radius auto-tune and profiling heuristics (which
+    // take float); the double copies carry full precision into the main
+    // encode kernel so double inputs keep their tighter error bound.
     float ebx2 = static_cast<float>(2.0 * computed_abs_eb_);
     float eb_r = (computed_abs_eb_ > TInput(0))
                  ? (1.0f / static_cast<float>(computed_abs_eb_)) : 0.0f;
+    double ebx2_d = 2.0 * static_cast<double>(computed_abs_eb_);
+    double eb_r_d = (computed_abs_eb_ > TInput(0))
+                    ? (1.0 / static_cast<double>(computed_abs_eb_)) : 0.0;
 
     // ── Auto-tune radius if user left it at the sentinel (0) ──
     // Manual override (any radius > 0) skips the scan — required for CUDA
@@ -833,16 +840,6 @@ void GInterpStage<TInput, TCode>::execute(
     // Mode 1 is 3-D only (`c_spline_profiling_data` has no SPLINE_DIM==2
     // branch). Modes 2/3/4/5 work on both dims. On 2-D mode 1 we warn and
     // fall back to baseline.
-    const bool needs_profiling =
-        (config_.auto_tuning_mode == 1 || config_.auto_tuning_mode == 3 ||
-         config_.auto_tuning_mode == 4);
-    if (config_.auto_tuning_mode == 1 && dim == 2) {
-        FZ_LOG(WARN,
-            "GInterp: setAutoTuning(1) is wired for the 3-D path only — "
-            "falling back to deterministic baseline for this 2-D input "
-            "(try mode 2, 3, 4, or 5 for 2-D auto-tuning)");
-    }
-
     // Compute rel_eb (needed for the piecewise-linear alpha schedule) for
     // any non-zero mode.
     auto compute_rel_eb = [&]() -> double {
@@ -884,7 +881,22 @@ void GInterpStage<TInput, TCode>::execute(
             "(user manual=%g/%g, rel_eb=%g)",
             resolved_alpha_, resolved_beta_,
             config_.manual_alpha, config_.manual_beta, rel_eb);
-    } else if (config_.auto_tuning_mode == 2) {
+    } else if constexpr (std::is_same<TInput, float>::value) {
+      // ── Profiling-based auto-tune (modes 1-4) is float-only. The cuSZ-Hi
+      // profiling kernels write error metrics into a data-typed buffer, while
+      // the host analysis and scratch are float; threading double through that
+      // for an off-by-default heuristic isn't worth it. Double inputs land in
+      // the `else` below and use the deterministic baseline. ──
+      const bool needs_profiling =
+          (config_.auto_tuning_mode == 1 || config_.auto_tuning_mode == 3 ||
+           config_.auto_tuning_mode == 4);
+      if (config_.auto_tuning_mode == 1 && dim == 2) {
+          FZ_LOG(WARN,
+              "GInterp: setAutoTuning(1) is wired for the 3-D path only — "
+              "falling back to deterministic baseline for this 2-D input "
+              "(try mode 2, 3, 4, or 5 for 2-D auto-tuning)");
+      }
+      if (config_.auto_tuning_mode == 2) {
         // Mode 2: alternate cheap probe. Dim-agnostic — works on both 3-D
         // and 2-D (cuSZ-Hi spline3.cu branches on l3.z != 1).
         initProfilingScratch(pool);
@@ -970,13 +982,24 @@ void GInterpStage<TInput, TCode>::execute(
                 }
             }
         }
-    } else if (config_.auto_tuning_mode > 0 &&
-               config_.auto_tuning_mode != 5 && dim == 3) {
+      } else if (config_.auto_tuning_mode > 0 &&
+                 config_.auto_tuning_mode != 5 && dim == 3) {
         // Unknown mode on 3-D — log once and fall back.
         FZ_LOG(WARN,
             "GInterp: unsupported auto_tuning_mode=%u (only 0/1/2/3/4/5 wired); "
             "falling back to deterministic baseline",
             config_.auto_tuning_mode);
+      }
+    } else {
+        // double input, auto_tuning_mode != 5: profiling modes 1-4 are not
+        // wired for double (see the float branch above). Use the deterministic
+        // baseline; mode 5 (manual alpha/beta) is handled generically above.
+        if (config_.auto_tuning_mode != 0) {
+            FZ_LOG(WARN,
+                "GInterp: auto_tuning modes 1-4 are float-only; double input "
+                "uses the deterministic baseline (mode 5 manual alpha/beta is "
+                "still honored)");
+        }
     }
 
     INTERPOLATION_PARAMS intp_param = buildIntpParam();
@@ -988,7 +1011,7 @@ void GInterpStage<TInput, TCode>::execute(
             static_cast<TInput*>(outputs[2]),
             static_cast<uint32_t*>(outputs[3]),
             d_outlier_count_scratch_,
-            eb_r, ebx2, static_cast<int>(config_.quant_radius),
+            eb_r_d, ebx2_d, static_cast<int>(config_.quant_radius),
             intp_param,
             stream);
     } else {
@@ -999,7 +1022,7 @@ void GInterpStage<TInput, TCode>::execute(
             static_cast<TInput*>(outputs[2]),
             static_cast<uint32_t*>(outputs[3]),
             d_outlier_count_scratch_,
-            eb_r, ebx2, static_cast<int>(config_.quant_radius),
+            eb_r_d, ebx2_d, static_cast<int>(config_.quant_radius),
             intp_param,
             stream);
     }
@@ -1056,7 +1079,7 @@ size_t GInterpStage<TInput, TCode>::serializeHeader(
             "GInterpStage::serializeHeader: insufficient buffer");
     }
     GInterpConfig c;
-    c.error_bound   = static_cast<float>(computed_abs_eb_);
+    c.error_bound   = static_cast<double>(computed_abs_eb_);
     c.quant_radius  = static_cast<uint32_t>(config_.quant_radius);
     c.num_elements  = static_cast<uint32_t>(num_elements_);
     c.outlier_count = actual_outlier_count_;
@@ -1128,5 +1151,8 @@ void GInterpStage<TInput, TCode>::deserializeHeader(
 template class GInterpStage<float, uint8_t>;
 template class GInterpStage<float, uint16_t>;
 template class GInterpStage<float, uint32_t>;
+template class GInterpStage<double, uint8_t>;
+template class GInterpStage<double, uint16_t>;
+template class GInterpStage<double, uint32_t>;
 
 } // namespace fz

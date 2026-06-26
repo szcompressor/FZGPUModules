@@ -90,6 +90,41 @@ dim3 stride3FromLen3(dim3 len3) {
     return dim3(1u, len3.x, len3.x * len3.y);
 }
 
+// ─── dynamic shared-memory sizing ─────────────────────────────────────────────
+//
+// The main encode/decode kernels carve two T tiles (data + ectrl) out of
+// dynamic shared memory. A 16^3 anchor tile + 1-element halo per spatial axis
+// is (16+1)^3 = 4913 elements; two of those in double are ~77 KB, well over the
+// 48 KB static __shared__ limit, which is why those kernels use dynamic shmem.
+template <typename T>
+static inline size_t ginterpSplineSmemBytes(
+    int spline_dim,
+    int abx, int aby, int abz,
+    int nbx, int nby, int nbz)
+{
+    const int tx = abx * nbx + (spline_dim >= 1 ? 1 : 0);
+    const int ty = aby * nby + (spline_dim >= 2 ? 1 : 0);
+    const int tz = abz * nbz + (spline_dim >= 3 ? 1 : 0);
+    // Two tiles: shmem_data + shmem_ectrl.
+    return static_cast<size_t>(tx) * ty * tz * sizeof(T) * 2;
+}
+
+// Opt into the >48 KB dynamic shared-memory region for the given kernel when
+// needed. Below the static cap this is a no-op (the default 48 KB is always
+// available). On GPUs whose max is 48 KB (pre-Volta) the cudaFuncSetAttribute
+// call fails for large tiles and the subsequent launch surfaces the error.
+template <typename KernelPtr>
+static inline void ginterpRaiseSmemIfNeeded(KernelPtr kernel, size_t smem_bytes)
+{
+    constexpr size_t kStaticSmemCap = 48u * 1024u;
+    if (smem_bytes > kStaticSmemCap) {
+        cudaFuncSetAttribute(
+            reinterpret_cast<const void*>(kernel),
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(smem_bytes));
+    }
+}
+
 // ─── outlier scatter (inverse path) ───────────────────────────────────────────
 //
 // Writes `outlier_vals[i]` to `outlier_tmp[outlier_idxs[i]]` for i in [0, n).
@@ -138,7 +173,7 @@ void launchGInterpForward3D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream)
 {
@@ -156,18 +191,23 @@ void launchGInterpForward3D(
     dim3 anchor_st3 = stride3FromLen3(anchor_len3);
     dim3 ectrl_len3 = data_len3;
 
-    fz::ginterp::c_spline_infprecis_data<
-        TInput*, TCode*, float,
+    auto kernel = &fz::ginterp::c_spline_infprecis_data<
+        TInput*, TCode*, TInput,
         kLevel, kSplineDim3,
         kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
         kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
-        kLinearBlockSize>
-        <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
+        kLinearBlockSize>;
+    size_t smem = ginterpSplineSmemBytes<TInput>(
+        kSplineDim3, kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
+        kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3);
+    ginterpRaiseSmemIfNeeded(kernel, smem);
+
+    kernel<<<grid_dim, dim3(kLinearBlockSize, 1, 1), smem, stream>>>(
             const_cast<TInput*>(d_data), data_len3, data_st3,
             d_ectrl, ectrl_len3, ectrl_st3,
             d_anchor, anchor_st3,
             d_outlier_vals, d_outlier_idxs, d_outlier_count_scratch,
-            eb_r, ebx2, radius,
+            static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
             intp_param);
 }
 
@@ -179,7 +219,7 @@ void launchGInterpInverse3D(
     const TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_tmp,        // pre-scattered outlier buffer (full N)
     TInput* d_out,                // reconstructed data
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream)
 {
@@ -197,18 +237,23 @@ void launchGInterpInverse3D(
     dim3 ectrl_st3  = data_st3;
     dim3 anchor_st3 = stride3FromLen3(anchor_len3);
 
-    fz::ginterp::x_spline_infprecis_data<
-        TCode*, TInput*, float,
+    auto kernel = &fz::ginterp::x_spline_infprecis_data<
+        TCode*, TInput*, TInput,
         kLevel, kSplineDim3,
         kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
         kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3,
-        kLinearBlockSize>
-        <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
+        kLinearBlockSize>;
+    size_t smem = ginterpSplineSmemBytes<TInput>(
+        kSplineDim3, kAnchorBlockSizeX3, kAnchorBlockSizeY3, kAnchorBlockSizeZ3,
+        kNumAnchorBlockX3, kNumAnchorBlockY3, kNumAnchorBlockZ3);
+    ginterpRaiseSmemIfNeeded(kernel, smem);
+
+    kernel<<<grid_dim, dim3(kLinearBlockSize, 1, 1), smem, stream>>>(
             const_cast<TCode*>(d_ectrl), ectrl_len3, ectrl_st3,
             const_cast<TInput*>(d_anchor), anchor_len3, anchor_st3,
             d_out, data_len3, data_st3,
             d_outlier_tmp,
-            eb_r, ebx2, radius,
+            static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
             intp_param);
 }
 
@@ -369,7 +414,7 @@ void launchGInterpForward2D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream)
 {
@@ -389,18 +434,23 @@ void launchGInterpForward2D(
     dim3 anchor_st3 = stride3FromLen3(anchor_len3);
     dim3 ectrl_len3 = data_len3;
 
-    fz::ginterp::c_spline_infprecis_data<
-        TInput*, TCode*, float,
+    auto kernel = &fz::ginterp::c_spline_infprecis_data<
+        TInput*, TCode*, TInput,
         kLevel, kSplineDim2,
         kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
         kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2,
-        kLinearBlockSize>
-        <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
+        kLinearBlockSize>;
+    size_t smem = ginterpSplineSmemBytes<TInput>(
+        kSplineDim2, kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
+        kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2);
+    ginterpRaiseSmemIfNeeded(kernel, smem);
+
+    kernel<<<grid_dim, dim3(kLinearBlockSize, 1, 1), smem, stream>>>(
             const_cast<TInput*>(d_data), data_len3, data_st3,
             d_ectrl, ectrl_len3, ectrl_st3,
             d_anchor, anchor_st3,
             d_outlier_vals, d_outlier_idxs, d_outlier_count_scratch,
-            eb_r, ebx2, radius,
+            static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
             intp_param);
 }
 
@@ -412,7 +462,7 @@ void launchGInterpInverse2D(
     const TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_tmp,
     TInput* d_out,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream)
 {
@@ -430,81 +480,81 @@ void launchGInterpInverse2D(
     dim3 ectrl_st3  = data_st3;
     dim3 anchor_st3 = stride3FromLen3(anchor_len3);
 
-    fz::ginterp::x_spline_infprecis_data<
-        TCode*, TInput*, float,
+    auto kernel = &fz::ginterp::x_spline_infprecis_data<
+        TCode*, TInput*, TInput,
         kLevel, kSplineDim2,
         kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
         kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2,
-        kLinearBlockSize>
-        <<<grid_dim, dim3(kLinearBlockSize, 1, 1), 0, stream>>>(
+        kLinearBlockSize>;
+    size_t smem = ginterpSplineSmemBytes<TInput>(
+        kSplineDim2, kAnchorBlockSizeX2, kAnchorBlockSizeY2, kAnchorBlockSizeZ2,
+        kNumAnchorBlockX2, kNumAnchorBlockY2, kNumAnchorBlockZ2);
+    ginterpRaiseSmemIfNeeded(kernel, smem);
+
+    kernel<<<grid_dim, dim3(kLinearBlockSize, 1, 1), smem, stream>>>(
             const_cast<TCode*>(d_ectrl), ectrl_len3, ectrl_st3,
             const_cast<TInput*>(d_anchor), anchor_len3, anchor_st3,
             d_out, data_len3, data_st3,
             d_outlier_tmp,
-            eb_r, ebx2, radius,
+            static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
             intp_param);
 }
 
 // ─── Explicit instantiations ──────────────────────────────────────────────────
 
-template void launchGInterpForward3D<float, uint8_t>(
-    const float*, dim3, uint8_t*, float*, dim3,
-    float*, uint32_t*, uint32_t*, float, float, int,
-    const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpForward3D<float, uint16_t>(
-    const float*, dim3, uint16_t*, float*, dim3,
-    float*, uint32_t*, uint32_t*, float, float, int,
-    const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpForward3D<float, uint32_t>(
-    const float*, dim3, uint32_t*, float*, dim3,
-    float*, uint32_t*, uint32_t*, float, float, int,
-    const INTERPOLATION_PARAMS&, cudaStream_t);
+#define FZ_GINTERP_INSTANTIATE_FORWARD(TIN, TCODE)                       \
+    template void launchGInterpForward3D<TIN, TCODE>(                     \
+        const TIN*, dim3, TCODE*, TIN*, dim3,                            \
+        TIN*, uint32_t*, uint32_t*, double, double, int,                 \
+        const INTERPOLATION_PARAMS&, cudaStream_t);                      \
+    template void launchGInterpForward2D<TIN, TCODE>(                     \
+        const TIN*, dim3, TCODE*, TIN*, dim3,                            \
+        TIN*, uint32_t*, uint32_t*, double, double, int,                 \
+        const INTERPOLATION_PARAMS&, cudaStream_t);
 
-template void launchGInterpInverse3D<float, uint8_t>(
-    const uint8_t*, dim3, const float*, dim3, float*, float*,
-    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpInverse3D<float, uint16_t>(
-    const uint16_t*, dim3, const float*, dim3, float*, float*,
-    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpInverse3D<float, uint32_t>(
-    const uint32_t*, dim3, const float*, dim3, float*, float*,
-    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
+#define FZ_GINTERP_INSTANTIATE_INVERSE(TIN, TCODE)                       \
+    template void launchGInterpInverse3D<TIN, TCODE>(                     \
+        const TCODE*, dim3, const TIN*, dim3, TIN*, TIN*,                \
+        double, double, int, const INTERPOLATION_PARAMS&, cudaStream_t); \
+    template void launchGInterpInverse2D<TIN, TCODE>(                     \
+        const TCODE*, dim3, const TIN*, dim3, TIN*, TIN*,                \
+        double, double, int, const INTERPOLATION_PARAMS&, cudaStream_t);
 
-template void launchGInterpForward2D<float, uint8_t>(
-    const float*, dim3, uint8_t*, float*, dim3,
-    float*, uint32_t*, uint32_t*, float, float, int,
-    const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpForward2D<float, uint16_t>(
-    const float*, dim3, uint16_t*, float*, dim3,
-    float*, uint32_t*, uint32_t*, float, float, int,
-    const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpForward2D<float, uint32_t>(
-    const float*, dim3, uint32_t*, float*, dim3,
-    float*, uint32_t*, uint32_t*, float, float, int,
-    const INTERPOLATION_PARAMS&, cudaStream_t);
+// Core compress/decompress + outlier scatter — instantiated for float AND
+// double. These are the data path.
+#define FZ_GINTERP_INSTANTIATE_CORE(TIN)                                 \
+    FZ_GINTERP_INSTANTIATE_FORWARD(TIN, uint8_t)                         \
+    FZ_GINTERP_INSTANTIATE_FORWARD(TIN, uint16_t)                        \
+    FZ_GINTERP_INSTANTIATE_FORWARD(TIN, uint32_t)                        \
+    FZ_GINTERP_INSTANTIATE_INVERSE(TIN, uint8_t)                         \
+    FZ_GINTERP_INSTANTIATE_INVERSE(TIN, uint16_t)                        \
+    FZ_GINTERP_INSTANTIATE_INVERSE(TIN, uint32_t)                        \
+    template void launchScatterOutliers<TIN>(                            \
+        const TIN*, const uint32_t*, uint32_t, TIN*, cudaStream_t);
 
-template void launchGInterpInverse2D<float, uint8_t>(
-    const uint8_t*, dim3, const float*, dim3, float*, float*,
-    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpInverse2D<float, uint16_t>(
-    const uint16_t*, dim3, const float*, dim3, float*, float*,
-    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
-template void launchGInterpInverse2D<float, uint32_t>(
-    const uint32_t*, dim3, const float*, dim3, float*, float*,
-    float, float, int, const INTERPOLATION_PARAMS&, cudaStream_t);
+// Auto-tuning profiling kernels — float only. The cuSZ-Hi profiling kernels
+// write their error metrics into a buffer typed by the data iterator (TITER),
+// while the host-side analysis and the scratch buffers are float. Rather than
+// thread double through all of that for an off-by-default heuristic, double
+// inputs skip auto-tuning and use the deterministic baseline (see
+// GInterpStage::execute, the `if constexpr (float)` guard).
+#define FZ_GINTERP_INSTANTIATE_PROFILING(TIN)                            \
+    template void launchGInterpProfileMode1<TIN>(                        \
+        const TIN*, dim3, float*, cudaStream_t);                         \
+    template void launchGInterpProfileMode2<TIN>(                        \
+        const TIN*, dim3, int, float*, cudaStream_t);                    \
+    template void launchGInterpProfileMode3<TIN>(                        \
+        const TIN*, dim3, int, dim3, dim3, dim3, float, float,          \
+        const INTERPOLATION_PARAMS&, float*, bool, cudaStream_t);
 
-template void launchScatterOutliers<float>(
-    const float*, const uint32_t*, uint32_t, float*, cudaStream_t);
+FZ_GINTERP_INSTANTIATE_CORE(float)
+FZ_GINTERP_INSTANTIATE_CORE(double)
+FZ_GINTERP_INSTANTIATE_PROFILING(float)
 
-template void launchGInterpProfileMode1<float>(
-    const float*, dim3, float*, cudaStream_t);
-
-template void launchGInterpProfileMode2<float>(
-    const float*, dim3, int, float*, cudaStream_t);
-
-template void launchGInterpProfileMode3<float>(
-    const float*, dim3, int, dim3, dim3, dim3, float, float,
-    const INTERPOLATION_PARAMS&, float*, bool, cudaStream_t);
+#undef FZ_GINTERP_INSTANTIATE_PROFILING
+#undef FZ_GINTERP_INSTANTIATE_CORE
+#undef FZ_GINTERP_INSTANTIATE_INVERSE
+#undef FZ_GINTERP_INSTANTIATE_FORWARD
 
 } // namespace ginterp
 } // namespace fz

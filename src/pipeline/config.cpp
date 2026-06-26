@@ -594,7 +594,9 @@ static void saveADMStage(Stage* s, std::ostringstream& out) {
 // already required for any 3-D pipeline; setDims() is invoked on every stage
 // at addStage time, and GInterpStage::setDims throws unless dims[2] > 1.
 static Stage* addGInterpStage(Pipeline& p, const toml::table& t) {
+    std::string in_type   = optStr(t, "input_type", "float32");
     std::string code_type = optStr(t, "code_type", "uint16");
+    DataType    in_dt     = dataTypeFromString(in_type);
     DataType    code_dt   = dataTypeFromString(code_type);
 
     Stage* s = nullptr;
@@ -606,17 +608,27 @@ static Stage* addGInterpStage(Pipeline& p, const toml::table& t) {
         g->setAutoTuning(static_cast<uint8_t>(optInt(t, "auto_tuning", 0)));
         s = g;
     };
-    if      (code_dt == DataType::UINT16) configure(p.addStage<GInterpStage<float, uint16_t>>());
-    else if (code_dt == DataType::UINT8)  configure(p.addStage<GInterpStage<float, uint8_t>>());
-    else if (code_dt == DataType::UINT32) configure(p.addStage<GInterpStage<float, uint32_t>>());
+    auto dispatch = [&](auto input_tag) {
+        using TInput = decltype(input_tag);
+        if      (code_dt == DataType::UINT16) configure(p.addStage<GInterpStage<TInput, uint16_t>>());
+        else if (code_dt == DataType::UINT8)  configure(p.addStage<GInterpStage<TInput, uint8_t>>());
+        else if (code_dt == DataType::UINT32) configure(p.addStage<GInterpStage<TInput, uint32_t>>());
+        else
+            throw std::runtime_error(
+                "loadConfig: unsupported GInterp code_type \"" + code_type + "\"");
+    };
+    if      (in_dt == DataType::FLOAT32) dispatch(float{});
+    else if (in_dt == DataType::FLOAT64) dispatch(double{});
     else
         throw std::runtime_error(
-            "loadConfig: unsupported GInterp code_type \"" + code_type + "\"");
+            "loadConfig: unsupported GInterp input_type \"" + in_type + "\"");
     return s;
 }
 
 static void saveGInterpStage(Stage* s, std::ostringstream& out) {
+    DataType in_dt   = static_cast<DataType>(s->getInputDataType(0));
     DataType code_dt = static_cast<DataType>(s->getOutputDataType(0));
+    out << "input_type = \"" << dataTypeToString(in_dt) << "\"\n";
     out << "code_type = \"" << dataTypeToString(code_dt) << "\"\n";
 
     float eb = 1e-3f, cap = 0.10f;
@@ -630,9 +642,14 @@ static void saveGInterpStage(Stage* s, std::ostringstream& out) {
         cap = g->getOutlierCapacity();
         at  = g->getAutoTuningMode();
     };
-    if      (code_dt == DataType::UINT16) read(static_cast<GInterpStage<float, uint16_t>*>(s));
-    else if (code_dt == DataType::UINT8)  read(static_cast<GInterpStage<float, uint8_t>*>(s));
-    else if (code_dt == DataType::UINT32) read(static_cast<GInterpStage<float, uint32_t>*>(s));
+    auto dispatch = [&](auto input_tag) {
+        using TInput = decltype(input_tag);
+        if      (code_dt == DataType::UINT16) read(static_cast<GInterpStage<TInput, uint16_t>*>(s));
+        else if (code_dt == DataType::UINT8)  read(static_cast<GInterpStage<TInput, uint8_t>*>(s));
+        else if (code_dt == DataType::UINT32) read(static_cast<GInterpStage<TInput, uint32_t>*>(s));
+    };
+    if (in_dt == DataType::FLOAT64) dispatch(double{});
+    else                            dispatch(float{});
     out << "error_bound = "      << static_cast<double>(eb)  << "\n";
     out << "error_bound_mode = \"" << ebModeToString(ebm)    << "\"\n";
     out << "quant_radius = "     << static_cast<int64_t>(qr) << "\n";

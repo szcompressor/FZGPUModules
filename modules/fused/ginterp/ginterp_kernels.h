@@ -64,7 +64,7 @@ void launchGInterpForward3D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream);
 
@@ -84,7 +84,7 @@ void launchGInterpInverse3D(
     const TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_tmp,
     TInput* d_out,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream);
 
@@ -106,7 +106,7 @@ void launchGInterpForward2D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream);
 
@@ -121,7 +121,7 @@ void launchGInterpInverse2D(
     const TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_tmp,
     TInput* d_out,
-    float eb_r, float ebx2, int radius,
+    double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream);
 

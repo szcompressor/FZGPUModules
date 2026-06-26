@@ -63,9 +63,11 @@ static_assert(sizeof(AdaptiveBitpackConfig) <= FZM_STAGE_CONFIG_SIZE,
  *       and stays out of capture.
  *
  * @note **Prior work:** the per-block fixed-rate bit-plane encoding is the cuSZp
- *       lossless scheme (Yafan Huang et al., SC'23/SC'24, BSD-3-Clause). The
- *       stage, the byte-granular layout, and the CUB offset scan are FZGPUModules
- *       code. See `THIRD_PARTY.md` and `memory/cuszp_stages.md`.
+ *       lossless scheme (Yafan Huang et al., SC'23/SC'24, BSD-3-Clause). This
+ *       stage is a **direct port of the cuSZp encode/decode kernel logic**; the
+ *       byte-granular layout, CUB offset scan, and FZM/MemoryPool scaffolding are
+ *       FZGPUModules code. The cuSZp BSD-3-Clause copyright is reproduced in
+ *       `THIRD_PARTY.md`. See also `memory/cuszp_stages.md`.
  *
  * @tparam T  Signed element type: `int16_t` or `int32_t`.
  */

@@ -63,7 +63,7 @@ to the algorithm — G-Interp ships only as the fused stage.
 
 | Parameter | Constraint |
 |---|---|
-| `TInput` | `float` — `double` is not supported. Upstream cuSZ-Hi has `INIT(f8, …)` instantiations commented out as a placeholder in `src/kernel/spline3.cu`, so this matches upstream. |
+| `TInput` | `float` or `double`. Both run the **same** dynamic-shared-memory kernels — there is no separate float/double code path. The 3-D `double` path needs a Volta-or-newer GPU (opt-in dynamic shared memory ≥ ~77 KB); see "Precision and shared memory" below. |
 | `TCode`  | `uint8_t`, `uint16_t`, or `uint32_t` |
 
 ## Available instantiations
@@ -72,6 +72,37 @@ Only these types are compiled and linked:
 - `GInterpStage<float, uint8_t>`
 - `GInterpStage<float, uint16_t>` — most common
 - `GInterpStage<float, uint32_t>`
+- `GInterpStage<double, uint8_t>`
+- `GInterpStage<double, uint16_t>`
+- `GInterpStage<double, uint32_t>`
+
+### Precision and shared memory
+
+Both precisions are supported by the same `c_spline_infprecis_data` /
+`x_spline_infprecis_data` kernel templates. Those kernels stage two working
+tiles (data + ectrl) in **dynamic** shared memory (`extern __shared__`, sized by
+the launcher), unconditionally — this is **not** a double-only branch:
+
+- The 3-D tile is `(16+1)³ = 4913` elements × 2 buffers. In `double` that is
+  ~77 KB, over the 48 KB static `__shared__` cap, which is why dynamic shared
+  memory is used. `float` is ~38.5 KB — under the cap, but it goes through the
+  same dynamic-shmem path.
+- The launcher only calls `cudaFuncSetAttribute(...,
+  cudaFuncAttributeMaxDynamicSharedMemorySize, …)` when the tile exceeds 48 KB,
+  so the opt-in fires **only for 3-D `double`**. `float` (and all 2-D) use the
+  default dynamic region and never touch the attribute.
+- `float` throughput is expected to be unchanged versus the previous
+  static-`__shared__` version: same shared-memory size, same occupancy, same
+  in-kernel access pattern — only the tile base address is now a launch-time
+  value.
+- The 3-D `double` path therefore requires a GPU whose opt-in max dynamic shared
+  memory is ≥ ~77 KB (Volta and newer). On older GPUs capped at 48 KB the
+  `cudaFuncSetAttribute` call fails and the launch surfaces the error. 2-D
+  `double` and all `float` configs are unaffected.
+- **Auto-tuning (modes 1-4) is `float`-only.** The cuSZ-Hi profiling kernels
+  write their metrics into a data-typed buffer while the host analysis is
+  `float`; `double` inputs with a profiling mode set fall back to the
+  deterministic baseline with a warning (mode 5 manual `α`/`β` is still honored).
 
 ---
 
@@ -294,7 +325,7 @@ p.compress(d_in, in_bytes, &d_out, &out_sz, stream);
 [[stage]]
 name         = "ginterp"
 type         = "GInterp"
-input_type   = "float32"
+input_type   = "float32"     # "float32" or "float64"
 code_type    = "uint16"
 error_bound  = 1e-2
 error_bound_mode = "ABS"    # "ABS", "REL", or "NOA"
@@ -307,11 +338,14 @@ auto_tuning  = 0            # 0=off, 1=cheap, 2=alt-cheap, 3=full, 4=full+a/b sw
 
 ## Serialized header
 
-64-byte `GInterpConfig` — fits comfortably in `FZM_STAGE_CONFIG_SIZE` (128 B).
-Stores `error_bound`, `quant_radius` (the resolved value, never 0 by the time
-it lands here), `dim_x/y/z`, anchor extents, `eb_mode`, `input_type` /
-`code_type`, the user-specified `user_eb`, and the resolved `value_base` for
-NOA/REL.
+`GInterpConfig` (~96 bytes) — fits comfortably in `FZM_STAGE_CONFIG_SIZE`
+(128 B). Stores `error_bound` (a **`double`**, so the resolved absolute bound
+survives the round-trip at full precision for `double` inputs), `quant_radius`
+(the resolved value, never 0 by the time it lands here), `dim_x/y/z`, anchor
+extents, `eb_mode`, `input_type` / `code_type`, the user-specified `user_eb`, and
+the resolved `value_base` for NOA/REL. Note: widening `error_bound` from `float`
+to `double` shifted the on-disk layout, so `.fzm` files written before
+double-input support will not deserialize against this version.
 
 ---
 
@@ -323,5 +357,8 @@ Argonne National Laboratory), BSD-3-Clause. The host-side wrapper, memory-pool
 integration, outlier-fusion contract, and radius auto-tune are FZGPUModules
 code. See `THIRD_PARTY.md` for the full license text.
 
-> Liu, S., Tao, D., et al. *cuSZ-Hi: High-Ratio GPU-Based Error-Bounded Lossy
-> Compression for Scientific Data.* https://github.com/shixun404/cuSZ-Hi
+> Shixun Wu, Jinwen Pan, Jinyang Liu, Jiannan Tian, Ziwei Qiu, Jiajun Huang,
+> Kai Zhao, Xin Liang, Sheng Di, Zizhong Chen, Franck Cappello. *Boosting
+> Scientific Error-Bounded Lossy Compression through Optimized Synergistic
+> Lossy-Lossless Orchestration* (cuSZ-Hi). SC '25.
+> https://doi.org/10.1145/3712285.3759798

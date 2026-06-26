@@ -156,6 +156,10 @@ outlier_selection = false   # true = cuSZp2 per-block plain/outlier selection
 
 The per-block fixed-rate ("fixed-length") bit-plane scheme originates in cuSZp
 (Yafan Huang et al., SC'23); the per-block plain/outlier selection is the cuSZp2
-contribution (SC'24). This is an independent reimplementation of the published
-schemes — no cuSZp source is copied. Repo: https://github.com/szcompressor/cuSZp.
+contribution (SC'24). This stage is a **direct port of the cuSZp fixed-length
+encode/decode kernel logic**, re-expressed one-thread-per-block with a
+byte-granular layout and a CUB `DeviceScan` for per-block offsets (in place of
+cuSZp's fused decoupled look-back scan); `MemoryPool` integration and FZM
+scaffolding are FZGPUModules code. cuSZp is BSD-3-Clause (copyright reproduced
+verbatim in `THIRD_PARTY.md`). Repo: https://github.com/szcompressor/cuSZp.
 See `THIRD_PARTY.md` and `memory/cuszp_stages.md`.

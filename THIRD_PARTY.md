@@ -173,33 +173,42 @@ three generations; the current `main` is the cuSZp3 / VGC generation).
 `TiledLorenzoStage` (`modules/predictors/tiled_lorenzo/`), and the `linear` mode
 of `QuantizerStage` + the `setBlockSize` option of `LorenzoStage`.
 
-**Relationship:** These are **independent reimplementations of published cuSZp
-schemes — no cuSZp source code is copied.** Mapping our pieces to the papers:
+**Relationship:** Mixed — **two components contain direct copies/ports of cuSZp
+kernel source** (`AdaptiveBitpackStage`, `TiledLorenzoStage`), while two are
+**independent reimplementations** with no source copied (`QuantizerStage` linear
+mode, `LorenzoStage` block mode). The BSD-3-Clause copyright notice is reproduced
+verbatim below to satisfy the source-redistribution condition for the copied
+parts. Mapping our pieces to the papers:
 
 - **cuSZp (SC'23)** — the family's core: linear error-bounded quantization,
   block-local 1-D Lorenzo, fixed-length (per-block fixed-rate bit-plane)
-  encoding, and a block bit-shuffle. We reimplement the first three:
-  `QuantizerStage`'s linear mode reproduces `q = round(x / 2·eb)` (no
-  radius/outlier fallback); `LorenzoStage::setBlockSize` reproduces the
-  block-local 1-D delta; `AdaptiveBitpackStage` reproduces the fixed-length
-  encoding (byte-granular layout, one-thread-per-block kernels, an ordinary CUB
-  `DeviceScan` for per-block offsets where cuSZp fuses a decoupled look-back scan
-  into one kernel — that fusion is left to a downstream compiler). The SC'23
-  **block bit-shuffle is not reproduced** as a cuSZp stage (FZGPUModules has a
-  separate LC-framework `BitshuffleStage`).
+  encoding, and a block bit-shuffle. `QuantizerStage`'s linear mode is an
+  **independent reimplementation** of `q = round(x / 2·eb)` (no radius/outlier
+  fallback); `LorenzoStage::setBlockSize` is an **independent reimplementation**
+  of the block-local 1-D delta; **`AdaptiveBitpackStage` is a direct port of the
+  cuSZp fixed-length encode/decode kernel logic**, re-expressed
+  one-thread-per-block with a byte-granular layout and an ordinary CUB
+  `DeviceScan` for per-block offsets (cuSZp fuses a decoupled look-back scan into
+  one kernel — that fusion is left to a downstream compiler), wrapped with
+  FZGPUModules `MemoryPool` integration and the FZM header/stage scaffolding. The
+  SC'23 **block bit-shuffle is not reproduced** as a cuSZp stage (FZGPUModules has
+  a separate LC-framework `BitshuffleStage`).
 - **cuSZp2 (SC'24)** — adds the per-block **plain vs. outlier** selection over
   the fixed-length backend. `AdaptiveBitpackStage`'s default plain mode and its
   `setOutlierSelection(true)` reproduce these two modes.
 - **cuSZp3 / VGC (SC'25)** — adds **dimension-aware (1-D/2-D/3-D) delta** with
   three modes (fixed = no delta, plain = delta, outlier = delta + outlier).
-  `TiledLorenzoStage` reproduces the 2-D/3-D tiled separable delta; combined with
-  the stages above it yields all three modes (1-D delta is `LorenzoStage`'s block
+  **`TiledLorenzoStage` is a direct port of the cuSZp3 2-D/3-D tiled separable
+  delta kernel logic** (from `cuSZp_kernels_{2D,3D}_f32.cu`), re-expressed as a
+  standalone integer predictor with a tile-major output reshape + zero-padding so
+  it composes with `AdaptiveBitpackStage`; the tile-major decomposition, FZM
+  header, and `MemoryPool` integration are FZGPUModules code. Combined with the
+  stages above it yields all three modes (1-D delta is `LorenzoStage`'s block
   mode). cuSZp3's **memory-efficient compression** and **selective decompression**
   features are **not ported** (they don't map cleanly onto the staged pipeline).
 
-The reference codebases (for cross-checking only, not vendored) live at
-`compressors/cuSZp2/` and `compressors/cuSZp3/`; design notes are in
-`memory/cuszp_stages.md`.
+The reference codebases live at `compressors/cuSZp2/` and `compressors/cuSZp3/`;
+design notes are in `memory/cuszp_stages.md`.
 
 **Papers** (all Argonne National Laboratory / University of Iowa):
 - Yafan Huang, Sheng Di, Xiaodong Yu, Guanpeng Li, Franck Cappello, "cuSZp: An
@@ -209,9 +218,46 @@ The reference codebases (for cross-checking only, not vendored) live at
   Compressor with Extreme Throughput and Optimized Compression Ratio", SC '24.
 - Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello, "GPU Lossy Compression for
   HPC Can Be Versatile and Ultra-Fast" (cuSZp3 / VGC), SC '25.
+  https://doi.org/10.1145/3712285.3759817
 
-**License:** cuSZp is BSD-3-Clause. As no source is copied, this is an
-algorithmic attribution.
+**License:**
+
+```
+Copyright © 2024, UChicago Argonne and University of Iowa
+
+All Rights Reserved
+
+Software Name: cuSZp: A Fast and High-ratio GPU Error-bounded Lossy Compressor
+
+By: Argonne National Laboratory, University of Iowa
+
+OPEN SOURCE LICENSE
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice, this
+   list of conditions and the following disclaimer in the documentation and/or
+   other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+Contact: SZ Team (szlossycompressor@gmail.com)
+```
 
 ---
 
@@ -246,6 +292,13 @@ documented in the adapter-changes comment block at the top of
 **Reference copy** of the upstream kernels (unmodified) is in
 `memory/references/spline_cuszhi/` (`spline3.cu`, `spline3_md.inl`,
 `type.h`) for cross-checking against the patched local copy.
+
+**Paper:**
+- Shixun Wu, Jinwen Pan, Jinyang Liu, Jiannan Tian, Ziwei Qiu, Jiajun Huang,
+  Kai Zhao, Xin Liang, Sheng Di, Zizhong Chen, Franck Cappello, "Boosting
+  Scientific Error-Bounded Lossy Compression through Optimized Synergistic
+  Lossy-Lossless Orchestration" (cuSZ-Hi), SC '25.
+  https://doi.org/10.1145/3712285.3759798
 
 **License:**
 

@@ -1456,3 +1456,141 @@ TEST(GInterpStage, GI30_GInterpHuffmanPipeline) {
         << "GInterp+Huffman compressed (" << res.compressed_bytes
         << " B) is not smaller than input (" << in_bytes << " B)";
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Double-precision support (TInput = double)
+//
+// The 3-D double path uses dynamic shared memory (two 17³ double tiles exceed
+// the 48 KB static cap), so these tests exercise the cudaFuncSetAttribute
+// opt-in as well as the double eb serialization + factory dispatch.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+inline std::vector<double> make_smooth_3d_d(size_t nx, size_t ny, size_t nz,
+                                            double scale = 50.0)
+{
+    std::vector<double> v(nx * ny * nz);
+    for (size_t z = 0; z < nz; ++z)
+        for (size_t y = 0; y < ny; ++y)
+            for (size_t x = 0; x < nx; ++x) {
+                double fx = static_cast<double>(x) / static_cast<double>(nx);
+                double fy = static_cast<double>(y) / static_cast<double>(ny);
+                double fz = static_cast<double>(z) / static_cast<double>(nz);
+                double val = std::sin(2.0 * M_PI * fx) *
+                             std::cos(2.0 * M_PI * fy * 1.3) *
+                             std::sin(2.0 * M_PI * fz * 0.7);
+                v[x + nx * (y + ny * z)] = val * scale;
+            }
+    return v;
+}
+}  // namespace
+
+// GI_D1: double 3-D ABS round-trip — exercises the dynamic-shmem double path.
+TEST(GInterpStage, GID1_RoundTripABS_Double3D) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t N = NX * NY * NZ;
+    const double eb = 1e-2;
+
+    auto h_input = make_smooth_3d_d(NX, NY, NZ);
+
+    Pipeline p(N * sizeof(double), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<double, uint16_t>>();
+    stage->setErrorBound(static_cast<float>(eb));
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<double>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.001)
+        << "double 3D max_error=" << res.max_error << " > eb=" << eb;
+}
+
+// GI_D2: double 2-D ABS round-trip (static-shmem-sized tile, double FP path).
+TEST(GInterpStage, GID2_RoundTrip2D_Double) {
+    const size_t NX = 64, NY = 64, NZ = 1;
+    const size_t N = NX * NY * NZ;
+    const double eb = 1e-2;
+
+    auto h_input = make_smooth_3d_d(NX, NY, NZ);
+
+    Pipeline p(N * sizeof(double), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<double, uint16_t>>();
+    stage->setErrorBound(static_cast<float>(eb));
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<double>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.001)
+        << "double 2D max_error=" << res.max_error << " > eb=" << eb;
+}
+
+// GI_D3: double 3-D REL round-trip.
+TEST(GInterpStage, GID3_RoundTripREL_Double3D) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t N = NX * NY * NZ;
+    const double rel_eb = 1e-2;
+
+    auto h_input = make_smooth_3d_d(NX, NY, NZ, 100.0);
+    double max_abs = 0.0;
+    for (double v : h_input) max_abs = std::max(max_abs, std::abs(v));
+
+    Pipeline p(N * sizeof(double), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<double, uint16_t>>();
+    stage->setErrorBound(static_cast<float>(rel_eb));
+    stage->setErrorBoundMode(ErrorBoundMode::REL);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<double>(p, h_input, cs.stream);
+    // Global-approximate REL: abs bound ~ rel_eb * max(|data|).
+    EXPECT_LE(res.max_error, rel_eb * max_abs * 1.05)
+        << "double REL max_error=" << res.max_error;
+}
+
+// GI_D4: double 3-D file round-trip — exercises serialize/deserialize of the
+// double error_bound and the FLOAT64 factory dispatch on reload.
+TEST(GInterpStage, GID4_FileRoundTrip_Double3D) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t N = NX * NY * NZ;
+    const double eb = 1e-2;
+    std::string path = "/tmp/ginterp_double_rt.fzm";
+
+    auto h_input = make_smooth_3d_d(NX, NY, NZ);
+
+    Pipeline p(N * sizeof(double), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<double, uint16_t>>();
+    stage->setErrorBound(static_cast<float>(eb));
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_file_round_trip<double>(p, h_input, cs.stream, path);
+    EXPECT_LE(res.max_error, eb * 1.001)
+        << "double file RT max_error=" << res.max_error << " > eb=" << eb;
+}
+
+// GI_D5: tight bound on large-magnitude data — the increment (code-radius)*ebx2
+// must be applied in double, otherwise float ebx2 rounding would blow the bound.
+TEST(GInterpStage, GID5_TightBoundLargeMagnitude_Double3D) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const size_t N = NX * NY * NZ;
+    const double eb = 1.0;  // tiny relative to the 1e6 magnitude
+
+    auto h_input = make_smooth_3d_d(NX, NY, NZ, 1.0e6);
+
+    Pipeline p(N * sizeof(double), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<double, uint32_t>>();
+    stage->setErrorBound(static_cast<float>(eb));
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<double>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.01)
+        << "double tight-bound max_error=" << res.max_error << " > eb=" << eb;
+}
