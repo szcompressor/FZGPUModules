@@ -95,3 +95,9 @@ add_executable(cusz_huffman_vs_bitplane_rle cusz_huffman_vs_bitplane_rle.cpp)
 target_link_libraries(cusz_huffman_vs_bitplane_rle PRIVATE fzgmod)
 set_target_properties(cusz_huffman_vs_bitplane_rle PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── cuSZp 1/2/3 variants: performance + CUDA graph-mode check ─────────────────
+add_executable(cuszp_variants cuszp_variants.cpp)
+target_link_libraries(cuszp_variants PRIVATE fzgmod)
+set_target_properties(cuszp_variants PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

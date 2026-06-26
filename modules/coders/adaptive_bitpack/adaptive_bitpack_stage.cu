@@ -35,6 +35,31 @@ std::vector<size_t> AdaptiveBitpackStage<T>::estimateOutputSizes(
 }
 
 template<typename T>
+size_t AdaptiveBitpackStage<T>::estimateScratchBytes(
+    const std::vector<size_t>& input_sizes) const {
+    // Per-block cost + offset arrays and the CUB scan temp are allocated from the
+    // pool inside execute() (both forward and inverse). Forward derives the block
+    // count from the code input bytes; inverse from the header element count.
+    size_t num_blocks;
+    if (is_inverse_) {
+        num_blocks = (block_size_ == 0)
+            ? 0 : (num_elements_ + block_size_ - 1) / block_size_;
+    } else {
+        const size_t in_bytes = input_sizes.empty() ? 0 : input_sizes[0];
+        const size_t n = in_bytes / sizeof(T);
+        num_blocks = (block_size_ == 0) ? 0 : (n + block_size_ - 1) / block_size_;
+    }
+    if (num_blocks == 0) return 0;
+
+    size_t cub_tmp = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, cub_tmp,
+                                  static_cast<uint32_t*>(nullptr),
+                                  static_cast<uint32_t*>(nullptr),
+                                  num_blocks);
+    return 2u * num_blocks * sizeof(uint32_t) + cub_tmp;
+}
+
+template<typename T>
 void AdaptiveBitpackStage<T>::execute(
     cudaStream_t stream,
     MemoryPool* pool,

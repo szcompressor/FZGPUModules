@@ -116,6 +116,22 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── cuSZp-family pipeline block/tile size sweeps ─────────────────────────────
+fz_add_test(
+    NAME    test_cuszp_block_sizes
+    SOURCES test_cuszp_block_sizes.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── Optional large-data stress tests (env-gated; FZ_LARGE_DATA_TEST=1) ───────
+fz_add_test(
+    NAME    test_large_data
+    SOURCES test_large_data.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu large
+)
+
 # ─── Quantizer predictor ─────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_quantizer

@@ -112,6 +112,14 @@ public:
         const std::vector<size_t>& input_sizes
     ) const override;
 
+    /// Transient pool scratch held during execute() — two uint32 per-block arrays
+    /// (cost + offset) plus the CUB exclusive-scan temp storage. Reported so the
+    /// pipeline sizes the pool (PREALLOCATE) / peak (MINIMAL) for it and per-stage
+    /// memory accounting reflects this stage. Defined in the .cu (needs CUB).
+    size_t estimateScratchBytes(
+        const std::vector<size_t>& input_sizes
+    ) const override;
+
     std::unordered_map<std::string, size_t>
     getActualOutputSizesByName() const override {
         return {{"output", actual_output_size_}};
