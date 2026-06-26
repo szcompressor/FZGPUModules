@@ -152,51 +152,19 @@ fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --repo
 
 ## Acknowledgements
 
-FZGPUModules builds on prior work from the following projects.
+FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. All are BSD-3-Clause licensed except dietGPU (MIT).
 
-**LC framework** (Burtscher et al., Texas State University) — the RZE, Bitshuffle,
-Difference, and Quantizer stages incorporate algorithms and GPU kernels from the
-LC framework for synthesizing high-speed parallel lossless and lossy compression.
+| Project | Stages |
+|---|---|
+| [LC framework](https://github.com/burtscher/LC-framework) — Burtscher et al., Texas State University | `RZEStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
+| [cuSZ / PHF](https://github.com/szcompressor/cuSZ) — Argonne NL, Indiana U, et al. | `LorenzoQuantStage`, `HuffmanStage` |
+| [FZ-GPU](https://github.com/szcompressor/cuSZ) — Zhang, Tian et al. (via cuSZ repo) | `BitplaneRLEStage` |
+| [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) — Indiana U, Argonne NL | `GInterpStage` |
+| [cuSZp / cuSZp2 / cuSZp3](https://github.com/szcompressor/cuSZp) — Huang, Di et al., Argonne NL | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
+| [MANS](https://github.com/hpdps-group/MANS) — Huang, Yang et al. | `ADMStage` |
+| [dietGPU](https://github.com/facebookresearch/dietgpu) — Meta Platforms (MIT) | `ANSStage` |
 
-> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez, Benila Jerald,
-> Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
-> https://github.com/burtscher/LC-framework
-
-**cuSZ / PHF** (cuSZ team, Argonne National Laboratory, Indiana University, and others) —
-the LorenzoQuant stage follows the cuSZ fused Lorenzo predictor+quantizer design, and the
-Huffman stage incorporates vendored PHF codec source files adapted from the cuSZ repository.
-
-> cuSZ team.
-> *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*
-> https://github.com/szcompressor/cuSZ
-
-Both projects are BSD-3-Clause licensed. See [`THIRD_PARTY.md`](THIRD_PARTY.md) for full
-copyright notices and per-module attribution details.
-
----
-
-## Acknowledgements
-
-FZGPUModules builds on prior work from the following projects.
-
-**LC framework** (Burtscher et al., Texas State University) — the RZE, Bitshuffle,
-Difference, and Quantizer stages incorporate algorithms and GPU kernels from the
-LC framework for synthesizing high-speed parallel lossless and lossy compression.
-
-> Noushin Azami, Alex Fallin, Brandon Burtchell, Andrew Rodriguez, Benila Jerald,
-> Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher.
-> https://github.com/burtscher/LC-framework
-
-**cuSZ / PHF** (cuSZ team, Argonne National Laboratory, Indiana University, and others) —
-the LorenzoQuant stage follows the cuSZ fused Lorenzo predictor+quantizer design, and the
-Huffman stage incorporates vendored PHF codec source files adapted from the cuSZ repository.
-
-> cuSZ team.
-> *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*
-> https://github.com/szcompressor/cuSZ
-
-Both projects are BSD-3-Clause licensed. See [`THIRD_PARTY.md`](THIRD_PARTY.md) for full
-copyright notices and per-module attribution details.
+For per-stage attribution details, copyright notices, relationship types (direct port, algorithmic reimplementation, or vendored), and paper citations, see [`docs/acknowledgements.md`](docs/acknowledgements.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).
 
 ---
 
