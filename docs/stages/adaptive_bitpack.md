@@ -100,8 +100,19 @@ Single input → single output.
 
 ## Graph compatibility
 
-`isGraphCompatible()` is **false** — the forward path does a host-blocking D2H to
-read the scanned total payload length (same pattern as `BitplaneRLEStage`).
+`isGraphCompatible()` is **true for the forward (compress) path, false for the
+inverse**. The archive length is still data-dependent (cuSZp's `cmpSize`), but
+the host readback of the scanned total payload is deferred to `postStreamSync()`
+— which the pipeline calls after the launch and a full stream sync, outside any
+capture window — so `execute()` enqueues only stream-ordered device work. The
+per-block cost/offset scratch is kept persistent (grown lazily, freed in the
+destructor) so the readback can happen post-sync and no allocation occurs inside
+a captured graph replay. This mirrors `RZEStage`'s forward path. The inverse
+keeps a per-execute layout and is left out of graph capture.
+
+This means the full cuSZp pipelines (`Quantizer(linear) → Lorenzo(block)/TiledLorenzo
+→ AdaptiveBitpack`) can be captured and replayed as a CUDA graph on the compress
+side. See `examples/cuszp_variants.cpp` for a PREALLOCATE-vs-GRAPH benchmark.
 
 ---
 

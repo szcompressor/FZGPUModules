@@ -53,8 +53,14 @@ static_assert(sizeof(AdaptiveBitpackConfig) <= FZM_STAGE_CONFIG_SIZE,
  * Pair with `QuantizerStage(linear) → LorenzoStage(setBlockSize)` for the cuSZp
  * pipeline; `block_size` typically matches the Lorenzo block (32) but need not.
  *
- * @note **Not graph-compatible** — the forward path does a host-blocking D2H to
- *       read the scanned payload length (same as `BitplaneRLEStage`).
+ * @note **Forward is graph-compatible; inverse is not.** The forward path's
+ *       data-dependent compressed-size readback (cuSZp's `cmpSize` D2H) is
+ *       deferred to `postStreamSync()` — run after the launch, outside any
+ *       capture window — so `execute()` enqueues only stream-ordered device
+ *       work. Per-block cost/offset scratch is kept persistent so the readback
+ *       can happen post-sync and no allocation occurs during graph replay
+ *       (mirrors `RZEStage`'s forward). The inverse keeps a per-execute layout
+ *       and stays out of capture.
  *
  * @note **Prior work:** the per-block fixed-rate bit-plane encoding is the cuSZp
  *       lossless scheme (Yafan Huang et al., SC'23/SC'24, BSD-3-Clause). The
@@ -69,12 +75,17 @@ class AdaptiveBitpackStage : public Stage {
                   "AdaptiveBitpackStage: T must be int16_t or int32_t.");
 public:
     AdaptiveBitpackStage() = default;
-    ~AdaptiveBitpackStage() override = default;
+    ~AdaptiveBitpackStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-    bool isGraphCompatible() const override { return false; }
+    // Forward (compress) is graph-capturable: execute() enqueues only
+    // device-side work and the data-dependent compressed-size readback is
+    // deferred to postStreamSync() (run after the launch, outside any capture
+    // window).  The inverse path keeps a per-execute layout and is left out of
+    // graph capture, mirroring RZEStage.
+    bool isGraphCompatible() const override { return !is_inverse_; }
 
     /// Elements per logical block (the fixed-rate granularity). Must be in
     /// [1, 1024]. cuSZp uses 32.
@@ -102,6 +113,12 @@ public:
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
+
+    /// Forward only: read the scanned payload length (D2H of two tail words from
+    /// the persistent cost/offset scratch) once the stream is idle, and finalize
+    /// actual_output_size_.  Kept out of execute() so the forward path stays
+    /// graph-capturable (no host sync inside the capture window).
+    void postStreamSync(cudaStream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
     std::string getName() const override { return "AdaptiveBitpack"; }
@@ -187,6 +204,17 @@ private:
     bool     outlier_selection_  = false;
     size_t   num_elements_       = 0;
     size_t   actual_output_size_ = 0;
+
+    // Forward-path persistent scratch (kept alive across execute() so the
+    // compressed-size readback can be deferred to postStreamSync(), and so no
+    // allocation happens inside a captured graph replay). Grown lazily when a
+    // larger input is seen; freed in the destructor. Pool-managed (persistent).
+    uint32_t*   d_cost_          = nullptr;  ///< per-block payload byte cost
+    uint32_t*   d_offset_        = nullptr;  ///< exclusive scan of d_cost_
+    size_t      scratch_blocks_  = 0;        ///< capacity of d_cost_/d_offset_ in blocks
+    MemoryPool* scratch_pool_    = nullptr;  ///< owner of d_cost_/d_offset_
+    size_t      fwd_num_blocks_  = 0;        ///< block count of the last forward encode
+    size_t      fwd_meta_region_ = 0;        ///< metadata-region bytes of the last forward encode
 
     uint32_t saved_block_size_   = 32;
     bool     saved_outlier_select_ = false;

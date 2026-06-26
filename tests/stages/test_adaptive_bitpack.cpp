@@ -3,7 +3,8 @@
  *
  * GPU unit tests for AdaptiveBitpackStage<T> — per-block adaptive fixed-rate
  * bit-plane coder (cuSZp-style plain mode). Signed int16/int32 input, uint8
- * archive output. Not graph-compatible (forward D2H for the scanned length).
+ * archive output. Forward (compress) is graph-capturable; the compressed-size
+ * readback is deferred to postStreamSync().
  *
  *   AB1  RoundTrip_Int32            — signed int32 block round-trip, exact
  *   AB2  RoundTrip_Int16            — signed int16 round-trip, exact
@@ -14,9 +15,10 @@
  *   AB7  SerializeDeserialize      — block_size + num_elements survive header
  *   AB8  SetBlockSizeRejects       — 0 and >1024 throw
  *   AB9  PortAndTypeContract       — 1 in/out; UINT8 archive / signed codes
- *   AB10 GraphCompatibleFalse      — isGraphCompatible() == false
+ *   AB10 GraphCompatForwardOnly    — isGraphCompatible(): forward true, inverse false
  *   AB11 CompressionRatio          — small-magnitude data compresses below input
  *   AB12 CuSZpPipeline             — Quantizer(linear)→Lorenzo(block)→AdaptiveBitpack
+ *   AB20 GraphCaptureRoundTrip     — capture+replay the cuSZp compress graph, validate
  */
 
 #include <gtest/gtest.h>
@@ -159,8 +161,17 @@ TEST(AdaptiveBitpackStage, PortAndTypeContract) {
 }
 
 // ── AB10 ──────────────────────────────────────────────────────────────────────
-TEST(AdaptiveBitpackStage, GraphCompatibleFalse) {
-    EXPECT_FALSE(AdaptiveBitpackStage<int32_t>().isGraphCompatible());
+// Forward (compress) is graph-capturable: the data-dependent compressed-size
+// readback is deferred to postStreamSync(), so execute() does no host sync.
+// The inverse path is left out of graph capture (like RZEStage's inverse).
+TEST(AdaptiveBitpackStage, GraphCompatForwardOnly) {
+    AdaptiveBitpackStage<int32_t> fwd;
+    fwd.setInverse(false);
+    EXPECT_TRUE(fwd.isGraphCompatible());
+
+    AdaptiveBitpackStage<int32_t> inv;
+    inv.setInverse(true);
+    EXPECT_FALSE(inv.isGraphCompatible());
 }
 
 // ── AB11 ──────────────────────────────────────────────────────────────────────
@@ -377,4 +388,72 @@ TEST(AdaptiveBitpackStage, Outlier_CuSZpPipeline) {
     cudaMemcpy(h_recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
     float max_err = max_abs_error(h_input, h_recon);
     EXPECT_LE(max_err, EB * 1.01f);
+}
+
+// ── AB20 ──────────────────────────────────────────────────────────────────────
+// Capture and replay the full cuSZp compress graph
+// (Quantizer(linear) → Lorenzo(block=32) → AdaptiveBitpack), then validate the
+// round-trip through the graph-produced buffer. Exercises the deferred-size
+// readback path that makes AdaptiveBitpack's forward graph-compatible.
+TEST(AdaptiveBitpackStage, GraphCaptureRoundTrip) {
+    {
+        Pipeline probe(1024, MemoryStrategy::PREALLOCATE, 1.0f);
+        if (probe.isMemPoolFallbackMode())
+            GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
+
+    constexpr size_t N  = 1 << 15;
+    constexpr float  EB = 1e-3f;
+    const size_t in_bytes = N * sizeof(float);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 100.0f;
+
+    CudaStream cs;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
+    auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
+    quant->setErrorBound(EB);
+    quant->setErrorBoundMode(ErrorBoundMode::ABS);
+    quant->setLinearMode(true);
+    auto* lrz = p.addStage<LorenzoStage<int32_t>>();
+    lrz->setBlockSize(32);
+    p.connect(lrz, quant, "codes");
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    p.connect(ab, lrz);
+    p.enableGraphMode(true);
+    p.finalize();
+
+    p.warmup(cs.stream);
+    p.captureGraph(cs.stream);
+    cudaStreamSynchronize(cs.stream);
+    ASSERT_TRUE(p.isGraphCaptured());
+
+    // Replay several times; size must be stable and the round-trip within bound.
+    size_t first_sz = 0;
+    for (int it = 0; it < 3; ++it) {
+        void* d_comp = nullptr; size_t comp_sz = 0;
+        p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, cs.stream);
+        cudaStreamSynchronize(cs.stream);
+        ASSERT_GT(comp_sz, 0u);
+        if (it == 0) first_sz = comp_sz;
+        else EXPECT_EQ(comp_sz, first_sz) << "graph replay size drift on iter " << it;
+
+        void* d_dec = nullptr; size_t dec_sz = 0;
+        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, cs.stream);
+        cudaStreamSynchronize(cs.stream);
+        ASSERT_EQ(dec_sz, in_bytes);
+
+        std::vector<float> h_recon(N);
+        cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+        // Tolerance matches AB12 (linear-quant float reconstruction q*2eb can sit
+        // a fraction of a percent over eb on larger-magnitude data).
+        EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f)
+            << "graph round-trip exceeded error bound on iter " << it;
+    }
 }

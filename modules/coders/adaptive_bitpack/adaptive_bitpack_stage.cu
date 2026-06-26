@@ -125,40 +125,74 @@ void AdaptiveBitpackStage<T>::execute(
     const size_t meta_region = cfg.meta_bytes * cfg.num_blocks;
     uint8_t* d_payload = archive + meta_region;
 
-    auto* d_cost   = static_cast<uint32_t*>(
-        pool->allocate(sizeof(uint32_t) * cfg.num_blocks, stream, "ab_cost"));
-    auto* d_offset = static_cast<uint32_t*>(
-        pool->allocate(sizeof(uint32_t) * cfg.num_blocks, stream, "ab_offset"));
+    // Persistent per-block cost/offset scratch, grown only when a larger input is
+    // seen. Keeping it across calls (a) lets postStreamSync() read the scanned
+    // length after the stream is idle instead of a host-blocking D2H here, and
+    // (b) avoids any allocation inside a captured graph replay. This is what
+    // makes the forward path graph-compatible (mirrors RZEStage's forward).
+    if (cfg.num_blocks > scratch_blocks_) {
+        if (scratch_pool_ && d_cost_)   scratch_pool_->free(d_cost_, stream);
+        if (scratch_pool_ && d_offset_) scratch_pool_->free(d_offset_, stream);
+        d_cost_ = static_cast<uint32_t*>(pool->allocate(
+            sizeof(uint32_t) * cfg.num_blocks, stream, "ab_cost", /*persistent=*/true));
+        d_offset_ = static_cast<uint32_t*>(pool->allocate(
+            sizeof(uint32_t) * cfg.num_blocks, stream, "ab_offset", /*persistent=*/true));
+        if (!d_cost_ || !d_offset_)
+            throw std::runtime_error(
+                "AdaptiveBitpackStage: failed to allocate persistent forward scratch");
+        scratch_blocks_ = cfg.num_blocks;
+        scratch_pool_   = pool;
+    }
 
-    if (outlier_selection_) ab::launchEncodeRateOutlier<T>(d_in, cfg, d_meta, d_cost, stream);
-    else                    ab::launchEncodeRate<T>(d_in, cfg, d_meta, d_cost, stream);
+    if (outlier_selection_) ab::launchEncodeRateOutlier<T>(d_in, cfg, d_meta, d_cost_, stream);
+    else                    ab::launchEncodeRate<T>(d_in, cfg, d_meta, d_cost_, stream);
 
     size_t tmp_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes, d_cost, d_offset,
+    cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes, d_cost_, d_offset_,
                                   cfg.num_blocks, stream);
     auto* d_tmp = pool->allocate(tmp_bytes, stream, "ab_cub_tmp");
-    cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_cost, d_offset,
+    cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_cost_, d_offset_,
                                   cfg.num_blocks, stream);
 
-    // Total payload = exclusive_offset[last] + cost[last].
-    uint32_t h_last_off = 0, h_last_cost = 0;
-    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_last_off, d_offset + (cfg.num_blocks - 1),
-                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_last_cost, d_cost + (cfg.num_blocks - 1),
-                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-    const size_t total_payload = static_cast<size_t>(h_last_off) + h_last_cost;
-
     if (outlier_selection_)
-        ab::launchEncodePackOutlier<T>(d_in, cfg, d_meta, d_offset, d_payload, stream);
+        ab::launchEncodePackOutlier<T>(d_in, cfg, d_meta, d_offset_, d_payload, stream);
     else
-        ab::launchEncodePack<T>(d_in, cfg, d_meta, d_offset, d_payload, stream);
-
-    actual_output_size_ = meta_region + total_payload;
+        ab::launchEncodePack<T>(d_in, cfg, d_meta, d_offset_, d_payload, stream);
 
     pool->free(d_tmp, stream);
-    pool->free(d_offset, stream);
-    pool->free(d_cost, stream);
+
+    // The real archive length (meta_region + total payload) needs the scanned
+    // tail, which we read in postStreamSync() once the stream is idle — doing a
+    // D2H here would forbid CUDA graph capture. Record what postStreamSync needs
+    // and set a worst-case provisional size (postStreamSync is not invoked during
+    // graph *recording*, so actual_output_size_ must be valid right now too).
+    fwd_num_blocks_     = cfg.num_blocks;
+    fwd_meta_region_    = meta_region;
+    actual_output_size_ = ab::maxArchiveBytes(cfg, 8u * sizeof(T));
+}
+
+template<typename T>
+void AdaptiveBitpackStage<T>::postStreamSync(cudaStream_t /*stream*/) {
+    // Forward only: refine actual_output_size_ from the scanned payload length.
+    // The pipeline calls this after dag execute + a full stream sync, so a plain
+    // synchronous D2H of the two tail words is safe and adds no extra stall.
+    if (is_inverse_ || d_offset_ == nullptr || fwd_num_blocks_ == 0) return;
+    const size_t last = fwd_num_blocks_ - 1;
+    uint32_t h_last_off = 0, h_last_cost = 0;
+    FZ_CUDA_CHECK(cudaMemcpy(&h_last_off, d_offset_ + last,
+                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpy(&h_last_cost, d_cost_ + last,
+                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    actual_output_size_ =
+        fwd_meta_region_ + static_cast<size_t>(h_last_off) + h_last_cost;
+}
+
+template<typename T>
+AdaptiveBitpackStage<T>::~AdaptiveBitpackStage() {
+    if (scratch_pool_) {
+        if (d_cost_)   scratch_pool_->free(d_cost_, 0);
+        if (d_offset_) scratch_pool_->free(d_offset_, 0);
+    }
 }
 
 // ── Explicit instantiations ─────────────────────────────────────────────────
