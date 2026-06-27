@@ -116,6 +116,19 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── Module-card contract validation (memory/module_cards.md §4) ──────────────
+# Asserts each card.toml's identity/contract/data facets against the live Stage
+# interface, so cards can't drift from the code. Needs the modules/ path to find
+# the card.toml files at runtime.
+fz_add_test(
+    NAME    test_module_cards
+    SOURCES test_module_cards.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+target_compile_definitions(test_module_cards PRIVATE
+    FZ_MODULES_DIR="${CMAKE_SOURCE_DIR}/modules")
+
 # ─── cuSZp-family pipeline block/tile size sweeps ─────────────────────────────
 fz_add_test(
     NAME    test_cuszp_block_sizes

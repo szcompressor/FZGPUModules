@@ -7,15 +7,15 @@ name          = "GInterpStage"
 get_name      = "GInterp"          # == Stage::getName()
 stage_type_id = 22                 # == StageType::G_INTERP
 category      = "fused"            # modules/fused/ginterp
-templated     = true               # GInterpStage<float, uint8|uint16|uint32>
+templated     = true               # GInterpStage<{float,double}, {uint8,uint16,uint32}> — 6 instantiations
 version_added = "1.0"
 
 [facets]
 lossiness = "lossy"                # error-bounded; see [caveats] — bound is a TARGET, not a hard guarantee
 role      = ["fused", "decorrelation", "quantization"]
 algorithm = ["interpolation-spline"]
-data      = ["2d", "3d", "float32", "smooth-field", "spatial"]
-hardware  = ["cuda", "sm70+"]
+data      = ["2d", "3d", "float32", "float64", "smooth-field", "spatial"]
+hardware  = ["cuda", "sm70+"]     # 3-D double needs Volta+ (opt-in dynamic shared mem >= ~77 KB)
 contract  = ["multi-output", "dimension-aware"]   # NOT graph-capturable — see [caveats]
 pipeline  = ["cusz-hi"]
 maturity  = "beta"                 # 2-D auto-tune + several auto-tune modes still landing
