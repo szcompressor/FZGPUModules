@@ -116,7 +116,7 @@ static void build_pipeline(Pipeline& p, float eb, WarmupMode warmup_mode) {
 
     auto* rze = p.addStage<RZEStage>();
     rze->setChunkSize(CHUNK);
-    rze->setLevels(4);
+    rze->setWordSize(1);
     p.connect(rze, bshuf);
 
     if (warmup_mode == WarmupMode::AUTO) {

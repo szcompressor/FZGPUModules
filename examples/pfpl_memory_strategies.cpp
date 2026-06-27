@@ -95,7 +95,7 @@ static void build_pfpl_pipeline(
 
     auto* rze = p.addStage<RZEStage>();
     rze->setChunkSize(CHUNK);
-    rze->setLevels(4);
+    rze->setWordSize(1);
     p.connect(rze, bitshuffle);
 
     p.finalize();

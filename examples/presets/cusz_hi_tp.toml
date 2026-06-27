@@ -1,0 +1,70 @@
+[pipeline]
+# cuSZ-Hi LC back-end — throughput (tp) mode (Huffman-free).
+#   codes:    LorenzoQuant -> TCMS1 -> BIT1 -> RRE1
+#   outliers: Merge -> BIT4 -> RRE2 -> RZE1   (the "BITR" chain)
+# TCMS = Zigzag (byte-transparent), BIT = Bitshuffle, RRE = RRE, RZE = RZE.
+# dims are a placeholder; override at load time for your data.
+memory_strategy = "PREALLOCATE"
+dims = [512, 512, 1]
+input_size = 1048576               # 512*512*4 bytes (override with your data)
+
+[[stage]]
+name = "lq"
+type = "LorenzoQuant"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 1e-2
+error_bound_mode = "ABS"
+quant_radius = 32768
+outlier_capacity = 0.1
+
+# ── codes chain: TCMS1 -> BIT1 -> RRE1 ──
+[[stage]]
+name = "tcms"
+type = "Zigzag"
+input_type = "int8"
+output_type = "uint8"
+byte_transparent = true            # LC TCMS: zigzag the raw byte stream
+inputs = [{from = "lq", port = "codes"}]
+
+[[stage]]
+name = "bit1"
+type = "Bitshuffle"
+element_width = 1
+block_size = 16384
+inputs = [{from = "tcms", port = "output"}]
+
+[[stage]]
+name = "rre1"
+type = "RRE"
+word_size = 1
+inputs = [{from = "bit1", port = "output"}]
+
+# ── outlier chain (BITR): Merge -> BIT4 -> RRE2 -> RZE1 ──
+[[stage]]
+name = "merge"
+type = "Merge"
+segments = ["outlier_errors", "outlier_indices"]
+inputs = [
+  {from = "lq", port = "outlier_errors"},
+  {from = "lq", port = "outlier_indices"},
+]
+
+[[stage]]
+name = "bit4"
+type = "Bitshuffle"
+element_width = 4
+block_size = 16384
+inputs = [{from = "merge", port = "output"}]
+
+[[stage]]
+name = "rre2"
+type = "RRE"
+word_size = 2
+inputs = [{from = "bit4", port = "output"}]
+
+[[stage]]
+name = "rze"
+type = "RZE"
+word_size = 1                       # LC RZE_1 (byte word size)
+inputs = [{from = "rre2", port = "output"}]

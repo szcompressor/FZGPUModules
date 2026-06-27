@@ -138,13 +138,14 @@ position within the payload.
 | 6  | `HUFFMAN`      | `HuffmanStage` — GPU Huffman entropy coding (PHF) |
 | 7  | `BITPACK`      | `BitpackStage` — dense N-bit integer packing |
 | 10 | `SPLIT`        | `SplitStage` (test utility) |
-| 11 | `MERGE`        | `MergeStage` (test utility) |
+| 11 | `MERGE`        | `MergeStage` — concatenate N ports into one buffer / split back |
 | 12 | `LORENZO`      | `LorenzoStage` — plain integer delta predictor; dimensionality stored in config |
 | 14 | `QUANTIZER`    | `QuantizerStage` — direct-value quantizer |
 | 15 | `ZIGZAG`       | `ZigzagStage` — zigzag encode/decode |
 | 16 | `NEGABINARY`   | `NegabinaryStage` — negabinary encode/decode |
 | 17 | `BITSHUFFLE`   | `BitshuffleStage` — GPU bit-matrix transpose |
 | 18 | `RZE`          | `RZEStage` — recursive zero-byte elimination |
+| 26 | `RRE`          | `RREStage` — repetition-reduction encoding (LC component) |
 
 **Rule:** never reuse or renumber an existing value — stage type IDs are baked into
 `.fzm` files on disk.  New stages always take the next unused integer.
@@ -181,6 +182,7 @@ STAGE_TYPES = {
     4: "PassThrough", 5: "RLE", 6: "Huffman", 7: "BitPack",
     10: "Split", 11: "Merge", 12: "Lorenzo", 14: "Quantizer",
     15: "Zigzag", 16: "Negabinary", 17: "Bitshuffle", 18: "RZE",
+    26: "RRE",
 }
 DATA_TYPES = {
     0: "uint8", 1: "uint16", 2: "uint32", 3: "uint64",

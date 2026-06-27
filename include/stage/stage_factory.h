@@ -15,6 +15,8 @@
 #include "transforms/negabinary/negabinary_stage.h"
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
+#include "coders/rre/rre_stage.h"
+#include "structural/merge/merge_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
@@ -210,6 +212,20 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
 
         case StageType::RZE: {
             auto* s = new RZEStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::RRE: {
+            auto* s = new RREStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::MERGE: {
+            auto* s = new MergeStage();
             s->deserializeHeader(config, config_size);
             stage = s;
             break;

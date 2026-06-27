@@ -261,7 +261,7 @@ TEST(ConfigSave, PreservesParams) {
     constexpr int    QR      = 1024;
     constexpr float  OUTCAP  = 0.12f;
     constexpr size_t CHUNK   = 8192;
-    constexpr int    LEVELS  = 3;
+    constexpr int    WORDSZ  = 4;
     constexpr size_t BSBLOCK = 8192;
     constexpr size_t BSWIDTH = 2;
 
@@ -283,7 +283,7 @@ TEST(ConfigSave, PreservesParams) {
 
     auto* rze = p.addStage<RZEStage>();
     rze->setChunkSize(CHUNK);
-    rze->setLevels(LEVELS);
+    rze->setWordSize(WORDSZ);
     p.connect(rze, bs);
 
     p.setPoolManagedDecompOutput(false);
@@ -327,7 +327,7 @@ TEST(ConfigSave, PreservesParams) {
     auto& s2 = *(*stages)[2].as_table();
     EXPECT_EQ(s2["type"].value_or<std::string>(""), "RZE");
     EXPECT_EQ(s2["chunk_size"].value_or<int64_t>(0), static_cast<int64_t>(CHUNK));
-    EXPECT_EQ(s2["levels"].value_or<int64_t>(0), static_cast<int64_t>(LEVELS));
+    EXPECT_EQ(s2["word_size"].value_or<int64_t>(0), static_cast<int64_t>(WORDSZ));
     ASSERT_TRUE(s2.contains("inputs"));
 
     // Bitshuffle inputs: from="LorenzoQuant" (getName() return value), port="codes"
@@ -470,7 +470,7 @@ TEST(ConfigLoad, AllSupportedStageTypes) {
     p1.connect(bs, rle);
 
     auto* rze  = p1.addStage<RZEStage>();
-    rze->setChunkSize(16384); rze->setLevels(2);
+    rze->setChunkSize(16384); rze->setWordSize(2);
     p1.connect(rze, bs);
 
     // Lorenzo outlier outputs (ports 1-3) are unconnected → pipeline outputs.

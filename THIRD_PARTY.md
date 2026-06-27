@@ -10,12 +10,16 @@ verbatim to satisfy BSD-3-Clause condition 2 (binary redistribution).
 
 ## LC Framework
 
-**Used by:** `RZEStage`, `BitshuffleStage` (4- and 8-byte butterfly kernels),
-`DifferenceStage`, `QuantizerStage`
+**Used by:** `RZEStage`, `RREStage`, `BitshuffleStage` (4- and 8-byte butterfly
+kernels), `DifferenceStage`, `QuantizerStage`
 
 **Relationship:**
-- `RZEStage` (`modules/coders/rze/`) — GPU kernels are a direct port of
-  `zero_elim.h`, `repeated_elim.h`, and `rze.h` from the LC framework.
+- `RREStage` + `RZEStage` (`modules/coders/{rre,rze}/`) — GPU kernels are a
+  faithful port of `d_RRE.h`, `d_RZE.h`, `d_repetition_elimination.h`,
+  `d_zero_elimination.h`, and `prefix_sum.h` from the LC framework (the `RRE` and
+  `RZE` lossless components used by cuSZ-Hi's LC pipelines), vendored together in
+  `modules/coders/lc_common/lc_chunk_components.cuh`.  Both support LC word sizes
+  1/2/4/8 (`RRE_N` / `RZE_N`).
 - `BitshuffleStage` (`modules/shufflers/bitshuffle/`) — the 4- and 8-byte
   butterfly shuffle kernels are adapted directly from `d_BIT_4` / `d_BIT_8`
   in the LC framework; the 1- and 2-byte paths use a standard `__ballot_sync`

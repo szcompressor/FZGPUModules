@@ -128,7 +128,7 @@ public:
      *
      * Used by Pipeline::finalize() to detect type mismatches between connected
      * stages before any execution.  Return DataType::UNKNOWN to opt out of
-     * checking — byte-transparent stages (Bitshuffle, RZE) and mock stages
+     * checking — byte-transparent stages (Bitshuffle, RZE, RRE) and mock stages
      * must return UNKNOWN; finalize() skips any connection where either side
      * is UNKNOWN.
      */

@@ -25,4 +25,4 @@ input_port = "quant:codes"
 [[stage]]
 name = "rze"
 type = "RZE"
-levels = 4
+word_size = 1

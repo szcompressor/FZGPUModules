@@ -43,6 +43,21 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
+    /**
+     * Byte-transparent mode (default off).  When enabled, the stage opts out of
+     * finalize() type checking by reporting DataType::UNKNOWN on both ports,
+     * while still applying the same `sizeof(TIn)`-word zigzag transform.
+     *
+     * This is what lets ZigzagStage act as the LC framework's `TCMS` component
+     * (Two's-Complement → Magnitude-Sign) inside a byte-stream chain: LC's
+     * TCMS_N operates on a raw byte stream as N-byte words regardless of the
+     * upstream element type, so the typed default (which would reject, e.g.,
+     * a uint16 codes port feeding `Zigzag<int8_t>`, or a UINT8 byte stream
+     * feeding `Zigzag<int64_t>`) must be relaxed for the chain to connect.
+     */
+    void setByteTransparent(bool on) { byte_transparent_ = on; }
+    bool isByteTransparent() const   { return byte_transparent_; }
+
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
         cudaStream_t stream,
@@ -77,6 +92,7 @@ public:
 
     uint8_t getOutputDataType(size_t output_index) const override {
         (void)output_index;
+        if (byte_transparent_) return static_cast<uint8_t>(DataType::UNKNOWN);
         // Forward output is TOut (unsigned); inverse output is TIn (signed).
         return is_inverse_
             ? static_cast<uint8_t>(dataTypeOf<TIn>())
@@ -84,6 +100,7 @@ public:
     }
 
     uint8_t getInputDataType(size_t /*input_index*/) const override {
+        if (byte_transparent_) return static_cast<uint8_t>(DataType::UNKNOWN);
         // Forward input is TIn (signed); inverse input is TOut (unsigned).
         return is_inverse_
             ? static_cast<uint8_t>(dataTypeOf<TOut>())
@@ -95,22 +112,24 @@ public:
         size_t output_index, uint8_t* buf, size_t max_size
     ) const override {
         (void)output_index;
-        if (max_size < 2) return 0;
+        if (max_size < 3) return 0;
         buf[0] = static_cast<uint8_t>(dataTypeOf<TIn>());
         buf[1] = static_cast<uint8_t>(dataTypeOf<TOut>());
-        return 2;
+        buf[2] = byte_transparent_ ? 1 : 0;   // LC TCMS mode
+        return 3;
     }
 
     void deserializeHeader(const uint8_t* buf, size_t size) override {
-        (void)buf; (void)size;
-        // TIn/TOut are baked into the template.
-        // The factory selects the right instantiation before calling this.
+        // TIn/TOut are baked into the template (factory selects the right
+        // instantiation before calling this); byte 2 carries byte-transparent.
+        if (size >= 3) byte_transparent_ = (buf[2] != 0);
     }
 
-    size_t getMaxHeaderSize(size_t) const override { return 2; }
+    size_t getMaxHeaderSize(size_t) const override { return 3; }
 
 private:
     bool   is_inverse_;
+    bool   byte_transparent_ = false;  // LC TCMS mode: opt out of type checking
     size_t actual_output_size_;
 
     template<typename U>

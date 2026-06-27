@@ -164,13 +164,36 @@ on integer data.
 
 ### RZE
 
-Recursive Zero-byte Elimination -- lossless byte-stream compressor operating on
-Bitshuffle output.
+Zero-Elimination Encoding -- lossless byte-stream compressor (LC framework
+component). Eliminates zero words (the sibling of RRE, which eliminates repeats).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| chunk_size | integer | 16384 | Chunk size in bytes. Must be a positive multiple of 4096. |
-| levels | integer | 4 | Recursion depth 1-4. Level 1 = ZE only; levels 2-4 add RE passes. |
+| chunk_size | integer | 16384 | Chunk size in bytes. Only 16384 is currently supported. |
+| word_size | integer | 1 | Word granularity in bytes: 1, 2, 4, or 8 (LC RZE_1/RZE_2/RZE_4/RZE_8). |
+
+### RRE
+
+Repetition-Reduction Encoding -- lossless byte-stream compressor (LC framework
+component used by cuSZ-Hi's LC pipelines). Eliminates runs of a repeated value
+(the sibling of RZE, which eliminates zeros).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| chunk_size | integer | 16384 | Chunk size in bytes. Only 16384 is currently supported. |
+| word_size | integer | 1 | Word granularity in bytes: 1, 2, 4, or 8 (LC RRE_1/RRE_2/RRE_4/RRE_8). |
+
+### Merge
+
+Structural stage: concatenates N producer ports into one buffer (forward) and
+splits the reconstructed buffer back into N segments (inverse). Used to run a
+single lossless chain over the concatenation of several ports (e.g. cuSZ-Hi's
+merged `[Huffman | outliers]` blob). List one `inputs` entry per segment, in
+`segments` order.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| segments | string[] | (required) | Segment names, in connection order (max 16). Defines N. |
 
 ### RLE
 

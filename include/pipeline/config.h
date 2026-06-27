@@ -12,7 +12,7 @@
  *   LorenzoQuant  — fused float predictor+quantizer (cuSZ-style)
  *   Lorenzo       — plain integer delta predictor (lossless, use after Quantizer)
  *   Quantizer     — standalone float-to-integer quantizer
- *   Bitshuffle, RZE, RLE, Bitpack, Difference, Zigzag, Negabinary
+ *   Bitshuffle, RZE, RRE, RLE, Bitpack, Difference, Zigzag, Negabinary, Merge
  *
  * File format: human-readable TOML v1.0
  *

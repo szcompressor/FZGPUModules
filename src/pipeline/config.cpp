@@ -37,6 +37,8 @@
 #include "quantizers/quantizer/quantizer.h"
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
+#include "coders/rre/rre_stage.h"
+#include "structural/merge/merge_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
@@ -292,11 +294,14 @@ static Stage* addDifferenceStage(Pipeline& p, const toml::table& t) {
 static Stage* addZigzagStage(Pipeline& p, const toml::table& t) {
     DataType in_dt  = dataTypeFromString(optStr(t, "input_type",  "int32"));
     DataType out_dt = dataTypeFromString(optStr(t, "output_type", "uint32"));
-    if (in_dt == DataType::INT8  && out_dt == DataType::UINT8)  return p.addStage<ZigzagStage<int8_t,  uint8_t>>();
-    if (in_dt == DataType::INT16 && out_dt == DataType::UINT16) return p.addStage<ZigzagStage<int16_t, uint16_t>>();
-    if (in_dt == DataType::INT32 && out_dt == DataType::UINT32) return p.addStage<ZigzagStage<int32_t, uint32_t>>();
-    if (in_dt == DataType::INT64 && out_dt == DataType::UINT64) return p.addStage<ZigzagStage<int64_t, uint64_t>>();
-    throw std::runtime_error("loadConfig: unsupported Zigzag type combination");
+    const bool bt = optBool(t, "byte_transparent", false);  // LC TCMS mode
+    Stage* s = nullptr;
+    if      (in_dt == DataType::INT8  && out_dt == DataType::UINT8)  { auto* z = p.addStage<ZigzagStage<int8_t,  uint8_t>>();  z->setByteTransparent(bt); s = z; }
+    else if (in_dt == DataType::INT16 && out_dt == DataType::UINT16) { auto* z = p.addStage<ZigzagStage<int16_t, uint16_t>>(); z->setByteTransparent(bt); s = z; }
+    else if (in_dt == DataType::INT32 && out_dt == DataType::UINT32) { auto* z = p.addStage<ZigzagStage<int32_t, uint32_t>>(); z->setByteTransparent(bt); s = z; }
+    else if (in_dt == DataType::INT64 && out_dt == DataType::UINT64) { auto* z = p.addStage<ZigzagStage<int64_t, uint64_t>>(); z->setByteTransparent(bt); s = z; }
+    else throw std::runtime_error("loadConfig: unsupported Zigzag type combination");
+    return s;
 }
 
 static Stage* addBitpackStage(Pipeline& p, const toml::table& t) {
@@ -339,8 +344,28 @@ static Stage* addBitshuffleStage(Pipeline& p, const toml::table& t) {
 static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
     auto* rze = p.addStage<RZEStage>();
     rze->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
-    rze->setLevels(static_cast<int>(optInt(t, "levels", 4)));
+    rze->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
     return rze;
+}
+
+static Stage* addRREStage(Pipeline& p, const toml::table& t) {
+    auto* rre = p.addStage<RREStage>();
+    rre->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
+    rre->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
+    return rre;
+}
+
+static Stage* addMergeStage(Pipeline& p, const toml::table& t) {
+    auto* mg = p.addStage<MergeStage>();
+    std::vector<std::string> names;
+    if (auto* arr = t["segments"].as_array())
+        for (auto& n : *arr)
+            if (auto s = n.as_string()) names.push_back(s->get());
+    if (names.empty())
+        throw std::runtime_error("loadConfig: Merge stage requires a non-empty 'segments' array "
+                                 "(one name per input, in connection order)");
+    mg->setSegmentNames(names);
+    return mg;
 }
 
 static Stage* addBitplaneRLEStage(Pipeline& p, const toml::table& t) {
@@ -509,7 +534,24 @@ static void saveBitshuffleStage(Stage* s, std::ostringstream& out) {
 static void saveRZEStage(Stage* s, std::ostringstream& out) {
     auto* rze = static_cast<RZEStage*>(s);
     out << "chunk_size = " << static_cast<int64_t>(rze->getChunkSize()) << "\n";
-    out << "levels = "     << static_cast<int64_t>(rze->getLevels())    << "\n";
+    out << "word_size = "  << static_cast<int64_t>(rze->getWordSize())  << "\n";
+}
+
+static void saveRREStage(Stage* s, std::ostringstream& out) {
+    auto* rre = static_cast<RREStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(rre->getChunkSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(rre->getWordSize())  << "\n";
+}
+
+static void saveMergeStage(Stage* s, std::ostringstream& out) {
+    auto* mg = static_cast<MergeStage*>(s);
+    const auto& names = mg->getSegmentNames();
+    out << "segments = [";
+    for (size_t i = 0; i < names.size(); i++) {
+        out << "\"" << names[i] << "\"";
+        if (i + 1 < names.size()) out << ", ";
+    }
+    out << "]\n";
 }
 
 static void saveBitplaneRLEStage(Stage* s, std::ostringstream& out) {
@@ -557,10 +599,13 @@ static void saveDifferenceStage(Stage* s, std::ostringstream& out) {
 }
 
 static void saveZigzagStage(Stage* s, std::ostringstream& out) {
-    out << "input_type = \""
-        << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))  << "\"\n";
-    out << "output_type = \""
-        << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+    // Read TIn/TOut/byte_transparent from the serialized header — getInputDataType()
+    // returns UNKNOWN in byte-transparent mode, so the header is the reliable source.
+    uint8_t hdr[3] = {};
+    const size_t n = s->serializeHeader(0, hdr, sizeof(hdr));
+    out << "input_type = \""  << dataTypeToString(static_cast<DataType>(hdr[0])) << "\"\n";
+    out << "output_type = \"" << dataTypeToString(static_cast<DataType>(hdr[1])) << "\"\n";
+    if (n >= 3 && hdr[2]) out << "byte_transparent = true\n";
 }
 
 static void saveNegabinaryStage(Stage* s, std::ostringstream& out) {
@@ -700,6 +745,8 @@ static const StageEntry kStageRegistry[] = {
     { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage    },
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage   },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage          },
+    { "RRE",          StageType::RRE,          addRREStage,          saveRREStage          },
+    { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage        },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage          },
     { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage   },
     { "Zigzag",       StageType::ZIGZAG,       addZigzagStage,       saveZigzagStage       },

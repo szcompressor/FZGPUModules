@@ -25,6 +25,8 @@
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/rze/rze_stage.h"
+#include "coders/rre/rre_stage.h"
+#include "structural/merge/merge_stage.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "quantizers/quantizer/quantizer.h"
 #include "transforms/zigzag/zigzag_stage.h"

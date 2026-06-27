@@ -102,7 +102,7 @@ TEST(Liveness, DiamondTopologyLevelStructure) {
     auto* split = p.addStage<SplitStage>();
     auto* pta   = p.addStage<PassThroughStage>();
     auto* ptb   = p.addStage<PassThroughStage>();
-    auto* merge = p.addStage<MergeStage>();
+    auto* merge = p.addStage<fz_test::MergeStage>();
 
     p.connect(pta, split, "copy1");
     p.connect(ptb, split, "copy2");
@@ -146,7 +146,7 @@ TEST(Liveness, DiamondDagCompressOutputSize) {
     auto* split = p.addStage<SplitStage>();
     auto* pta   = p.addStage<PassThroughStage>();
     auto* ptb   = p.addStage<PassThroughStage>();
-    auto* merge = p.addStage<MergeStage>();
+    auto* merge = p.addStage<fz_test::MergeStage>();
     p.connect(pta, split, "copy1");
     p.connect(ptb, split, "copy2");
     p.connect(merge, {pta, ptb});

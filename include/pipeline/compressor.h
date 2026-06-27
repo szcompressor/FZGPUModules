@@ -420,7 +420,7 @@ public:
      * before this call.
      *
      * Recognized stage types: LorenzoQuant, Lorenzo, Quantizer,
-     * Bitshuffle, RZE, RLE, Bitpack, Difference, Zigzag, Negabinary.
+     * Bitshuffle, RZE, RRE, RLE, Bitpack, Difference, Zigzag, Negabinary.
      *
      * @throws std::runtime_error  File not found, parse error, unknown stage
      *                             type, bad wiring reference, or already finalized.

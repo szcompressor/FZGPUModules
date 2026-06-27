@@ -84,6 +84,22 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── RREStage GPU round-trip ─────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_rre_stage
+    SOURCES test_rre_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── MergeStage (structural concat/split) ────────────────────────────────────
+fz_add_test(
+    NAME    test_merge_stage
+    SOURCES test_merge_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── Bitpack transform ────────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_bitpack

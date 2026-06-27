@@ -33,5 +33,5 @@ inputs = [{from = "diff", port = "output"}]
 [[stage]]
 name = "rze"
 type = "RZE"
-levels = 4
+word_size = 1
 inputs = [{from = "bshuf", port = "output"}]

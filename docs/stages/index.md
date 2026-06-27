@@ -11,3 +11,4 @@ same module categories used in the library.
 - \subpage stage_coders
 - \subpage stage_shufflers
 - \subpage stage_transforms
+- \subpage stage_structural

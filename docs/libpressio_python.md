@@ -539,7 +539,7 @@ metrics = comp.get_metrics()
 | `lorenzo:intN` (lossless) | `output` | same as input |
 | `quantizer:*` | `codes`, `outlier_idxs` | code type, uint32 |
 | `diff:*`, `zigzag:*`, `negabinary:*` | `output` | same as output type |
-| `rle:*`, `bitpack:*`, `bitshuffle`, `rze` | `output` | uint8 |
+| `rle:*`, `bitpack:*`, `bitshuffle`, `rze`, `rre` | `output` | uint8 |
 
 Note: `quantizer` uses `outlier_idxs`; quantizing Lorenzo uses `outlier_indices`.
 

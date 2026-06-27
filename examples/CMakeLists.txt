@@ -101,3 +101,9 @@ add_executable(cuszp_variants cuszp_variants.cpp)
 target_link_libraries(cuszp_variants PRIVATE fzgmod)
 set_target_properties(cuszp_variants PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── cuSZ-Hi LC lossless back-end (tp/cr chains + merged-blob via MergeStage) ──
+add_executable(lc_lossless_pipeline lc_lossless_pipeline.cpp)
+target_link_libraries(lc_lossless_pipeline PRIVATE fzgmod)
+set_target_properties(lc_lossless_pipeline PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

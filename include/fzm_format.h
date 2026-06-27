@@ -96,6 +96,7 @@ enum class StageType : uint16_t {
     BITPLANE_RLE = 23, ///< Fused bitplane transpose + zero-byte RLE (FZ-GPU lossless encoder)
     ADAPTIVE_BITPACK = 24, ///< Per-block adaptive fixed-rate bit-plane coder (cuSZp plain mode)
     TILED_LORENZO = 25, ///< Dimension-aware (tiled separable) Lorenzo predictor (cuSZp3 delta)
+    RRE        = 26,   ///< Repetition-Reduction Encoding (LC framework lossless component)
 };
 
 /**
@@ -316,6 +317,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::NEGABINARY:  return "Negabinary";
         case StageType::BITSHUFFLE:  return "Bitshuffle";
         case StageType::RZE:         return "RZE";
+        case StageType::RRE:         return "RRE";
         case StageType::LORENZO:     return "Lorenzo";
         case StageType::ANS:  return "ANS";
         case StageType::ADM:  return "ADM";

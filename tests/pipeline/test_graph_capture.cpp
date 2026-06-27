@@ -388,7 +388,7 @@ TEST(GraphCapture, RZEInverseIncompatibleThrowsAtCapture) {
     auto* rze = p.addStage<RZEStage>();
     rze->setInverse(true);
     rze->setChunkSize(16384);
-    rze->setLevels(4);
+    rze->setWordSize(1);
     p.enableGraphMode(true);
 
     // finalize() itself should throw because setCaptureMode validation

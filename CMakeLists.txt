@@ -243,6 +243,8 @@ add_library(fzgmod_modules
   modules/quantizers/quantizer/quantizer.cu
   modules/coders/rle/rle.cu
   modules/coders/rze/rze_stage.cu
+  modules/coders/rre/rre_stage.cu
+  modules/structural/merge/merge_stage.cu
   modules/coders/bitpack/bitpack_stage.cu
   modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu
   modules/coders/adaptive_bitpack/adaptive_bitpack_stage.cu

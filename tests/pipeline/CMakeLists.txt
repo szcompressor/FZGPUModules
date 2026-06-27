@@ -131,3 +131,14 @@ fz_add_test(
 target_compile_definitions(test_golden PRIVATE
     FZGM_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
 )
+
+# cuSZ-Hi LC back-end preset round-trips (throughput + ratio modes).
+fz_add_test(
+    NAME    test_lc_presets
+    SOURCES test_lc_presets.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+target_compile_definitions(test_lc_presets PRIVATE
+    FZ_PRESETS_DIR="${CMAKE_SOURCE_DIR}/examples/presets"
+)

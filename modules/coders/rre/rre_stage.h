@@ -1,18 +1,18 @@
 #pragma once
 
 /**
- * @file rze_stage.h
- * @brief Zero-Elimination Encoding stage — lossless byte-stream compressor.
+ * @file rre_stage.h
+ * @brief Repetition-Reduction Encoding stage — lossless byte-stream compressor.
  *
- * Standalone port of the LC framework `RZE` component.  Operates on a raw byte
- * stream treated as `word_size`-byte words (1, 2, 4, or 8 → LC RZE_1/2/4/8; the
- * `_N` suffix is the word size).  Each chunk is processed independently:
- *  - Level 1 (ZE): compact non-zero words; emit a 1-bit-per-word bitmap.
+ * Standalone port of the LC framework `RRE` component.  Operates on a raw byte
+ * stream treated as `word_size`-byte words (1, 2, 4, or 8).  Each chunk is
+ * processed independently:
+ *  - Level 1 (RE): compact non-repeated words (a word differs from its
+ *    predecessor); emit a 1-bit-per-word bitmap.
  *  - The bitmap is then recursively RE-compressed (hierarchical 2048/256/32/4
- *    byte levels), exactly as in the LC `d_RZE<T>` device function.
+ *    byte levels), exactly as in the LC `d_RRE<T>` device function.
  *
- * RZE is the zero-eliminating sibling of RREStage (which eliminates repeated
- * values).  Output stream layout (identical container to RREStage):
+ * Output stream layout (identical container to RZEStage):
  * @code
  *   [uint32_t: original byte count]
  *   [uint32_t: num_chunks]
@@ -38,23 +38,22 @@
 namespace fz {
 
 /**
- * Zero-Elimination Encoding stage.
+ * Repetition-Reduction Encoding stage.
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; only 16384 is supported).
- * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1 = LC RZE_1).
+ * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1).
  *
- * @note **Prior work:** GPU kernels are a faithful port of `d_RZE.h`,
- *       `d_zero_elimination.h`, and `d_repetition_elimination.h` from the LC
- *       framework (Burtscher et al., BSD-3-Clause), shared with RREStage via
- *       `modules/coders/lc_common/lc_chunk_components.cuh`.  See `THIRD_PARTY.md`.
+ * @note **Prior work:** GPU kernels are a faithful port of `d_RRE.h` and
+ *       `d_repetition_elimination.h` from the LC framework (Burtscher et al.,
+ *       BSD-3-Clause).  See `THIRD_PARTY.md` and `modules/coders/lc_common/lc_chunk_components.cuh`.
  *
  * @note CUDA Graph capture is supported for compression only. The inverse path
  *       reads the stream header with blocking D2H copies before it can launch
  *       the decode kernel (same constraint as RZEStage).
  */
-class RZEStage : public Stage {
+class RREStage : public Stage {
 public:
-    RZEStage()
+    RREStage()
         : is_inverse_(false)
         , chunk_size_(16384)
         , word_size_(1)
@@ -67,7 +66,7 @@ public:
         , scratch_capacity_(0)
     {}
 
-    ~RZEStage() override;
+    ~RREStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
@@ -97,7 +96,7 @@ public:
     void postStreamSync(cudaStream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
-    std::string getName() const override { return "RZE"; }
+    std::string getName() const override { return "RRE"; }
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
@@ -138,7 +137,7 @@ public:
     }
 
     uint16_t getStageTypeId() const override {
-        return static_cast<uint16_t>(StageType::RZE);
+        return static_cast<uint16_t>(StageType::RRE);
     }
 
     uint8_t getOutputDataType(size_t) const override {

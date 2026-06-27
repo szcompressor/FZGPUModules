@@ -1,20 +1,19 @@
 /**
- * modules/coders/rze/rze_stage.cu
+ * modules/coders/rre/rre_stage.cu
  *
- * GPU implementation of RZEStage — Zero-Elimination Encoding (LC RZE_1/2/4/8).
+ * GPU implementation of RREStage — Repetition-Reduction Encoding.
  *
- * One CUDA block per chunk, blockDim = 512 threads (RZE_TPB).  Each block holds
+ * One CUDA block per chunk, blockDim = 512 threads (RRE_TPB).  Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC
- * `d_RZE<T>` / `d_iRZE<T>` device functions on it.  Inter-chunk packing offsets
- * are computed with a CUB exclusive scan (mirroring RREStage) rather than LC's
+ * `d_RRE<T>` / `d_iRRE<T>` device functions on it.  Inter-chunk packing offsets
+ * are computed with a CUB exclusive scan (mirroring RZEStage) rather than LC's
  * decoupled look-back — the chunk format here is FZGM's own container.
  *
- * Algorithm reference: d_RZE.h / d_zero_elimination.h from the LC framework
- * (Burtscher et al., BSD-3-Clause).  Shared kernels:
- * modules/coders/lc_common/lc_chunk_components.cuh.  See THIRD_PARTY.md.
+ * Algorithm reference: d_RRE.h / d_repetition_elimination.h from the LC
+ * framework (Burtscher et al., BSD-3-Clause).  See lc_chunk_components.cuh and THIRD_PARTY.md.
  */
 
-#include "coders/rze/rze_stage.h"
+#include "coders/rre/rre_stage.h"
 #include "coders/lc_common/lc_chunk_components.cuh"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -30,54 +29,54 @@
 
 namespace fz {
 
-static constexpr int RZE_CS   = 16384;  // chunk size in bytes (must match rze_lc.cuh CS)
-static constexpr int RZE_TPB  = 512;    // threads per block (must match rze_lc.cuh TPB)
-static constexpr int RZE_TEMP = 4096;   // shared bytes for prefix-sum scratch + bitmap levels
+static constexpr int RRE_CS   = 16384;  // chunk size in bytes (must match lc_chunk_components.cuh CS)
+static constexpr int RRE_TPB  = 512;    // threads per block (must match lc_chunk_components.cuh TPB)
+static constexpr int RRE_TEMP = 4096;   // shared bytes for prefix-sum scratch + bitmap levels
 
 using fz::lc_detail::byte;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Encode kernel — one block per chunk.  Runs d_RZE<T> on the chunk in shared
-// memory; falls back to verbatim storage (high-bit flag) when RZE fails or
+// Encode kernel — one block per chunk.  Runs d_RRE<T> on the chunk in shared
+// memory; falls back to verbatim storage (high-bit flag) when RRE fails or
 // fails to shrink the chunk.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 template <typename T>
-static __global__ void __launch_bounds__(RZE_TPB)
-rzeEncodeKernel(
+static __global__ void __launch_bounds__(RRE_TPB)
+rreEncodeKernel(
     const byte* __restrict__ d_in,
     byte*       __restrict__ d_scratch,
     uint32_t*   __restrict__ d_sizes,
     uint32_t total_in_bytes)
 {
-    __shared__ __align__(16) byte s_in[RZE_CS];
-    __shared__ __align__(16) byte s_out[RZE_CS];
-    __shared__ __align__(16) byte s_temp[RZE_TEMP];
+    __shared__ __align__(16) byte s_in[RRE_CS];
+    __shared__ __align__(16) byte s_out[RRE_CS];
+    __shared__ __align__(16) byte s_temp[RRE_TEMP];
 
     const uint32_t cid     = blockIdx.x;
-    const uint32_t in_off  = cid * (uint32_t)RZE_CS;
+    const uint32_t in_off  = cid * (uint32_t)RRE_CS;
     const int      in_size = static_cast<int>(
-        min((uint32_t)RZE_CS, total_in_bytes - in_off));
+        min((uint32_t)RRE_CS, total_in_bytes - in_off));
 
     // Load chunk into shared memory; zero-pad the remainder of s_in so that
     // word/long reads past in_size (rounded up) see deterministic zeros.
-    for (int i = threadIdx.x; i < RZE_CS; i += RZE_TPB)
+    for (int i = threadIdx.x; i < RRE_CS; i += RRE_TPB)
         s_in[i] = (i < in_size) ? d_in[in_off + i] : (byte)0;
     __syncthreads();
 
     int  csize = in_size;
-    bool good  = lc_detail::d_RZE<T>(csize, s_in, s_out, s_temp);
+    bool good  = lc_detail::d_RRE<T>(csize, s_in, s_out, s_temp);
 
-    byte* out = d_scratch + (size_t)cid * (uint32_t)RZE_CS;
+    byte* out = d_scratch + (size_t)cid * (uint32_t)RRE_CS;
 
     if (good && csize < in_size) {
-        for (int i = threadIdx.x; i < csize; i += RZE_TPB)
+        for (int i = threadIdx.x; i < csize; i += RRE_TPB)
             out[i] = s_out[i];
         if (threadIdx.x == 0)
             d_sizes[cid] = (uint32_t)csize;
     } else {
         // Incompressible: store the original chunk verbatim (s_in is untouched
-        // by d_RZE, which only writes s_out / s_temp).
-        for (int i = threadIdx.x; i < in_size; i += RZE_TPB)
+        // by d_RRE, which only writes s_out / s_temp).
+        for (int i = threadIdx.x; i < in_size; i += RRE_TPB)
             out[i] = s_in[i];
         if (threadIdx.x == 0)
             d_sizes[cid] = (1u << 31) | (uint32_t)in_size;
@@ -89,8 +88,8 @@ rzeEncodeKernel(
 // are copied by the host and skipped here.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 template <typename T>
-static __global__ void __launch_bounds__(RZE_TPB)
-rzeDecodeKernel(
+static __global__ void __launch_bounds__(RRE_TPB)
+rreDecodeKernel(
     const byte*     __restrict__ d_in,
     byte*           __restrict__ d_out,
     const uint32_t* __restrict__ d_in_offsets,
@@ -98,9 +97,9 @@ rzeDecodeKernel(
     const uint32_t* __restrict__ d_out_offsets,
     const uint32_t* __restrict__ d_orig_sizes)
 {
-    __shared__ __align__(16) byte s_in[RZE_CS];
-    __shared__ __align__(16) byte s_out[RZE_CS];
-    __shared__ __align__(16) byte s_temp[RZE_TEMP];
+    __shared__ __align__(16) byte s_in[RRE_CS];
+    __shared__ __align__(16) byte s_out[RRE_CS];
+    __shared__ __align__(16) byte s_temp[RRE_TEMP];
 
     const uint32_t cid       = blockIdx.x;
     const uint32_t comp_size = d_comp_sizes[cid];
@@ -111,20 +110,20 @@ rzeDecodeKernel(
     const byte* in  = d_in  + d_in_offsets[cid];
     byte*       out = d_out + d_out_offsets[cid];
 
-    for (int i = threadIdx.x; i < (int)comp_size; i += RZE_TPB)
+    for (int i = threadIdx.x; i < (int)comp_size; i += RRE_TPB)
         s_in[i] = in[i];
     __syncthreads();
 
     int csize = (int)comp_size;
-    lc_detail::d_iRZE<T>(csize, s_in, s_out, s_temp);  // sets csize = orig_size
+    lc_detail::d_iRRE<T>(csize, s_in, s_out, s_temp);  // sets csize = orig_size
     __syncthreads();
 
-    for (int i = threadIdx.x; i < (int)orig_size; i += RZE_TPB)
+    for (int i = threadIdx.x; i < (int)orig_size; i += RRE_TPB)
         out[i] = s_out[i];
 }
 
 // ━━━━ helper kernels (word-size independent; mirror RZEStage) ━━━━━━━━━━━━━
-static __global__ void rzeStripFlagKernel(
+static __global__ void rreStripFlagKernel(
     const uint32_t* __restrict__ d_sizes_with_flag,
     uint32_t*       __restrict__ d_clean_sizes,
     uint32_t n_chunks)
@@ -134,14 +133,14 @@ static __global__ void rzeStripFlagKernel(
         d_clean_sizes[i] = d_sizes_with_flag[i] & 0x7FFFFFFFu;
 }
 
-static __global__ void rzeAddOffsetKernel(
+static __global__ void rreAddOffsetKernel(
     uint32_t* __restrict__ arr, uint32_t n, uint32_t offset)
 {
     const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) arr[i] += offset;
 }
 
-static __global__ void rzePackKernel(
+static __global__ void rrePackKernel(
     const byte*     __restrict__ d_scratch,
     byte*           __restrict__ d_out,
     const uint32_t* __restrict__ d_dst_offsets,
@@ -164,11 +163,11 @@ static void launchEncode(uint8_t word_size, int n_chunks, cudaStream_t stream,
                          uint32_t* d_sizes, uint32_t in_bytes)
 {
     switch (word_size) {
-        case 1: rzeEncodeKernel<uint8_t> <<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        case 2: rzeEncodeKernel<uint16_t><<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        case 4: rzeEncodeKernel<uint32_t><<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        case 8: rzeEncodeKernel<uint64_t><<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        default: throw std::runtime_error("RZEStage: word_size must be 1, 2, 4, or 8");
+        case 1: rreEncodeKernel<uint8_t> <<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
+        case 2: rreEncodeKernel<uint16_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
+        case 4: rreEncodeKernel<uint32_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
+        case 8: rreEncodeKernel<uint64_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
+        default: throw std::runtime_error("RREStage: word_size must be 1, 2, 4, or 8");
     }
 }
 
@@ -178,16 +177,16 @@ static void launchDecode(uint8_t word_size, int n_chunks, cudaStream_t stream,
                          const uint32_t* out_off, const uint32_t* orig_sz)
 {
     switch (word_size) {
-        case 1: rzeDecodeKernel<uint8_t> <<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        case 2: rzeDecodeKernel<uint16_t><<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        case 4: rzeDecodeKernel<uint32_t><<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        case 8: rzeDecodeKernel<uint64_t><<<n_chunks, RZE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        default: throw std::runtime_error("RZEStage: word_size must be 1, 2, 4, or 8");
+        case 1: rreDecodeKernel<uint8_t> <<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
+        case 2: rreDecodeKernel<uint16_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
+        case 4: rreDecodeKernel<uint32_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
+        case 8: rreDecodeKernel<uint64_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
+        default: throw std::runtime_error("RREStage: word_size must be 1, 2, 4, or 8");
     }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RZEStage::~RZEStage() {
+RREStage::~RREStage() {
     auto fwd_free = [&](void* p) {
         if (!p) return;
         if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(p, 0);
@@ -199,7 +198,7 @@ RZEStage::~RZEStage() {
     fwd_free(d_dst_off_dev_);
 }
 
-void RZEStage::postStreamSync(cudaStream_t /*stream*/) {
+void RREStage::postStreamSync(cudaStream_t /*stream*/) {
     if (!tail_readback_pending_) return;
 
     uint32_t tail_off = 0, tail_sz = 0;
@@ -217,12 +216,12 @@ void RZEStage::postStreamSync(cudaStream_t /*stream*/) {
 
     const float ratio = cached_orig_bytes_ > 0
         ? (float)cached_orig_bytes_ / (float)actual_output_size_ : 0.0f;
-    FZ_LOG(DEBUG, "RZE encode done: %.1f KB -> %.1f KB  ratio %.2fx",
+    FZ_LOG(DEBUG, "RRE encode done: %.1f KB -> %.1f KB  ratio %.2fx",
            cached_orig_bytes_ / 1024.0f, actual_output_size_ / 1024.0f, ratio);
 }
 
 std::unordered_map<std::string, size_t>
-RZEStage::getActualOutputSizesByName() const {
+RREStage::getActualOutputSizesByName() const {
     if (tail_readback_pending_) {
         FZ_CUDA_CHECK(cudaStreamSynchronize(tail_readback_stream_));
         uint32_t tail_off = 0, tail_sz = 0;
@@ -231,24 +230,24 @@ RZEStage::getActualOutputSizesByName() const {
         FZ_CUDA_CHECK(cudaMemcpy(&tail_sz, d_clean_dev_ + tail_last_index_,
                                  sizeof(uint32_t), cudaMemcpyDeviceToHost));
         const size_t total_out = (size_t)tail_off + (size_t)tail_sz;
-        const_cast<RZEStage*>(this)->actual_output_size_ = (total_out + 3) & ~size_t(3);
+        const_cast<RREStage*>(this)->actual_output_size_ = (total_out + 3) & ~size_t(3);
         if (tail_output_ptr_ && actual_output_size_ > total_out)
             cudaMemset(tail_output_ptr_ + total_out, 0, actual_output_size_ - total_out);
-        const_cast<RZEStage*>(this)->tail_output_ptr_  = nullptr;
+        const_cast<RREStage*>(this)->tail_output_ptr_  = nullptr;
         tail_readback_pending_ = false;
         tail_readback_stream_  = nullptr;
     }
     return {{"output", actual_output_size_}};
 }
 
-size_t RZEStage::getActualOutputSize(int index) const {
+size_t RREStage::getActualOutputSize(int index) const {
     if (index != 0) return 0;
     getActualOutputSizesByName();
     return actual_output_size_;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-void RZEStage::execute(
+void RREStage::execute(
     cudaStream_t stream,
     MemoryPool* pool,
     const std::vector<void*>& inputs,
@@ -256,7 +255,7 @@ void RZEStage::execute(
     const std::vector<size_t>& sizes)
 {
     if (inputs.empty() || outputs.empty() || sizes.empty())
-        throw std::runtime_error("RZEStage: invalid inputs/outputs");
+        throw std::runtime_error("RREStage: invalid inputs/outputs");
 
     tail_readback_pending_ = false;
     tail_readback_stream_  = nullptr;
@@ -267,11 +266,11 @@ void RZEStage::execute(
 
     if (chunk_size_ != 16384)
         throw std::runtime_error(
-            "RZEStage: only chunk_size == 16384 is curzently supported; got "
+            "RREStage: only chunk_size == 16384 is currently supported; got "
             + std::to_string(chunk_size_));
     if (word_size_ != 1 && word_size_ != 2 && word_size_ != 4 && word_size_ != 8)
         throw std::runtime_error(
-            "RZEStage: word_size must be 1, 2, 4, or 8; got "
+            "RREStage: word_size must be 1, 2, 4, or 8; got "
             + std::to_string((int)word_size_));
 
     const size_t   n_chunks   = (in_bytes + chunk_size_ - 1) / chunk_size_;
@@ -297,12 +296,12 @@ void RZEStage::execute(
             fwd_free(d_dst_off_dev_);d_dst_off_dev_= nullptr;
 
             if (pool) {
-                d_scratch_    = (uint8_t*) pool->allocate(n_chunks * (size_t)chunk_size_, stream, "rze_scratch", true);
-                d_sizes_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rze_sizes",   true);
-                d_clean_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rze_clean",   true);
-                d_dst_off_dev_= (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rze_offsets", true);
+                d_scratch_    = (uint8_t*) pool->allocate(n_chunks * (size_t)chunk_size_, stream, "rre_scratch", true);
+                d_sizes_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rre_sizes",   true);
+                d_clean_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rre_clean",   true);
+                d_dst_off_dev_= (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rre_offsets", true);
                 if (!d_scratch_ || !d_sizes_dev_ || !d_clean_dev_ || !d_dst_off_dev_)
-                    throw std::runtime_error("RZEStage: failed to allocate persistent forward scratch from MemoryPool");
+                    throw std::runtime_error("RREStage: failed to allocate persistent forward scratch from MemoryPool");
                 scratch_pool_owner_ = pool;
                 scratch_from_pool_  = true;
             } else {
@@ -316,7 +315,7 @@ void RZEStage::execute(
             scratch_capacity_ = n_chunks;
         }
 
-        FZ_LOG(TRACE, "RZE encode: %.1f KB in, %u chunks, word_size %d",
+        FZ_LOG(TRACE, "RRE encode: %.1f KB in, %u chunks, word_size %d",
                in_bytes / 1024.0, n_chunks_u, (int)word_size_);
 
         const size_t header_size = 4 + 4 + 4 * n_chunks;
@@ -335,7 +334,7 @@ void RZEStage::execute(
                                       cudaMemcpyDeviceToDevice, stream));
 
         // (3) Strip flag bits → clean sizes.
-        rzeStripFlagKernel<<<grid256, 256, 0, stream>>>(d_sizes_dev_, d_clean_dev_, n_chunks_u);
+        rreStripFlagKernel<<<grid256, 256, 0, stream>>>(d_sizes_dev_, d_clean_dev_, n_chunks_u);
 
         // (4) Exclusive prefix sum of clean sizes → payload-relative offsets.
         {
@@ -343,7 +342,7 @@ void RZEStage::execute(
             cub::DeviceScan::ExclusiveSum(nullptr, scan_tmp_bytes,
                                           d_clean_dev_, d_dst_off_dev_,
                                           (int)n_chunks, stream);
-            void* d_scan_tmp = pool ? pool->allocate(scan_tmp_bytes, stream, "rze_cub_scan_tmp") : nullptr;
+            void* d_scan_tmp = pool ? pool->allocate(scan_tmp_bytes, stream, "rre_cub_scan_tmp") : nullptr;
             if (!d_scan_tmp && scan_tmp_bytes > 0)
                 FZ_CUDA_CHECK(cudaMalloc(&d_scan_tmp, scan_tmp_bytes));
             cub::DeviceScan::ExclusiveSum(d_scan_tmp, scan_tmp_bytes,
@@ -354,7 +353,7 @@ void RZEStage::execute(
         }
 
         // (5) Convert to absolute output offsets (add header size).
-        rzeAddOffsetKernel<<<grid256, 256, 0, stream>>>(d_dst_off_dev_, n_chunks_u, (uint32_t)header_size);
+        rreAddOffsetKernel<<<grid256, 256, 0, stream>>>(d_dst_off_dev_, n_chunks_u, (uint32_t)header_size);
 
         // (6) Defer final output-size readback to postStreamSync.
         tail_last_index_       = n_chunks_u - 1;
@@ -363,7 +362,7 @@ void RZEStage::execute(
         tail_readback_stream_  = stream;
 
         // (7) Pack compressed chunks from uniform scratch to packed output.
-        rzePackKernel<<<(int)n_chunks, 512, 0, stream>>>(
+        rrePackKernel<<<(int)n_chunks, 512, 0, stream>>>(
             d_scratch_, d_out, d_dst_off_dev_, d_clean_dev_, (uint32_t)chunk_size_);
         FZ_CUDA_CHECK(cudaGetLastError());
 
@@ -412,10 +411,10 @@ void RZEStage::execute(
             if (pool) return (uint32_t*)pool->allocate(num_chunks * sizeof(uint32_t), stream, tag);
             uint32_t* p = nullptr; FZ_CUDA_CHECK(cudaMalloc(&p, num_chunks * sizeof(uint32_t))); return p;
         };
-        uint32_t* d_in_off  = alloc_u32("rze_inv_in_off");
-        uint32_t* d_comp_sz = alloc_u32("rze_inv_comp_sz");
-        uint32_t* d_out_off = alloc_u32("rze_inv_out_off");
-        uint32_t* d_orig_sz = alloc_u32("rze_inv_orig_sz");
+        uint32_t* d_in_off  = alloc_u32("rre_inv_in_off");
+        uint32_t* d_comp_sz = alloc_u32("rre_inv_comp_sz");
+        uint32_t* d_out_off = alloc_u32("rre_inv_out_off");
+        uint32_t* d_orig_sz = alloc_u32("rre_inv_orig_sz");
 
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_in_off,  h_in_off.data(),  num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_comp_sz, h_comp_sz.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
@@ -444,7 +443,7 @@ void RZEStage::execute(
         }
 
         actual_output_size_ = (size_t)orig_total;
-        FZ_LOG(DEBUG, "RZE decode done: %.1f KB -> %.1f KB",
+        FZ_LOG(DEBUG, "RRE decode done: %.1f KB -> %.1f KB",
                in_bytes / 1024.0, actual_output_size_ / 1024.0);
     }
 }

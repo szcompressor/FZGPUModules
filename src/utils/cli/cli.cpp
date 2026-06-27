@@ -69,7 +69,6 @@ struct CliSettings {
     bool bounds_check = false;
 
     size_t chunk_size = kDefaultChunkSize;
-    int rze_levels = 4;
 
     int benchmark_runs = kDefaultBenchmarkRuns;
 };
@@ -325,7 +324,6 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
     if (contains(opts, "strategy")) s->strategy = parse_strategy(opts.at("strategy"));
     if (contains(opts, "pool-mult")) s->pool_multiplier = parse_float(opts.at("pool-mult"), "pool-mult");
     if (contains(opts, "chunk-size")) s->chunk_size = parse_integer<size_t>(opts.at("chunk-size"), "chunk-size");
-    if (contains(opts, "rze-levels")) s->rze_levels = parse_integer<int>(opts.at("rze-levels"), "rze-levels");
     if (contains(opts, "runs")) s->benchmark_runs = parse_integer<int>(opts.at("runs"), "runs");
 
     s->warmup = contains(opts, "warmup") && parse_bool(opts.at("warmup"), "warmup");
@@ -493,11 +491,20 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             // otherwise fall back to the element width of the input type.
             bshuf->setElementWidth(last_is_codes_port ? 2 : static_cast<int>(sizeof(T)));
             connect_next(bshuf);
-        } else if (name == "rze") {
+        } else if (name == "rze" || name == "rze1" || name == "rze2" ||
+                   name == "rze4" || name == "rze8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
             auto* rze = pipeline->addStage<RZEStage>();
             rze->setChunkSize(s.chunk_size);
-            rze->setLevels(s.rze_levels);
+            rze->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
             connect_next(rze);
+        } else if (name == "rre" || name == "rre1" || name == "rre2" ||
+                   name == "rre4" || name == "rre8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* rre = pipeline->addStage<RREStage>();
+            rre->setChunkSize(s.chunk_size);
+            rre->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
+            connect_next(rre);
         } else if (name == "diff" || name == "difference") {
             auto* diff = pipeline->addStage<DifferenceStage<uint16_t>>();
             diff->setChunkSize(s.chunk_size);
@@ -528,7 +535,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         } else {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
-                "Supported: lorenzo, quantizer, bitshuffle, rze, diff, rle, huffman, ans, adm");
+                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], diff, rle, huffman, ans, adm");
         }
     }
 
@@ -570,13 +577,12 @@ static void print_root_usage(const char* argv0) {
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
-        << "                                                      rze, diff, rle, huffman, ans, adm\n"
+        << "                                                      rze[1|2|4|8], rre[1|2|4|8], diff, rle, huffman, ans, adm\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"
         << "  -r, --radius <value>              Quantization radius (default: 32768)\n"
         << "  --chunk-size <bytes>              Encoder chunk size (default: 16384)\n"
-        << "  --rze-levels <1-4>                RZE levels (default: 4)\n"
         << "  -l, --len <x>x<y>x<z>            Dimensions (e.g., 100x200x300)\n\n"
         << "Input/Output Options:\n"
         << "  -i, --input <filename>            Input file\n"

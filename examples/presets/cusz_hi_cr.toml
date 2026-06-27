@@ -1,0 +1,59 @@
+[pipeline]
+# cuSZ-Hi LC back-end — compression-ratio (cr) mode (Huffman + LC chain).
+#   codes -> Huffman ; Merge([Huffman | outliers]) -> RRE4 -> TCMS8 -> RZE1
+# One LC chain runs over the *concatenation* of the Huffman output and the
+# outlier ports — hence the Merge stage. TCMS8 = Zigzag<int64> (byte-transparent).
+# dims are a placeholder; override at load time for your data.
+memory_strategy = "PREALLOCATE"
+dims = [512, 512, 1]
+input_size = 1048576               # 512*512*4 bytes (override with your data)
+
+[[stage]]
+name = "lq"
+type = "LorenzoQuant"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 1e-2
+error_bound_mode = "ABS"
+quant_radius = 2048                 # keep 2*radius within the Huffman codebook
+outlier_capacity = 0.1
+zigzag_codes = true                 # Huffman needs contiguous [0, 2r-2] symbols
+
+[[stage]]
+name = "huf"
+type = "Huffman"
+input_type = "uint16"
+bklen = 4096                        # = 2*quant_radius
+inputs = [{from = "lq", port = "codes"}]
+
+# Concatenate [Huffman(codes) | outlier_errors | outlier_indices] into one blob.
+[[stage]]
+name = "merge"
+type = "Merge"
+segments = ["vle", "outlier_errors", "outlier_indices"]
+inputs = [
+  {from = "huf", port = "output"},
+  {from = "lq",  port = "outlier_errors"},
+  {from = "lq",  port = "outlier_indices"},
+]
+
+# ── RTR chain over the blob: RRE4 -> TCMS8 -> RZE1 ──
+[[stage]]
+name = "rre4"
+type = "RRE"
+word_size = 4
+inputs = [{from = "merge", port = "output"}]
+
+[[stage]]
+name = "tcms8"
+type = "Zigzag"
+input_type = "int64"
+output_type = "uint64"
+byte_transparent = true
+inputs = [{from = "rre4", port = "output"}]
+
+[[stage]]
+name = "rze"
+type = "RZE"
+word_size = 1                       # LC RZE_1
+inputs = [{from = "tcms8", port = "output"}]

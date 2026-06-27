@@ -151,7 +151,7 @@ int main(int argc, char* argv[]) {
 
     RZEStage m_rze;
     m_rze.setChunkSize(CHUNK);
-    m_rze.setLevels(4);
+    m_rze.setWordSize(1);
 
     // Padded copy of the input so chunked stages see CHUNK-aligned boundaries.
     void* d_padded = nullptr;
@@ -222,7 +222,7 @@ int main(int argc, char* argv[]) {
 
     auto* dr = dag_p.addStage<RZEStage>();
     dr->setChunkSize(CHUNK);
-    dr->setLevels(4);
+    dr->setWordSize(1);
     dag_p.connect(dr, db);
 
     dag_p.finalize();

@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
 
     auto* rze_codes = p.addStage<RZEStage>();
     rze_codes->setChunkSize(CHUNK);
-    rze_codes->setLevels(4);
+    rze_codes->setWordSize(1);
     p.connect(rze_codes, bshuf_codes);
 
     p.finalize();

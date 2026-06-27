@@ -10,7 +10,7 @@ predictors, quantizers, shufflers, transforms, fused stages, and external stages
 connected and executed entirely on the GPU with stream-ordered memory management.
 
 **Key properties:**
-- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, Bitshuffle, Huffman, ANS, …)
+- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, RRE, Bitshuffle, Huffman, ANS, …)
 - **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **File format** — FZM format with CRC32 checksums and full stage config serialization
@@ -97,6 +97,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_adm "ADMStage"                         | `modules/transforms/adm/adm_stage.h`               | Adaptive data mapping — uint16/32 → 8-bit symbol domain (MANS port) |
 | \ref stage_bitshuffle "BitshuffleStage"                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
 | \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Recursive zero-byte elimination                |
+| \ref stage_rre "RREStage"                         | `modules/coders/rre/rre_stage.h`                   | Repetition-reduction encoding (LC component)   |
 | \ref stage_zigzag "ZigzagStage<TIn, TOut>"           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | \ref stage_negabinary "NegabinaryStage<TIn, TOut>"       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
@@ -104,6 +105,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF, cuSZ port)    |
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rle "BitplaneRLEStage"        | `modules/fused/bitplane_rle/bitplane_rle_stage.h`  | Fused bitplane transpose + zero-byte RLE lossless encoder (FZ-GPU port) |
+| \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
 
 ### Memory Strategies
 

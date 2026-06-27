@@ -90,6 +90,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `RLEStage<T>` | Run-length encoding |
 | `BitshuffleStage` | GPU bit-matrix transpose |
 | `RZEStage` | Recursive zero-byte elimination |
+| `RREStage` | Repetition-reduction encoding (LC framework lossless component) |
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
@@ -97,6 +98,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `HuffmanStage<T>` | GPU Huffman entropy coding (PHF, cuSZ port) |
 | `ANSStage` | GPU rANS entropy coding (dietGPU port) |
 | `BitplaneRLEStage` | Fused bitplane transpose + zero-byte RLE lossless encoder (FZ-GPU port) |
+| `MergeStage` | Concatenate N producer ports into one buffer / split back (structural) |
 
 ---
 
@@ -156,7 +158,7 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 
 | Project | Stages |
 |---|---|
-| [LC framework](https://github.com/burtscher/LC-framework) — Burtscher et al., Texas State University | `RZEStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
+| [LC framework](https://github.com/burtscher/LC-framework) — Burtscher et al., Texas State University | `RZEStage`, `RREStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
 | [cuSZ / PHF](https://github.com/szcompressor/cuSZ) — Argonne NL, Indiana U, et al. | `LorenzoQuantStage`, `HuffmanStage` |
 | [FZ-GPU](https://github.com/szcompressor/cuSZ) — Zhang, Tian et al. (via cuSZ repo) | `BitplaneRLEStage` |
 | [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) — Indiana U, Argonne NL | `GInterpStage` |

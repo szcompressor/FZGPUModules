@@ -6,5 +6,6 @@
 | \subpage stage_ans | GPU rANS entropy coding (dietGPU, byte-level) |
 | \subpage stage_rle | Run-length encoding |
 | \subpage stage_rze | Recursive zero-byte elimination |
+| \subpage stage_rre | Repetition-reduction encoding (LC framework lossless component) |
 | \subpage stage_bitpack | Dense bit-packing of fixed-width integers |
 | \subpage stage_adaptive_bitpack | Per-block adaptive fixed-rate bit-plane coding (cuSZp plain mode) |
