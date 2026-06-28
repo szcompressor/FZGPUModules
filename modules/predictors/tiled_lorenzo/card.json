@@ -1,0 +1,82 @@
+{
+  "_schema": "memory/module_cards.md §3, facet vocab v0.2 §2",
+  "_note": "identity and facets.contract fields are validated against the live Stage interface by the contract-validation test (§4). Do not hand-edit those to disagree with the code.",
+
+  "identity": {
+    "name": "TiledLorenzoStage",
+    "get_name": "TiledLorenzo",
+    "stage_type_id": 25,
+    "category": "predictor",
+    "templated": true,
+    "version_added": "1.0"
+  },
+
+  "facets": {
+    "lossiness": "lossless",
+    "role": ["decorrelation"],
+    "algorithm": ["tiled-lorenzo"],
+    "data": ["2d", "3d", "signed-int", "structured-grid", "spatial"],
+    "hardware": ["cuda", "sm70+", "memory-bound"],
+    "contract": ["graph-capturable", "dimension-aware"],
+    "pipeline": ["cuszp3"],
+    "maturity": "stable",
+    "notes": "Single output port 'output'; tile-major + zero-padded so downstream AdaptiveBitpack(block_size=tile_elems) packs one block per tile. 1-D is intentionally out of scope — covered by LorenzoStage::setBlockSize. graph-capturable = forward/compress path only (capture is forward-only in this library)."
+  },
+
+  "zhub": {
+    "implements": ["lorenzo-predictor"],
+    "zhub_category": "Predictor"
+  },
+
+  "provenance": {
+    "algorithm_origin": "cuSZp3 / VGC (SC'25) dimension-aware tiled separable delta",
+    "upstream": "cuSZp3",
+    "license": "BSD-3-Clause",
+    "provenance": "vendored"
+  },
+
+  "papers": [
+    {
+      "title": "GPU Lossy Compression for HPC Can Be Versatile and Ultra-Fast",
+      "authors": "Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello",
+      "venue": "SC '25",
+      "year": 2025,
+      "pages": "2056-2075",
+      "doi": "10.1145/3712285.3759817",
+      "note": "cuSZp3 / VGC — source of the dimension-aware tiled separable delta"
+    }
+  ],
+
+  "evaluation": {
+    "metrics": { "cr": "3.95x", "ref_cr": "3.9466x" },
+    "datasets": []
+  },
+
+  "settings": {
+    "tile_shape": {
+      "setter": "setTileShape(tx,ty,tz)",
+      "default": "2-D 8x8 / 3-D 4x4x4 / 1-D 64",
+      "constraint": "each extent 1..255, product 1..1024"
+    },
+    "element_type": {
+      "template": "T",
+      "values": ["int16", "int32"]
+    }
+  },
+
+  "summary": {
+    "one_liner": "cuSZp3 dimension-aware tiled separable integer delta predictor (2D/3D), lossless.",
+    "features": [
+      "2D/3D separable integer Lorenzo within fixed tiles",
+      "Tile-major, zero-padded output feeds AdaptiveBitpack one block per tile (cuSZp3 layout)",
+      "Forward (compress) path is CUDA-graph capturable (deterministic sizes, no D2H); capture is forward-only",
+      "Inverse un-tiles back to natural row-major order"
+    ]
+  },
+
+  "docs": {
+    "page": "docs/stages/tiled_lorenzo.md",
+    "design": "memory/cuszp_stages.md",
+    "attribution": "THIRD_PARTY.md#cuszp--cuszp2--cuszp3"
+  }
+}

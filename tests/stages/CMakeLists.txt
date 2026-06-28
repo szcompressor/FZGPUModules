@@ -133,9 +133,8 @@ fz_add_test(
 )
 
 # ─── Module-card coverage (registry breadth check) ────────────────────────────
-# Scans modules/ for card.toml files and verifies each is in registry().
-# The TOML contract-validation phase (ContractMatchesInterface) was removed
-# because toml++ hits a SIGSEGV under nvc++ -O2 -DNDEBUG.
+# Scans modules/ for card.json files and verifies each is in registry().
+# Cards are JSON (migrated from TOML; toml++ hit SIGSEGV under nvc++ -O2 -DNDEBUG).
 fz_add_test(
     NAME    test_module_cards
     SOURCES test_module_cards.cpp
