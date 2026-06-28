@@ -4,7 +4,7 @@
 |---|---|
 | \subpage stage_lorenzo_quant | Fused float predictor + quantizer (1-D/2-D/3-D) |
 | \subpage stage_ginterp | Multi-level spline interpolation predictor + quantizer (3-D, cuSZ-Hi port) |
-| \subpage stage_bitplane_rle | Fused bitplane transpose + zero-byte RLE — FZ-GPU's lossless encoder |
+| \subpage stage_bitplane_rze | Fused bitplane transpose + zero-group RZE — FZ-GPU's lossless encoder |
 | \ref stage_diff "DifferenceStage (negabinary-fused)" | First-order difference with inline negabinary encoding (`DifferenceStage<T, TOut>` where `TOut != T`) |
 
 > **Note:** `DifferenceStage` with a `TOut != T` template argument fuses a negabinary

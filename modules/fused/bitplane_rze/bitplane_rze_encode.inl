@@ -12,7 +12,7 @@
 #include <cstdint>
 
 namespace fz {
-namespace bitplane_rle {
+namespace bitplane_rze {
 
 __global__ void KERNEL_fused_encode(
     uint32_t const* __restrict__ in_data, size_t data_len,
@@ -125,5 +125,5 @@ __global__ void KERNEL_fused_encode(
   }
 }
 
-}  // namespace bitplane_rle
+}  // namespace bitplane_rze
 }  // namespace fz

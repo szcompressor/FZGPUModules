@@ -49,7 +49,7 @@
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
 #include "fused/ginterp/ginterp_stage.h"
-#include "fused/bitplane_rle/bitplane_rle_stage.h"
+#include "fused/bitplane_rze/bitplane_rze_stage.h"
 
 #include <fstream>
 #include <iomanip>
@@ -368,9 +368,9 @@ static Stage* addMergeStage(Pipeline& p, const toml::table& t) {
     return mg;
 }
 
-static Stage* addBitplaneRLEStage(Pipeline& p, const toml::table& t) {
+static Stage* addBitplaneRZEStage(Pipeline& p, const toml::table& t) {
     (void)t;  // no tunable parameters — config is derived from input length
-    return p.addStage<BitplaneRLEStage>();
+    return p.addStage<BitplaneRZEStage>();
 }
 
 static Stage* addAdaptiveBitpackStage(Pipeline& p, const toml::table& t) {
@@ -554,7 +554,7 @@ static void saveMergeStage(Stage* s, std::ostringstream& out) {
     out << "]\n";
 }
 
-static void saveBitplaneRLEStage(Stage* s, std::ostringstream& out) {
+static void saveBitplaneRZEStage(Stage* s, std::ostringstream& out) {
     (void)s; (void)out;  // no tunable parameters to persist
 }
 
@@ -756,7 +756,7 @@ static const StageEntry kStageRegistry[] = {
     { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
     { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
     { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
-    { "BitplaneRLE",  StageType::BITPLANE_RLE, addBitplaneRLEStage,  saveBitplaneRLEStage  },
+    { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage  },
     { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage },
     { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage },
 };

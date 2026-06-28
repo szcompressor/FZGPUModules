@@ -15,7 +15,7 @@ see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
 |---|---|---|---|
 | [LC framework](#lc-framework) | BSD-3-Clause | Direct port / algorithm-faithful reimpl | `RZEStage`, `RREStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
 | [cuSZ / PHF](#cusz--phf) | BSD-3-Clause | Algorithm follow / vendored PHF headers | `LorenzoQuantStage`, `HuffmanStage` |
-| [FZ-GPU](#fz-gpu) | BSD-3-Clause | Direct port of fused kernels | `BitplaneRLEStage` |
+| [FZ-GPU](#fz-gpu) | BSD-3-Clause | Direct port of fused kernels | `BitplaneRZEStage` |
 | [cuSZ-Hi](#cusz-hi) | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
 | [cuSZp / cuSZp2 / cuSZp3](#cuszp--cuszp2--cuszp3) | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | [MANS](#mans) | BSD-3-Clause | Direct port of kernels | `ADMStage` |
@@ -83,12 +83,12 @@ SC '21. https://doi.org/10.1145/3458817.3476173
 
 **Stages:**
 
-- **`BitplaneRLEStage`** (`modules/fused/bitplane_rle/`) — the fused bitplane-transpose +
-  zero-byte run-length encode/decode kernels (`bitplane_rle_encode.inl`,
-  `bitplane_rle_decode.inl`) are adapted from `KERNEL_CUHIP_fz_fused_encode` /
+- **`BitplaneRZEStage`** (`modules/fused/bitplane_rze/`) — the fused bitplane-transpose +
+  zero-group encode/decode kernels (`bitplane_rze_encode.inl`,
+  `bitplane_rze_decode.inl`) are adapted from `KERNEL_CUHIP_fz_fused_encode` /
   `KERNEL_CUHIP_fz_fused_decode` as vendored in `origin/v1.1.0_dev` of cuSZ.
 
-  **Changes from original:** `namespace fzgpu` → `namespace fz::bitplane_rle`; `err.hh` /
+  **Changes from original:** `namespace fzgpu` → `namespace fz::bitplane_rze`; `err.hh` /
   `CHECK_GPU` stripped; `fzgpu::Buf` allocation replaced by FZGPUModules `MemoryPool`; the
   128-byte `fzg_header` is reproduced as `ArchiveHeader`. Kernel bodies preserved verbatim.
   Host-side wrapper and memory-pool integration are FZGPUModules code.

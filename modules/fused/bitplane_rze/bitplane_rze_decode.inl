@@ -10,7 +10,7 @@
 #include <cstdint>
 
 namespace fz {
-namespace bitplane_rle {
+namespace bitplane_rze {
 
 __global__ void KERNEL_fused_decode(
     uint32_t* in_archive, uint32_t* in_bitflag_array, uint32_t* in_start_pos,
@@ -116,5 +116,5 @@ __global__ void KERNEL_fused_decode(
     out_decoded[gD_id] = s_data_chunk[threadIdx.y][threadIdx.x];
 }
 
-}  // namespace bitplane_rle
+}  // namespace bitplane_rze
 }  // namespace fz

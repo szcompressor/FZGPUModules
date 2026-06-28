@@ -1,8 +1,8 @@
 /**
- * tests/stages/test_bitplane_rle.cpp
+ * tests/stages/test_bitplane_rze.cpp
  *
- * GPU unit tests for BitplaneRLEStage — the FZ-GPU fused bitplane-transpose +
- * zero-byte RLE lossless encoder. Fixed uint16_t input. Not graph-compatible
+ * GPU unit tests for BitplaneRZEStage — the FZ-GPU fused bitplane-transpose +
+ * zero-group RZE lossless encoder. Fixed uint16_t input. Not graph-compatible
  * (blocking D2H in both directions).
  *
  *   BP1  RoundTrip_Patterned       — uint16 round-trip, exact match (compressible data)
@@ -12,7 +12,7 @@
  *   BP5  ZeroInput                 — n=0 does not crash
  *   BP6  GraphCompatible           — isGraphCompatible() == false
  *   BP7  FileRoundTrip             — writeToFile → decompressFromFile (header serialize path)
- *   BP8  QuantizerPipeline         — Quantizer→BitplaneRLE end-to-end float round-trip (FZ-GPU)
+ *   BP8  QuantizerPipeline         — Quantizer→BitplaneRZE end-to-end float round-trip (FZ-GPU)
  */
 
 #include <gtest/gtest.h>
@@ -32,7 +32,7 @@ namespace {
 void expect_exact_round_trip(const std::vector<uint16_t>& h_in) {
     const size_t in_bytes = h_in.size() * sizeof(uint16_t);
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
-    p.addStage<BitplaneRLEStage>();
+    p.addStage<BitplaneRZEStage>();
     p.finalize();
 
     CudaStream cs;
@@ -46,7 +46,7 @@ void expect_exact_round_trip(const std::vector<uint16_t>& h_in) {
 }  // namespace
 
 // ── BP1 ──────────────────────────────────────────────────────────────────────
-TEST(BitplaneRLEStage, RoundTrip_Patterned) {
+TEST(BitplaneRZEStage, RoundTrip_Patterned) {
     const size_t N = 8192;  // 16384 bytes = 4 chunks, aligned
     std::vector<uint16_t> h_in(N);
     for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint16_t>(i % 64);
@@ -56,7 +56,7 @@ TEST(BitplaneRLEStage, RoundTrip_Patterned) {
 // ── BP2 ──────────────────────────────────────────────────────────────────────
 // 5000 uint16 = 10000 bytes → padded up to 12288 (3 chunks); exercises the
 // internal zero-pad scratch path.
-TEST(BitplaneRLEStage, RoundTrip_NonAligned) {
+TEST(BitplaneRZEStage, RoundTrip_NonAligned) {
     const size_t N = 5000;
     std::vector<uint16_t> h_in(N);
     for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint16_t>((i * 7) % 300);
@@ -64,7 +64,7 @@ TEST(BitplaneRLEStage, RoundTrip_NonAligned) {
 }
 
 // ── BP3 ──────────────────────────────────────────────────────────────────────
-TEST(BitplaneRLEStage, RoundTrip_Dense) {
+TEST(BitplaneRZEStage, RoundTrip_Dense) {
     const size_t N = 4096;
     std::vector<uint16_t> h_in(N);
     // Pseudo-random high-entropy 16-bit values.
@@ -77,7 +77,7 @@ TEST(BitplaneRLEStage, RoundTrip_Dense) {
 }
 
 // ── BP4 ──────────────────────────────────────────────────────────────────────
-TEST(BitplaneRLEStage, CompressedSmaller) {
+TEST(BitplaneRZEStage, CompressedSmaller) {
     const size_t N        = 8192;
     const size_t in_bytes = N * sizeof(uint16_t);
     // Mostly zeros with a few small nonzero values — highly compressible.
@@ -85,7 +85,7 @@ TEST(BitplaneRLEStage, CompressedSmaller) {
     for (size_t i = 0; i < N; i += 97) h_in[i] = static_cast<uint16_t>(1);
 
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
-    p.addStage<BitplaneRLEStage>();
+    p.addStage<BitplaneRZEStage>();
     p.finalize();
 
     CudaStream cs;
@@ -100,31 +100,31 @@ TEST(BitplaneRLEStage, CompressedSmaller) {
 // ── BP5 ──────────────────────────────────────────────────────────────────────
 // Single element — smallest real input; the kernel still processes one full
 // 4096-byte chunk, so this stresses the internal zero-pad path to the limit.
-TEST(BitplaneRLEStage, RoundTrip_Tiny) {
+TEST(BitplaneRZEStage, RoundTrip_Tiny) {
     std::vector<uint16_t> h_in{0xBEEF};
     expect_exact_round_trip(h_in);
 }
 
 // ── BP6 ──────────────────────────────────────────────────────────────────────
-TEST(BitplaneRLEStage, GraphCompatible) {
-    BitplaneRLEStage stage;
+TEST(BitplaneRZEStage, GraphCompatible) {
+    BitplaneRZEStage stage;
     EXPECT_FALSE(stage.isGraphCompatible());
 }
 
 // ── BP7 ──────────────────────────────────────────────────────────────────────
-TEST(BitplaneRLEStage, FileRoundTrip) {
+TEST(BitplaneRZEStage, FileRoundTrip) {
     const size_t N        = 8192;
     const size_t in_bytes = N * sizeof(uint16_t);
     std::vector<uint16_t> h_in(N);
     for (size_t i = 0; i < N; ++i) h_in[i] = static_cast<uint16_t>(i % 100);
 
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
-    p.addStage<BitplaneRLEStage>();
+    p.addStage<BitplaneRZEStage>();
     p.finalize();
 
     CudaStream cs;
     auto res = pipeline_file_round_trip<uint16_t>(
-        p, h_in, cs.stream, "test_bitplane_rle.fzm");
+        p, h_in, cs.stream, "test_bitplane_rze.fzm");
 
     ASSERT_EQ(res.data.size(), N);
     for (size_t i = 0; i < N; ++i)
@@ -132,10 +132,10 @@ TEST(BitplaneRLEStage, FileRoundTrip) {
 }
 
 // ── BP8 ──────────────────────────────────────────────────────────────────────
-// Faithful FZ-GPU pipeline: float → Quantizer (uint16 codes) → BitplaneRLE.
-// The bitplane transpose is built into BitplaneRLE, so no BitshuffleStage is
+// Faithful FZ-GPU pipeline: float → Quantizer (uint16 codes) → BitplaneRZE.
+// The bitplane transpose is built into BitplaneRZE, so no BitshuffleStage is
 // placed in front of it.
-TEST(BitplaneRLEStage, QuantizerPipeline) {
+TEST(BitplaneRZEStage, QuantizerPipeline) {
     const size_t N        = 16384;
     const size_t in_bytes = N * sizeof(float);
     const float  eb       = 1e-2f;
@@ -149,11 +149,11 @@ TEST(BitplaneRLEStage, QuantizerPipeline) {
     // outliers (representable range = radius*eb = 327), so the round-trip
     // tests the codes path cleanly.
     quant->setQuantRadius(32768);
-    // Normal mode: codes + outlier ports. BitplaneRLE consumes "codes"; the
+    // Normal mode: codes + outlier ports. BitplaneRZE consumes "codes"; the
     // outlier ports stay terminal and are archived/rewired by the pipeline on
     // decompress (same pattern as the Lorenzo → Bitshuffle dual-branch).
-    auto* bprle = p.addStage<BitplaneRLEStage>();
-    p.connect(bprle, quant, "codes");
+    auto* bprze = p.addStage<BitplaneRZEStage>();
+    p.connect(bprze, quant, "codes");
     p.finalize();
 
     CudaStream cs;

@@ -221,10 +221,10 @@ TEST(LargeData, AdaptiveBitpack_Int32) {
     }, Verify::Lossless);
 }
 
-TEST(LargeData, BitplaneRLE_Uint16) {
+TEST(LargeData, BitplaneRZE_Uint16) {
     size_t bytes = (target_bytes() / 2) * 2;
     run_large(bytes, MemoryStrategy::MINIMAL, [&](Pipeline& p) {
-        p.addStage<BitplaneRLEStage>();
+        p.addStage<BitplaneRZEStage>();
         p.finalize();
     }, Verify::Lossless);
 }

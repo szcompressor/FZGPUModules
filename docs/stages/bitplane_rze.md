@@ -1,12 +1,12 @@
-# BitplaneRLEStage {#stage_bitplane_rle}
+# BitplaneRZEStage {#stage_bitplane_rze}
 
-`BitplaneRLEStage` is the **FZ-GPU lossless encoder**, ported as a single fused
+`BitplaneRZEStage` is the **FZ-GPU lossless encoder**, ported as a single fused
 pipeline stage. It is the lossless back-end of the FZ-GPU compressor (Zhang et
-al., HPDC '23): a fused **bitplane transpose + zero-byte run-length elimination**
+al., HPDC '23): a fused **bitplane transpose + zero-group elimination**
 over `uint16_t` quantizer codes.
 
-Header: [bitplane_rle_stage.h](../../modules/fused/bitplane_rle/bitplane_rle_stage.h) ·
-Type id: `StageType::BITPLANE_RLE = 23`
+Header: [bitplane_rze_stage.h](../../modules/fused/bitplane_rze/bitplane_rze_stage.h) ·
+Type id: `StageType::BITPLANE_RZE = 23`
 
 ## What it does
 
@@ -16,7 +16,7 @@ words), the forward kernel:
 1. **Bitplane transpose** — `__ballot_sync` transposes the 32×32 bit matrix of
    each chunk. This is a bitshuffle at 4-byte element width: bit *i* of all 32
    words in a row is gathered into one output word.
-2. **Zero-byte elimination** — a per-byte *byteflag* and per-32-byte *bitflag*
+2. **Zero-group elimination** — a per-byte *byteflag* and per-32-byte *bitflag*
    bitmap mark which bytes survive; a block-local prefix sum compacts
    the non-zero 4-byte groups, and a single global `atomicAdd` reserves each
    block's slice of the output bitstream.
@@ -35,7 +35,7 @@ equivalent, and it adds no new functionality the existing stages lack. It earns
 its place on two grounds — **fidelity** (it reproduces FZ-GPU's exact codec and
 archive) and **throughput**:
 
-| | `BitplaneRLEStage` (fused) | `Bitshuffle(ew=4) → RZE(levels=1)` |
+| | `BitplaneRZEStage` (fused) | `Bitshuffle(ew=4) → RZE(levels=1)` |
 |---|---|---|
 | **Memory traffic** | Transpose result stays in shared memory; only the compacted bitstream reaches DRAM. One pass. | Full transposed buffer is materialized in global memory, read back, then zero-eliminated. ~2× the global-memory traffic for this segment. |
 | **Zero-elim granularity** | Compacts **4-byte groups** | RZE compacts **single bytes**, and can recurse (levels 2–4). Different CR on identical input. |
@@ -66,7 +66,7 @@ the archive header before launching the decode kernel.
 - **Inverse:** 1 input (archive) → 1 output (`uint16_t` codes).
 
 Wire it downstream of a quantizer's `codes` port:
-`p.connect(bprle, quant, "codes")`.
+`p.connect(bprze, quant, "codes")`.
 
 ## Typical pipeline
 
@@ -77,8 +77,8 @@ auto* quant = p.addStage<QuantizerStage<float, uint16_t>>();
 quant->setErrorBound(1e-2f);
 quant->setErrorBoundMode(ErrorBoundMode::ABS);
 quant->setQuantRadius(32768);
-auto* bprle = p.addStage<BitplaneRLEStage>();
-p.connect(bprle, quant, "codes");
+auto* bprze = p.addStage<BitplaneRZEStage>();
+p.connect(bprze, quant, "codes");
 p.finalize();
 ```
 
@@ -86,7 +86,7 @@ p.finalize();
 
 ```toml
 [[stage]]
-type = "BitplaneRLE"
+type = "BitplaneRZE"
 inputs = [{ from = "quant", port = "codes" }]
 ```
 

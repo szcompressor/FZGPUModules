@@ -1,14 +1,14 @@
 /**
- * examples/cusz_huffman_vs_bitplane_rle.cpp
+ * examples/cusz_huffman_vs_bitplane_rze.cpp
  *
- * Lossless back-end comparison — cuSZ's Huffman vs FZ-GPU's bitplane-RLE:
+ * Lossless back-end comparison — cuSZ's Huffman vs FZ-GPU's bitplane-RZE:
  *   Pipeline A (cuSZ):    LorenzoQuantStage<float,uint16_t> → HuffmanStage<uint16_t>
- *   Pipeline B (FZ-GPU):  LorenzoQuantStage<float,uint16_t> → BitplaneRLEStage
+ *   Pipeline B (FZ-GPU):  LorenzoQuantStage<float,uint16_t> → BitplaneRZEStage
  *
  * Both pipelines share an identical LorenzoQuant front-end, so the comparison
  * isolates the lossless coder: cuSZ's parallel Huffman entropy coder versus
  * FZ-GPU's fused bitplane-transpose + zero-byte run-length encoder. The
- * bitplane transpose is built into BitplaneRLEStage, so there is no separate
+ * bitplane transpose is built into BitplaneRZEStage, so there is no separate
  * BitshuffleStage in pipeline B (that is FZ-GPU's actual back-end).
  *
  * Metrics reported (same as cusz_huffman_vs_ans):
@@ -23,25 +23,25 @@
  *   - Zigzag maps [-511, 511] → [0, 1022], so Huffman bklen=1024 suffices and
  *     no out-of-range symbols are produced. Zigzag also keeps the codes
  *     small/positive (high bytes mostly zero), which is exactly what the
- *     bitplane-RLE zero-byte elimination exploits — so it is a fair, identical
+ *     bitplane-RZE zero-byte elimination exploits — so it is a fair, identical
  *     front-end for both back-ends.
  *   - outlier_capacity=10% of N
  *
- * Expect: bitplane-RLE typically wins compress/decompress throughput (single
+ * Expect: bitplane-RZE typically wins compress/decompress throughput (single
  * fused shared-memory pass, no CPU codebook build, no host sync for a tree),
  * while Huffman typically wins compression ratio on data whose code
  * distribution is skewed enough for entropy coding to pay off. The crossover
  * depends on the dataset and error bound.
  *
  * Usage:
- *   ./build/bin/examples/cusz_huffman_vs_bitplane_rle <input.f32> [dim_x] [dim_y] [error_bound] [runs]
+ *   ./build/bin/examples/cusz_huffman_vs_bitplane_rze <input.f32> [dim_x] [dim_y] [error_bound] [runs]
  *
  * Examples:
- *   ./build/bin/examples/cusz_huffman_vs_bitplane_rle data/CLDHGH.f32 3600 1800
- *   ./build/bin/examples/cusz_huffman_vs_bitplane_rle data/CLDHGH.f32 3600 1800 1e-3 20
+ *   ./build/bin/examples/cusz_huffman_vs_bitplane_rze data/CLDHGH.f32 3600 1800
+ *   ./build/bin/examples/cusz_huffman_vs_bitplane_rze data/CLDHGH.f32 3600 1800 1e-3 20
  *
  * Delta column in the summary:
- *   BitplaneRLE/Huf — FZ-GPU back-end relative to cuSZ's Huffman.
+ *   BitplaneRZE/Huf — FZ-GPU back-end relative to cuSZ's Huffman.
  */
 
 #include "fzgpumodules.h"
@@ -125,14 +125,14 @@ static void build_huffman_pipeline(Pipeline& p, float eb, size_t dim_x, size_t d
     p.finalize();
 }
 
-static void build_bitplane_rle_pipeline(Pipeline& p, float eb, size_t dim_x, size_t dim_y)
+static void build_bitplane_rze_pipeline(Pipeline& p, float eb, size_t dim_x, size_t dim_y)
 {
     auto* lq = add_lorenzo_quant(p, eb, dim_x, dim_y);
 
     // FZ-GPU's lossless back-end. The 32x32 bitplane transpose is fused into
     // the kernel, so no BitshuffleStage precedes it. Consumes the uint16 codes.
-    auto* bprle = p.addStage<BitplaneRLEStage>();
-    p.connect(bprle, lq, "codes");
+    auto* bprze = p.addStage<BitplaneRZEStage>();
+    p.connect(bprze, lq, "codes");
 
     p.finalize();
 }
@@ -328,7 +328,7 @@ int main(int argc, char* argv[])
     float* d_input = nullptr;
     if (!load_data(input_file, dim_x, dim_y, h_input, &d_input)) return 1;
 
-    std::cout << "=== cuSZ Huffman vs FZ-GPU bitplane-RLE Comparison ===\n"
+    std::cout << "=== cuSZ Huffman vs FZ-GPU bitplane-RZE Comparison ===\n"
               << "  Dataset:        " << input_file << " (" << dim_x << " x " << dim_y << ")\n"
               << "  Elements:       " << N << "\n"
               << "  Raw size:       " << std::fixed << std::setprecision(2)
@@ -339,11 +339,11 @@ int main(int argc, char* argv[])
               << "  Outlier cap:    " << std::fixed << std::setprecision(0)
               << OUTLIER_CAP * 100.0f << "% of N\n"
               << "  Huffman bklen:  1024\n"
-              << "  BitplaneRLE:    fixed uint16, no tunable params (transpose fused in)\n"
+              << "  BitplaneRZE:    fixed uint16, no tunable params (transpose fused in)\n"
               << "  Runs:           " << runs << " (+ 1 warmup each)\n"
               << "  Pool mult:      " << POOL_MULT << "x\n";
 
-    VariantResult huf_res, bprle_res;
+    VariantResult huf_res, bprze_res;
 
     // ── Huffman (cuSZ) variant ──────────────────────────────────────────────────
     {
@@ -353,12 +353,12 @@ int main(int argc, char* argv[])
         huf_res = run_variant(p, "Huffman (cuSZ back-end)", d_input, input_bytes, h_input, runs);
     }
 
-    // ── BitplaneRLE (FZ-GPU) variant ────────────────────────────────────────────
+    // ── BitplaneRZE (FZ-GPU) variant ────────────────────────────────────────────
     {
         Pipeline p(input_bytes, MemoryStrategy::PREALLOCATE, POOL_MULT);
         p.enableProfiling(true);
-        build_bitplane_rle_pipeline(p, eb, dim_x, dim_y);
-        bprle_res = run_variant(p, "BitplaneRLE (FZ-GPU back-end)", d_input, input_bytes, h_input, runs);
+        build_bitplane_rze_pipeline(p, eb, dim_x, dim_y);
+        bprze_res = run_variant(p, "BitplaneRZE (FZ-GPU back-end)", d_input, input_bytes, h_input, runs);
     }
 
     // ── Side-by-side comparison ───────────────────────────────────────────────
@@ -367,7 +367,7 @@ int main(int argc, char* argv[])
     };
 
     const double cr_huf   = static_cast<double>(input_bytes) / huf_res.compressed_size;
-    const double cr_bprle = static_cast<double>(input_bytes) / bprle_res.compressed_size;
+    const double cr_bprze = static_cast<double>(input_bytes) / bprze_res.compressed_size;
 
     // Returns "+X.X%" / "-X.X%" / "~same" for a relative delta; "better"
     // direction follows higher_is_better.
@@ -382,47 +382,47 @@ int main(int argc, char* argv[])
     std::cout << "\n\n══ Summary ══════════════════════════════════════════════════════════════\n";
     std::cout << std::left  << std::setw(28) << "Metric"
               << std::right << std::setw(16) << "Huffman"
-              << std::setw(16) << "BitplaneRLE"
-              << std::setw(16) << "BitplaneRLE/Huf"
+              << std::setw(16) << "BitplaneRZE"
+              << std::setw(16) << "BitplaneRZE/Huf"
               << "\n" << std::string(76, '-') << "\n";
 
     const auto row = [&](const std::string& label,
-                         double v_huf, double v_bprle,
+                         double v_huf, double v_bprze,
                          const std::string& unit,
                          bool higher_is_better = true)
     {
         std::cout << std::left  << std::setw(28) << label
                   << std::right << std::setw(13) << std::fixed << std::setprecision(2) << v_huf << unit
-                  << std::setw(13) << v_bprle << unit
-                  << "  " << std::setw(12) << fmt_delta(v_bprle, v_huf, higher_is_better)
+                  << std::setw(13) << v_bprze << unit
+                  << "  " << std::setw(12) << fmt_delta(v_bprze, v_huf, higher_is_better)
                   << "\n";
     };
 
     row("Compressed size",
         huf_res.compressed_size / (1024.0 * 1024.0),
-        bprle_res.compressed_size / (1024.0 * 1024.0), " MB", false);
-    row("Compression ratio",   cr_huf,  cr_bprle,  "x  ", true);
-    row("Comp tput dag mean",  tput(huf_res.comp_mean_dag_ms),  tput(bprle_res.comp_mean_dag_ms),  " GB/s", true);
-    row("Comp tput dag best",  tput(huf_res.comp_min_dag_ms),   tput(bprle_res.comp_min_dag_ms),   " GB/s", true);
-    row("Comp tput host mean", tput(huf_res.comp_mean_host_ms), tput(bprle_res.comp_mean_host_ms), " GB/s", true);
-    row("Decomp tput dag mean",  tput(huf_res.decomp_mean_dag_ms),  tput(bprle_res.decomp_mean_dag_ms),  " GB/s", true);
-    row("Decomp tput dag best",  tput(huf_res.decomp_min_dag_ms),   tput(bprle_res.decomp_min_dag_ms),   " GB/s", true);
-    row("Decomp tput host mean", tput(huf_res.decomp_mean_host_ms), tput(bprle_res.decomp_mean_host_ms), " GB/s", true);
+        bprze_res.compressed_size / (1024.0 * 1024.0), " MB", false);
+    row("Compression ratio",   cr_huf,  cr_bprze,  "x  ", true);
+    row("Comp tput dag mean",  tput(huf_res.comp_mean_dag_ms),  tput(bprze_res.comp_mean_dag_ms),  " GB/s", true);
+    row("Comp tput dag best",  tput(huf_res.comp_min_dag_ms),   tput(bprze_res.comp_min_dag_ms),   " GB/s", true);
+    row("Comp tput host mean", tput(huf_res.comp_mean_host_ms), tput(bprze_res.comp_mean_host_ms), " GB/s", true);
+    row("Decomp tput dag mean",  tput(huf_res.decomp_mean_dag_ms),  tput(bprze_res.decomp_mean_dag_ms),  " GB/s", true);
+    row("Decomp tput dag best",  tput(huf_res.decomp_min_dag_ms),   tput(bprze_res.decomp_min_dag_ms),   " GB/s", true);
+    row("Decomp tput host mean", tput(huf_res.decomp_mean_host_ms), tput(bprze_res.decomp_mean_host_ms), " GB/s", true);
     row("Peak device memory",
         huf_res.peak_memory / (1024.0 * 1024.0),
-        bprle_res.peak_memory / (1024.0 * 1024.0), " MB", false);
+        bprze_res.peak_memory / (1024.0 * 1024.0), " MB", false);
     row("Max abs error",
         static_cast<double>(huf_res.max_abs_error),
-        static_cast<double>(bprle_res.max_abs_error), "   ", false);
-    row("MAE",  huf_res.mae,  bprle_res.mae,  "   ", false);
-    row("RMSE", huf_res.rmse, bprle_res.rmse, "   ", false);
+        static_cast<double>(bprze_res.max_abs_error), "   ", false);
+    row("MAE",  huf_res.mae,  bprze_res.mae,  "   ", false);
+    row("RMSE", huf_res.rmse, bprze_res.rmse, "   ", false);
 
     std::cout << std::string(76, '-') << "\n"
               << "  Input bytes: " << input_bytes << "  ("
               << std::setprecision(2) << input_bytes / (1024.0 * 1024.0) << " MB)\n"
               << "  Error bound: " << std::scientific << std::setprecision(1) << eb << " ABS\n"
               << "  Note: both pipelines share the LorenzoQuant front-end; the delta\n"
-              << "        isolates the lossless back-end (Huffman vs FZ-GPU bitplane-RLE).\n";
+              << "        isolates the lossless back-end (Huffman vs FZ-GPU bitplane-RZE).\n";
 
     cudaFree(d_input);
     std::cout << "\nDone.\n";

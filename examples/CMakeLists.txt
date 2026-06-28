@@ -90,10 +90,10 @@ target_link_libraries(compare_predictors PRIVATE fzgmod)
 set_target_properties(compare_predictors PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
-# ── Lossless back-end comparison: cuSZ Huffman vs FZ-GPU bitplane-RLE ─────────
-add_executable(cusz_huffman_vs_bitplane_rle cusz_huffman_vs_bitplane_rle.cpp)
-target_link_libraries(cusz_huffman_vs_bitplane_rle PRIVATE fzgmod)
-set_target_properties(cusz_huffman_vs_bitplane_rle PROPERTIES
+# ── Lossless back-end comparison: cuSZ Huffman vs FZ-GPU bitplane-RZE ─────────
+add_executable(cusz_huffman_vs_bitplane_rze cusz_huffman_vs_bitplane_rze.cpp)
+target_link_libraries(cusz_huffman_vs_bitplane_rze PRIVATE fzgmod)
+set_target_properties(cusz_huffman_vs_bitplane_rze PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
 # ── cuSZp 1/2/3 variants: performance + CUDA graph-mode check ─────────────────

@@ -138,16 +138,16 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 ## FZ-GPU
 
-**Used by:** `BitplaneRLEStage` (`modules/fused/bitplane_rle/`)
+**Used by:** `BitplaneRZEStage` (`modules/fused/bitplane_rze/`)
 
 **Relationship:**
-- `BitplaneRLEStage` (`modules/fused/bitplane_rle/`) — the fused
-  bitplane-transpose + zero-byte run-length encode/decode kernels
-  (`bitplane_rle_encode.inl`, `bitplane_rle_decode.inl`) are adapted from
+- `BitplaneRZEStage` (`modules/fused/bitplane_rze/`) — the fused
+  bitplane-transpose + zero-group encode/decode kernels
+  (`bitplane_rze_encode.inl`, `bitplane_rze_decode.inl`) are adapted from
   `KERNEL_CUHIP_fz_fused_encode` / `KERNEL_CUHIP_fz_fused_decode` of the
   FZ-GPU lossless codec, as vendored in `origin/v1.1.0_dev` of the cuSZ
   repository (`modules/codec/fzg/`). Changes from the original:
-  `namespace fzgpu` → `namespace fz::bitplane_rle`; `err.hh` / `CHECK_GPU`
+  `namespace fzgpu` → `namespace fz::bitplane_rze`; `err.hh` / `CHECK_GPU`
   stripped; the `fzgpu::Buf` allocation/`alloc_test_buf` path is dropped and
   all device memory is routed through the FZGPUModules `MemoryPool`; the
   128-byte self-describing archive header (`fzg_header`) is reproduced as

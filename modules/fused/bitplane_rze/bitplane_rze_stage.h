@@ -1,8 +1,8 @@
 #pragma once
 
 /**
- * @file bitplane_rle_stage.h
- * @brief Fused bitplane-transpose + zero-byte RLE stage — the FZ-GPU lossless
+ * @file bitplane_rze_stage.h
+ * @brief Fused bitplane-transpose + zero-group RZE stage — the FZ-GPU lossless
  *        encoder, ported as a single-kernel pipeline stage.
  */
 
@@ -19,7 +19,7 @@
 namespace fz {
 
 /**
- * Fused bitplane-transpose + zero-byte run-length encoder (FZ-GPU's lossless
+ * Fused bitplane-transpose + zero-group run-zero encoder (FZ-GPU's lossless
  * back-end), as a pipeline stage.
  *
  * In one shared-memory pass per 4096-byte chunk the forward kernel:
@@ -29,7 +29,7 @@ namespace fz {
  *      a per-block `atomicAdd`.
  * Input is interpreted as `uint16_t` symbols (two per word), matching FZ-GPU's
  * quantizer codes; the typical pipeline is `QuantizerStage<float,uint16_t> →
- * BitplaneRLEStage`. The transpose is built in, so a separate `BitshuffleStage`
+ * BitplaneRZEStage`. The transpose is built in, so a separate `BitshuffleStage`
  * is **not** needed in front of it.
  *
  * ## Relationship to BitshuffleStage + RZEStage
@@ -40,7 +40,7 @@ namespace fz {
  * (faster); (2) zero elimination is at 4-byte-group granularity rather than
  * per-byte; (3) it emits FZ-GPU's exact self-describing archive (per-block
  * atomic start positions + 128-byte header). It exists for FZ-GPU fidelity and
- * throughput, not to add new functionality. See `docs/stages/bitplane_rle.md`.
+ * throughput, not to add new functionality. See `docs/stages/bitplane_rze.md`.
  *
  * Output is a self-describing byte archive (`uint8_t`): a 128-byte header
  * followed by the bitflag bitmap, per-block start positions, and the compacted
@@ -57,10 +57,10 @@ namespace fz {
  *       (Boyuan Zhang et al., HPDC '23), BSD-3-Clause. The stage wrapper and
  *       memory-pool integration are FZGPUModules code. See `THIRD_PARTY.md`.
  */
-class BitplaneRLEStage : public Stage {
+class BitplaneRZEStage : public Stage {
 public:
-    BitplaneRLEStage() = default;
-    ~BitplaneRLEStage() override;
+    BitplaneRZEStage() = default;
+    ~BitplaneRZEStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
@@ -79,7 +79,7 @@ public:
     ) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
-    std::string getName() const override { return "BitplaneRLE"; }
+    std::string getName() const override { return "BitplaneRZE"; }
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
@@ -96,7 +96,7 @@ public:
     }
 
     uint16_t getStageTypeId() const override {
-        return static_cast<uint16_t>(StageType::BITPLANE_RLE);
+        return static_cast<uint16_t>(StageType::BITPLANE_RZE);
     }
 
     // Forward output is a raw byte archive; inverse output is the uint16 codes.

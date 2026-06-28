@@ -1,22 +1,22 @@
 [pipeline]
-# Lorenzo-Quant → BitplaneRLE  (FZ-GPU-style)
+# Lorenzo-Quant → BitplaneRZE  (FZ-GPU-style)
 #
 # Fused Lorenzo predictor + quantizer followed by FZ-GPU's lossless back-end:
-# a fused bitplane transpose + zero-byte run-length encoder. Faithfully
+# a fused bitplane transpose + zero-group elimination encoder. Faithfully
 # reproduces the FZ-GPU compression pipeline.
 #
 # Notes
 # ─────────────────────────────────────────────────────────────────────────────
-# - BitplaneRLEStage has the 32x32 bitplane transpose built in, so there is NO
+# - BitplaneRZEStage has the 32x32 bitplane transpose built in, so there is NO
 #   separate Bitshuffle stage in front of it (that is FZ-GPU's actual design).
 # - It takes the uint16 quantizer codes directly. There are no tunable
 #   parameters — the chunk layout is derived from the input length.
 # - zigzag_codes = true keeps the codes small and positive (high bytes mostly
-#   zero), which is exactly what the zero-byte elimination exploits. Leave it on.
-# - Compared to the cuSZ preset (cusz.toml, Huffman back-end): BitplaneRLE
+#   zero), which is exactly what the zero-group elimination exploits. Leave it on.
+# - Compared to the cuSZ preset (cusz.toml, Huffman back-end): BitplaneRZE
 #   typically wins compress/decompress throughput (single fused shared-memory
 #   pass, no CPU codebook build), while Huffman typically wins compression ratio
-#   on skewed code distributions. See examples/cusz_huffman_vs_bitplane_rle.cpp.
+#   on skewed code distributions. See examples/cusz_huffman_vs_bitplane_rze.cpp.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/fzgpu.toml \
@@ -35,6 +35,6 @@ outlier_capacity = 0.2
 zigzag_codes = true
 
 [[stage]]
-name = "bprle"
-type = "BitplaneRLE"
+name = "bprze"
+type = "BitplaneRZE"
 inputs = [{from = "lrz", port = "codes"}]

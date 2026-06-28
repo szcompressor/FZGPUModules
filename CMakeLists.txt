@@ -268,9 +268,9 @@ add_library(fzgmod_modules
   # GInterp (cuSZ-Hi spline interpolation predictor + quantizer — fused)
   modules/fused/ginterp/ginterp_kernels.cu
   modules/fused/ginterp/ginterp_stage.cu
-  # BitplaneRLE (FZ-GPU fused bitplane transpose + zero-byte RLE)
-  modules/fused/bitplane_rle/bitplane_rle_kernels.cu
-  modules/fused/bitplane_rle/bitplane_rle_stage.cu
+  # BitplaneRZE (FZ-GPU fused bitplane transpose + zero-group RZE)
+  modules/fused/bitplane_rze/bitplane_rze_kernels.cu
+  modules/fused/bitplane_rze/bitplane_rze_stage.cu
 )
 
 target_link_libraries(fzgmod_modules

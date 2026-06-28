@@ -1,11 +1,11 @@
-#include "fused/bitplane_rle/bitplane_rle_kernels.h"
+#include "fused/bitplane_rze/bitplane_rze_kernels.h"
 #include "cuda_check.h"
 
-#include "bitplane_rle_encode.inl"
-#include "bitplane_rle_decode.inl"
+#include "bitplane_rze_encode.inl"
+#include "bitplane_rze_decode.inl"
 
 namespace fz {
-namespace bitplane_rle {
+namespace bitplane_rze {
 
 Config configure(size_t data_len) {
   // Pad byte count up to a 4096-byte chunk multiple, matching FZ-GPU.
@@ -24,7 +24,7 @@ Config configure(size_t data_len) {
 size_t maxArchiveBytes(size_t data_len) {
   Config c = configure(data_len);
   // header + bitflag + start-pos + worst-case bitstream (every group retained).
-  return kBitplaneRleHeaderBytes
+  return kBitplaneRzeHeaderBytes
        + sizeof(uint32_t) * c.chunk_size
        + sizeof(uint32_t) * c.grid_x
        + c.data_bytes;
@@ -56,5 +56,5 @@ void launchDecode(
   FZ_CUDA_CHECK(cudaGetLastError());
 }
 
-}  // namespace bitplane_rle
+}  // namespace bitplane_rze
 }  // namespace fz

@@ -24,7 +24,7 @@
 #include "coders/ans/ans_stage.h"
 #include "transforms/adm/adm_stage.h"
 #include "fused/ginterp/ginterp_stage.h"
-#include "fused/bitplane_rle/bitplane_rle_stage.h"
+#include "fused/bitplane_rze/bitplane_rze_stage.h"
 
 #include <memory>
 #include <stdexcept>
@@ -315,8 +315,8 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             break;
         }
 
-        case StageType::BITPLANE_RLE: {
-            auto* s = new BitplaneRLEStage();
+        case StageType::BITPLANE_RZE: {
+            auto* s = new BitplaneRZEStage();
             s->deserializeHeader(config, config_size);
             stage = s;
             break;

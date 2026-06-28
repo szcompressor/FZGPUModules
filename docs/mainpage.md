@@ -104,7 +104,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_adaptive_bitpack "AdaptiveBitpackStage<T>" | `modules/coders/adaptive_bitpack/adaptive_bitpack_stage.h` | Per-block adaptive fixed-rate bit-plane coding (cuSZp/cuSZp2 port) |
 | \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF, cuSZ port)    |
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
-| \ref stage_bitplane_rle "BitplaneRLEStage"        | `modules/fused/bitplane_rle/bitplane_rle_stage.h`  | Fused bitplane transpose + zero-byte RLE lossless encoder (FZ-GPU port) |
+| \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
 
 ### Memory Strategies
