@@ -1,7 +1,8 @@
 [pipeline]
 # cuSZ-Hi LC back-end — throughput (tp) mode (Huffman-free).
-#   codes:    LorenzoQuant -> TCMS1 -> BIT1 -> RRE1
-#   outliers: Merge -> BIT4 -> RRE2 -> RZE1   (the "BITR" chain)
+#   predictor: GInterp (spline interpolation, cuSZ-Hi Spline path)
+#   codes:    GInterp -> TCMS1 -> BIT1 -> RRE1
+#   outliers: Merge([anchor | outlier_vals | outlier_idxs]) -> BIT4 -> RRE2 -> RZE1
 # TCMS = Zigzag (byte-transparent), BIT = Bitshuffle, RRE = RRE, RZE = RZE.
 # dims are a placeholder; override at load time for your data.
 memory_strategy = "PREALLOCATE"
@@ -9,13 +10,12 @@ dims = [512, 512, 1]
 input_size = 1048576               # 512*512*4 bytes (override with your data)
 
 [[stage]]
-name = "lq"
-type = "LorenzoQuant"
+name = "gi"
+type = "GInterp"
 input_type = "float32"
 code_type = "uint16"
 error_bound = 1e-2
 error_bound_mode = "ABS"
-quant_radius = 32768
 outlier_capacity = 0.1
 
 # ── codes chain: TCMS1 -> BIT1 -> RRE1 ──
@@ -25,7 +25,7 @@ type = "Zigzag"
 input_type = "int8"
 output_type = "uint8"
 byte_transparent = true            # LC TCMS: zigzag the raw byte stream
-inputs = [{from = "lq", port = "codes"}]
+inputs = [{from = "gi", port = "codes"}]
 
 [[stage]]
 name = "bit1"
@@ -40,14 +40,15 @@ type = "RRE"
 word_size = 1
 inputs = [{from = "bit1", port = "output"}]
 
-# ── outlier chain (BITR): Merge -> BIT4 -> RRE2 -> RZE1 ──
+# ── outlier chain (BITR): Merge([anchor|outlier_vals|outlier_idxs]) -> BIT4 -> RRE2 -> RZE1 ──
 [[stage]]
 name = "merge"
 type = "Merge"
-segments = ["outlier_errors", "outlier_indices"]
+segments = ["anchor", "outlier_vals", "outlier_idxs"]
 inputs = [
-  {from = "lq", port = "outlier_errors"},
-  {from = "lq", port = "outlier_indices"},
+  {from = "gi", port = "anchor"},
+  {from = "gi", port = "outlier_vals"},
+  {from = "gi", port = "outlier_idxs"},
 ]
 
 [[stage]]

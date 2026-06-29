@@ -634,10 +634,10 @@ static void saveADMStage(Stage* s, std::ostringstream& out) {
     out << "dtype = \"" << (adm->getDtype() == ADMDtype::U16 ? "uint16" : "uint32") << "\"\n";
 }
 
-// Add a GInterp stage (3-D MVP — dispatches on code_type).
+// Add a GInterp stage (2-D or 3-D — dispatches on code_type).
 // dims are NOT read from TOML — they come from `Pipeline::setDims()` which is
-// already required for any 3-D pipeline; setDims() is invoked on every stage
-// at addStage time, and GInterpStage::setDims throws unless dims[2] > 1.
+// already required for any multi-dim pipeline; setDims() is invoked on every
+// stage at addStage time. GInterpStage::setDims throws for 1-D (dims[1] == 1).
 static Stage* addGInterpStage(Pipeline& p, const toml::table& t) {
     std::string in_type   = optStr(t, "input_type", "float32");
     std::string code_type = optStr(t, "code_type", "uint16");
