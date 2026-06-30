@@ -142,11 +142,12 @@ void HuffmanStage<T>::execute(
             hist_grid_dim_, hist_block_dim_, hist_shmem_use_, hist_r_per_block_,
             stream);
 
-        // Sync stream, then D2H copy of frequency table to host
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-        FZ_CUDA_CHECK(cudaMemcpy(
+        // D2H: frequency table (async on caller's stream — stream-scoped sync,
+        // not a device-wide default-stream barrier).
+        FZ_CUDA_CHECK(cudaMemcpyAsync(
             buf_->h_freq, buf_->d_freq,
-            bklen_ * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+            bklen_ * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         // Symbol range validation: out-of-range symbols are skipped by the histogram
         // kernel (not counted), so freq_sum < inlen means bklen is too small.
@@ -192,10 +193,15 @@ void HuffmanStage<T>::execute(
 
         if (!buf_ || inlen > cap_inlen_ || bklen_ != last_bklen_) initBuf(inlen, pool);
 
-        // Read the phf_header embedded at the start of the encoded buffer (D2H)
+        // Read the phf_header embedded at the start of the encoded buffer (D2H).
+        // Issue on the caller's stream (NOT a plain cudaMemcpy, which would run on
+        // the legacy default stream and impose a device-wide barrier); the
+        // following stream sync then stalls only this thread, so concurrent decodes
+        // on other streams/instances still overlap.
         phf_header hdr {};
-        FZ_CUDA_CHECK(cudaMemcpy(
-            &hdr, d_encoded, sizeof(hdr), cudaMemcpyDeviceToHost));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(
+            &hdr, d_encoded, sizeof(hdr), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         phf::high_level<T>::decode(
             buf_.get(), hdr, d_encoded, static_cast<T*>(outputs[0]), stream);

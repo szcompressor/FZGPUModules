@@ -13,6 +13,11 @@
  *   BP6  GraphCompatible           — isGraphCompatible() == false
  *   BP7  FileRoundTrip             — writeToFile → decompressFromFile (header serialize path)
  *   BP8  QuantizerPipeline         — Quantizer→BitplaneRZE end-to-end float round-trip (FZ-GPU)
+ *
+ * Concurrency: multi-slot concurrent decode tests are in test_concurrency.cpp
+ * (CC4 MultiSlot_BitplaneRZE). The ArchiveHeader D2H read in the inverse path
+ * was converted from a device-wide plain cudaMemcpy to cudaMemcpyAsync + stream-
+ * scoped sync, so BitplaneRZEStage decompresses overlap across independent slots.
  */
 
 #include <gtest/gtest.h>

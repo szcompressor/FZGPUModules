@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace fz {
@@ -205,9 +206,80 @@ void Pipeline::compress(
            profiling_enabled_ ? last_perf_result_.pipeline_throughput_gbs() : 0.0f);
 }
 
-void Pipeline::decompress(
+void Pipeline::buildStaticBufferMetadata() {
+    buffer_metadata_.clear();
+    buffer_metadata_.reserve(output_buffer_ids_.size());
+    for (size_t i = 0; i < output_buffer_ids_.size(); i++) {
+        int         buffer_id   = output_buffer_ids_[i];
+        const auto& buffer_info = dag_->getBufferInfo(buffer_id);
+        DAGNode*    producer    = output_nodes_[i];
+
+        BufferMetadata meta;
+        meta.buffer_id      = buffer_id;
+        meta.allocated_size = buffer_info.size;
+        meta.actual_size    = buffer_info.size;  // placeholder; real size read from blob
+        meta.producer       = producer;
+        meta.output_index   = buffer_info.producer_output_index;
+
+        auto output_names = producer->stage->getOutputNames();
+        int  output_idx   = buffer_info.producer_output_index;
+        meta.name = (output_idx >= 0 && output_idx < static_cast<int>(output_names.size()))
+                    ? output_names[output_idx] : "output";
+
+        buffer_metadata_.push_back(std::move(meta));
+    }
+}
+
+std::vector<size_t> Pipeline::readConcatSegmentSizes(
+    const void* d_blob, size_t n, cudaStream_t stream) const
+{
+    const size_t hdr = sizeof(uint32_t) + n * sizeof(uint64_t);
+    std::vector<uint8_t> host(hdr);
+    FZ_CUDA_CHECK(cudaMemcpyAsync(host.data(), d_blob, hdr,
+                                  cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    uint32_t count = 0;
+    std::memcpy(&count, host.data(), sizeof(uint32_t));
+    if (count != n) {
+        throw std::runtime_error(
+            "decompress: concat header segment count (" + std::to_string(count) +
+            ") does not match this pipeline's output count (" + std::to_string(n) +
+            ") — blob was produced by a different pipeline");
+    }
+
+    std::vector<size_t> sizes(n);
+    const uint8_t* p = host.data() + sizeof(uint32_t);
+    for (size_t i = 0; i < n; i++) {
+        uint64_t v = 0;
+        std::memcpy(&v, p, sizeof(uint64_t));
+        p += sizeof(uint64_t);
+        sizes[i] = static_cast<size_t>(v);
+    }
+    return sizes;
+}
+
+void Pipeline::prepareInverse(size_t uncompressed_size) {
+    if (!is_finalized_) {
+        throw std::runtime_error("prepareInverse() requires a finalized pipeline");
+    }
+    if (uncompressed_size == 0) {
+        throw std::runtime_error("prepareInverse() requires a non-zero uncompressed size");
+    }
+    buildStaticBufferMetadata();
+    source_input_sizes_.assign(1, uncompressed_size);
+    input_size_ = uncompressed_size;
+    FZ_LOG(DEBUG, "prepareInverse: pipeline ready for external-blob decompress "
+                  "(%zu output buffer(s), uncompressed=%zu bytes)",
+           buffer_metadata_.size(), uncompressed_size);
+}
+
+void Pipeline::decompressCore(
     const void* d_input,
     size_t      input_size,
+    void*       caller_output,
+    size_t      caller_capacity,
+    bool        synchronize,
     void**      d_output,
     size_t*     output_size,
     cudaStream_t stream
@@ -216,26 +288,42 @@ void Pipeline::decompress(
         throw std::runtime_error("Pipeline not finalized");
     }
     if (buffer_metadata_.empty()) {
-        throw std::runtime_error("decompress() requires compress() to have been called first");
+        throw std::runtime_error(
+            "decompress() requires compress() or prepareInverse(uncompressed_size) "
+            "to have been called first");
     }
 
     auto t_host_start = std::chrono::steady_clock::now();
     FZ_LOG(INFO, "Decompressing");
 
+    // Per-segment compressed sizes. For an external blob (d_input != nullptr) these
+    // are read from the blob's own self-describing concat header — authoritative and
+    // independent of any prior compress(), so blobs of differing sizes decode
+    // correctly and prepareInverse()'s placeholder sizes are never used. The
+    // single-segment case needs no header: the whole blob is the one segment. Only
+    // the live-DAG path (d_input == nullptr, immediately after compress()) falls
+    // back to the freshly-produced buffer_metadata_ sizes.
+    const size_t n_seg = buffer_metadata_.size();
+    std::vector<size_t> seg_sizes(n_seg);
+    if (d_input != nullptr && needs_concat_) {
+        seg_sizes = readConcatSegmentSizes(d_input, n_seg, stream);
+    } else if (d_input != nullptr) {
+        seg_sizes[0] = input_size;  // single segment == whole blob
+    } else {
+        for (size_t i = 0; i < n_seg; i++) seg_sizes[i] = buffer_metadata_[i].actual_size;
+    }
+
     // Map each compressed buffer ID to a device pointer from d_input or the live DAG.
     std::unordered_map<int, void*> compressed_ptrs;
     if (d_input != nullptr) {
         if (!needs_concat_) {
-            if (!buffer_metadata_.empty())
-                compressed_ptrs[buffer_metadata_[0].buffer_id] =
-                    const_cast<void*>(d_input);
+            compressed_ptrs[buffer_metadata_[0].buffer_id] = const_cast<void*>(d_input);
         } else {
-            const size_t n = buffer_metadata_.size();
-            size_t byte_offset = ConcatLayout::headerSize(n);
-            for (const auto& meta : buffer_metadata_) {
-                compressed_ptrs[meta.buffer_id] =
+            size_t byte_offset = ConcatLayout::headerSize(n_seg);
+            for (size_t i = 0; i < n_seg; i++) {
+                compressed_ptrs[buffer_metadata_[i].buffer_id] =
                     static_cast<uint8_t*>(const_cast<void*>(d_input)) + byte_offset;
-                byte_offset += ConcatLayout::slotSize(meta.actual_size);
+                byte_offset += ConcatLayout::slotSize(seg_sizes[i]);
             }
         }
     } else {
@@ -249,11 +337,12 @@ void Pipeline::decompress(
     }
 
     PipelineOutputMap po_map;
-    for (const auto& meta : buffer_metadata_) {
+    for (size_t i = 0; i < n_seg; i++) {
+        const auto& meta = buffer_metadata_[i];
         auto it = compressed_ptrs.find(meta.buffer_id);
         po_map[meta.buffer_id] = {
             (it != compressed_ptrs.end()) ? it->second : dag_->getBuffer(meta.buffer_id),
-            meta.actual_size
+            seg_sizes[i]
         };
     }
 
@@ -266,7 +355,9 @@ void Pipeline::decompress(
     CompressionDAG& inv_dag        = *inv_cache_->inv_dag;
     const auto&     inv_result_map = inv_cache_->inv_result_map;
 
-    if (pool_managed_decomp_) {
+    // Reclaim prior pool-managed decompress outputs only when WE allocate the
+    // output below (caller-supplied output is caller-owned and not pool-tracked).
+    if (caller_output == nullptr && pool_managed_decomp_) {
         for (void* p : d_decomp_outputs_) {
             if (p && mem_pool_) mem_pool_->free(p, stream);
         }
@@ -283,8 +374,22 @@ void Pipeline::decompress(
     int    res_buf_id  = buf_it->second;
     size_t actual_size = inv_dag.getBufferSize(res_buf_id);
 
+    // Resolve the output pointer.  A caller-supplied buffer is written into
+    // directly — no cudaMalloc / D2D copy / cudaFree (all device-wide barriers
+    // that would prevent cross-stream overlap).  Otherwise allocate as before.
     void* d_final = nullptr;
-    if (pool_managed_decomp_) {
+    if (caller_output != nullptr) {
+        if (actual_size > caller_capacity) {
+            for (auto& s : stages_) { s->setInverse(false); s->restoreState(); }
+            throw std::runtime_error(
+                "decompress() user-owned output: actual decompressed size (" +
+                std::to_string(actual_size) + " bytes) exceeds the provided buffer "
+                "capacity (" + std::to_string(caller_capacity) + " bytes). Allocate a "
+                "larger buffer (the original uncompressed size is available from the "
+                "file header or your compress() call).");
+        }
+        d_final = caller_output;
+    } else if (pool_managed_decomp_) {
         if (actual_size > 0) {
             d_final = mem_pool_->allocate(actual_size, stream, "decomp_output", /*persistent=*/true);
             if (!d_final) {
@@ -307,27 +412,33 @@ void Pipeline::decompress(
     }
     inv_dag.setExternalPointer(res_buf_id, d_final);
 
-    DagEventTimer dag_timer(profiling_enabled_);
+    const bool do_profile = profiling_enabled_ && synchronize;
+    DagEventTimer dag_timer(do_profile);
     auto t_dag_start = std::chrono::steady_clock::now();
     dag_timer.recordStart(stream);
     inv_dag.execute(stream);
     dag_timer.recordStop(stream);
     auto t_dag_end = std::chrono::steady_clock::now();
-    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    for (auto& stage_ptr : stages_) {
-        stage_ptr->postStreamSync(stream);
-    }
+    std::vector<StageTimingResult> stage_timings;
+    if (synchronize) {
+        // Correctness/convenience barrier: result is ready and stage metadata
+        // (sizes, counts) can be read back.  Skipped on the async path, where the
+        // caller owns synchronization and the planned size is authoritative.
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    auto stage_timings = profiling_enabled_
-        ? inv_dag.collectTimings()
-        : std::vector<StageTimingResult>{};
+        for (auto& stage_ptr : stages_) {
+            stage_ptr->postStreamSync(stream);
+        }
 
-    // Refine output size from postStreamSync.
-    auto post_sizes = src_stage->getActualOutputSizesByName();
-    auto post_names = src_stage->getOutputNames();
-    if (!post_names.empty() && post_sizes.count(post_names[0])) {
-        actual_size = post_sizes.at(post_names[0]);
+        if (do_profile) stage_timings = inv_dag.collectTimings();
+
+        // Refine output size from postStreamSync.
+        auto post_sizes = src_stage->getActualOutputSizesByName();
+        auto post_names = src_stage->getOutputNames();
+        if (!post_names.empty() && post_sizes.count(post_names[0])) {
+            actual_size = post_sizes.at(post_names[0]);
+        }
     }
 
     inv_dag.reset(stream);
@@ -348,11 +459,13 @@ void Pipeline::decompress(
     auto t_host_end = std::chrono::steady_clock::now();
     float host_ms = std::chrono::duration<float, std::milli>(t_host_end - t_host_start).count();
     // True device wall time via CUDA events when profiling; host fallback otherwise.
-    float dag_ms  = profiling_enabled_
+    // dag_timer events are only valid after a stream sync, so device time is only
+    // meaningful on the synchronous path.
+    float dag_ms  = do_profile
         ? dag_timer.elapsedMs()
         : std::chrono::duration<float, std::milli>(t_dag_end - t_dag_start).count();
 
-    if (profiling_enabled_) {
+    if (do_profile) {
         PipelinePerfResult r;
         r.is_compress     = false;
         r.host_elapsed_ms = host_ms;
@@ -364,10 +477,61 @@ void Pipeline::decompress(
         last_perf_result_ = std::move(r);
     }
 
-    FZ_LOG(INFO, "Decompress complete: %zu bytes (host=%.2f ms, dag=%.2f ms, DAG=%.2f GB/s, pipeline=%.2f GB/s)",
-           *output_size, host_ms, dag_ms,
-           profiling_enabled_ ? last_perf_result_.throughput_gbs() : 0.0f,
-           profiling_enabled_ ? last_perf_result_.pipeline_throughput_gbs() : 0.0f);
+    FZ_LOG(INFO, "Decompress %s: %zu bytes (host=%.2f ms, dag=%.2f ms)",
+           synchronize ? "complete" : "enqueued", *output_size, host_ms, dag_ms);
+}
+
+// ── Public decompress overloads (thin wrappers over decompressCore) ───────────
+
+void Pipeline::decompress(
+    const void* d_input,
+    size_t      input_size,
+    void**      d_output,
+    size_t*     output_size,
+    cudaStream_t stream
+) {
+    decompressCore(d_input, input_size, /*caller_output=*/nullptr, /*caller_capacity=*/0,
+                   /*synchronize=*/true, d_output, output_size, stream);
+}
+
+void Pipeline::decompress(
+    const void* d_input,
+    size_t      input_size,
+    void*       d_output_buf,
+    size_t      output_buf_capacity,
+    size_t*     actual_output_size,
+    cudaStream_t stream
+) {
+    if (d_output_buf == nullptr) {
+        throw std::runtime_error(
+            "decompress(): d_output_buf must not be null for user-owned output");
+    }
+    // Inject the caller buffer as the inverse result pointer — no temp alloc,
+    // no D2D copy, no free.  Still synchronous (result ready on return).
+    void* result = nullptr;
+    decompressCore(d_input, input_size, d_output_buf, output_buf_capacity,
+                   /*synchronize=*/true, &result, actual_output_size, stream);
+}
+
+void Pipeline::decompressInto(
+    const void* d_input,
+    size_t      input_size,
+    void*       d_output_buf,
+    size_t      output_buf_capacity,
+    size_t*     actual_output_size,
+    cudaStream_t stream
+) {
+    if (d_output_buf == nullptr) {
+        throw std::runtime_error("decompressInto(): d_output_buf must not be null");
+    }
+    if (strategy_ != MemoryStrategy::PREALLOCATE) {
+        throw std::runtime_error(
+            "decompressInto() requires PREALLOCATE memory strategy (internal inverse "
+            "buffers must be allocated once, not per call, for stream-concurrent decode)");
+    }
+    void* result = nullptr;
+    decompressCore(d_input, input_size, d_output_buf, output_buf_capacity,
+                   /*synchronize=*/false, &result, actual_output_size, stream);
 }
 
 void Pipeline::buildOrReuseInvCache(
@@ -511,53 +675,5 @@ void Pipeline::compress(
 }
 
 // ── decompress (user-owned output buffer) ────────────────────────────────────
-
-void Pipeline::decompress(
-    const void* d_input,
-    size_t      input_size,
-    void*       d_output_buf,
-    size_t      output_buf_capacity,
-    size_t*     actual_output_size,
-    cudaStream_t stream
-) {
-    if (d_output_buf == nullptr) {
-        throw std::runtime_error(
-            "decompress(): d_output_buf must not be null for user-owned output");
-    }
-
-    // Run the standard decompress into a temporary pool/malloc'd buffer,
-    // then D2D-copy into the caller's buffer and free the temporary.
-    const bool saved_pool = pool_managed_decomp_;
-    pool_managed_decomp_ = false;    // always get a fresh cudaMalloc'd pointer here
-
-    void*  d_tmp  = nullptr;
-    size_t tmp_sz = 0;
-    try {
-        decompress(d_input, input_size, &d_tmp, &tmp_sz, stream);
-    } catch (...) {
-        pool_managed_decomp_ = saved_pool;
-        throw;
-    }
-    pool_managed_decomp_ = saved_pool;
-
-    if (tmp_sz > output_buf_capacity) {
-        cudaFree(d_tmp);
-        throw std::runtime_error(
-            "decompress() user-owned output: actual decompressed size (" +
-            std::to_string(tmp_sz) +
-            " bytes) exceeds the provided buffer capacity (" +
-            std::to_string(output_buf_capacity) +
-            " bytes). Allocate a larger buffer (the original uncompressed "
-            "size is available from the file header or your compress() call).");
-    }
-
-    FZ_CUDA_CHECK(cudaMemcpyAsync(d_output_buf, d_tmp, tmp_sz,
-                                  cudaMemcpyDeviceToDevice, stream));
-    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-    cudaFree(d_tmp);
-    *actual_output_size = tmp_sz;
-
-    FZ_LOG(INFO, "decompress (user-owned output): copied %zu bytes to caller buffer", tmp_sz);
-}
 
 } // namespace fz

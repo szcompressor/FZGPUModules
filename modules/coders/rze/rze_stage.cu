@@ -199,18 +199,23 @@ RZEStage::~RZEStage() {
     fwd_free(d_dst_off_dev_);
 }
 
-void RZEStage::postStreamSync(cudaStream_t /*stream*/) {
+void RZEStage::postStreamSync(cudaStream_t stream) {
     if (!tail_readback_pending_) return;
 
+    // Batch both tail reads onto the caller's stream; one sync covers both.
     uint32_t tail_off = 0, tail_sz = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&tail_off, d_dst_off_dev_ + tail_last_index_,
-                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    FZ_CUDA_CHECK(cudaMemcpy(&tail_sz, d_clean_dev_ + tail_last_index_,
-                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_off, d_dst_off_dev_ + tail_last_index_,
+                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_sz, d_clean_dev_ + tail_last_index_,
+                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
     const size_t total_out = (size_t)tail_off + (size_t)tail_sz;
     actual_output_size_ = (total_out + 3) & ~size_t(3);
-    if (tail_output_ptr_ && actual_output_size_ > total_out)
-        cudaMemset(tail_output_ptr_ + total_out, 0, actual_output_size_ - total_out);
+    if (tail_output_ptr_ && actual_output_size_ > total_out) {
+        FZ_CUDA_CHECK(cudaMemsetAsync(tail_output_ptr_ + total_out, 0,
+                                      actual_output_size_ - total_out, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
     tail_output_ptr_       = nullptr;
     tail_readback_pending_ = false;
     tail_readback_stream_  = nullptr;
@@ -224,16 +229,19 @@ void RZEStage::postStreamSync(cudaStream_t /*stream*/) {
 std::unordered_map<std::string, size_t>
 RZEStage::getActualOutputSizesByName() const {
     if (tail_readback_pending_) {
-        FZ_CUDA_CHECK(cudaStreamSynchronize(tail_readback_stream_));
         uint32_t tail_off = 0, tail_sz = 0;
-        FZ_CUDA_CHECK(cudaMemcpy(&tail_off, d_dst_off_dev_ + tail_last_index_,
-                                 sizeof(uint32_t), cudaMemcpyDeviceToHost));
-        FZ_CUDA_CHECK(cudaMemcpy(&tail_sz, d_clean_dev_ + tail_last_index_,
-                                 sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_off, d_dst_off_dev_ + tail_last_index_,
+                                      sizeof(uint32_t), cudaMemcpyDeviceToHost, tail_readback_stream_));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_sz, d_clean_dev_ + tail_last_index_,
+                                      sizeof(uint32_t), cudaMemcpyDeviceToHost, tail_readback_stream_));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(tail_readback_stream_));
         const size_t total_out = (size_t)tail_off + (size_t)tail_sz;
         const_cast<RZEStage*>(this)->actual_output_size_ = (total_out + 3) & ~size_t(3);
-        if (tail_output_ptr_ && actual_output_size_ > total_out)
-            cudaMemset(tail_output_ptr_ + total_out, 0, actual_output_size_ - total_out);
+        if (tail_output_ptr_ && actual_output_size_ > total_out) {
+            FZ_CUDA_CHECK(cudaMemsetAsync(tail_output_ptr_ + total_out, 0,
+                                          actual_output_size_ - total_out, tail_readback_stream_));
+            FZ_CUDA_CHECK(cudaStreamSynchronize(tail_readback_stream_));
+        }
         const_cast<RZEStage*>(this)->tail_output_ptr_  = nullptr;
         tail_readback_pending_ = false;
         tail_readback_stream_  = nullptr;
@@ -372,8 +380,12 @@ void RZEStage::execute(
         const byte* d_in  = (const byte*)inputs[0];
         byte*       d_out = (byte*)outputs[0];
 
+        // Header reads go on the caller's stream + a stream-scoped sync (NOT plain
+        // cudaMemcpy, which runs on the legacy default stream = device-wide barrier).
+        // The sync stalls only this thread, so concurrent decodes overlap.
         uint8_t h_hdr_raw[8];
-        FZ_CUDA_CHECK(cudaMemcpy(h_hdr_raw, d_in, 8, cudaMemcpyDeviceToHost));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(h_hdr_raw, d_in, 8, cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         uint32_t orig_total, num_chunks;
         std::memcpy(&orig_total, h_hdr_raw + 0, sizeof(uint32_t));
         std::memcpy(&num_chunks, h_hdr_raw + 4, sizeof(uint32_t));
@@ -382,8 +394,10 @@ void RZEStage::execute(
         if (num_chunks == 0 || orig_total == 0) { actual_output_size_ = 0; return; }
 
         std::vector<uint32_t> h_chunk_entries(num_chunks);
-        FZ_CUDA_CHECK(cudaMemcpy(h_chunk_entries.data(), d_in + 8,
-                                 num_chunks * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(h_chunk_entries.data(), d_in + 8,
+                                      num_chunks * sizeof(uint32_t),
+                                      cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         const size_t header_bytes = 4 + 4 + 4 * num_chunks;
 

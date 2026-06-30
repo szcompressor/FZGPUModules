@@ -756,13 +756,14 @@ void QuantizerStage<TInput, TCode>::execute(
 }
 
 template<typename TInput, typename TCode>
-void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
+void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
     // Inplace mode never allocates the scratch; nothing to read back.
     if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
 
     uint32_t h_count = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_count, d_outlier_count_scratch_,
-                              sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_outlier_count_scratch_,
+                                   sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Cap at the allocated capacity: atomicAdd always increments the device
     // counter even when the buffer is full, so h_count may exceed max_outliers.

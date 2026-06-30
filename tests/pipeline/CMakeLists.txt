@@ -132,6 +132,15 @@ target_compile_definitions(test_golden PRIVATE
     FZGM_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../golden"
 )
 
+# ─── Multi-stream concurrency (K independent instances, K streams, K threads) ─
+fz_add_test(
+    NAME    test_concurrency
+    SOURCES test_concurrency.cpp
+    LIBS    fzgmod Threads::Threads
+    LABELS  pipeline gpu
+)
+find_package(Threads REQUIRED)
+
 # cuSZ-Hi LC back-end preset round-trips (throughput + ratio modes).
 fz_add_test(
     NAME    test_lc_presets

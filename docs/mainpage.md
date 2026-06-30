@@ -207,6 +207,27 @@ checksums. See the \ref fzm_format "FZM File Format" page for the full specifica
 
 ---
 
+### Decode-only pipelines (no warmup compress)
+
+For streaming decode loops that only ever decompress blobs produced elsewhere, a
+decode-only pipeline can decode an in-memory blob with **no** prior `compress()` by
+carrying a small metadata header:
+
+```cpp
+// Producer (after compress()): store the header alongside the blob.
+std::vector<uint8_t> header = producer.serializeHeaderToMemory();   // ~1 KB, no payload
+
+// Consumer (fresh, finalized, same topology, never compress()ed): one call per blob.
+slot.decompressFromMemory(header.data(), header.size(),
+                          d_blob, blob_size, &d_out, &out_size, stream);
+```
+
+The header carries the data-dependent inverse metadata that is not in the raw blob
+(Huffman symbol count, quantizer outlier count). See `examples/decode_only_slots.cpp`
+and the \ref api_reference "API Reference".
+
+---
+
 ### Thread Safety
 
 Each `Pipeline` must be used from a single host thread. There is no internal locking.

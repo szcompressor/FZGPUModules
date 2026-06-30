@@ -85,3 +85,15 @@ set_target_properties(fzgmod-profile-repeat PROPERTIES
 if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-repeat PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
+
+# ── Multi-stream decode concurrency probe ─────────────────────────────────────
+# K host threads, K Pipeline instances, K streams running decompressInto() —
+# measures whether decode calls overlap on the GPU (serial vs concurrent speedup).
+find_package(Threads REQUIRED)
+add_executable(decompress_concurrency decompress_concurrency.cu)
+target_link_libraries(decompress_concurrency PRIVATE fzgmod Threads::Threads)
+set_target_properties(decompress_concurrency PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(decompress_concurrency PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()

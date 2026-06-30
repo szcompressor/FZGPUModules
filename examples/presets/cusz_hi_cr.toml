@@ -17,7 +17,8 @@ code_type = "uint16"
 error_bound = 1e-2
 error_bound_mode = "ABS"
 quant_radius = 2048                 # explicit so Huffman bklen can match: bklen = 2*radius
-outlier_capacity = 0.1
+outlier_capacity = 0.2              # headroom: at eb=1e-2 this data needs ~10%; 0.1 overflows
+                                    # and the overflow leaks out-of-range codes into the stream
 
 [[stage]]
 name = "huf"

@@ -266,6 +266,78 @@ public:
         cudaStream_t stream = 0
     );
 
+    /**
+     * Fully stream-asynchronous decompress into a caller-provided buffer — for
+     * overlapped / double-buffered decode loops where decompress() calls on
+     * distinct streams must run concurrently.
+     *
+     * Unlike the synchronous `decompress()` overloads, this:
+     *   - writes the inverse result straight into `d_output_buf` (no internal
+     *     `cudaMalloc`, no device→device copy, no `cudaFree` — those are all
+     *     device-wide barriers that prevent cross-stream overlap), and
+     *   - does **not** call `cudaStreamSynchronize()` before returning.
+     *
+     * `*actual_output_size` is the planned output size (known host-side from the
+     * inverse DAG); the decompressed bytes are valid only after the caller
+     * synchronizes `stream` itself. A capacity check is done host-side and throws
+     * before any GPU work if `d_output_buf` is too small.
+     *
+     * Requirements:
+     *   - **PREALLOCATE** memory strategy (internal inverse buffers are allocated
+     *     once at finalize, never per call). Throws under MINIMAL.
+     *   - Each concurrent stream uses its **own** Pipeline instance (independent
+     *     pools/state); this matches the cached-inverse-DAG reuse model.
+     *
+     * Caveat: some inverse coder stages (e.g. RZE/RRE/Huffman/AdaptiveBitpack) do a
+     * blocking device→host header read **inside** their `execute()`. Those readbacks
+     * are internal to the stage and are NOT removed by this method, so a pipeline
+     * built from them still serializes at that point on a single host thread. This
+     * method removes only the Pipeline-level serializers; for full overlap of such
+     * pipelines, drive each slot from its own host thread (so one slot's readback
+     * does not stall another's GPU work).
+     *
+     * @param d_input             Compressed blob (device pointer).
+     * @param input_size          Size of the compressed blob in bytes.
+     * @param d_output_buf        Caller-owned device buffer for the result.
+     * @param output_buf_capacity Capacity of d_output_buf in bytes.
+     * @param actual_output_size  Receives the planned decompressed size.
+     * @param stream              CUDA stream for all GPU operations.
+     */
+    void decompressInto(
+        const void* d_input,
+        size_t      input_size,
+        void*       d_output_buf,
+        size_t      output_buf_capacity,
+        size_t*     actual_output_size,
+        cudaStream_t stream = 0
+    );
+
+    /**
+     * Make a finalized pipeline ready to decompress() external blobs without a
+     * prior compress() call.
+     *
+     * Normally decompress() relies on state populated by compress() (the list of
+     * pipeline-output buffers and the source's uncompressed size). When a pipeline
+     * instance only ever decodes blobs produced elsewhere — e.g. K decode-only
+     * slots reading archives off disk — this would otherwise force a throwaway
+     * "warmup" compress() over dummy data purely to populate that state.
+     *
+     * prepareInverse() builds the pipeline-output buffer metadata directly from the
+     * finalized forward topology and records the source uncompressed size, so the
+     * next decompress() works straight away. It launches no kernels and touches no
+     * device memory; the inverse DAG is still built lazily on the first decompress()
+     * exactly as it is after a real compress().
+     *
+     * Per-segment compressed sizes are NOT needed here — decompress() reads them
+     * from the blob's own self-describing concat header, so blobs of differing
+     * sizes all decode correctly. Call this again to update the uncompressed size
+     * if a later blob decodes to a different element count.
+     *
+     * @param uncompressed_size  Byte size of the original (decompressed) data.
+     *                           Used to size the decompress output buffer.
+     */
+    void prepareInverse(size_t uncompressed_size);
+
     /** Free non-persistent buffers and reset execution state for re-use. */
     void reset(cudaStream_t stream = 0);
 
@@ -362,6 +434,45 @@ public:
     /** Build the FZM header from current pipeline state. Requires a prior compress(). */
     FZMFileHeader buildHeader() const;
 
+    // ── In-memory metadata header (decode without a prior compress) ────────────
+
+    /**
+     * Serialize this pipeline's FZM metadata header to a host byte buffer.
+     *
+     * Requires a prior compress(). The returned bytes are the same core + stage +
+     * buffer header that writeToFile() prepends to an `.fzm` file, WITHOUT the
+     * compressed payload. They carry everything the inverse path needs that is not
+     * recoverable from the raw compressed blob — most importantly the data-dependent
+     * per-stage inverse metadata (e.g. HuffmanStage's symbol count, the quantizer
+     * outlier count). Store these bytes alongside the compress() output blob.
+     *
+     * The companion is primeInverseFromHeader(): a fresh, finalized, decode-only
+     * pipeline of the same topology can primeInverseFromHeader(these_bytes) and then
+     * decompress() the blob directly — no throwaway "warmup" compress() required.
+     */
+    std::vector<uint8_t> serializeHeaderToMemory() const;
+
+    /**
+     * Prepare a finalized pipeline to decompress() an external blob whose metadata
+     * header was produced by serializeHeaderToMemory(), without a prior compress().
+     *
+     * Restores each stage's inverse-side configuration from the header (the analogue
+     * of what decompressFromFile() does via createStage()), records the source
+     * uncompressed size, and builds the pipeline-output buffer metadata. After this
+     * call, decompress(blob, blob_size, ...) works and reuses the cached inverse DAG
+     * across successive blocks. Call once per blob to refresh the data-dependent
+     * metadata (e.g. a new outlier count); the cached inverse DAG is kept when the
+     * source size is unchanged.
+     *
+     * This pipeline must have been built with the SAME stage topology as the one
+     * that produced the header (same addStage()/connect() sequence). A stage-type
+     * mismatch throws.
+     *
+     * @param header_bytes  Bytes returned by serializeHeaderToMemory() on the producer.
+     * @param header_size   Length of header_bytes.
+     */
+    void primeInverseFromHeader(const void* header_bytes, size_t header_size);
+
     /**
      * One-shot decompress from an FZM file. Reconstructs the pipeline from the
      * file header, allocates a pool, and runs decompression.
@@ -408,6 +519,40 @@ public:
         size_t*             output_size,
         cudaStream_t        stream   = 0,
         PipelinePerfResult* perf_out = nullptr
+    );
+
+    /**
+     * One-shot decompress of an external in-memory blob, given its metadata header
+     * — the fused convenience for decode-only pipelines.
+     *
+     * Equivalent to primeInverseFromHeader(header...) followed by
+     * decompress(d_blob...). This is the single per-blob call for a streaming
+     * decode loop: it restores the data-dependent inverse metadata from the header
+     * and decodes the blob, reusing this instance's cached inverse DAG across calls
+     * (so there is no per-blob DAG rebuild — unlike the static decompressFromFile()
+     * path which reconstructs everything each call).
+     *
+     * `header_bytes` come from serializeHeaderToMemory() on the producer; `d_blob`
+     * is the producer's compress() output (the two may be stored separately, or
+     * concatenated and sliced by the caller). Output ownership follows
+     * setPoolManagedDecompOutput() as for decompress().
+     *
+     * @param header_bytes  Bytes from serializeHeaderToMemory().
+     * @param header_size   Length of header_bytes.
+     * @param d_blob        Device pointer to the compressed blob.
+     * @param blob_size     Size of the compressed blob in bytes.
+     * @param d_output      Receives the decompressed device pointer.
+     * @param output_size   Receives the decompressed size in bytes.
+     * @param stream        CUDA stream for all GPU operations.
+     */
+    void decompressFromMemory(
+        const void*  header_bytes,
+        size_t       header_size,
+        const void*  d_blob,
+        size_t       blob_size,
+        void**       d_output,
+        size_t*      output_size,
+        cudaStream_t stream = 0
     );
 
     // ── Config File ───────────────────────────────────────────────────────────
@@ -574,7 +719,48 @@ private:
         size_t       src_sz,
         cudaStream_t stream);
 
+    /**
+     * Shared inverse-execution core behind all decompress() overloads.
+     * @param caller_output  if non-null, the inverse result is written here (no
+     *                       internal allocation/copy); ownership stays with the
+     *                       caller. If null, the library allocates (pool or
+     *                       cudaMalloc per setPoolManagedDecompOutput()).
+     * @param caller_capacity capacity of caller_output (checked host-side).
+     * @param synchronize    if false, skip the post-execute cudaStreamSynchronize,
+     *                       postStreamSync, size-refine and profiling collection
+     *                       (the planned size from the inverse DAG is reported);
+     *                       caller must synchronize the stream before reading.
+     */
+    void decompressCore(
+        const void* d_input,
+        size_t      input_size,
+        void*       caller_output,
+        size_t      caller_capacity,
+        bool        synchronize,
+        void**      d_output,
+        size_t*     output_size,
+        cudaStream_t stream);
+
+    /**
+     * Populate buffer_metadata_ from the finalized forward topology
+     * (output_buffer_ids_ / output_nodes_) with placeholder sizes. Lets
+     * decompress() route an external blob without a prior compress(). The
+     * authoritative per-segment compressed sizes come from the blob's concat
+     * header at decompress time, so the placeholders here are never used as sizes.
+     */
+    void buildStaticBufferMetadata();
+
+    /**
+     * Read the `n` per-segment compressed sizes from an external blob's concat
+     * header (`[count:4B][size:8B * n]`), validating that the embedded count
+     * matches the pipeline's pipeline-output count. Single D2H copy of the header.
+     */
+    std::vector<size_t> readConcatSegmentSizes(
+        const void* d_blob, size_t n, cudaStream_t stream) const;
+
     // decompressFromFile() helpers.
+    /** Parse + validate an FZM header from an in-memory byte buffer (mirrors readHeader()). */
+    static FZMFileHeader parseHeaderFromMemory(const void* data, size_t size);
     static size_t computeFilePoolSize(const FZMFileHeader& fh, size_t pool_override_bytes);
     static std::pair<std::vector<std::unique_ptr<Stage>>, std::vector<FwdStageDesc>>
         reconstructForwardTopology(const FZMFileHeader& fh);

@@ -155,7 +155,21 @@ size_t actual_sz = 0;
 pipeline.decompress(d_compressed, compressed_sz,
                     d_buf, decomp_capacity, &actual_sz, stream);
 // caller owns d_buf; cudaFree when done
+// Writes straight into d_buf (no temp alloc/copy/free); synchronous (result ready on return).
 ```
+
+### Stream-concurrent decode (`decompressInto`, async)
+```cpp
+// PREALLOCATE required. No internal cudaMalloc/cudaFree/D2D copy/cudaStreamSynchronize,
+// so decode calls on distinct streams can overlap. *actual_sz is the planned size;
+// the bytes are valid only after YOU synchronize the stream.
+pipeline.decompressInto(d_compressed, compressed_sz,
+                        d_buf, decomp_capacity, &actual_sz, stream);
+cudaStreamSynchronize(stream);   // now d_buf is valid
+```
+Use one Pipeline instance per concurrent stream. Note: RZE/RRE/Huffman/AdaptiveBitpack
+inverse stages do a blocking device→host header read inside `execute()` that this cannot
+remove — for full overlap of those pipelines, drive each slot from its own host thread.
 
 **Sizing helpers:**
 
@@ -176,6 +190,7 @@ pipeline.decompress(d_compressed, compressed_sz,
 | Decompressed output (caller-owned) | Caller | Must `cudaFree` |
 | File decompress (`decompressFromFile` static) | Caller | Must `cudaFree` |
 | File decompress (`decompressFromFileInstance`) | Depends on `setPoolManagedDecompOutput()` | Same rules as `decompress()` |
+| Memory decompress (`decompressFromMemory`) | Depends on `setPoolManagedDecompOutput()` | Same rules as `decompress()` |
 
 ---
 
@@ -206,6 +221,44 @@ pipeline.saveConfig("pipeline.toml");   // requires finalize() first
 ```
 
 See the \ref fzm_format "FZM File Format" page for the full file header specification.
+
+---
+
+## Decode-only pipelines (no warmup compress)
+
+A pipeline that only ever decompresses blobs produced elsewhere — e.g. K streaming
+slots reading independently-compressed blocks — does **not** need a throwaway
+`compress()` over dummy data to become ready. The in-memory `decompress()` path
+otherwise depends on state a forward `compress()` leaves on the instance: the
+archive layout *and* the data-dependent inverse metadata that is **not** in the raw
+blob (the `HuffmanStage` symbol count, the quantizer outlier count — which changes
+block to block). Carry that metadata in a small in-memory header instead:
+
+```cpp
+// PRODUCER (after compress()): grab the metadata header, store it with the blob.
+std::vector<uint8_t> header = producer.serializeHeaderToMemory();   // ~1 KB, no payload
+
+// CONSUMER: a fresh, finalized pipeline of the SAME topology, never compress()ed.
+Pipeline slot(block_bytes);
+/* addStage/connect identically */ slot.finalize();
+
+// One call per blob: restores this blob's metadata, decodes it, and reuses the
+// slot's cached inverse DAG across calls (no per-blob DAG rebuild).
+slot.decompressFromMemory(header.data(), header.size(),
+                          d_blob, blob_size, &d_output, &output_sz, stream);
+```
+
+- `serializeHeaderToMemory()` requires a prior `compress()`; returns the FZM
+  core+stage+buffer header as host bytes (no payload). The header is per-blob
+  because the outlier count varies block to block.
+- `decompressFromMemory()` fuses `primeInverseFromHeader()` + `decompress()`; output
+  ownership follows `setPoolManagedDecompOutput()` exactly as `decompress()` does.
+- The two steps are also available separately (`primeInverseFromHeader(header...)`
+  then `decompress(blob...)`).
+- For fully **self-describing** pipelines (pure lossless chains, linear-mode
+  quantizer — no Huffman, no outliers) the lighter `prepareInverse(uncompressed_size)`
+  needs no header at all.
+- Worked example: `examples/decode_only_slots.cpp`.
 
 ---
 

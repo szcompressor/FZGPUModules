@@ -90,13 +90,14 @@ inline float computeValueBase(
     minmax_partial_kernel<TInput><<<num_blocks, kBlockSize, smem, stream>>>(
         d_data, n, d_pmin, d_pmax);
 
-    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-
+    // D2H async on the caller's stream — stream ordering ensures the kernel
+    // completes before the copies start; one stream-scoped sync covers both.
     std::vector<TInput> h_pmin(num_blocks), h_pmax(num_blocks);
-    FZ_CUDA_CHECK(cudaMemcpy(h_pmin.data(), d_pmin,
-                             num_blocks * sizeof(TInput), cudaMemcpyDeviceToHost));
-    FZ_CUDA_CHECK(cudaMemcpy(h_pmax.data(), d_pmax,
-                             num_blocks * sizeof(TInput), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(h_pmin.data(), d_pmin,
+                                  num_blocks * sizeof(TInput), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(h_pmax.data(), d_pmax,
+                                  num_blocks * sizeof(TInput), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     pool->free(d_pmin, 0);
     pool->free(d_pmax, 0);

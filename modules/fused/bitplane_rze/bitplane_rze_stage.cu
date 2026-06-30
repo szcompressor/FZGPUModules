@@ -55,9 +55,13 @@ void BitplaneRZEStage::execute(
         // ── Decode ───────────────────────────────────────────────────────────
         // The archive is self-describing: read its 128-byte header to recover
         // the original symbol count and the sub-array byte offsets.
+        // Issue on the caller's stream (not plain cudaMemcpy which runs on the
+        // legacy default stream and imposes a device-wide barrier); the following
+        // stream sync then stalls only this thread.
         bprze::ArchiveHeader header{};
-        FZ_CUDA_CHECK(cudaMemcpy(&header, inputs[0], sizeof(header),
-                                 cudaMemcpyDeviceToHost));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&header, inputs[0], sizeof(header),
+                                      cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         const size_t data_len = header.original_len;
         cached_orig_len_ = data_len;
         bprze::Config cfg = bprze::configure(data_len);
@@ -139,10 +143,12 @@ void BitplaneRZEStage::execute(
     bprze::launchEncode(d_in, cfg, d_offset_counter, d_bitflag, d_start_pos,
                         d_comp_out, d_comp_len, stream);
 
-    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    // D2H: read the offset accumulator to compute the bitstream size.
+    // Stream-scoped: stalls only this thread, not other streams/instances.
     uint32_t h_offset_sum = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_offset_sum, d_offset_counter, sizeof(uint32_t),
-                             cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_offset_sum, d_offset_counter, sizeof(uint32_t),
+                                  cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Build the self-describing header (cumulative byte offsets).
     bprze::ArchiveHeader header{};
@@ -156,8 +162,11 @@ void BitplaneRZEStage::execute(
     for (int i = 1; i <= bprze::BPRZE_HDR_END; i++) header.entry[i] = nbyte[i - 1];
     for (int i = 1; i <= bprze::BPRZE_HDR_END; i++) header.entry[i] += header.entry[i - 1];
 
-    FZ_CUDA_CHECK(cudaMemcpy(archive, &header, sizeof(header),
-                             cudaMemcpyHostToDevice));
+    // H2D: write the header back to the archive (pageable src is staged before
+    // the call returns, so header can safely go out of scope after sync).
+    FZ_CUDA_CHECK(cudaMemcpyAsync(archive, &header, sizeof(header),
+                                  cudaMemcpyHostToDevice, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     actual_output_size_ = header.entry[bprze::BPRZE_HDR_END];
     cached_orig_len_ = data_len;

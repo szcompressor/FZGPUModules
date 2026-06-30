@@ -1042,12 +1042,13 @@ void GInterpStage<TInput, TCode>::execute(
 
 // ─── postStreamSync ──────────────────────────────────────────────────────────
 template <typename TInput, typename TCode>
-void GInterpStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
+void GInterpStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
     if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
 
     uint32_t h_outlier_count = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_outlier_count, d_outlier_count_scratch_,
-                              sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_outlier_count, d_outlier_count_scratch_,
+                                   sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     size_t max_outliers = getMaxOutlierCount(num_elements_);
     if (h_outlier_count > max_outliers) {

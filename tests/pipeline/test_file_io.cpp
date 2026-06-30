@@ -29,6 +29,11 @@
  *   CK2  FileIO/CorruptedDataPayloadThrows           — corrupted data payload throws checksum error
  *   DI1  FileIO/LorenzoDimsSerializedThroughFile     — 2D dims survive writeToFile → decompressFromFile
  *   PS1  FileIO/PoolOverrideBytesWorks               — pool_override_bytes escape hatch works
+ *   IM1  FileIO/PrimeInverseFromHeaderDecodeOnly     — decode-only pipeline decompresses a blob with no compress()
+ *   IM2  FileIO/PrimeInverseFromHeaderMultiBlock     — one reused instance decodes blocks with differing metadata
+ *   IM3  FileIO/InMemoryHeaderErrorHandling          — serialize-before-compress / mismatch / corrupt-header throws
+ *   IM4  FileIO/DecompressIntoAsyncRoundTrip         — async caller-buffer decompress (no internal alloc/copy/sync)
+ *   IM5  FileIO/DecompressIntoRequiresPrealloc       — decompressInto() throws under MINIMAL
  */
 
 #include <gtest/gtest.h>
@@ -37,6 +42,7 @@
 #include "fzm_format.h"
 
 #include <cstdio>
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -990,4 +996,280 @@ TEST(FileIO, PoolOverrideBytesWorks) {
         << "Pool override round-trip max_err=" << max_err;
 
     std::remove(tmp.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory metadata header: serializeHeaderToMemory() + primeInverseFromHeader()
+// Lets a decode-only pipeline decompress an external blob with NO prior compress()
+// (replaces the throwaway "warmup compress" pattern).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Build the cuSZ-style pipeline (LorenzoQuant + Huffman) — exercises both
+// data-dependent inverse metadata that lives only in the header: the quantizer
+// outlier count and HuffmanStage::original_len_.
+static void buildCuszPipeline(Pipeline& p, float eb) {
+    auto* lq = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lq->setErrorBound(eb);
+    lq->setErrorBoundMode(ErrorBoundMode::ABS);
+    lq->setQuantRadius(512);
+    lq->setOutlierCapacity(0.10f);
+    lq->setZigzagCodes(true);
+    auto* huf = p.addStage<HuffmanStage<uint16_t>>();
+    huf->setBklen(1024);
+    p.connect(huf, lq, "codes");
+    p.finalize();
+}
+
+// IM1: a fresh decode-only pipeline (never compress()ed) decodes an external blob
+//      using only the in-memory header.
+TEST(FileIO, PrimeInverseFromHeaderDecodeOnly) {
+    {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-3f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth_data<float>(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    // ── Producer: compress, capture header + an INDEPENDENT copy of the blob ──
+    std::vector<uint8_t> header;
+    CudaBuffer<uint8_t>* blob = nullptr;
+    size_t blob_sz = 0;
+    {
+        Pipeline prod(in_bytes, MemoryStrategy::MINIMAL);
+        buildCuszPipeline(prod, EB);
+        void*  d_comp = nullptr;
+        size_t comp_sz = 0;
+        prod.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        stream.sync();
+        ASSERT_GT(comp_sz, 0u);
+        header  = prod.serializeHeaderToMemory();
+        blob_sz = comp_sz;
+        blob    = new CudaBuffer<uint8_t>(comp_sz);
+        FZ_TEST_CUDA(cudaMemcpy(blob->void_ptr(), d_comp, comp_sz,
+                                cudaMemcpyDeviceToDevice));
+        stream.sync();
+    }  // prod (and its pool) destroyed — blob is independent
+    EXPECT_FALSE(header.empty());
+
+    // ── Decode-only consumer: NEVER calls compress() ─────────────────────────
+    Pipeline dec(in_bytes, MemoryStrategy::MINIMAL);
+    buildCuszPipeline(dec, EB);
+    dec.setPoolManagedDecompOutput(false);
+
+    dec.primeInverseFromHeader(header.data(), header.size());
+
+    void*  d_dec = nullptr;
+    size_t dec_sz = 0;
+    dec.decompress(blob->void_ptr(), blob_sz, &d_dec, &dec_sz, stream);
+    stream.sync();
+
+    ASSERT_NE(d_dec, nullptr);
+    EXPECT_EQ(dec_sz, in_bytes);
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+    cudaFree(d_dec);
+    EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f);
+
+    delete blob;
+    }
+    cudaDeviceSynchronize();
+}
+
+// IM2: one reused decode-only instance decodes TWO different blocks whose
+//      data-dependent metadata (outlier count, Huffman length) differ — proving
+//      the per-block re-prime path and cached-inverse reuse are correct.
+TEST(FileIO, PrimeInverseFromHeaderMultiBlock) {
+    {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-3f;
+    const size_t in_bytes = N * sizeof(float);
+
+    // Two datasets: smooth vs spiky (many outliers).
+    auto smooth = make_smooth_data<float>(N);
+    std::vector<float> spiky(N);
+    for (size_t i = 0; i < N; ++i)
+        spiky[i] = (i % 503 == 0) ? 40.0f : 0.05f * std::sin(0.01f * float(i));
+
+    auto produce = [&](const std::vector<float>& h,
+                       std::vector<uint8_t>& header_out,
+                       CudaBuffer<uint8_t>*& blob_out, size_t& blob_sz_out) {
+        CudaBuffer<float> d_in(N);
+        d_in.upload(h, stream); stream.sync();
+        Pipeline prod(in_bytes, MemoryStrategy::MINIMAL);
+        buildCuszPipeline(prod, EB);
+        void* d_comp = nullptr; size_t comp_sz = 0;
+        prod.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        stream.sync();
+        header_out = prod.serializeHeaderToMemory();
+        blob_sz_out = comp_sz;
+        blob_out = new CudaBuffer<uint8_t>(comp_sz);
+        FZ_TEST_CUDA(cudaMemcpy(blob_out->void_ptr(), d_comp, comp_sz,
+                                cudaMemcpyDeviceToDevice));
+        stream.sync();
+    };
+
+    std::vector<uint8_t> h1, h2;
+    CudaBuffer<uint8_t>* b1 = nullptr; size_t s1 = 0;
+    CudaBuffer<uint8_t>* b2 = nullptr; size_t s2 = 0;
+    produce(smooth, h1, b1, s1);
+    produce(spiky,  h2, b2, s2);
+
+    Pipeline dec(in_bytes, MemoryStrategy::MINIMAL);
+    buildCuszPipeline(dec, EB);
+    dec.setPoolManagedDecompOutput(false);
+
+    // Fused one-call form: prime + decode in a single call (decode loop hot path).
+    auto decode = [&](const std::vector<uint8_t>& hdr, CudaBuffer<uint8_t>* blob,
+                      size_t sz, const std::vector<float>& ref) {
+        void* d_dec = nullptr; size_t dec_sz = 0;
+        dec.decompressFromMemory(hdr.data(), hdr.size(), blob->void_ptr(), sz,
+                                 &d_dec, &dec_sz, stream);
+        stream.sync();
+        EXPECT_EQ(dec_sz, in_bytes);
+        std::vector<float> recon(N);
+        FZ_TEST_CUDA(cudaMemcpy(recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+        cudaFree(d_dec);
+        EXPECT_LE(max_abs_error(ref, recon), EB * 1.01f);
+    };
+
+    decode(h1, b1, s1, smooth);
+    decode(h2, b2, s2, spiky);   // different block, same instance
+    decode(h1, b1, s1, smooth);  // back to block 1 — re-prime correctness
+
+    delete b1; delete b2;
+    }
+    cudaDeviceSynchronize();
+}
+
+// IM3: error handling — serialize before compress throws; decompress before prime
+//      throws; topology mismatch throws; corrupt header throws.
+TEST(FileIO, InMemoryHeaderErrorHandling) {
+    constexpr size_t N = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    // serializeHeaderToMemory() before compress() throws.
+    {
+        Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+        buildCuszPipeline(p, 1e-3f);
+        EXPECT_THROW(p.serializeHeaderToMemory(), std::runtime_error);
+    }
+
+    // decompress() before any compress()/prime throws (not silently undefined).
+    {
+        Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+        buildCuszPipeline(p, 1e-3f);
+        void* d_out = nullptr; size_t out_sz = 0;
+        EXPECT_THROW(p.decompress(nullptr, 0, &d_out, &out_sz, 0), std::runtime_error);
+    }
+
+    // Build a valid header from a real compress for the remaining checks.
+    CudaStream stream;
+    auto h_input = make_smooth_data<float>(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream); stream.sync();
+    std::vector<uint8_t> header;
+    {
+        Pipeline prod(in_bytes, MemoryStrategy::MINIMAL);
+        buildCuszPipeline(prod, 1e-3f);
+        void* d_comp = nullptr; size_t comp_sz = 0;
+        prod.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        stream.sync();
+        header = prod.serializeHeaderToMemory();
+    }
+
+    // Topology mismatch: prime a DIFFERENT pipeline with this header throws.
+    {
+        Pipeline wrong(in_bytes, MemoryStrategy::MINIMAL);
+        auto* lrz = wrong.addStage<LorenzoQuantStage<float, uint16_t>>();
+        lrz->setErrorBound(1e-3f);
+        auto* diff = wrong.addStage<DifferenceStage<uint16_t>>();
+        wrong.connect(diff, lrz, "codes");
+        wrong.finalize();
+        EXPECT_THROW(wrong.primeInverseFromHeader(header.data(), header.size()),
+                     std::runtime_error);
+    }
+
+    // Corrupt header bytes (flip magic) throws.
+    {
+        Pipeline dec(in_bytes, MemoryStrategy::MINIMAL);
+        buildCuszPipeline(dec, 1e-3f);
+        std::vector<uint8_t> corrupt = header;
+        corrupt[0] ^= 0xFF;  // break magic
+        EXPECT_THROW(dec.primeInverseFromHeader(corrupt.data(), corrupt.size()),
+                     std::runtime_error);
+    }
+    stream.sync();
+    cudaDeviceSynchronize();
+}
+
+// IM4: decompressInto() — async, caller-buffer, no internal alloc/copy/sync. The
+//      caller synchronizes the stream itself before reading the result.
+TEST(FileIO, DecompressIntoAsyncRoundTrip) {
+    {
+    CudaStream stream;
+    constexpr size_t N  = 1 << 14;
+    constexpr float  EB = 1e-3f;
+    const size_t in_bytes = N * sizeof(float);
+    auto h_input = make_smooth_data<float>(N);
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    // PREALLOCATE is required by decompressInto().
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
+    buildCuszPipeline(p, EB);
+
+    void*  d_comp = nullptr;
+    size_t comp_sz = 0;
+    p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+
+    // Caller owns the output buffer.
+    CudaBuffer<float> d_out(N);
+    size_t actual = 0;
+    p.decompressInto(d_comp, comp_sz, d_out.void_ptr(), in_bytes, &actual, stream);
+    // Result is NOT valid yet — the caller must synchronize first.
+    stream.sync();
+
+    EXPECT_EQ(actual, in_bytes);
+    std::vector<float> recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(recon.data(), d_out.void_ptr(), in_bytes, cudaMemcpyDeviceToHost));
+    EXPECT_LE(max_abs_error(h_input, recon), EB * 1.01f);
+
+    // Capacity too small throws (host-side, before any GPU work).
+    size_t dummy = 0;
+    EXPECT_THROW(p.decompressInto(d_comp, comp_sz, d_out.void_ptr(),
+                                  in_bytes / 2, &dummy, stream),
+                 std::runtime_error);
+    }
+    cudaDeviceSynchronize();
+}
+
+// IM5: decompressInto() throws under MINIMAL (per-call buffer alloc would defeat
+//      the stream-concurrency goal).
+TEST(FileIO, DecompressIntoRequiresPrealloc) {
+    constexpr size_t N = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+    CudaStream stream;
+    auto h_input = make_smooth_data<float>(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream); stream.sync();
+
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+    buildCuszPipeline(p, 1e-3f);
+    void* d_comp = nullptr; size_t comp_sz = 0;
+    p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+
+    CudaBuffer<float> d_out(N);
+    size_t actual = 0;
+    EXPECT_THROW(p.decompressInto(d_comp, comp_sz, d_out.void_ptr(), in_bytes, &actual, stream),
+                 std::runtime_error);
+    cudaDeviceSynchronize();
 }

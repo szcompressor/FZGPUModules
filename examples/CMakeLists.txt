@@ -60,6 +60,12 @@ target_link_libraries(file_io_example PRIVATE fzgmod)
 set_target_properties(file_io_example PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
+# ── Decode-only slots: in-memory metadata header, no warmup compress() ────────
+add_executable(decode_only_slots decode_only_slots.cpp)
+target_link_libraries(decode_only_slots PRIVATE fzgmod)
+set_target_properties(decode_only_slots PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
 # ── Ownership: pool-owned vs caller-owned compress and decompress output ──────
 add_executable(ownership_example ownership_example.cpp)
 target_link_libraries(ownership_example PRIVATE fzgmod)

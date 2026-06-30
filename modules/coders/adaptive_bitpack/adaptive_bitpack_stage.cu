@@ -172,17 +172,17 @@ void AdaptiveBitpackStage<T>::execute(
 }
 
 template<typename T>
-void AdaptiveBitpackStage<T>::postStreamSync(cudaStream_t /*stream*/) {
+void AdaptiveBitpackStage<T>::postStreamSync(cudaStream_t stream) {
     // Forward only: refine actual_output_size_ from the scanned payload length.
-    // The pipeline calls this after dag execute + a full stream sync, so a plain
-    // synchronous D2H of the two tail words is safe and adds no extra stall.
     if (is_inverse_ || d_offset_ == nullptr || fwd_num_blocks_ == 0) return;
+    // Batch both tail reads on the caller's stream; one stream-scoped sync covers both.
     const size_t last = fwd_num_blocks_ - 1;
     uint32_t h_last_off = 0, h_last_cost = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_last_off, d_offset_ + last,
-                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    FZ_CUDA_CHECK(cudaMemcpy(&h_last_cost, d_cost_ + last,
-                             sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_last_off, d_offset_ + last,
+                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_last_cost, d_cost_ + last,
+                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
     actual_output_size_ =
         fwd_meta_region_ + static_cast<size_t>(h_last_off) + h_last_cost;
 }

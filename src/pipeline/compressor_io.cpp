@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include <unordered_set>
 
@@ -759,6 +760,172 @@ void Pipeline::decompressFromFileInstance(
 
     FZ_LOG(INFO, "decompressFromFile (pool-owned): %.2f MB at %p",
            tmp_sz / (1024.0 * 1024.0), d_pool);
+}
+
+// ========== In-memory metadata header ==========
+
+std::vector<uint8_t> Pipeline::serializeHeaderToMemory() const {
+    if (!is_finalized_) {
+        throw std::runtime_error("Cannot serialize header before finalization");
+    }
+    if (!is_compressed_) {
+        throw std::runtime_error(
+            "compress() must be called before serializeHeaderToMemory()");
+    }
+
+    FZMFileHeader fh = buildHeader();
+
+    // No payload is included, so only the header checksum is meaningful here.
+    // computeHeaderChecksum() expects header_checksum == 0 at hash time (it is,
+    // straight out of buildHeader()), and the flag bit set to its final value.
+    fh.core.flags |= FZM_FLAG_HAS_HEADER_CHECKSUM;
+    fh.core.header_checksum = computeHeaderChecksum(fh);
+
+    const size_t stages_bytes  = fh.stages.size()  * sizeof(FZMStageInfo);
+    const size_t buffers_bytes = fh.buffers.size() * sizeof(FZMBufferEntry);
+    std::vector<uint8_t> out(sizeof(FZMHeaderCore) + stages_bytes + buffers_bytes);
+
+    uint8_t* p = out.data();
+    std::memcpy(p, &fh.core, sizeof(FZMHeaderCore));
+    p += sizeof(FZMHeaderCore);
+    if (stages_bytes)  { std::memcpy(p, fh.stages.data(),  stages_bytes);  p += stages_bytes; }
+    if (buffers_bytes) { std::memcpy(p, fh.buffers.data(), buffers_bytes); }
+
+    FZ_LOG(DEBUG, "serializeHeaderToMemory: %zu bytes (%u stages, %u buffers)",
+           out.size(), fh.core.num_stages, fh.core.num_buffers);
+    return out;
+}
+
+Pipeline::FZMFileHeader Pipeline::parseHeaderFromMemory(const void* data, size_t size) {
+    if (!data) {
+        throw std::runtime_error("parseHeaderFromMemory: null buffer");
+    }
+    const uint8_t* base = static_cast<const uint8_t*>(data);
+
+    if (size < sizeof(uint32_t) + sizeof(uint16_t)) {
+        throw std::runtime_error("parseHeaderFromMemory: buffer too small for magic/version");
+    }
+
+    uint32_t magic   = 0;
+    uint16_t version = 0;
+    std::memcpy(&magic,   base,                    sizeof(magic));
+    std::memcpy(&version, base + sizeof(magic),    sizeof(version));
+
+    if (magic != FZM_MAGIC) {
+        throw std::runtime_error("parseHeaderFromMemory: invalid FZM header (bad magic number)");
+    }
+    const uint8_t major = fzmVersionMajor(version);
+    const uint8_t minor = fzmVersionMinor(version);
+    if (major != FZM_VERSION_MAJOR) {
+        throw std::runtime_error(
+            "parseHeaderFromMemory: incompatible FZM major version " + std::to_string(major) +
+            " (reader expects " + std::to_string(FZM_VERSION_MAJOR) + ")");
+    }
+    const bool version_exact = (minor == FZM_VERSION_MINOR);
+    const bool is_legacy     = (minor == 0);
+
+    const size_t core_read = is_legacy ? FZM_LEGACY_HEADER_CORE_SIZE : sizeof(FZMHeaderCore);
+    if (size < core_read) {
+        throw std::runtime_error("parseHeaderFromMemory: buffer truncated (core header)");
+    }
+
+    FZMFileHeader fh;
+    fh.core = FZMHeaderCore{};  // zero-init so legacy/new fields default to 0
+    std::memcpy(&fh.core, base, core_read);
+
+    if (fh.core.num_stages > FZM_MAX_BUFFERS || fh.core.num_buffers > FZM_MAX_BUFFERS) {
+        throw std::runtime_error("parseHeaderFromMemory: header has too many stages/buffers");
+    }
+
+    const size_t stages_bytes  = static_cast<size_t>(fh.core.num_stages)  * sizeof(FZMStageInfo);
+    const size_t buffers_bytes = static_cast<size_t>(fh.core.num_buffers) * sizeof(FZMBufferEntry);
+    if (size < core_read + stages_bytes + buffers_bytes) {
+        throw std::runtime_error("parseHeaderFromMemory: buffer truncated (stage/buffer arrays)");
+    }
+
+    size_t off = core_read;
+    fh.stages.resize(fh.core.num_stages);
+    if (stages_bytes)  { std::memcpy(fh.stages.data(),  base + off, stages_bytes);  off += stages_bytes; }
+    fh.buffers.resize(fh.core.num_buffers);
+    if (buffers_bytes) { std::memcpy(fh.buffers.data(), base + off, buffers_bytes); }
+
+    if (!is_legacy && version_exact && (fh.core.flags & FZM_FLAG_HAS_HEADER_CHECKSUM)) {
+        uint32_t expected = fh.core.header_checksum;
+        uint32_t computed = computeHeaderChecksum(fh);
+        if (computed != expected) {
+            throw std::runtime_error("parseHeaderFromMemory: header checksum mismatch (corrupt buffer)");
+        }
+    }
+    return fh;
+}
+
+void Pipeline::primeInverseFromHeader(const void* header_bytes, size_t header_size) {
+    if (!is_finalized_) {
+        throw std::runtime_error("primeInverseFromHeader() requires a finalized pipeline");
+    }
+
+    FZMFileHeader fh = parseHeaderFromMemory(header_bytes, header_size);
+
+    // Restore each stage's inverse-side config from the header, matching stages to
+    // this pipeline's nodes in execution (level) order — the same order in which
+    // buildHeader() serialized them. This sets the data-dependent inverse metadata
+    // that is NOT present in the raw blob (e.g. HuffmanStage::original_len_, the
+    // quantizer outlier count), exactly as decompressFromFile()'s createStage() does.
+    size_t idx = 0;
+    for (const auto& level : dag_->getLevels()) {
+        for (auto* node : level) {
+            if (idx >= fh.stages.size()) {
+                throw std::runtime_error(
+                    "primeInverseFromHeader: header describes fewer stages than this "
+                    "pipeline — topology mismatch");
+            }
+            const auto& si = fh.stages[idx];
+            if (static_cast<uint16_t>(node->stage->getStageTypeId()) !=
+                static_cast<uint16_t>(si.stage_type)) {
+                throw std::runtime_error(
+                    "primeInverseFromHeader: stage-type mismatch at index " +
+                    std::to_string(idx) + " — header blob was produced by a different pipeline");
+            }
+            if (si.num_outputs > 0) {
+                node->stage->deserializeHeader(si.stage_config, si.config_size);
+            }
+            ++idx;
+        }
+    }
+    if (idx != fh.stages.size()) {
+        throw std::runtime_error(
+            "primeInverseFromHeader: header describes more stages than this pipeline "
+            "— topology mismatch");
+    }
+
+    size_t src_sz = (fh.core.num_sources > 0 && fh.core.source_uncompressed_sizes[0] > 0)
+                    ? static_cast<size_t>(fh.core.source_uncompressed_sizes[0])
+                    : static_cast<size_t>(fh.core.uncompressed_size);
+    if (src_sz == 0) {
+        throw std::runtime_error("primeInverseFromHeader: header reports zero uncompressed size");
+    }
+    source_input_sizes_.assign(1, src_sz);
+    input_size_ = src_sz;
+
+    // Pipeline-output buffer list (ids + producers) from the finalized topology;
+    // per-segment compressed sizes are read from the blob at decompress() time.
+    buildStaticBufferMetadata();
+
+    FZ_LOG(DEBUG, "primeInverseFromHeader: primed %zu stage(s), uncompressed=%zu bytes",
+           idx, src_sz);
+}
+
+void Pipeline::decompressFromMemory(
+    const void*  header_bytes,
+    size_t       header_size,
+    const void*  d_blob,
+    size_t       blob_size,
+    void**       d_output,
+    size_t*      output_size,
+    cudaStream_t stream)
+{
+    primeInverseFromHeader(header_bytes, header_size);
+    decompress(d_blob, blob_size, d_output, output_size, stream);
 }
 
 } // namespace fz

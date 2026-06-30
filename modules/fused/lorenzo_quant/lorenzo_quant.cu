@@ -749,15 +749,15 @@ void LorenzoQuantStage<TInput, TCode>::execute(
 }
 
 template<typename TInput, typename TCode>
-void LorenzoQuantStage<TInput, TCode>::postStreamSync(cudaStream_t /*stream*/) {
+void LorenzoQuantStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
     // Only applies to compression mode and only when execute() has run.
     if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
 
-    // The stream is fully synchronized by the time Pipeline::compress() calls
-    // us, so a plain (synchronous) cudaMemcpy is safe and adds no extra stall.
+    // D2H on the caller's stream — stream-scoped sync (stalls only this thread).
     uint32_t h_outlier_count = 0;
-    FZ_CUDA_CHECK(cudaMemcpy(&h_outlier_count, d_outlier_count_scratch_,
-                              sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_outlier_count, d_outlier_count_scratch_,
+                                   sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
     size_t max_outliers = getMaxOutlierCount(num_elements_);
 
