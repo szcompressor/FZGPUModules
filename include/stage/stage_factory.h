@@ -25,6 +25,7 @@
 #include "transforms/adm/adm_stage.h"
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
+#include "quantizers/quantizer/quantizer.h"
 
 #include <memory>
 #include <stdexcept>
@@ -114,6 +115,38 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
                 }
             } else {
                 stage = new DifferenceStage<float>();
+            }
+            break;
+        }
+
+        case StageType::QUANTIZER: {
+            if (config_size < sizeof(QuantizerConfig)) {
+                throw std::runtime_error(
+                    "QuantizerConfig too small: " + std::to_string(config_size));
+            }
+            QuantizerConfig qc;
+            std::memcpy(&qc, config, sizeof(QuantizerConfig));
+            if (qc.input_type == DataType::FLOAT32 && qc.code_type == DataType::UINT16) {
+                auto* s = new QuantizerStage<float, uint16_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else if (qc.input_type == DataType::FLOAT32 && qc.code_type == DataType::UINT32) {
+                auto* s = new QuantizerStage<float, uint32_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else if (qc.input_type == DataType::FLOAT64 && qc.code_type == DataType::UINT16) {
+                auto* s = new QuantizerStage<double, uint16_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else if (qc.input_type == DataType::FLOAT64 && qc.code_type == DataType::UINT32) {
+                auto* s = new QuantizerStage<double, uint32_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else {
+                throw std::runtime_error(
+                    "Unsupported QuantizerStage types: input_type="
+                    + std::to_string(static_cast<int>(qc.input_type))
+                    + " code_type=" + std::to_string(static_cast<int>(qc.code_type)));
             }
             break;
         }
