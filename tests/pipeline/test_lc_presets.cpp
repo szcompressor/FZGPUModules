@@ -34,12 +34,23 @@ using namespace fz;
 using namespace fz_test;
 
 static constexpr size_t NX = 512, NY = 512;
-static constexpr float  EB = 1e-2f;
-// GInterp accumulates multi-level interpolation errors; docs bound ≤ 2× eb worst-case.
-static constexpr float  EB_TOL = EB * 2.0f;
+// Matches error_bound in both cusz_hi_*.toml (NOA mode).
+static constexpr float PRESET_EB = 1e-3f;
 
-static float preset_round_trip(Pipeline& p) {
+// Both presets use error_bound_mode = "NOA": abs_eb = preset_eb × (vmax - vmin).
+// make_smooth_data defaults (amp1=50, amp2=20) give range ≈ 140, so abs_eb ≈ 0.14.
+// GInterp accumulates multi-level errors; docs bound ≤ 2× abs_eb worst-case.
+// Tolerance is computed per-test from the actual data range rather than hardcoded.
+
+struct RoundTripOut {
+    float max_error;
+    float data_range;  // vmax - vmin of the input, needed for NOA tolerance
+};
+
+static RoundTripOut preset_round_trip(Pipeline& p) {
     auto h_in = make_smooth_data<float>(NX * NY);
+    const float vmin = *std::min_element(h_in.begin(), h_in.end());
+    const float vmax = *std::max_element(h_in.begin(), h_in.end());
     const size_t in_bytes = h_in.size() * sizeof(float);
     CudaStream stream;
 
@@ -57,19 +68,27 @@ static float preset_round_trip(Pipeline& p) {
     std::vector<float> recon(dec_sz / sizeof(float));
     cudaMemcpy(recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
     if (!p.isPoolManagedDecompOutput()) cudaFree(d_dec);
-    return max_abs_error(h_in, recon);
+    return {max_abs_error(h_in, recon), vmax - vmin};
 }
 
 TEST(LCPresets, ThroughputRoundTrip) {
     Pipeline p;
     p.loadConfig(std::string(FZ_PRESETS_DIR) + "/cusz_hi_tp.toml");
-    EXPECT_LE(preset_round_trip(p), EB_TOL);
+    auto r = preset_round_trip(p);
+    const float abs_eb  = PRESET_EB * r.data_range;
+    const float eb_tol  = abs_eb * 2.0f;
+    EXPECT_LE(r.max_error, eb_tol)
+        << "abs_eb=" << abs_eb << " data_range=" << r.data_range;
 }
 
 TEST(LCPresets, RatioRoundTrip) {
     Pipeline p;
     p.loadConfig(std::string(FZ_PRESETS_DIR) + "/cusz_hi_cr.toml");
-    EXPECT_LE(preset_round_trip(p), EB_TOL);
+    auto r = preset_round_trip(p);
+    const float abs_eb  = PRESET_EB * r.data_range;
+    const float eb_tol  = abs_eb * 2.0f;
+    EXPECT_LE(r.max_error, eb_tol)
+        << "abs_eb=" << abs_eb << " data_range=" << r.data_range;
 }
 
 TEST(LCPresets, SaveLoadRoundTrip) {
@@ -90,6 +109,9 @@ TEST(LCPresets, SaveLoadRoundTrip) {
 
     Pipeline p2;
     p2.loadConfig(saved);
-    EXPECT_LE(preset_round_trip(p2), EB * 1.05f);
+    auto r = preset_round_trip(p2);
+    const float abs_eb = PRESET_EB * r.data_range;
+    EXPECT_LE(r.max_error, abs_eb * 1.05f)
+        << "abs_eb=" << abs_eb << " data_range=" << r.data_range;
     std::remove(saved.c_str());
 }

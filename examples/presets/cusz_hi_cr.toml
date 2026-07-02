@@ -5,7 +5,7 @@
 # One LC chain runs over the *concatenation* of the Huffman output and the
 # outlier ports — hence the Merge stage. TCMS8 = Zigzag<int64> (byte-transparent).
 # dims are a placeholder; override at load time for your data.
-memory_strategy = "PREALLOCATE"
+memory_strategy = "MINIMAL"
 dims = [512, 512, 1]
 
 [[stage]]

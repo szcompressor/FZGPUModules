@@ -5,7 +5,7 @@
 #   outliers: Merge([anchor | outlier_vals | outlier_idxs]) -> BIT4 -> RRE2 -> RZE1
 # TCMS = Zigzag (byte-transparent), BIT = Bitshuffle, RRE = RRE, RZE = RZE.
 # dims are a placeholder; override at load time for your data.
-memory_strategy = "PREALLOCATE"
+memory_strategy = "MINIMAL"
 dims = [512, 512, 1]
 
 [[stage]]
