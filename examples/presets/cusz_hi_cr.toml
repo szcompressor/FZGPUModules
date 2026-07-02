@@ -7,18 +7,17 @@
 # dims are a placeholder; override at load time for your data.
 memory_strategy = "PREALLOCATE"
 dims = [512, 512, 1]
-input_size = 1048576               # 512*512*4 bytes (override with your data)
 
 [[stage]]
 name = "gi"
 type = "GInterp"
 input_type = "float32"
 code_type = "uint16"
-error_bound = 1e-2
-error_bound_mode = "ABS"
+error_bound = 1e-3
+error_bound_mode = "NOA"
 quant_radius = 2048                 # explicit so Huffman bklen can match: bklen = 2*radius
-outlier_capacity = 0.2              # headroom: at eb=1e-2 this data needs ~10%; 0.1 overflows
-                                    # and the overflow leaks out-of-range codes into the stream
+                                    # NOA eb=1e-3 auto-radius ≈ ceil(2/eb) = 2000; 2048 covers it
+outlier_capacity = 0.2
 
 [[stage]]
 name = "huf"

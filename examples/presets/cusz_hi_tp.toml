@@ -7,16 +7,15 @@
 # dims are a placeholder; override at load time for your data.
 memory_strategy = "PREALLOCATE"
 dims = [512, 512, 1]
-input_size = 1048576               # 512*512*4 bytes (override with your data)
 
 [[stage]]
 name = "gi"
 type = "GInterp"
 input_type = "float32"
 code_type = "uint16"
-error_bound = 1e-2
-error_bound_mode = "ABS"
-outlier_capacity = 0.1
+error_bound = 1e-3
+error_bound_mode = "NOA"
+outlier_capacity = 0.2
 
 # ── codes chain: TCMS1 -> BIT1 -> RRE1 ──
 [[stage]]
