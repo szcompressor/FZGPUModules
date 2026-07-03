@@ -11,11 +11,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # Needed for pushing to gh-pages
+      contents: read
+      pages: write
+      id-token: write
 
     steps:
       - name: Checkout
@@ -30,11 +32,27 @@ jobs:
       - name: Generate documentation
         run: doxygen Doxyfile
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: docs/doxygen/html
-          # Keep the gh-pages branch history lean
-          force_orphan: true
-          enable_jekyll: false
+          path: docs/doxygen/html
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
