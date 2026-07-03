@@ -60,6 +60,10 @@ std::vector<StageTimingResult> CompressionDAG::collectTimings() {
             FZ_LOG(WARN, "cudaEventElapsedTime failed for '%s': %s",
                    node->name.c_str(), cudaGetErrorString(err));
             r.elapsed_ms = -1.0f;
+            // A failed runtime call also latches the error into the per-thread
+            // "last error" slot; consume it here so it cannot resurface at an
+            // unrelated downstream cudaGetLastError() and abort valid work.
+            cudaGetLastError();
         }
 
         // Sum up buffer sizes for input/output byte counts

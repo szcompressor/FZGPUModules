@@ -20,6 +20,7 @@
  *   GC14 - captureGraph() after compress() throws
  *   GC15 - enableGraphMode() after finalize() throws
  *   GC16 - graph capture works with a Lorenzo -> RLE pipeline
+ *   GC17 - profiling-enabled graph replay round-trips (sticky-error regression)
  */
 
 #include <gtest/gtest.h>
@@ -649,4 +650,82 @@ TEST(GraphCapture, RlePipelineCorrectOutput) {
     float max_err = max_abs_error(h_input, h_recon);
     EXPECT_LE(max_err, EB * 1.01f)
         << "GC16: Lorenzo->RLE graph round-trip max_err=" << max_err;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GC17: Profiling-enabled graph replay must not corrupt the CUDA context.
+//
+// Regression for the `--graph` benchmark crash: with profiling on, compress()
+// calls collectTimings() after every graph launch.  Per-stage start/completion
+// events are recorded by nodes baked into the captured graph, and
+// cudaEventElapsedTime() across graph-recorded events returns
+// cudaErrorInvalidValue.  That failure latched a sticky error into the context
+// that later aborted an unrelated kernel launch (seen as an "invalid argument"
+// at the AdaptiveBitpack decode kernel).  The fix skips the per-stage query on a
+// graph replay and clears the sticky error defensively; this test drives the
+// exact path (profiling on + AdaptiveBitpack terminal + compress/decompress loop)
+// and asserts a clean, correct round-trip.
+TEST(GraphCapture, ProfilingEnabledReplayRoundTrips) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
+    constexpr size_t N  = 1 << 15;
+    constexpr float  EB = 1e-3f;
+    const size_t in_bytes = N * sizeof(float);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = std::sin(static_cast<float>(i) * 0.01f) * 100.0f;
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_input, stream.stream);
+    stream.sync();
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 3.0f);
+    auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
+    quant->setErrorBound(EB);
+    quant->setErrorBoundMode(ErrorBoundMode::ABS);
+    quant->setLinearMode(true);
+    auto* lrz = p.addStage<LorenzoStage<int32_t>>();
+    lrz->setBlockSize(32);
+    p.connect(lrz, quant, "codes");
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    ab->setOutlierSelection(true);   // cuSZp2 variant (the reported --graph crash)
+    p.connect(ab, lrz);
+    p.enableGraphMode(true);
+    p.enableProfiling(true);         // ← triggers collectTimings() after each launch
+    p.setPoolManagedDecompOutput(false);
+    p.finalize();
+
+    p.warmup(stream.stream);
+    p.captureGraph(stream.stream);
+    ASSERT_TRUE(p.isGraphCaptured());
+
+    // Several async compress→decompress iterations without CUDA_LAUNCH_BLOCKING:
+    // a sticky context error would surface here.
+    for (int it = 0; it < 4; ++it) {
+        void* d_comp = nullptr; size_t comp_sz = 0;
+        ASSERT_NO_THROW(p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream.stream))
+            << "GC17: compress (graph replay + profiling) threw on iter " << it;
+        stream.sync();
+        ASSERT_GT(comp_sz, 0u);
+
+        void* d_dec = nullptr; size_t dec_sz = 0;
+        ASSERT_NO_THROW(p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream.stream))
+            << "GC17: decompress threw on iter " << it;
+        stream.sync();
+        ASSERT_EQ(dec_sz, in_bytes);
+
+        std::vector<float> h_recon(N);
+        cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+        cudaFree(d_dec);
+        EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f)
+            << "GC17: round-trip exceeded error bound on iter " << it;
+
+        // The context must be error-free after the profiling/timing pass.
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess)
+            << "GC17: sticky CUDA error left in context on iter " << it;
+    }
 }

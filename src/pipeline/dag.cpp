@@ -415,7 +415,12 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 outputs[j] = buffers_[node->output_buffer_ids[j]].d_ptr;
             }
             
-            if (profiling_enabled_ && node->start_event) {
+            // start_event is timing-only (read by collectTimings()).  Skip it
+            // during graph capture: per-stage elapsed-time queries across
+            // graph-recorded events are unsupported, so recording it would only
+            // add a dead node to the graph.  completion_event is still recorded
+            // below because it carries the inter-node dependency ordering.
+            if (profiling_enabled_ && node->start_event && !capture_mode_) {
                 FZ_CUDA_CHECK(cudaEventRecord(node->start_event, exec_stream));
             }
 

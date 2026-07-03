@@ -916,8 +916,12 @@ static int run_benchmark(CliSettings s) {
         // Graph mode requires PREALLOCATE (enforced here regardless of -strategy).
         // enableGraphMode() must be called before finalize() (which loadConfig() does
         // internally, or build_dynamic_linear_pipeline() does at the end).
-        // enableProfiling() must be on before warmup()/captureGraph() so per-stage
-        // CUDA events are included inside the captured graph nodes.
+        // enableProfiling() must be on before warmup()/captureGraph() so the
+        // whole-pipeline DagEventTimer (events recorded on `stream`, outside the
+        // graph) yields dag_elapsed_ms.  Per-stage event timing is *not* available
+        // during a graph replay — cudaEventElapsedTime() across graph-recorded
+        // events is unsupported — so the compress `stages[]` breakdown is empty
+        // under --graph (decompress, which runs the normal DAG, still reports it).
         // A real (non-default) stream is required because cudaStreamBeginCapture
         // returns cudaErrorStreamCaptureUnsupported on stream 0.
         if (s.use_graph) {

@@ -129,7 +129,16 @@ void Pipeline::compress(
             stage_ptr->postStreamSync(stream);
         }
 
-        stage_timings = profiling_enabled_ ? dag_->collectTimings() : std::vector<StageTimingResult>{};
+        // Per-stage CUDA-event timing is unavailable during a graph replay: the
+        // start/completion events are recorded by nodes baked into the captured
+        // graph, and cudaEventElapsedTime() across graph-recorded events is not
+        // supported (returns cudaErrorInvalidValue on every node).  The whole-
+        // pipeline dag_elapsed_ms from the outer DagEventTimer (events recorded
+        // on `stream` outside the graph) is still valid.  Skip the per-stage pass
+        // here so we never issue the failing query.
+        stage_timings = (profiling_enabled_ && !graph_captured_)
+                            ? dag_->collectTimings()
+                            : std::vector<StageTimingResult>{};
 
         for (size_t i = 0; i < output_buffer_ids_.size(); i++) {
             int buffer_id = output_buffer_ids_[i];
