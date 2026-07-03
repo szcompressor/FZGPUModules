@@ -67,6 +67,7 @@ struct CliSettings {
     int  verbose_level = 0;    // 0=off, 1=INFO, 2=DEBUG, 3=TRACE
     bool print_pipeline = false;
     bool bounds_check = false;
+    bool use_graph = false;
 
     size_t chunk_size = kDefaultChunkSize;
 
@@ -234,7 +235,8 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
             (key == "warmup") ||
             (key == "profile") ||
             (key == "print-pipeline") ||
-            (key == "bounds-check");
+            (key == "bounds-check") ||
+            (key == "graph");
 
         if (is_flag) {
             opts[key] = "true";
@@ -331,6 +333,7 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
     s->report = contains(opts, "report") && parse_bool(opts.at("report"), "report");
     s->print_pipeline = contains(opts, "print-pipeline") && parse_bool(opts.at("print-pipeline"), "print-pipeline");
     s->bounds_check   = contains(opts, "bounds-check")   && parse_bool(opts.at("bounds-check"),   "bounds-check");
+    s->use_graph      = contains(opts, "graph")          && parse_bool(opts.at("graph"),           "graph");
 
     if (contains(opts, "verbose")) {
         const std::string& v = opts.at("verbose");
@@ -566,6 +569,7 @@ static void print_root_usage(const char* argv0) {
         << "  --report-json <file>              Write a machine-readable JSON report to <file>\n"
         << "  --compare <original>              Compare decompressed output with original\n"
         << "  --profile                         Print per-stage GPU timing table\n"
+        << "  --graph                           Use CUDA Graph mode for benchmark (silently falls back if pipeline is incompatible)\n"
         << "  --print-pipeline                  Print pipeline stage graph after finalize\n\n"
         << "Diagnostic Options:\n"
         << "  -v                                Verbose: enable INFO-level library logging\n"
@@ -887,7 +891,7 @@ static int run_decompress(CliSettings s) {
 
 static int run_benchmark(CliSettings s) {
     if (s.input_path.empty()) throw std::runtime_error("-b (benchmark) requires -i/--input");
-    
+
     size_t element_size = (s.type == "f64" || s.type == "i64") ? 8 : 4;
     std::vector<uint8_t> input_bytes = read_binary_file(s.input_path);
     if (input_bytes.empty()) throw std::runtime_error("Input file is empty: " + s.input_path);
@@ -896,34 +900,107 @@ static int run_benchmark(CliSettings s) {
     const bool want_json = !s.report_json_path.empty();
     void* d_input = nullptr;
 
+    // Graph mode state — bench_stream stays 0 (default stream) unless graph capture succeeds.
+    bool graph_active = false;
+    std::string graph_reason;
+    cudaStream_t bench_stream = 0;
+
     try {
         FZ_CUDA_CHECK(cudaMalloc(&d_input, payload_bytes));
         FZ_CUDA_CHECK(cudaMemcpy(d_input, input_bytes.data(), payload_bytes, cudaMemcpyHostToDevice));
 
         s.profile = true;
         std::unique_ptr<Pipeline> pipeline;
-        if (!s.config_path.empty()) {
-            pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
-            pipeline->setDims(s.nx, s.ny, s.nz);
-            pipeline->setWarmupOnFinalize(s.warmup);
-            pipeline->enableProfiling(true);
-            if (s.bounds_check) pipeline->enableBoundsCheck(true);
-            pipeline->loadConfig(s.config_path);
-            if (s.print_pipeline) pipeline->printPipeline();
-        } else {
-            pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
-            if (s.type == "f32") {
-                build_dynamic_linear_pipeline<float>(pipeline.get(), s);
-            } else if (s.type == "f64") {
-                build_dynamic_linear_pipeline<double>(pipeline.get(), s);
+
+        // ── Try CUDA Graph capture ─────────────────────────────────────────────
+        // Graph mode requires PREALLOCATE (enforced here regardless of -strategy).
+        // enableGraphMode() must be called before finalize() (which loadConfig() does
+        // internally, or build_dynamic_linear_pipeline() does at the end).
+        // enableProfiling() must be on before warmup()/captureGraph() so per-stage
+        // CUDA events are included inside the captured graph nodes.
+        // A real (non-default) stream is required because cudaStreamBeginCapture
+        // returns cudaErrorStreamCaptureUnsupported on stream 0.
+        if (s.use_graph) {
+            try {
+                CliSettings gs = s;
+                gs.strategy    = MemoryStrategy::PREALLOCATE;
+                gs.warmup      = false;   // manual warmup(stream) below; skip auto on stream 0
+                gs.print_pipeline = false; // suppress during trial; print after confirmed success
+
+                auto gp = std::make_unique<Pipeline>(payload_bytes, MemoryStrategy::PREALLOCATE,
+                                                     s.pool_multiplier);
+                if (!s.config_path.empty()) {
+                    gp->setDims(s.nx, s.ny, s.nz);
+                    gp->setWarmupOnFinalize(false);
+                    if (s.bounds_check) gp->enableBoundsCheck(true);
+                    gp->enableProfiling(true);
+                    gp->enableGraphMode(true);
+                    gp->loadConfig(s.config_path);   // calls finalize() internally
+                } else {
+                    gp->enableGraphMode(true);        // must precede finalize() inside build_*
+                    if (gs.type == "f32") {
+                        build_dynamic_linear_pipeline<float>(gp.get(), gs);
+                    } else if (gs.type == "f64") {
+                        build_dynamic_linear_pipeline<double>(gp.get(), gs);
+                    } else {
+                        throw std::runtime_error("Dynamic builder only supports f32/f64 currently.");
+                    }
+                }
+
+                // Ensure profiling is on before warmup/captureGraph (calling again is harmless
+                // if build_dynamic_linear_pipeline already set it).
+                gp->enableProfiling(true);
+
+                // CUDA graph capture requires a non-default stream.
+                FZ_CUDA_CHECK(cudaStreamCreate(&bench_stream));
+
+                gp->warmup(bench_stream);
+                gp->captureGraph(bench_stream);
+                FZ_CUDA_CHECK(cudaStreamSynchronize(bench_stream));
+
+                if (s.print_pipeline) gp->printPipeline();
+
+                pipeline = std::move(gp);
+                graph_active = true;
+                s.strategy = MemoryStrategy::PREALLOCATE;  // reflect actual strategy in JSON
+                std::cout << "[benchmark] CUDA graph captured successfully\n";
+            } catch (const std::exception& ex) {
+                graph_reason = ex.what();
+                if (bench_stream != 0) {
+                    cudaStreamDestroy(bench_stream);
+                    bench_stream = 0;
+                }
+                pipeline.reset();
+                std::cerr << "[benchmark] Graph capture failed (falling back to normal pipeline): "
+                          << ex.what() << "\n";
+            }
+        }
+
+        // ── Normal pipeline (no --graph, or silent graph fallback) ─────────────
+        if (!pipeline) {
+            if (!s.config_path.empty()) {
+                pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
+                pipeline->setDims(s.nx, s.ny, s.nz);
+                pipeline->setWarmupOnFinalize(s.warmup);
+                pipeline->enableProfiling(true);
+                if (s.bounds_check) pipeline->enableBoundsCheck(true);
+                pipeline->loadConfig(s.config_path);
+                if (s.print_pipeline) pipeline->printPipeline();
             } else {
-                throw std::runtime_error("Dynamic builder only supports f32/f64 currently.");
+                pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
+                if (s.type == "f32") {
+                    build_dynamic_linear_pipeline<float>(pipeline.get(), s);
+                } else if (s.type == "f64") {
+                    build_dynamic_linear_pipeline<double>(pipeline.get(), s);
+                } else {
+                    throw std::runtime_error("Dynamic builder only supports f32/f64 currently.");
+                }
             }
         }
 
         void* d_compressed = nullptr;
         size_t compressed_size = 0;
-        pipeline->compress(d_input, payload_bytes, &d_compressed, &compressed_size, 0);
+        pipeline->compress(d_input, payload_bytes, &d_compressed, &compressed_size, bench_stream);
         FZ_CUDA_CHECK(cudaDeviceSynchronize());
 
         TimingSummary compress_stats, decompress_stats;
@@ -934,7 +1011,7 @@ static int run_benchmark(CliSettings s) {
             const bool is_last = (i == s.benchmark_runs - 1);
 
             const auto t0 = std::chrono::high_resolution_clock::now();
-            pipeline->compress(d_input, payload_bytes, &d_compressed, &compressed_size, 0);
+            pipeline->compress(d_input, payload_bytes, &d_compressed, &compressed_size, bench_stream);
             FZ_CUDA_CHECK(cudaDeviceSynchronize());
             const auto t1 = std::chrono::high_resolution_clock::now();
             compress_stats.add(std::chrono::duration<double, std::milli>(t1 - t0).count(), pipeline->getLastPerfResult().dag_elapsed_ms);
@@ -943,7 +1020,7 @@ static int run_benchmark(CliSettings s) {
             void* d_recon = nullptr;
             size_t recon_size = 0;
             const auto t2 = std::chrono::high_resolution_clock::now();
-            pipeline->decompress(d_compressed, compressed_size, &d_recon, &recon_size, 0);
+            pipeline->decompress(d_compressed, compressed_size, &d_recon, &recon_size, bench_stream);
             FZ_CUDA_CHECK(cudaDeviceSynchronize());
             const auto t3 = std::chrono::high_resolution_clock::now();
 
@@ -1022,13 +1099,18 @@ static int run_benchmark(CliSettings s) {
             append_stages(d.stages, last_compress_perf, "compress");
             append_stages(d.stages, last_decompress_perf, "decompress");
             if (has_m) set_quality(d, m);
+            d.graph_requested = s.use_graph;
+            d.graph_active    = graph_active;
+            d.graph_incompatible_reason = graph_reason;
             try_write_report(s.report_json_path, d);
         }
 
     } catch (...) {
+        if (bench_stream != 0) { cudaStreamDestroy(bench_stream); bench_stream = 0; }
         if (d_input) FZ_CUDA_CHECK_WARN(cudaFree(d_input));
         throw;
     }
+    if (bench_stream != 0) cudaStreamDestroy(bench_stream);
     if (d_input) FZ_CUDA_CHECK(cudaFree(d_input));
     return 0;
 }

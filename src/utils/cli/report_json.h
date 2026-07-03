@@ -22,7 +22,7 @@ namespace cli {
  * false, except `error_message` which is `null` on success.
  */
 
-constexpr const char* kReportSchemaVersion = "1.0";
+constexpr const char* kReportSchemaVersion = "1.1";
 
 /// One stage's device time within a phase, for the `stages[]` block.
 struct StageTimeJson {
@@ -84,6 +84,11 @@ struct ReportData {
 
     // ── stages (only when profiling produced per-stage timings) ──
     std::vector<StageTimeJson> stages;
+
+    // ── graph mode (benchmark only; omitted entirely when graph_requested is false) ──
+    bool        graph_requested = false;
+    bool        graph_active    = false;
+    std::string graph_incompatible_reason;   // empty → field omitted
 };
 
 /**

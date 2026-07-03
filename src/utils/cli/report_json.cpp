@@ -199,7 +199,20 @@ void write_report_json(const std::string& path, const ReportData& d) {
           << "\", \"phase\": \"" << esc(s.phase)
           << "\", \"device_ms\": " << num(s.device_ms) << " }";
     }
-    o << (d.stages.empty() ? "]\n" : "\n  ]\n");
+    o << (d.stages.empty() ? "]" : "\n  ]");
+    if (d.graph_requested) o << ",";
+    o << "\n";
+
+    // graph (benchmark only; emitted only when graph was requested)
+    if (d.graph_requested) {
+        o << "  \"graph\": {\n";
+        o << "    \"requested\": " << (d.graph_requested ? "true" : "false") << ",\n";
+        o << "    \"active\": " << (d.graph_active ? "true" : "false");
+        if (!d.graph_incompatible_reason.empty()) {
+            o << ",\n    \"incompatible_reason\": \"" << esc(d.graph_incompatible_reason) << "\"";
+        }
+        o << "\n  }\n";
+    }
 
     o << "}\n";
 
