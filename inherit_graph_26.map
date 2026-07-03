@@ -1,0 +1,37 @@
+<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
+<area shape="rect" id="Node000000" href="$classfz_1_1Stage.html" title=" " alt="" coords="5,447,84,472"/>
+<area shape="rect" id="Node000001" href="$classfz_1_1AdaptiveBitpackStage.html" title=" " alt="" coords="132,5,356,31"/>
+<area shape="poly" id="edge1_Node000000_Node000001" title=" " alt="" coords="45,433,53,345,69,227,80,168,94,114,110,70,130,40,145,29,149,33,134,44,115,73,99,116,85,169,74,228,58,345,50,433"/>
+<area shape="rect" id="Node000002" href="$classfz_1_1BitpackStage.html" title=" " alt="" coords="161,55,327,80"/>
+<area shape="poly" id="edge2_Node000000_Node000002" title=" " alt="" coords="46,432,55,354,72,251,97,153,112,115,130,89,159,72,162,76,134,93,117,118,102,155,77,252,61,354,51,433"/>
+<area shape="rect" id="Node000003" href="$classfz_1_1BitplaneRZEStage.html" title=" " alt="" coords="165,104,323,129"/>
+<area shape="poly" id="edge3_Node000000_Node000003" title=" " alt="" coords="47,433,58,364,76,276,100,193,114,161,130,139,146,127,163,120,165,125,148,132,134,143,119,163,105,195,81,277,63,365,52,434"/>
+<area shape="rect" id="Node000004" href="$classfz_1_1BitshuffleStage.html" title=" " alt="" coords="173,153,315,179"/>
+<area shape="poly" id="edge4_Node000000_Node000004" title=" " alt="" coords="44,433,48,381,61,316,72,281,87,248,106,217,130,189,150,176,172,168,174,173,152,181,134,193,110,220,91,250,77,283,66,317,53,382,49,433"/>
+<area shape="rect" id="Node000005" href="$classfz_1_1DifferenceStage.html" title=" " alt="" coords="171,203,317,243"/>
+<area shape="poly" id="edge5_Node000000_Node000005" title=" " alt="" coords="47,433,56,393,71,345,95,296,111,273,130,253,149,241,170,232,172,237,151,245,134,257,115,277,100,299,76,347,61,395,52,434"/>
+<area shape="rect" id="Node000006" href="$classfz_1_1GInterpStage.html" title=" " alt="" coords="151,267,337,307"/>
+<area shape="poly" id="edge6_Node000000_Node000006" title=" " alt="" coords="53,432,81,374,103,343,130,317,150,305,153,310,134,321,107,347,86,377,58,435"/>
+<area shape="rect" id="Node000007" href="$classfz_1_1HuffmanStage.html" title=" " alt="" coords="157,332,331,357"/>
+<area shape="poly" id="edge7_Node000000_Node000007" title=" " alt="" coords="61,433,91,399,131,368,160,355,162,360,133,372,94,403,65,437"/>
+<area shape="rect" id="Node000008" href="$classfz_1_1LorenzoQuantStage.html" title=" " alt="" coords="159,382,329,422"/>
+<area shape="poly" id="edge8_Node000000_Node000008" title=" " alt="" coords="96,442,131,431,172,420,174,425,133,437,98,447"/>
+<area shape="rect" id="Node000009" href="$classfz_1_1LorenzoStage.html" title=" " alt="" coords="160,447,328,472"/>
+<area shape="poly" id="edge9_Node000000_Node000009" title=" " alt="" coords="98,457,160,457,160,462,98,462"/>
+<area shape="rect" id="Node000010" href="$classfz_1_1MergeStage.html" title=" " alt="" coords="184,496,304,521"/>
+<area shape="poly" id="edge10_Node000000_Node000010" title=" " alt="" coords="98,472,133,481,185,493,184,498,131,486,97,477"/>
+<area shape="rect" id="Node000011" href="$classfz_1_1NegabinaryStage.html" title=" " alt="" coords="167,546,321,586"/>
+<area shape="poly" id="edge11_Node000000_Node000011" title=" " alt="" coords="69,480,98,506,133,530,168,545,165,550,131,535,95,510,65,484"/>
+<area shape="rect" id="Node000012" href="$classfz_1_1QuantizerStage.html" title=" " alt="" coords="173,610,315,650"/>
+<area shape="poly" id="edge12_Node000000_Node000012" title=" " alt="" coords="58,484,86,541,107,571,134,596,152,607,173,616,171,621,150,612,130,600,103,574,82,544,53,486"/>
+<area shape="rect" id="Node000013" href="$classfz_1_1RLEStage.html" title=" " alt="" coords="173,675,315,700"/>
+<area shape="poly" id="edge13_Node000000_Node000013" title=" " alt="" coords="52,485,60,524,75,572,99,620,115,641,134,660,153,672,174,679,172,684,150,677,130,664,111,645,95,623,70,574,55,526,47,486"/>
+<area shape="rect" id="Node000014" href="$classfz_1_1RREStage.html" title=" " alt="" coords="191,724,297,749"/>
+<area shape="poly" id="edge14_Node000000_Node000014" title=" " alt="" coords="50,486,55,534,68,595,93,657,111,685,134,709,161,725,192,733,190,738,159,730,130,713,107,688,89,659,63,596,50,535,44,486"/>
+<area shape="rect" id="Node000015" href="$classfz_1_1RZEStage.html" title=" " alt="" coords="191,773,297,799"/>
+<area shape="poly" id="edge15_Node000000_Node000015" title=" " alt="" coords="48,486,50,543,62,617,72,655,88,693,108,728,134,759,161,775,192,783,190,788,159,780,130,763,103,731,83,696,67,657,56,618,45,543,43,486"/>
+<area shape="rect" id="Node000016" href="$classfz_1_1TiledLorenzoStage.html" title=" " alt="" coords="144,823,344,848"/>
+<area shape="poly" id="edge16_Node000000_Node000016" title=" " alt="" coords="52,485,62,560,79,658,103,749,118,785,134,808,151,820,148,825,130,812,113,787,98,751,74,659,56,561,46,486"/>
+<area shape="rect" id="Node000017" href="$classfz_1_1ZigzagStage.html" title=" " alt="" coords="163,873,325,913"/>
+<area shape="poly" id="edge17_Node000000_Node000017" title=" " alt="" coords="51,485,60,569,76,681,101,788,116,829,134,858,147,869,164,877,161,882,145,873,130,861,112,832,96,790,71,682,54,570,46,486"/>
+</map>

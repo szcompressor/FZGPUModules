@@ -1,0 +1,4 @@
+var searchData=
+[
+  ['zigzag_5fcodes_0',['zigzag_codes',['../structfz_1_1LorenzoQuantConfig.html#a07600b6c8f0a3c4f3078ba83b5b745c2',1,'fz::LorenzoQuantConfig::zigzag_codes'],['../structfz_1_1LorenzoQuantStage_1_1Config.html#aa4c95fa92ccc7d99d97cd12d4e1e3f86',1,'fz::LorenzoQuantStage::Config::zigzag_codes'],['../structfz_1_1QuantizerConfig.html#a85477ba4b478fc245288f38a05ff2894',1,'fz::QuantizerConfig::zigzag_codes'],['../structfz_1_1QuantizerStage_1_1Config.html#a27ec1b197cd1f5b1b62a2b108c550746',1,'fz::QuantizerStage::Config::zigzag_codes']]]
+];
