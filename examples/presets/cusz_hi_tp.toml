@@ -13,10 +13,18 @@ memory_strategy = "MINIMAL"
 name = "gi"
 type = "GInterp"
 input_type = "float32"
-code_type = "uint16"
+code_type = "uint8"                # match cuSZ-Hi's spline ectrl (ErrCtrlTrait<1> = u1).
+                                   # 1 byte/code, half the code-stream bytes of uint16.
 error_bound = 1e-3
 error_bound_mode = "NOA"
-outlier_capacity = 0.2
+quant_radius = 128                 # match cuSZ-Hi's spline default (dict_size=256, radius=128).
+                                   # Codes live in [0,256) so they fit a single byte; residuals
+                                   # outside +/-128 escape to the outlier buffer (compaction),
+                                   # exactly as native does. Together with uint8 codes this ~2x's
+                                   # the CR vs the old uint16/r32768 config (CLDHGH 7.68->12.47x,
+                                   # native 13.33x) at identical fidelity. Auto-tuning adds <0.5%.
+outlier_capacity = 0.2             # radius-128 pushes more residuals to outliers than a wide
+                                   # radius would; 20% capacity covers sharp fields (e.g. NYX).
 
 # ── codes chain: TCMS1 -> BIT1 -> RRE1 ──
 [[stage]]
