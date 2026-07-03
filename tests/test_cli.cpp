@@ -238,7 +238,7 @@ TEST(CLI, ReportJsonCompressEmitsValidFile) {
     ASSERT_TRUE(std::filesystem::exists(report_path));
 
     const std::string json = read_text_file(report_path);
-    EXPECT_NE(json.find("\"schema_version\": \"1.0\""), std::string::npos);
+    EXPECT_NE(json.find("\"schema_version\": \"1.1\""), std::string::npos);
     EXPECT_NE(json.find("\"status\": \"ok\""), std::string::npos);
     EXPECT_NE(json.find("\"operation\": \"compress\""), std::string::npos);
     // Raw count must be present and exact so the harness can recompute ratio.
@@ -297,4 +297,76 @@ TEST(CLI, BenchmarkCompressSingleRunWorks) {
     });
 
     EXPECT_EQ(rc, 0);
+}
+
+// --graph should succeed for a graph-compatible pipeline (lorenzo->rle) and emit
+// "active": true in the JSON report.  Graph mode accelerates the (repeated)
+// compress path only; the benchmark's decompress round-trip runs the normal
+// inverse DAG, so the terminal coder here must round-trip cleanly (mirrors the
+// Lorenzo->RLE pipeline exercised by the GraphCapture unit tests).
+TEST(CLI, BenchmarkGraphModeActivates) {
+    TempWorkspace tmp;
+
+    constexpr size_t kN = 1 << 11;
+    std::vector<float> input = fz_test::make_sine_floats(kN, 0.015f, 2.0f);
+    const auto input_path = tmp.file("graph_input.f32");
+    const auto report_path = tmp.file("graph_report.json");
+    write_float_file(input_path, input);
+
+    const int rc = run_cli({
+        "fzgmod-cli",
+        "-b",
+        "-i", input_path.string(),
+        "--stages", "lorenzo->rle",
+        "-m", "abs",
+        "-e", "1e-3",
+        "--strategy", "preallocate",
+        "--runs", "1",
+        "--graph",
+        "--report-json", report_path.string()
+    });
+
+    EXPECT_EQ(rc, 0);
+    ASSERT_TRUE(std::filesystem::exists(report_path));
+
+    const std::string json = read_text_file(report_path);
+    EXPECT_NE(json.find("\"schema_version\": \"1.1\""), std::string::npos);
+    EXPECT_NE(json.find("\"graph\""), std::string::npos);
+    EXPECT_NE(json.find("\"requested\": true"), std::string::npos);
+    EXPECT_NE(json.find("\"active\": true"), std::string::npos);
+    // No incompatible_reason field when graph succeeded.
+    EXPECT_EQ(json.find("\"incompatible_reason\""), std::string::npos);
+}
+
+// --graph with a graph-incompatible stage (huffman) should fall back silently,
+// exit 0, and report "active": false with an incompatible_reason.
+TEST(CLI, BenchmarkGraphModeFallsBackOnIncompatibleStage) {
+    TempWorkspace tmp;
+
+    constexpr size_t kN = 1 << 11;
+    std::vector<float> input = fz_test::make_sine_floats(kN, 0.015f, 2.0f);
+    const auto input_path = tmp.file("graph_fb_input.f32");
+    const auto report_path = tmp.file("graph_fb_report.json");
+    write_float_file(input_path, input);
+
+    const int rc = run_cli({
+        "fzgmod-cli",
+        "-b",
+        "-i", input_path.string(),
+        "--stages", "lorenzo->bitshuffle->huffman",
+        "-m", "abs",
+        "-e", "1e-3",
+        "--strategy", "preallocate",
+        "--runs", "1",
+        "--graph",
+        "--report-json", report_path.string()
+    });
+
+    EXPECT_EQ(rc, 0);
+    ASSERT_TRUE(std::filesystem::exists(report_path));
+
+    const std::string json = read_text_file(report_path);
+    EXPECT_NE(json.find("\"requested\": true"), std::string::npos);
+    EXPECT_NE(json.find("\"active\": false"), std::string::npos);
+    EXPECT_NE(json.find("\"incompatible_reason\""), std::string::npos);
 }
