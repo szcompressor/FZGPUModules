@@ -299,12 +299,23 @@ TEST(CLI, BenchmarkCompressSingleRunWorks) {
     EXPECT_EQ(rc, 0);
 }
 
+// CUDA Graph capture requires a real device memory pool; on vGPU / cudaMalloc
+// fallback mode it is unsupported and the CLI silently falls back.  Mirrors the
+// GraphCapture unit tests' is_graph_supported() guard.
+static bool cli_graph_supported() {
+    fz::Pipeline probe(1024, fz::MemoryStrategy::PREALLOCATE, 1.0f);
+    return !probe.isMemPoolFallbackMode();
+}
+
 // --graph should succeed for a graph-compatible pipeline (lorenzo->rle) and emit
 // "active": true in the JSON report.  Graph mode accelerates the (repeated)
 // compress path only; the benchmark's decompress round-trip runs the normal
 // inverse DAG, so the terminal coder here must round-trip cleanly (mirrors the
 // Lorenzo->RLE pipeline exercised by the GraphCapture unit tests).
 TEST(CLI, BenchmarkGraphModeActivates) {
+    if (!cli_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode (vGPU)";
+    }
     TempWorkspace tmp;
 
     constexpr size_t kN = 1 << 11;
