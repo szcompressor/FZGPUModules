@@ -330,9 +330,16 @@ __device__ void c_reset_scratch_data(
                     (AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2));
 
         s_data[z][y][x] = 0;
-        if (x % AnchorBlockSizeX == 0 and y % AnchorBlockSizeY == 0 and
-            z % AnchorBlockSizeZ == 0)
-          s_ectrl[z][y][x] = radius;
+        // Initialize the *entire* quant-code scratch to the zero-residual code
+        // (radius), not just the anchor corners. Any position the interpolation
+        // does not overwrite (e.g. block-boundary slots the stencil skips) then
+        // serializes a deterministic 0-residual code instead of leftover shared
+        // memory from a previous block — which otherwise made the compressed
+        // blob non-deterministic across runs (different every compress()) and
+        // corrupted reconstruction for data with extreme values / sharp
+        // gradients (e.g. NYX temperature). Mirrors x_reset_scratch_data, which
+        // zeros all of s_ectrl on the decode side.
+        s_ectrl[z][y][x] = radius;
     }
     __syncthreads();
 }
@@ -437,13 +444,22 @@ __device__ void x_reset_scratch_data(
                  (AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2));
 
         s_ectrl[z][y][x] = 0;  // TODO explicitly handle zero-padding
+        // Zero the *entire* reconstruction scratch, not just the anchor corners.
+        // The encoder's c_reset_scratch_data() zeros all of s_data, so any
+        // interpolation position that is read before it is written sees a
+        // deterministic 0 there. The decoder must match: if it only zeroed the
+        // corners (as before), every non-corner slot held leftover shared memory
+        // from a previous block, so a read-before-write during reconstruction
+        // returned non-deterministic garbage — visible as ~1e9 blow-ups on data
+        // with extreme values / sharp gradients (e.g. NYX temperature), and as
+        // silent per-run PSNR variance elsewhere. Zeroing all of s_xdata makes
+        // the decode deterministic and symmetric with the encode.
+        s_xdata[z][y][x] = 0;
         /*****************************************************************************
          okay to use
          ******************************************************************************/
         if (x % AnchorBlockSizeX == 0 and y % AnchorBlockSizeY == 0 and
             z % AnchorBlockSizeZ == 0) {
-            s_xdata[z][y][x] = 0;
-
             auto ax = ((x / AnchorBlockSizeX) + BIX * numAnchorBlockX);
             auto ay = ((y / AnchorBlockSizeY) + BIY * numAnchorBlockY);
             auto az = ((z / AnchorBlockSizeZ) + BIZ * numAnchorBlockZ);

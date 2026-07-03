@@ -1002,6 +1002,18 @@ void GInterpStage<TInput, TCode>::execute(
         }
     }
 
+    // Zero the full outlier capacity before scattering. The forward kernel
+    // fills only slots [0, outlier_count); the tail is left untouched. Merge
+    // (and any other consumer) reads these ports at their worst-case capacity
+    // during the DAG run because postStreamSync() — which trims the sizes to
+    // the actual count — only runs after the whole pipeline completes. Without
+    // this memset the untouched tail is whatever the recycled pool page held,
+    // so the merged blob becomes non-deterministic across repeated compress()
+    // calls (notably when a decompress() runs in between, e.g. benchmark loops),
+    // inflating the stream and corrupting decode. Zeroing makes it deterministic.
+    FZ_CUDA_CHECK(cudaMemsetAsync(outputs[2], 0, max_outliers * sizeof(TInput),   stream));
+    FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, max_outliers * sizeof(uint32_t), stream));
+
     INTERPOLATION_PARAMS intp_param = buildIntpParam();
     if (dim == 3) {
         ginterp::launchGInterpForward3D<TInput, TCode>(

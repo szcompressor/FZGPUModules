@@ -4,9 +4,10 @@
 #   codes:    GInterp -> TCMS1 -> BIT1 -> RRE1
 #   outliers: Merge([anchor | outlier_vals | outlier_idxs]) -> BIT4 -> RRE2 -> RZE1
 # TCMS = Zigzag (byte-transparent), BIT = Bitshuffle, RRE = RRE, RZE = RZE.
-# dims are a placeholder; override at load time for your data.
+# dims are intentionally omitted: the caller must set them (CLI -l / setDims())
+# for the actual data. A dims entry here would override setDims() at loadConfig
+# time (GInterp is ≥2-D), silently running the pipeline at the wrong shape.
 memory_strategy = "MINIMAL"
-dims = [512, 512, 1]
 
 [[stage]]
 name = "gi"

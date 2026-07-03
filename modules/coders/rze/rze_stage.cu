@@ -66,6 +66,11 @@ rzeEncodeKernel(
 
     int  csize = in_size;
     bool good  = lc_detail::d_RZE<T>(csize, s_in, s_out, s_temp);
+    // d_RZE (like d_RRE) writes its final bitmap level to s_out without a
+    // trailing barrier, so the reads below can race the last writers. The
+    // inverse path syncs externally; mirror that here to keep the packed output
+    // deterministic (racecheck flagged d_RZE vs this kernel).
+    __syncthreads();
 
     byte* out = d_scratch + (size_t)cid * (uint32_t)RZE_CS;
 

@@ -554,11 +554,18 @@ void CompressionDAG::reset(cudaStream_t stream) {
         buffer.remaining_consumers = buffer.consumer_stage_ids.size();
 
         // Restore the functional size back to the allocated capacity.
-        // During execute(), stages (like RZE) may shrink buffer.size to
-        // reflect their actual output. If we don't reset this, subsequent 
+        // During execute(), stages (like RZE/RRE) may shrink buffer.size to
+        // reflect their actual output. If we don't reset this, subsequent
         // executions will use the shrunk size, causing data truncation.
         // We use initial_size to ensure we even restore buffers that shrunk to 0.
-        if (buffer.is_allocated && !buffer.is_external) {
+        //
+        // This must run regardless of is_allocated: under MINIMAL the buffer was
+        // just freed above (is_allocated == false), but the *logical* size is
+        // metadata that the next execute()'s lazy allocateBuffer() reads to size
+        // the new allocation. Gating on is_allocated left MINIMAL buffers pinned
+        // at rep-1's shrunk (post-compression) size, so rep 2+ under-allocated the
+        // buffer and the stage kernel wrote past it (e.g. rrePackKernel overrun).
+        if (!buffer.is_external) {
              buffer.size = buffer.initial_size;
              // We intentionally do NOT reset buffer.allocated_size because
              // in PREALLOCATE mode, the pointer is kept and the capacity

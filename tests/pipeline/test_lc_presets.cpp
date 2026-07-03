@@ -73,6 +73,7 @@ static RoundTripOut preset_round_trip(Pipeline& p) {
 
 TEST(LCPresets, ThroughputRoundTrip) {
     Pipeline p;
+    p.setDims(NX, NY, 1);  // presets carry no dims; caller must set them
     p.loadConfig(std::string(FZ_PRESETS_DIR) + "/cusz_hi_tp.toml");
     auto r = preset_round_trip(p);
     const float abs_eb  = PRESET_EB * r.data_range;
@@ -83,6 +84,7 @@ TEST(LCPresets, ThroughputRoundTrip) {
 
 TEST(LCPresets, RatioRoundTrip) {
     Pipeline p;
+    p.setDims(NX, NY, 1);  // presets carry no dims; caller must set them
     p.loadConfig(std::string(FZ_PRESETS_DIR) + "/cusz_hi_cr.toml");
     auto r = preset_round_trip(p);
     const float abs_eb  = PRESET_EB * r.data_range;
@@ -95,6 +97,7 @@ TEST(LCPresets, SaveLoadRoundTrip) {
     // Load tp, save it back out, reload the saved copy, and round-trip — this
     // exercises serialization of Zigzag byte_transparent + Merge segments.
     Pipeline p;
+    p.setDims(NX, NY, 1);  // presets carry no dims; caller must set them
     p.loadConfig(std::string(FZ_PRESETS_DIR) + "/cusz_hi_tp.toml");
     const std::string saved = "/tmp/fzgmod_lc_tp_saved.toml";
     p.saveConfig(saved);

@@ -65,6 +65,13 @@ rreEncodeKernel(
 
     int  csize = in_size;
     bool good  = lc_detail::d_RRE<T>(csize, s_in, s_out, s_temp);
+    // d_RRE writes its final bitmap level to s_out without a trailing barrier,
+    // so the reads below can race the last writers (compute-sanitizer racecheck
+    // flags d_RRE:1527/1540/1541 vs this kernel). The inverse path (d_iRRE)
+    // already syncs externally; mirror that here. Without it the packed output
+    // is non-deterministic across runs and can corrupt reconstruction for data
+    // that exercises the compressible path heavily (e.g. NYX temperature).
+    __syncthreads();
 
     byte* out = d_scratch + (size_t)cid * (uint32_t)RRE_CS;
 
