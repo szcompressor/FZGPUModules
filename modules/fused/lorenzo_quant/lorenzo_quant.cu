@@ -621,6 +621,16 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         // Store for header generation
         num_elements_ = num_elements;
 
+        // The input buffer is rounded up to the LC chunk alignment (see
+        // Pipeline::computeInputAlignment); the tail is zero-padding. The
+        // NOA/REL value-range scan below must cover only the real elements —
+        // otherwise a padding zero becomes the array minimum and, for
+        // all-positive fields, NOA collapses to eb*max instead of
+        // eb*(max-min), over-loosening the bound by ~min/range (E16). Use the
+        // logical grid (dims) when set; guard falls back to the full length.
+        size_t scan_N = config_.dims[0] * config_.dims[1] * config_.dims[2];
+        if (scan_N == 0 || scan_N > num_elements) scan_N = num_elements;
+
         if (num_elements == 0) {
             // Empty input
             for (size_t i = 0; i < 3; i++) {
@@ -649,7 +659,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
             if (value_base <= 0.0f) {
                 value_base = computeValueBase<TInput>(
                     static_cast<const TInput*>(inputs[0]),
-                    num_elements, config_.eb_mode, stream, pool);
+                    scan_N, config_.eb_mode, stream, pool);
             }
             computed_value_base_ = value_base;
 

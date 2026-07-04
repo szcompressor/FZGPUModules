@@ -15,6 +15,7 @@
  *   LCP1  LCPresets/ThroughputRoundTrip   — cusz_hi_tp.toml loads + round-trips
  *   LCP2  LCPresets/RatioRoundTrip        — cusz_hi_cr.toml loads + round-trips
  *   LCP3  LCPresets/SaveLoadRoundTrip     — save→load of the tp pipeline round-trips
+ *   LCP4  LCPresets/DeterministicCompress — repeated compress is bit-identical
  */
 
 #include <gtest/gtest.h>
@@ -117,4 +118,47 @@ TEST(LCPresets, SaveLoadRoundTrip) {
     EXPECT_LE(r.max_error, abs_eb * 1.05f)
         << "abs_eb=" << abs_eb << " data_range=" << r.data_range;
     std::remove(saved.c_str());
+}
+
+// LCP4: repeated compression of identical input must produce byte-identical
+// blobs. The GInterp outlier compaction scatters via atomicAdd, whose slot
+// order varies per kernel launch, so this reliably catches a regression of the
+// deterministic-outlier-order sort (and the multi-leaf concat / config-padding
+// determinism fixes). The cusz_hi_tp preset is multi-leaf (codes chain +
+// outlier chain), i.e. it goes through the concat path.
+TEST(LCPresets, DeterministicCompress) {
+    Pipeline p;
+    p.setDims(NX, NY, 1);
+    p.loadConfig(std::string(FZ_PRESETS_DIR) + "/cusz_hi_tp.toml");
+
+    // Smooth field + scattered sharp spikes → forces GInterp to route many
+    // residuals to the (atomicAdd-scattered) outlier buffer, exercising the
+    // non-deterministic path.
+    auto h_in = make_smooth_data<float>(NX * NY);
+    for (size_t i = 137; i < h_in.size(); i += 331)
+        h_in[i] += (i & 1) ? 5000.0f : -5000.0f;
+    const size_t in_bytes = h_in.size() * sizeof(float);
+
+    CudaStream stream;
+    CudaBuffer<float> d_in(h_in.size());
+    d_in.upload(h_in, stream);
+    stream.sync();
+
+    auto compress_once = [&]() {
+        void* d_comp = nullptr; size_t comp_sz = 0;
+        p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        stream.sync();
+        std::vector<uint8_t> blob(comp_sz);
+        cudaMemcpy(blob.data(), d_comp, comp_sz, cudaMemcpyDeviceToHost);
+        return blob;  // d_comp is the pool-owned concat buffer; do not free.
+    };
+
+    const std::vector<uint8_t> b1 = compress_once();
+    const std::vector<uint8_t> b2 = compress_once();
+    const std::vector<uint8_t> b3 = compress_once();
+
+    ASSERT_EQ(b1.size(), b2.size()) << "compressed size varies across runs";
+    ASSERT_EQ(b1.size(), b3.size()) << "compressed size varies across runs";
+    EXPECT_EQ(b1, b2) << "compressed blob is non-deterministic (run 1 vs 2)";
+    EXPECT_EQ(b1, b3) << "compressed blob is non-deterministic (run 1 vs 3)";
 }

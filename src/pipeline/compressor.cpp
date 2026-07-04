@@ -551,7 +551,17 @@ void Pipeline::setupInputBuffers(const std::vector<Stage*>& sources) {
 int Pipeline::autoDetectUnconnectedOutputs() {
     int pipeline_outputs_added = 0;
     
-    for (const auto& [stage, node] : stage_to_node_) {
+    // Iterate nodes in deterministic insertion order (nodes_), NOT stage_to_node_
+    // — the latter is an unordered_map keyed by Stage* pointers, whose iteration
+    // order depends on heap addresses (ASLR) and thus varies run-to-run. That
+    // order determines the sequence in which unconnected outputs are appended to
+    // output_buffer_ids_, i.e. the concat layout of multi-leaf pipelines, making
+    // the compressed blob non-deterministic (same size, permuted segments) even
+    // though every stage output is identical. Single-leaf pipelines were immune
+    // (one output, no ordering). Deterministic node order fixes reproducibility.
+    for (DAGNode* node : dag_->getNodes()) {
+        Stage* stage = node->stage;
+        if (!stage) continue;
         size_t num_outputs = stage->getNumOutputs();
         auto output_names = stage->getOutputNames();
         
@@ -867,9 +877,20 @@ void Pipeline::concatOutputs(void** d_output, size_t* output_size, cudaStream_t 
                total_size / 1024.0, outputs.size());
     }
 
+    // Zero the concat buffer before the gather. Each segment slot is padded to
+    // 16 bytes (ConcatLayout::slotSize = align16), but the gather kernel writes
+    // only actual_size bytes per slot — the [actual_size, align16) padding is
+    // left as whatever this persistent, recycled pool buffer held before. That
+    // stale padding makes the compressed blob non-deterministic across runs
+    // (identical total size, differing padding bytes; decode ignores it since
+    // it reads actual_size per segment from the header). Only multi-leaf
+    // pipelines concat, which is why single-output pipelines were unaffected.
+    FZ_CUDA_CHECK(cudaMemsetAsync(d_concat_buffer_.ptr, 0, total_size, stream));
+
     *d_output    = d_concat_buffer_.ptr;
     *output_size = writeConcatBuffer(outputs, static_cast<uint8_t*>(d_concat_buffer_.ptr), stream);
-    
+
+
     FZ_LOG(DEBUG, "Concatenation complete: %zu buffers -> %.1f KB",
            outputs.size(), total_size / 1024.0);
 }

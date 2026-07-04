@@ -10,6 +10,7 @@
 #include "log.h"
 
 #include <cuda_runtime.h>
+#include <cub/device/device_radix_sort.cuh>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -747,6 +748,18 @@ void GInterpStage<TInput, TCode>::execute(
     size_t max_outliers = getMaxOutlierCount(N);
     num_elements_       = N;
 
+    // The input buffer may be allocated larger than the logical grid (the pool
+    // rounds allocations up), and the tail is zero-padding. The value-range
+    // scan below must cover only the real elements — otherwise a padding zero
+    // becomes the array minimum, and for all-positive fields NOA collapses to
+    // eb*max instead of eb*(max-min), over-loosening the bound by ~min/range
+    // (the E16 CESM/CLDHGH overshoot). The prediction kernels already operate
+    // on the logical `dims` grid, so this only affects the min/max scan.
+    size_t scan_N = static_cast<size_t>(config_.dims[0])
+                  * static_cast<size_t>(config_.dims[1])
+                  * static_cast<size_t>(config_.dims[2]);
+    if (scan_N == 0 || scan_N > N) scan_N = N;
+
     if (N == 0) {
         for (size_t i = 0; i < 4; i++) actual_output_sizes_[i] = 0;
         actual_outlier_count_ = 0;
@@ -769,7 +782,7 @@ void GInterpStage<TInput, TCode>::execute(
         if (value_base <= 0.0f) {
             value_base = computeValueBase<TInput>(
                 static_cast<const TInput*>(inputs[0]),
-                N, config_.eb_mode, stream, pool);
+                scan_N, config_.eb_mode, stream, pool);
         }
         computed_value_base_ = value_base;
         if (value_base <= 0.0f) {
@@ -812,7 +825,7 @@ void GInterpStage<TInput, TCode>::execute(
             // range (max - min), not a magnitude.
             data_range = computeValueBase<TInput>(
                 static_cast<const TInput*>(inputs[0]),
-                N, ErrorBoundMode::NOA, stream, pool);
+                scan_N, ErrorBoundMode::NOA, stream, pool);
         }
         int auto_r = pickAutoRadius<TCode>(data_range, ebx2);
         config_.quant_radius = auto_r;
@@ -848,7 +861,7 @@ void GInterpStage<TInput, TCode>::execute(
             if (range <= 0.0f) {
                 range = computeValueBase<TInput>(
                     static_cast<const TInput*>(inputs[0]),
-                    N, ErrorBoundMode::NOA, stream, pool);
+                    scan_N, ErrorBoundMode::NOA, stream, pool);
                 computed_value_base_ = range;
             }
             return (range > 0.0f)
@@ -1014,6 +1027,18 @@ void GInterpStage<TInput, TCode>::execute(
     FZ_CUDA_CHECK(cudaMemsetAsync(outputs[2], 0, max_outliers * sizeof(TInput),   stream));
     FZ_CUDA_CHECK(cudaMemsetAsync(outputs[3], 0, max_outliers * sizeof(uint32_t), stream));
 
+    // Zero the codes buffer over the full (pool-padded) length before the kernel.
+    // The spline writes codes only for the logical `dims` grid, but the codes
+    // buffer is sized to the padded element count N (the input was rounded up to
+    // the LC chunk alignment). The downstream codes chain (Zigzag->Bitshuffle->
+    // RRE) compresses the WHOLE buffer including the [logical, N) tail, so an
+    // uninitialized tail (recycled pool page) makes the compressed blob
+    // non-deterministic across runs even though it decodes correctly (the
+    // inverse only reads the logical grid). Zeroing the tail makes compression
+    // reproducible. (Lorenzo/Quantizer are dimension-agnostic and write all N
+    // elements, so they don't hit this.)
+    FZ_CUDA_CHECK(cudaMemsetAsync(outputs[0], 0, N * sizeof(TCode), stream));
+
     INTERPOLATION_PARAMS intp_param = buildIntpParam();
     if (dim == 3) {
         ginterp::launchGInterpForward3D<TInput, TCode>(
@@ -1039,6 +1064,53 @@ void GInterpStage<TInput, TCode>::execute(
             stream);
     }
     FZ_CUDA_CHECK(cudaGetLastError());
+
+    // ── Deterministic outlier order ──────────────────────────────────────────
+    // The outlier compaction scatters via atomicAdd (ginterp_md.inl), so the
+    // ORDER of entries in outlier_vals/outlier_idxs is non-deterministic (which
+    // thread claims which slot). Order doesn't affect correctness — the inverse
+    // scatters each value back by its stored index — but it changes how the
+    // downstream coder chain (Merge->Bitshuffle->RRE->RZE) compresses those
+    // arrays, so the compressed blob SIZE varies run-to-run. In a reused MINIMAL
+    // pipeline that undersizes the inverse RZE output buffer (sized from a prior
+    // run) and corrupts memory (E19). Sorting (idx, val) by idx gives a
+    // reproducible, stable-size blob. Outlier counts are tiny (~0.001-0.004% of
+    // N here), so the radix sort is negligible next to the spline kernel.
+    // Skipped during CUDA graph capture: we can't read the host count there, and
+    // capture only runs under PREALLOCATE — which sizes buffers to worst case
+    // once, so the size-variation crash cannot occur on that path anyway.
+    {
+        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
+        cudaStreamIsCapturing(stream, &cap);
+        if (cap == cudaStreamCaptureStatusNone) {
+            uint32_t h_count = 0;
+            FZ_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_outlier_count_scratch_,
+                                          sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+            if (h_count > 1 && h_count <= max_outliers) {
+                uint32_t* d_idx = static_cast<uint32_t*>(outputs[3]);
+                TInput*   d_val = static_cast<TInput*>(outputs[2]);
+                const int n = static_cast<int>(h_count);
+                uint32_t* d_idx_out = static_cast<uint32_t*>(
+                    pool->allocate(h_count * sizeof(uint32_t), stream, "ginterp_sort_idx"));
+                TInput*   d_val_out = static_cast<TInput*>(
+                    pool->allocate(h_count * sizeof(TInput),   stream, "ginterp_sort_val"));
+                size_t tmp_bytes = 0;
+                cub::DeviceRadixSort::SortPairs(nullptr, tmp_bytes, d_idx, d_idx_out,
+                                                d_val, d_val_out, n, 0, 32, stream);
+                void* d_tmp = pool->allocate(tmp_bytes, stream, "ginterp_sort_tmp");
+                cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes, d_idx, d_idx_out,
+                                                d_val, d_val_out, n, 0, 32, stream);
+                FZ_CUDA_CHECK(cudaMemcpyAsync(d_idx, d_idx_out, h_count * sizeof(uint32_t),
+                                              cudaMemcpyDeviceToDevice, stream));
+                FZ_CUDA_CHECK(cudaMemcpyAsync(d_val, d_val_out, h_count * sizeof(TInput),
+                                              cudaMemcpyDeviceToDevice, stream));
+                pool->free(d_tmp,     stream);
+                pool->free(d_idx_out, stream);
+                pool->free(d_val_out, stream);
+            }
+        }
+    }
 
     // Max-capacity placeholders; postStreamSync() trims (and refreshes
     // actual_outlier_count_). We do NOT zero actual_outlier_count_ here:
@@ -1092,6 +1164,7 @@ size_t GInterpStage<TInput, TCode>::serializeHeader(
             "GInterpStage::serializeHeader: insufficient buffer");
     }
     GInterpConfig c;
+    std::memset(&c, 0, sizeof(c));  // zero alignment padding for a reproducible serialized header
     c.error_bound   = static_cast<double>(computed_abs_eb_);
     c.quant_radius  = static_cast<uint32_t>(config_.quant_radius);
     c.num_elements  = static_cast<uint32_t>(num_elements_);
@@ -1129,6 +1202,7 @@ void GInterpStage<TInput, TCode>::deserializeHeader(
             "GInterpStage::deserializeHeader: invalid config size");
     }
     GInterpConfig c;
+    std::memset(&c, 0, sizeof(c));  // zero alignment padding for a reproducible serialized header
     std::memcpy(&c, buf, sizeof(c));
 
     computed_abs_eb_       = static_cast<TInput>(c.error_bound);
