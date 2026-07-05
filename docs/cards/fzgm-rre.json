@@ -5,11 +5,12 @@
   "stage": "RREStage",
   "name": "Repetition-Reduction Encoder",
 
-  "zhubModule": "rre-reducer",
+  "zhubModule": "repeat-elimination",
   "isNewGeneralModule": false,
 
   "category": "coder",
   "algorithm": "rre",
+  "variantLabel": "general repeat (RRE)",
   "description": "GPU repetition-reduction encoding stage (LC framework RRE). Processes the input as word_size-byte words (1/2/4/8). Each chunk is encoded independently: Level 1 compacts words that differ from their predecessor and emits a 1-bit-per-word bitmap; the bitmap is then hierarchically RE-compressed (2048/256/32/4 byte levels). RRE eliminates repeated values (the zero-eliminating sibling is RZEStage). Lossless. Forward is CUDA Graph-capturable; inverse requires blocking D2H header reads. Used in cuSZ-Hi LC pipelines (TP/CR paths).",
 
   "lossy": false,

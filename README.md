@@ -1,5 +1,9 @@
 # FZGPUModules
 
+[![CI](https://github.com/szcompressor/FZGPUModules/actions/workflows/ci.yml/badge.svg)](https://github.com/szcompressor/FZGPUModules/actions/workflows/ci.yml)
+[![Docs](https://github.com/szcompressor/FZGPUModules/actions/workflows/docs.yml/badge.svg)](https://github.com/szcompressor/FZGPUModules/actions/workflows/docs.yml)
+[![License](https://img.shields.io/badge/license-BSD%203--Clause-blue)](LICENSE)
+
 GPU-accelerated graph composable compression pipeline builder for analytical workflows.
 
 ## Overview

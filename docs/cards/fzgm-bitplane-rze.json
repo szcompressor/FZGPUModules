@@ -6,7 +6,7 @@
   "name": "Fused Bitplane Transpose + Zero-Group RZE",
 
   "zhubModule": "bit-shuffle",
-  "zhubModuleSecondary": ["rze-reducer"],
+  "zhubModuleSecondary": ["repeat-elimination"],
   "isNewGeneralModule": false,
 
   "category": "fused",
