@@ -1,83 +1,107 @@
 /**
  * @file test_module_cards.cpp
- * @brief Registry coverage test for module cards.
+ * @brief Consistency checks for docs/cards/ FAIR module card files.
  *
- * Every `card.json` in the modules/ tree must be registered with at least one
- * concrete stage instantiation so cards can never silently go unvalidated.
+ * Verifies that index.json is in sync with the card files on disk and that each
+ * card contains the required top-level fields.  Heavy JSON-schema validation
+ * is done by validate-cards.py (Z-Hub repo); this C++ test catches missing /
+ * orphaned files and obvious format regressions without an external dependency.
  *
- * Adding a card: register a representative instantiation in `registry()` below.
- * `EveryCardHasARepresentative` fails if a `card.json` exists with no entry.
- *
- * NOTE: The TOML contract-validation phase (ContractMatchesInterface) was removed
- * because toml++ triggered a SIGSEGV under nvc++ -O2 -DNDEBUG. Cards were
- * migrated to JSON (card.json); a JSON-parsing validation phase can be added
- * without the toml++ dependency.
+ * CMake variable required:  FZ_CARDS_DIR  (absolute path to docs/cards/).
  */
 
 #include <gtest/gtest.h>
 
 #include <filesystem>
-#include <functional>
-#include <memory>
+#include <fstream>
+#include <regex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
-#include "stage/stage.h"
-#include "fzm_format.h"
-#include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
-#include "fused/ginterp/ginterp_stage.h"
-
-#ifndef FZ_MODULES_DIR
-#error "FZ_MODULES_DIR must be defined by CMake (path to the modules/ tree)."
+#ifndef FZ_CARDS_DIR
+#error "FZ_CARDS_DIR must be defined by CMake (absolute path to docs/cards/)."
 #endif
 
-using namespace fz;
 namespace fs = std::filesystem;
 
 namespace {
 
-// ── A carded stage + the concrete instantiations that validate its card ──────
-struct CardEntry {
-    std::string card_rel_path;   // relative to FZ_MODULES_DIR
-    std::vector<std::function<std::unique_ptr<Stage>()>> make_reps;
-};
+// Files in docs/cards/ that are not card files and should be skipped.
+const std::set<std::string> kNonCardFiles = { "index.json", "schema.json" };
 
-// The single source of truth for which cards exist and how to instantiate them.
-// Every card.json in the tree MUST appear here (enforced below).
-std::vector<CardEntry> registry() {
-    std::vector<CardEntry> r;
-    r.push_back({"predictors/tiled_lorenzo/card.json", {
-        [] { return std::make_unique<TiledLorenzoStage<int16_t>>(); },
-        [] { return std::make_unique<TiledLorenzoStage<int32_t>>(); },
-    }});
-    r.push_back({"fused/ginterp/card.json", {
-        [] { return std::make_unique<GInterpStage<float,  uint16_t>>(); },
-        [] { return std::make_unique<GInterpStage<double, uint16_t>>(); },
-    }});
-    return r;
+// Extract all "*.json" filename strings from index.json (simple regex scan;
+// no full JSON parser needed for this flat array format).
+std::vector<std::string> parseIndexJson(const fs::path& index_path) {
+    std::ifstream f(index_path);
+    if (!f) return {};
+    const std::string text((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+    std::vector<std::string> out;
+    const std::regex re(R"re("([^"]+\.json)")re");
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), re);
+         it != std::sregex_iterator(); ++it) {
+        out.push_back((*it)[1].str());
+    }
+    return out;
 }
 
-}  // namespace
+} // namespace
 
-// Every card.json on disk must be registered with a representative — otherwise
-// it ships unvalidated.  Catches "added a card, forgot to register it".
-TEST(ModuleCards, EveryCardHasARepresentative) {
-    std::set<std::string> registered;
-    for (const auto& e : registry()) registered.insert(e.card_rel_path);
+// index.json lists exactly the card files on disk — no orphans, no missing.
+TEST(ModuleCards, IndexConsistentWithDisk) {
+    const fs::path cards_dir = FZ_CARDS_DIR;
+    ASSERT_TRUE(fs::is_directory(cards_dir))
+        << "FZ_CARDS_DIR is not a directory: " << cards_dir;
 
-    const fs::path root = FZ_MODULES_DIR;
-    ASSERT_TRUE(fs::is_directory(root)) << "FZ_MODULES_DIR not a directory: " << root;
+    const fs::path index = cards_dir / "index.json";
+    ASSERT_TRUE(fs::exists(index)) << "index.json missing from " << cards_dir;
 
-    size_t found = 0;
-    for (const auto& p : fs::recursive_directory_iterator(root)) {
-        if (p.path().filename() != "card.json") continue;
-        ++found;
-        const std::string rel = fs::relative(p.path(), root).generic_string();
-        EXPECT_TRUE(registered.count(rel))
-            << "card.json has no representative in test_module_cards.cpp registry(): " << rel;
+    const auto listed = parseIndexJson(index);
+    EXPECT_GT(listed.size(), 0u) << "index.json parsed empty";
+
+    // Every filename listed in index.json must exist on disk.
+    for (const auto& name : listed)
+        EXPECT_TRUE(fs::exists(cards_dir / name))
+            << "index.json lists '" << name << "' but file is missing";
+
+    // Every *.json card on disk must be listed in index.json.
+    const std::set<std::string> indexed(listed.begin(), listed.end());
+    for (const auto& entry : fs::directory_iterator(cards_dir)) {
+        if (!entry.is_regular_file()) continue;
+        const std::string name = entry.path().filename().string();
+        if (name.size() < 5 || name.substr(name.size() - 5) != ".json") continue;
+        if (kNonCardFiles.count(name)) continue;
+        EXPECT_TRUE(indexed.count(name))
+            << "'" << name << "' exists on disk but is not listed in index.json";
     }
-    EXPECT_EQ(found, registered.size())
-        << "registry() lists " << registered.size()
-        << " cards but " << found << " card.json files exist on disk";
+}
+
+// Every card has the required top-level field keys (lightweight text scan).
+// Full schema validation (types, enum values, conditional requirements) is done
+// by validate-cards.py; this check catches obviously malformed cards quickly.
+TEST(ModuleCards, EachCardHasRequiredFields) {
+    const fs::path cards_dir = FZ_CARDS_DIR;
+    ASSERT_TRUE(fs::is_directory(cards_dir));
+
+    const auto listed = parseIndexJson(cards_dir / "index.json");
+    ASSERT_GT(listed.size(), 0u);
+
+    static const std::vector<std::string> kRequired = {
+        "\"schemaVersion\"", "\"id\"", "\"stage\"", "\"name\"",
+        "\"zhubModule\"",    "\"category\"", "\"algorithm\"",
+        "\"description\"",  "\"lossy\"", "\"hardware\"", "\"provenance\""
+    };
+
+    for (const auto& name : listed) {
+        const fs::path p = cards_dir / name;
+        if (!fs::exists(p)) continue;  // already reported by IndexConsistentWithDisk
+        std::ifstream f(p);
+        const std::string text((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+        for (const auto& key : kRequired)
+            EXPECT_NE(text.find(key), std::string::npos)
+                << name << " is missing required field " << key;
+    }
 }

@@ -132,9 +132,11 @@ fz_add_test(
     LABELS  stages gpu
 )
 
-# ─── Module-card coverage (registry breadth check) ────────────────────────────
-# Scans modules/ for card.json files and verifies each is in registry().
-# Cards are JSON (migrated from TOML; toml++ hit SIGSEGV under nvc++ -O2 -DNDEBUG).
+# ─── Module-card coverage (index / field consistency check) ──────────────────
+# Verifies docs/cards/index.json is in sync with card files on disk and each
+# card contains the required top-level fields.  Heavy JSON-schema validation
+# is done by validate-cards.py (Z-Hub repo); this C++ test is a fast CI guard.
+# Cards moved from modules/*/card.json to docs/cards/fzgm-*.json in v1.0.
 fz_add_test(
     NAME    test_module_cards
     SOURCES test_module_cards.cpp
@@ -142,7 +144,7 @@ fz_add_test(
     LABELS  stages gpu
 )
 target_compile_definitions(test_module_cards PRIVATE
-    FZ_MODULES_DIR="${CMAKE_SOURCE_DIR}/modules")
+    FZ_CARDS_DIR="${CMAKE_SOURCE_DIR}/docs/cards")
 
 # ─── cuSZp-family pipeline block/tile size sweeps ─────────────────────────────
 fz_add_test(
