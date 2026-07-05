@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-rre",
+  "stage": "RREStage",
+  "name": "Repetition-Reduction Encoder",
+
+  "zhubModule": "rre-reducer",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "rre",
+  "description": "GPU repetition-reduction encoding stage (LC framework RRE). Processes the input as word_size-byte words (1/2/4/8). Each chunk is encoded independently: Level 1 compacts words that differ from their predecessor and emits a 1-bit-per-word bitmap; the bitmap is then hierarchically RE-compressed (2048/256/32/4 byte levels). RRE eliminates repeated values (the zero-eliminating sibling is RZEStage). Lossless. Forward is CUDA Graph-capturable; inverse requires blocking D2H header reads. Used in cuSZ-Hi LC pipelines (TP/CR paths).",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "wordSize",
+      "type": "int",
+      "values": [1, 2, 4, 8],
+      "default": 1,
+      "description": "Word granularity in bytes (LC RRE_N)."
+    },
+    {
+      "name": "chunkSize",
+      "type": "int",
+      "default": 16384,
+      "description": "Chunk size in bytes. Only 16384 is currently supported."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "LC-framework",
+    "sourceUrl": "https://github.com/burtscher/LC-framework",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_rre.html",
+  "sourcePath": "modules/coders/rre",
+  "versionAdded": "1.0"
+}

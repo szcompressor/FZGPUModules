@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-ans",
+  "stage": "ANSStage",
+  "name": "rANS Entropy Coder",
+
+  "zhubModule": "ans-encoding",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "ans",
+  "description": "GPU rANS (range Asymmetric Numeral Systems) entropy coder via vendored dietGPU kernel templates. Forward: uint8_t byte stream → ANS compressed bitstream (ANSCoalescedHeader + rANS data). Inverse: ANS bitstream → uint8_t byte stream. D2H copies occur in both directions; not CUDA Graph-capturable. Input must be 4-byte aligned. Only prob_bits=10 (1024-bucket table) is supported in this build.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "probBits",
+      "type": "int",
+      "default": 10,
+      "description": "Probability resolution in bits (1024 buckets at default). Must be in [1, 11]. Only 10 is supported in the current build.",
+      "min": 1,
+      "max": 11
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "dietGPU",
+    "sourceUrl": "https://github.com/facebookresearch/dietgpu",
+    "relationship": "direct-port",
+    "license": "MIT"
+  },
+
+  "docs": "stage_ans.html",
+  "sourcePath": "modules/coders/ans",
+  "versionAdded": "1.0"
+}

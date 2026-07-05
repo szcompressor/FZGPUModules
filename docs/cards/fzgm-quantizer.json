@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-quantizer",
+  "stage": "QuantizerStage",
+  "name": "Direct-Value Quantizer",
+
+  "zhubModule": "quantizer",
+  "isNewGeneralModule": false,
+
+  "category": "quantizer",
+  "algorithm": "quant",
+  "description": "Error-bounded direct-value quantizer with lossless outlier fallback. Quantizes input values directly (not prediction residuals). ABS/NOA: uniform quantization step = 2·eb; values beyond the quant radius are stored losslessly as (value, index) pairs. REL: log2-space encoding (|error|/|x| <= eb, exact per-element PFPL bound). Linear mode (setLinearMode) emits raw signed codes with no outlier path, intended for the cuSZp pipeline (→ LorenzoStage(blockSize) → AdaptiveBitpackStage). Three forward outputs: codes, outlier_vals, outlier_idxs (one output in linear/inplace mode). Provenance: ABS/NOA/REL scheme and outlier handling follow the LC/PFPL framework; independently written kernels.",
+  "variantLabel": "direct-value (ABS/NOA/REL)",
+
+  "lossy": true,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["f32", "f64"],
+    "outputDtypes": ["u8", "u16", "u32"]
+  },
+
+  "config": [
+    {
+      "name": "errorBound",
+      "type": "float",
+      "default": 1e-4,
+      "description": "Error bound value. Interpretation set by errorMode."
+    },
+    {
+      "name": "errorMode",
+      "type": "enum",
+      "values": ["ABS", "NOA", "REL"],
+      "default": "ABS",
+      "description": "ABS = absolute |x-x'|<=eb; NOA = value-range relative eb*(max-min); REL = true per-element PFPL relative |x-x'|/|x|<=eb via log2-space encoding (requires u32 TCode for wide data ranges)."
+    },
+    {
+      "name": "quantRadius",
+      "type": "int",
+      "default": 32768,
+      "description": "Quantization radius. Values at bin index >= radius are stored as outliers. Default 2^15 for u16 TCode."
+    },
+    {
+      "name": "outlierCapacity",
+      "type": "float",
+      "default": 0.05,
+      "description": "Fraction of input size reserved for outlier storage.",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "zigzagCodes",
+      "type": "bool",
+      "default": false,
+      "description": "ABS/NOA only: zigzag-encode the quantization codes before storage to improve compressibility when codes cluster near zero. No effect in REL mode."
+    },
+    {
+      "name": "linearMode",
+      "type": "bool",
+      "default": false,
+      "description": "ABS/NOA: linear/no-outlier mode (cuSZp-style). Emits raw signed codes q=round(x/2·eb), no radius clamp, no outlier ports. Pair with LorenzoStage(setBlockSize) → AdaptiveBitpackStage."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "LC-framework",
+    "sourceUrl": "https://github.com/burtscher/LC-framework",
+    "relationship": "reimplementation",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_quantizer.html",
+  "sourcePath": "modules/quantizers/quantizer",
+  "versionAdded": "1.0"
+}

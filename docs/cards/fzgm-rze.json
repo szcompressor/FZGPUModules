@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-rze",
+  "stage": "RZEStage",
+  "name": "Zero-Elimination Encoder",
+
+  "zhubModule": "rze-reducer",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "rze",
+  "description": "GPU zero-elimination encoding stage (LC framework RZE). Processes the input as word_size-byte words (1/2/4/8). Each chunk is encoded independently: Level 1 compacts non-zero words and emits a 1-bit-per-word bitmap; the bitmap is then hierarchically RE-compressed (2048/256/32/4 byte levels). Lossless. Forward (compress) is CUDA Graph-capturable; inverse requires blocking D2H header reads. Designed for LC/PFPL-style pipelines following BitshuffleStage.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "wordSize",
+      "type": "int",
+      "values": [1, 2, 4, 8],
+      "default": 1,
+      "description": "Word granularity in bytes (LC RZE_N). Typically 4 after BitshuffleStage(elementWidth=4)."
+    },
+    {
+      "name": "chunkSize",
+      "type": "int",
+      "default": 16384,
+      "description": "Chunk size in bytes. Only 16384 is currently supported."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "LC-framework",
+    "sourceUrl": "https://github.com/burtscher/LC-framework",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_rze.html",
+  "sourcePath": "modules/coders/rze",
+  "versionAdded": "1.0"
+}

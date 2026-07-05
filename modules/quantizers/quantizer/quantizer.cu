@@ -600,6 +600,17 @@ void QuantizerStage<TInput, TCode>::execute(
 
     num_elements_ = num_elements;
 
+    // The input buffer may be rounded up to the LC chunk alignment (see
+    // Pipeline::computeInputAlignment) with a zero-padded tail. The NOA
+    // value-range scan below must cover only the real elements — otherwise a
+    // padding zero becomes the array minimum and, for all-positive fields, NOA
+    // collapses to eb*max instead of eb*(max-min), over-loosening the bound by
+    // ~min/range (the E16 overshoot). Use the logical grid (dims) when set;
+    // guard falls back to the full length. dims_ is a runtime-only hint (set by
+    // Pipeline::setDims at finalize); it is not serialized (decode never scans).
+    size_t scan_N = dims_[0] * dims_[1] * dims_[2];
+    if (scan_N == 0 || scan_N > num_elements) scan_N = num_elements;
+
     if (num_elements == 0) {
         if (isInplaceMode()) {
             actual_output_sizes_ = {0};
@@ -635,7 +646,7 @@ void QuantizerStage<TInput, TCode>::execute(
         if (value_base <= 0.0f) {
             value_base = computeValueBase<TInput>(
                 static_cast<const TInput*>(inputs[0]),
-                num_elements, ErrorBoundMode::NOA, stream, pool);
+                scan_N, ErrorBoundMode::NOA, stream, pool);
         }
         computed_value_base_ = value_base;
         if (value_base <= 0.0f) {

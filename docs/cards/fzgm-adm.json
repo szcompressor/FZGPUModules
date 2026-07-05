@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-adm",
+  "stage": "ADMStage",
+  "name": "Adaptive Data Mapping",
+
+  "zhubModule": "adm",
+  "isNewGeneralModule": true,
+
+  "category": "transform",
+  "algorithm": "adm",
+  "description": "Adaptive Data Mapping (ADM): remaps u16/u32 integer streams into a compact 8-bit symbol domain before entropy coding. Partitions the input into 512-element warp blocks, computes a per-warp center (mean), and encodes each element as a compact (code, unary-signal) pair. The resulting byte codes are compressible by ANSStage with a significantly better ratio than the raw integer stream. D2H copies in both directions; not CUDA Graph-capturable. Lossless. GPU kernels adapted from the MANS project.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u16", "u32"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "dtype",
+      "type": "enum",
+      "values": ["U16", "U32"],
+      "default": "U16",
+      "description": "Input element type. Must match the upstream stage's output. Set via setDtype(ADMDtype::U16) or setDtype(ADMDtype::U32)."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "MANS",
+    "sourceUrl": "https://github.com/hpdps-group/MANS",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_adm.html",
+  "sourcePath": "modules/transforms/adm",
+  "versionAdded": "1.0"
+}

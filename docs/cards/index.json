@@ -1,0 +1,21 @@
+[
+  "fzgm-huffman.json",
+  "fzgm-lorenzo.json",
+  "fzgm-tiled-lorenzo.json",
+  "fzgm-diff.json",
+  "fzgm-quantizer.json",
+  "fzgm-rle.json",
+  "fzgm-rze.json",
+  "fzgm-rre.json",
+  "fzgm-bitpack.json",
+  "fzgm-adaptive-bitpack.json",
+  "fzgm-ans.json",
+  "fzgm-bitshuffle.json",
+  "fzgm-bitplane-rze.json",
+  "fzgm-zigzag.json",
+  "fzgm-negabinary.json",
+  "fzgm-adm.json",
+  "fzgm-ginterp.json",
+  "fzgm-lorenzo-quant.json",
+  "fzgm-merge.json"
+]

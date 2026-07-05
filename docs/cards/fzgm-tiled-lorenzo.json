@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-tiled-lorenzo",
+  "stage": "TiledLorenzoStage",
+  "name": "Tiled Separable Lorenzo Predictor",
+
+  "zhubModule": "lorenzo-predictor",
+  "isNewGeneralModule": false,
+
+  "category": "predictor",
+  "algorithm": "tiled-lorenzo",
+  "description": "Dimension-aware tiled separable integer Lorenzo predictor (cuSZp3 delta). Within each fixed-size tile (default 8×8 in 2-D, 4×4×4 in 3-D) applies a separable integer Lorenzo: leading edges predict inward, each element predicts from its x-neighbor. Forward emits output in tile-major order so a downstream AdaptiveBitpackStage(blockSize=tileElems) packs each tile as one block, reproducing the cuSZp3 compression ratio. Lossless.",
+  "variantLabel": "tiled (cuSZp3-style)",
+
+  "lossy": false,
+  "dims": [1, 2, 3],
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["i16", "i32"],
+    "outputDtypes": ["i16", "i32"]
+  },
+
+  "config": [
+    {
+      "name": "tileShape",
+      "type": "string",
+      "default": "ndim-derived",
+      "description": "Tile extents (tx, ty, tz). Defaults: 1-D=64, 2-D=8×8, 3-D=4×4×4. Product tx*ty*tz must be in [1, 1024]. Set via setTileShape(tx[, ty[, tz]])."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "cuSZp",
+    "sourceUrl": "https://github.com/szcompressor/cuSZp",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause",
+    "paper": {
+      "title": "GPU Lossy Compression for HPC Can Be Versatile and Ultra-Fast",
+      "doi": "10.1145/3712285.3759817",
+      "authors": "Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello",
+      "year": 2025
+    }
+  },
+
+  "docs": "stage_tiled_lorenzo.html",
+  "sourcePath": "modules/predictors/tiled_lorenzo",
+  "versionAdded": "1.0"
+}

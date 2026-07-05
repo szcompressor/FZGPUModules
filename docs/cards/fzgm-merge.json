@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-merge",
+  "stage": "MergeStage",
+  "name": "Buffer Merge (N→1 / 1→N)",
+
+  "zhubModule": "merge",
+  "isNewGeneralModule": true,
+
+  "category": "structural",
+  "algorithm": "merge",
+  "description": "Structural N-to-1 / 1-to-N concatenation stage. Forward: concatenates N named input buffers into one contiguous blob (no in-stream header). Inverse: splits the blob back into N segments by sizes stored in the FZM stage config. Byte-transparent; graph-capturable in both directions.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "ports": {
+    "inputs": [{ "name": "segment", "arity": "N" }],
+    "outputs": [{ "name": "output", "arity": 1 }]
+  },
+
+  "provenance": {
+    "relationship": "original",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_merge.html",
+  "sourcePath": "modules/structural/merge",
+  "versionAdded": "1.0"
+}

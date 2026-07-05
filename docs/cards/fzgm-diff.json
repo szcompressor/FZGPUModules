@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-diff",
+  "stage": "DifferenceStage",
+  "name": "First-Order Difference Coder",
+
+  "zhubModule": "delta-encoding",
+  "isNewGeneralModule": false,
+
+  "category": "predictor",
+  "algorithm": "delta",
+  "description": "First-order difference coder (1-D delta / prefix sum). Forward: output[i] = input[i] - input[i-1] (first element stored as-is). Inverse: cumulative sum. Optional chunk-boundary reset (setChunkSize) makes each chunk an independent context for parallel decompression. Optional negabinary-fused variant (TOut = unsigned counterpart of T) applies negabinary encoding at the final write of the forward kernel, eliminating a separate NegabinaryStage pass. Algorithm follows the d_DIFFNB design from the LC/PFPL framework.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["f32", "f64", "u8", "u16", "u32", "i16", "i32"],
+    "outputDtypes": ["f32", "f64", "u8", "u16", "u32", "i16", "i32"]
+  },
+
+  "config": [
+    {
+      "name": "chunkSize",
+      "type": "int",
+      "default": 0,
+      "description": "Chunk size in bytes. 0 = no chunking (whole array is one context). When >0, difference and prefix-sum reset at each chunk boundary. Must be a positive multiple of sizeof(T).",
+      "min": 0
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "LC-framework",
+    "sourceUrl": "https://github.com/burtscher/LC-framework",
+    "relationship": "reimplementation",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_diff.html",
+  "sourcePath": "modules/predictors/diff",
+  "versionAdded": "1.0"
+}

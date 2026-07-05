@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-bitshuffle",
+  "stage": "BitshuffleStage",
+  "name": "GPU Bit-Matrix Transpose",
+
+  "zhubModule": "bit-shuffle",
+  "isNewGeneralModule": false,
+
+  "category": "shuffler",
+  "algorithm": "bitshuffle",
+  "description": "GPU W×N bit-matrix transpose over fixed-size chunks. Given a chunk of N elements each W bits wide, the forward pass produces W groups each containing the k-th bit of all N elements (transposing the bit-plane matrix). Output is the same byte size as input. MSB-first output layout: bit-plane W-1 at index 0. 4- and 8-byte butterfly kernels adapted from the LC framework (d_BIT_4/d_BIT_8); 1- and 2-byte paths use standard __ballot_sync. Size-preserving; lossless.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "blockSize",
+      "type": "int",
+      "default": 16384,
+      "description": "Chunk size in bytes. Must be a positive multiple of 1024*elementWidth.",
+      "min": 1
+    },
+    {
+      "name": "elementWidth",
+      "type": "int",
+      "values": [1, 2, 4, 8],
+      "default": 4,
+      "description": "Element width in bytes for the bit-matrix transpose. Determines W (bit-planes per chunk)."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "LC-framework",
+    "sourceUrl": "https://github.com/burtscher/LC-framework",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_bitshuffle.html",
+  "sourcePath": "modules/shufflers/bitshuffle",
+  "versionAdded": "1.0"
+}

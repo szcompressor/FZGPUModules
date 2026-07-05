@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-negabinary",
+  "stage": "NegabinaryStage",
+  "name": "Negabinary Signed-to-Unsigned Map",
+
+  "zhubModule": "negabinary",
+  "isNewGeneralModule": true,
+
+  "category": "transform",
+  "algorithm": "negabinary",
+  "description": "Element-wise negabinary (base -2) encode/decode. Forward (TIn[] → TOut[]): maps signed integers to unsigned negabinary via (n + MASK) ^ MASK where MASK = 0xAAAA…. After differencing smooth data the high-order bits vanish faster than zigzag encoding, producing denser zero runs at high bit-planes when followed by BitshuffleStage + RZEStage. Inverse: (u ^ MASK) - MASK cast to signed. Size-preserving; lossless. When fusing difference + negabinary, prefer DifferenceStage<T, TOut> for a single-kernel pass.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["i8", "i16", "i32", "i64"],
+    "outputDtypes": ["u8", "u16", "u32", "u64"]
+  },
+
+  "provenance": {
+    "relationship": "original",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_negabinary.html",
+  "sourcePath": "modules/transforms/negabinary",
+  "versionAdded": "1.0"
+}

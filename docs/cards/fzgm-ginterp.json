@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-ginterp",
+  "stage": "GInterpStage",
+  "name": "Fused Spline Interpolation Predictor + Quantizer",
+
+  "zhubModule": "interpolation",
+  "zhubModuleSecondary": ["quantizer"],
+  "isNewGeneralModule": false,
+
+  "category": "fused",
+  "algorithm": "interpolation-spline",
+  "description": "Multi-level spline interpolation predictor fused with error-bounded quantization (cuSZ-Hi port). 2-D and 3-D only (1-D rejected). Four forward outputs: codes (TCode[N]), anchor (TInput[~N/4096]), outlier_vals (TInput), outlier_idxs (uint32_t). ABS/NOA/REL modes resolve to a single absolute bound (NB: REL is global-approximate eb*max(|x|), not exact per-element PFPL; use QuantizerStage for exact REL). Error bound is a target; max element-wise error is typically ≤1.1×eb on smooth data, up to ~2×eb near outliers. Auto-tuning (setAutoTuning 1/3/4) optimizes INTERPOLATION_PARAMS; 3-D-only for modes 1/3/4. 3-D double path requires dynamic shared memory ≥77 KB (Volta+). Patched local fix for upstream spline_infprecis_data 2-D level-0 atomic offset collision (documented in THIRD_PARTY.md).",
+  "variantLabel": "spline (cuSZ-Hi-style)",
+
+  "lossy": true,
+  "dims": [2, 3],
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["f32", "f64"],
+    "outputDtypes": ["u8", "u16", "u32"]
+  },
+
+  "config": [
+    {
+      "name": "errorBound",
+      "type": "float",
+      "default": 1e-3,
+      "description": "Error bound value. Interpretation set by errorMode."
+    },
+    {
+      "name": "errorMode",
+      "type": "enum",
+      "values": ["ABS", "NOA", "REL"],
+      "default": "ABS",
+      "description": "ABS = absolute; NOA = value-range relative eb*(max-min); REL = pseudo-REL eb*max(|x|) (global-approximate, NOT exact per-element PFPL — use QuantizerStage for exact REL)."
+    },
+    {
+      "name": "quantRadius",
+      "type": "int",
+      "default": 0,
+      "description": "Quantization radius. 0 = auto-tune on first execute (scans input min/max; requires D2H sync, incompatible with graph capture). >0 = use this radius directly.",
+      "min": 0
+    },
+    {
+      "name": "outlierCapacity",
+      "type": "float",
+      "default": 0.1,
+      "description": "Fraction of input size reserved for outlier storage.",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "autoTuning",
+      "type": "int",
+      "values": [0, 1, 3, 4, 5],
+      "default": 0,
+      "description": "INTERPOLATION_PARAMS auto-tuning mode. 0=off (deterministic baseline). 1=cheap (reverse[] only). 3=full structural (use_md, use_natural, reverse per level). 4=full+alpha/beta sweep. 5=manual alpha/beta override (graph-safe). Modes 1/3/4 are 3-D-only; incompatible with CUDA graph capture."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "cuSZ-Hi",
+    "sourceUrl": "https://github.com/shixun404/cuSZ-Hi",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause",
+    "paper": {
+      "title": "Boosting Scientific Error-Bounded Lossy Compression through Optimized Synergistic Lossy-Lossless Orchestration",
+      "doi": "10.1145/3712285.3759798",
+      "authors": "Shixun Wu, Jinwen Pan, Jinyang Liu, Jiannan Tian, Ziwei Qiu, Jiajun Huang, Kai Zhao, Xin Liang, Sheng Di, Zizhong Chen, Franck Cappello",
+      "year": 2025
+    }
+  },
+
+  "docs": "stage_ginterp.html",
+  "sourcePath": "modules/fused/ginterp",
+  "versionAdded": "1.0"
+}

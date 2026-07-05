@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-bitplane-rze",
+  "stage": "BitplaneRZEStage",
+  "name": "Fused Bitplane Transpose + Zero-Group RZE",
+
+  "zhubModule": "bit-shuffle",
+  "zhubModuleSecondary": ["rze-reducer"],
+  "isNewGeneralModule": false,
+
+  "category": "fused",
+  "algorithm": "bitplane-rze",
+  "description": "Fused bitplane-transpose + zero-group RZE — the FZ-GPU lossless encoder. In one shared-memory pass per 4096-byte chunk: (1) bit-transposes a 32×32 matrix of uint32_t words (bitshuffle at 4-byte width), then (2) eliminates all-zero 4-byte groups via per-block atomicAdd. Input is uint16_t symbols (two per word). Emits a self-describing byte archive (128-byte header + bitflag bitmap + per-block start positions + compacted bitstream). Not CUDA Graph-capturable (blocking D2H in both directions). Replaces a BitshuffleStage(element_width=4) → RZEStage(levels=1) pair with less global memory traffic.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u16"],
+    "outputDtypes": ["u8"]
+  },
+
+  "provenance": {
+    "sourceProject": "cuSZ",
+    "sourceUrl": "https://github.com/szcompressor/cuSZ",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause",
+    "paper": {
+      "title": "FZ-GPU: A Fast and High-Ratio Lossy Compressor for Scientific Computing Applications on GPUs",
+      "doi": "10.1145/3588195.3592994",
+      "authors": "Boyuan Zhang, Jiannan Tian, Sheng Di, Xiaodong Yu, Yunhe Feng, Xin Liang, Dingwen Tao, Franck Cappello",
+      "year": 2023
+    }
+  },
+
+  "docs": "stage_bitplane_rze.html",
+  "sourcePath": "modules/fused/bitplane_rze",
+  "versionAdded": "1.0"
+}

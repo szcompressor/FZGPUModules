@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-huffman",
+  "stage": "HuffmanStage",
+  "name": "Huffman Entropy Coder",
+
+  "zhubModule": "huffman-encoding",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "huffman",
+  "description": "PHF Huffman entropy coder (T = u8/u16/u32). Lossless. Two encode paths: Coarse (multi-kernel, CPU prefix-sum sync) and Fine (single-kernel, fully GPU-async). Byte-transparent output.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8", "u16", "u32"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "bklen",
+      "type": "int",
+      "description": "Codebook length (distinct symbols). Default 256 for u8, 1024 for u16/u32. Must be <= 2^(8*sizeof(T)).",
+      "min": 1
+    },
+    {
+      "name": "encodeMode",
+      "type": "enum",
+      "values": ["Coarse", "Fine"],
+      "default": "Coarse",
+      "description": "Coarse = stable multi-kernel path with CPU sync. Fine = ReVISIT-lite single kernel, no mid-encode CPU sync."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "cuSZ",
+    "sourceUrl": "https://github.com/szcompressor/cuSZ",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause",
+    "paper": {
+      "title": "cuSZ: An Error-Bounded Lossy Compressor for GPU Scientific Data",
+      "doi": "10.1145/3410463.3414624",
+      "authors": "Tian J., et al.",
+      "year": 2020
+    }
+  },
+
+  "docs": "stage_huffman.html",
+  "sourcePath": "modules/coders/huffman",
+  "versionAdded": "1.0"
+}

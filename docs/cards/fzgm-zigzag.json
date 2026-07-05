@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-zigzag",
+  "stage": "ZigzagStage",
+  "name": "Zigzag Signed-to-Unsigned Map",
+
+  "zhubModule": "zigzag-ordering",
+  "isNewGeneralModule": false,
+
+  "category": "transform",
+  "algorithm": "zigzag",
+  "description": "Element-wise zigzag encode/decode. Forward (TIn[] → TOut[]): maps signed integers to unsigned via (n << 1) ^ (n >> W-1), concentrating small magnitudes near zero for better downstream compressibility. Inverse: decodes back to the signed type. Size-preserving; lossless. Byte-transparent mode (setByteTransparent) opts out of pipeline type checking for use as the LC TCMS component in byte-stream chains.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["i8", "i16", "i32", "i64"],
+    "outputDtypes": ["u8", "u16", "u32", "u64"]
+  },
+
+  "provenance": {
+    "relationship": "original",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_zigzag.html",
+  "sourcePath": "modules/transforms/zigzag",
+  "versionAdded": "1.0"
+}

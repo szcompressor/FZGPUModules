@@ -1,0 +1,78 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-lorenzo-quant",
+  "stage": "LorenzoQuantStage",
+  "name": "Fused Lorenzo Predictor + Quantizer",
+
+  "zhubModule": "lorenzo-predictor",
+  "zhubModuleSecondary": ["quantizer"],
+  "isNewGeneralModule": false,
+
+  "category": "fused",
+  "algorithm": "lorenzo",
+  "description": "Fused Lorenzo predictor + error-bounded quantizer (TInput = f32/f64, TCode = u8/u16/u32). 1D/2D/3D. Lossy. Supports ABS, NOA, and REL error-bound modes. Three forward outputs: codes, outlier_errors, outlier_indices.",
+  "variantLabel": "fused (cuSZ-style)",
+
+  "lossy": true,
+  "dims": [1, 2, 3],
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["f32", "f64"],
+    "outputDtypes": ["u8", "u16", "u32"]
+  },
+
+  "config": [
+    {
+      "name": "errorBound",
+      "type": "float",
+      "default": 1e-3,
+      "description": "Error bound value. Interpretation depends on errorMode."
+    },
+    {
+      "name": "errorMode",
+      "type": "enum",
+      "values": ["ABS", "NOA", "REL"],
+      "default": "ABS",
+      "description": "ABS = absolute |x-x'|<=eb; NOA = value-range relative eb*(max-min); REL = pseudo-REL (global-approximate point-wise relative) eb*max(|x|). NB: this REL is pseudo-REL, not PFPL's true point-wise REL."
+    },
+    {
+      "name": "quantRadius",
+      "type": "int",
+      "default": 32768,
+      "description": "Quantization radius. Default 2^15 for u16 TCode."
+    },
+    {
+      "name": "outlierCapacity",
+      "type": "float",
+      "default": 0.2,
+      "description": "Fraction of input size reserved for outlier storage.",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "name": "zigzagCodes",
+      "type": "bool",
+      "default": false,
+      "description": "Zigzag-encode codes before storage to improve compressibility when codes cluster near zero."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "cuSZ",
+    "sourceUrl": "https://github.com/szcompressor/cuSZ",
+    "relationship": "reimplementation",
+    "license": "BSD-3-Clause",
+    "paper": {
+      "title": "cuSZ: An Error-Bounded Lossy Compressor for GPU Scientific Data",
+      "doi": "10.1145/3410463.3414624",
+      "authors": "Tian J., et al.",
+      "year": 2020
+    }
+  },
+
+  "docs": "stage_lorenzo_quant.html",
+  "sourcePath": "modules/fused/lorenzo_quant",
+  "versionAdded": "1.0"
+}

@@ -197,6 +197,12 @@ public:
     void setInverse(bool inverse) override { is_inverse_ = inverse; }
     bool isInverse() const override        { return is_inverse_; }
 
+    /// Store the logical grid so the NOA value-range scan can exclude the
+    /// LC-chunk zero-padding tail of the input buffer (E16 over-loosening on
+    /// all-positive fields). Runtime-only hint; not serialized (decode never
+    /// scans). Base default is a no-op that discards dims.
+    void setDims(const std::array<size_t, 3>& dims) override { dims_ = dims; }
+
     uint16_t getStageTypeId() const override {
         return static_cast<uint16_t>(StageType::QUANTIZER);
     }
@@ -267,6 +273,7 @@ public:
 private:
     Config config_;
     Config saved_config_;
+    std::array<size_t, 3> dims_ = {0, 1, 1};  ///< Logical grid (setDims); NOA scan hint only.
     std::vector<size_t> actual_output_sizes_;
     std::vector<size_t> saved_actual_output_sizes_;
     size_t   num_elements_        = 0;

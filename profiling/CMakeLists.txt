@@ -3,13 +3,13 @@
 # Enabled with: cmake -DBUILD_PROFILING=ON ..
 #
 # Build:
-#   cmake --build <builddir> --target fzgmod-profile
+#   cmake --build <builddir> --target fzgmod-profile-cuszp2
 #   cmake --build <builddir> --target fzgmod-profile-repeat
 #
 # Run under nsys:
 #   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
-#        -o my_profile ./build/bin/profiling/fzgmod-profile
-#   nsys-ui my_profile.nsys-rep
+#        -o cuszp2 ./build/bin/profiling/fzgmod-profile-cuszp2
+#   nsys-ui cuszp2.nsys-rep
 
 if(NOT BUILD_PROFILING)
   return()
@@ -66,34 +66,14 @@ else()
 endif()
 
 
-# ── nsys / NVTX3 harness ──────────────────────────────────────────────────────
-add_executable(fzgmod-profile basic_profiling_example.cpp)
-target_link_libraries(fzgmod-profile PRIVATE fzgmod)
-set_target_properties(fzgmod-profile PROPERTIES
+# ── cuSZp2 nsys / NVTX3 harness ──────────────────────────────────────────────
+# Pipeline: Quantizer(linear,ABS) → Lorenzo(block=32) → AdaptiveBitpack(block=32,outlier)
+# Matches examples/presets/cuszp2.toml.
+# Profiles PREALLOCATE (cold + steady-state) and CUDA Graph (compress replay).
+add_executable(fzgmod-profile-cuszp2 cuszp2_profile.cpp)
+target_link_libraries(fzgmod-profile-cuszp2 PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-cuszp2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
 if(NVTX3_INCLUDE_DIR)
-    target_include_directories(fzgmod-profile PRIVATE ${NVTX3_INCLUDE_DIR})
-endif()
-
-# ── Repeated-compression throughput benchmark ─────────────────────────────────
-# Measures the benefit of reusing a PREALLOCATE pipeline vs. constructing a
-# fresh MINIMAL pipeline for every compress() call.
-add_executable(fzgmod-profile-repeat profile_repeat.cpp)
-target_link_libraries(fzgmod-profile-repeat PRIVATE fzgmod)
-set_target_properties(fzgmod-profile-repeat PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
-if(NVTX3_INCLUDE_DIR)
-    target_include_directories(fzgmod-profile-repeat PRIVATE ${NVTX3_INCLUDE_DIR})
-endif()
-
-# ── Multi-stream decode concurrency probe ─────────────────────────────────────
-# K host threads, K Pipeline instances, K streams running decompressInto() —
-# measures whether decode calls overlap on the GPU (serial vs concurrent speedup).
-find_package(Threads REQUIRED)
-add_executable(decompress_concurrency decompress_concurrency.cu)
-target_link_libraries(decompress_concurrency PRIVATE fzgmod Threads::Threads)
-set_target_properties(decompress_concurrency PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
-if(NVTX3_INCLUDE_DIR)
-    target_include_directories(decompress_concurrency PRIVATE ${NVTX3_INCLUDE_DIR})
+    target_include_directories(fzgmod-profile-cuszp2 PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()

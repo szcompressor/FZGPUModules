@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-rle",
+  "stage": "RLEStage",
+  "name": "Run-Length Encoder",
+
+  "zhubModule": "run-length-encoding",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "rle",
+  "description": "GPU run-length encoding stage. Lossless; effective when data contains long runs of identical values (e.g. quantized codes after a predictor). Wire format: [num_runs:u32][values:T×n (4B-aligned)][lengths:u32×n]. Worst-case output is ~2× input + 4 bytes (no repeated values). Byte-transparent output.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8", "u16", "u32", "i32"],
+    "outputDtypes": ["u8"]
+  },
+
+  "provenance": {
+    "relationship": "original",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_rle.html",
+  "sourcePath": "modules/coders/rle",
+  "versionAdded": "1.0"
+}

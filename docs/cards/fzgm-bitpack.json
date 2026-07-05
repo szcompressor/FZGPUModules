@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-bitpack",
+  "stage": "BitpackStage",
+  "name": "Fixed-Width Bit Packer",
+
+  "zhubModule": "bit-packing",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "bitpack",
+  "description": "GPU fixed-width bit-packing stage. Forward: packs each element using only the low nbits bits into a dense byte stream. Inverse: unpacks, zero-extending to full width. nbits must be a power of two (allowed: u8→{1,2,4,8}; u16→{1,2,4,8,16}; u32→{1,2,4,8,16,32}). Auto-detect mode (setAutoDetect) scans the input for its maximum value and selects the smallest valid nbits; incompatible with CUDA Graph capture.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["u8", "u16", "u32"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "nbits",
+      "type": "int",
+      "default": "8*sizeof(T)",
+      "description": "Bits per element. Must be a power of two in [1, 8*sizeof(T)]. Identity (no compression) at the default.",
+      "min": 1
+    },
+    {
+      "name": "autoDetect",
+      "type": "bool",
+      "default": false,
+      "description": "Scan input for max value and pick the smallest valid power-of-two nbits. Requires a D2H sync; incompatible with CUDA Graph capture."
+    }
+  ],
+
+  "provenance": {
+    "relationship": "original",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_bitpack.html",
+  "sourcePath": "modules/coders/bitpack",
+  "versionAdded": "1.0"
+}

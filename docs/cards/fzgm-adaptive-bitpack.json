@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-adaptive-bitpack",
+  "stage": "AdaptiveBitpackStage",
+  "name": "Per-Block Adaptive Bit-Plane Coder",
+
+  "zhubModule": "bit-packing",
+  "isNewGeneralModule": false,
+
+  "category": "coder",
+  "algorithm": "adaptive-bitpack",
+  "description": "Per-block adaptive fixed-rate bit-plane coder — the cuSZp lossless back-end. For each block of block_size signed elements emits one rate byte (bit-width of the largest magnitude), a per-block sign bitmap, and that many bit-planes. Per-block byte offsets resolved with a CUB exclusive scan. Pair with QuantizerStage(linearMode) → LorenzoStage(setBlockSize=32) for the full cuSZp-style pipeline. Optional outlierSelection (cuSZp2) stores element 0 as a raw outlier if smaller. Forward (compress) is CUDA Graph-capturable; inverse is not.",
+
+  "lossy": false,
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["i16", "i32"],
+    "outputDtypes": ["u8"]
+  },
+
+  "config": [
+    {
+      "name": "blockSize",
+      "type": "int",
+      "default": 32,
+      "description": "Elements per logical block (the fixed-rate granularity). Must be in [1, 1024]. cuSZp uses 32.",
+      "min": 1,
+      "max": 1024
+    },
+    {
+      "name": "outlierSelection",
+      "type": "bool",
+      "default": false,
+      "description": "cuSZp2 per-block plain/outlier selection: each block may store element 0 as a raw outlier and pack only the rest, whichever is smaller."
+    }
+  ],
+
+  "provenance": {
+    "sourceProject": "cuSZp",
+    "sourceUrl": "https://github.com/szcompressor/cuSZp",
+    "relationship": "direct-port",
+    "license": "BSD-3-Clause",
+    "paper": {
+      "title": "cuSZp: An Ultra-fast GPU Error-bounded Lossy Compression Framework with Optimized End-to-End Performance",
+      "doi": "10.1145/3581784.3607048",
+      "authors": "Yafan Huang, Sheng Di, Xiaodong Yu, Guanpeng Li, Franck Cappello",
+      "year": 2023
+    }
+  },
+
+  "docs": "stage_adaptive_bitpack.html",
+  "sourcePath": "modules/coders/adaptive_bitpack",
+  "versionAdded": "1.0"
+}

@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-lorenzo",
+  "stage": "LorenzoStage",
+  "name": "Integer Lorenzo Predictor",
+
+  "zhubModule": "lorenzo-predictor",
+  "isNewGeneralModule": false,
+
+  "category": "predictor",
+  "algorithm": "lorenzo",
+  "description": "Plain integer N-D Lorenzo predictor (delta coding / prefix sum). Forward: computes per-element delta from neighbor(s) using 1-D, 2-D, or 3-D inclusion-exclusion. Inverse: prefix sum to reconstruct. Lossless; output is the same signed type as input. Optional block-local reset period (setBlockSize) enables parallel decompression and mirrors the cuSZp 1-D block design (independent reimplementation).",
+  "variantLabel": "integer N-D",
+
+  "lossy": false,
+  "dims": [1, 2, 3],
+  "hardware": "gpu",
+
+  "io": {
+    "inputDtypes": ["i8", "i16", "i32", "i64"],
+    "outputDtypes": ["i8", "i16", "i32", "i64"]
+  },
+
+  "config": [
+    {
+      "name": "blockSize",
+      "type": "int",
+      "default": 0,
+      "description": "Block-local reset period (elements). 0 = default N-D behavior (full-array delta). >0 forces the 1-D path, restarting the prediction chain every n elements. cuSZp uses n=32. Must be in [1, 1024] when non-zero.",
+      "min": 0,
+      "max": 1024
+    }
+  ],
+
+  "provenance": {
+    "relationship": "original",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_lorenzo.html",
+  "sourcePath": "modules/predictors/lorenzo",
+  "versionAdded": "1.0"
+}
