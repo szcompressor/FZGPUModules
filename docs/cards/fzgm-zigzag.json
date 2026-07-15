@@ -5,11 +5,11 @@
   "stage": "ZigzagStage",
   "name": "Zigzag Signed-to-Unsigned Map",
 
-  "zhubModule": "zigzag-ordering",
+  "zhubModule": "zigzag-encoding",
   "isNewGeneralModule": false,
 
   "category": "transform",
-  "algorithm": "zigzag",
+  "algorithm": "zigzag-encoding",
   "description": "Element-wise zigzag encode/decode. Forward (TIn[] → TOut[]): maps signed integers to unsigned via (n << 1) ^ (n >> W-1), concentrating small magnitudes near zero for better downstream compressibility. Inverse: decodes back to the signed type. Size-preserving; lossless. Byte-transparent mode (setByteTransparent) opts out of pipeline type checking for use as the LC TCMS component in byte-stream chains.",
 
   "lossy": false,

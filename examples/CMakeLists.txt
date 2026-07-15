@@ -113,3 +113,8 @@ add_executable(lc_lossless_pipeline lc_lossless_pipeline.cpp)
 target_link_libraries(lc_lossless_pipeline PRIVATE fzgmod)
 set_target_properties(lc_lossless_pipeline PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── Zigzag vs Negabinary vs TCMS: self-contained integer transform comparison ─
+add_executable(integer_transforms_intro integer_transforms_intro.cpp)
+set_target_properties(integer_transforms_intro PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

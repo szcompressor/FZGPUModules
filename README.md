@@ -20,6 +20,12 @@ FZGPUModules is a CUDA library for building composable, high-throughput compress
 
 ---
 
+## Documentation for LLM users
+
+- **[CLAUDE.md](CLAUDE.md)** — repo guide for Claude Code (and other AI coding agents): pipeline model, stage catalog, build/test recipes, ownership rules, and key gotchas.
+
+---
+
 ## Requirements
 
 | Requirement | Minimum | Notes |

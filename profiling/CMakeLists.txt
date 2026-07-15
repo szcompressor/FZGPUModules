@@ -4,7 +4,10 @@
 #
 # Build:
 #   cmake --build <builddir> --target fzgmod-profile-cuszp2
-#   cmake --build <builddir> --target fzgmod-profile-repeat
+#   cmake --build <builddir> --target fzgmod-profile-speed
+#   cmake --build <builddir> --target fzgmod-profile-pfpl
+#   cmake --build <builddir> --target fzgmod-profile-fzgpu
+#   cmake --build <builddir> --target fzgmod-profile-cuszhi-tp
 #
 # Run under nsys:
 #   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
@@ -76,4 +79,48 @@ set_target_properties(fzgmod-profile-cuszp2 PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
 if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-cuszp2 PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
+# ── Speed preset (Quantizer REL → Bitshuffle → RZE) ──────────────────────────
+# Fewest stages — throughput ceiling / minimum framework overhead baseline.
+# Graph-capturable (REL value_base injected so scan is skipped during capture).
+add_executable(fzgmod-profile-speed speed_profile.cpp)
+target_link_libraries(fzgmod-profile-speed PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-speed PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-speed PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
+# ── PFPL (Quantizer NOA → Difference → Bitshuffle → RZE) ─────────────────────
+# SZ-style workhorse. Bitshuffle + RZE lossless back-end bottleneck target.
+# Graph-capturable (NOA value_base injected during Phase B capture).
+add_executable(fzgmod-profile-pfpl pfpl_profile.cpp)
+target_link_libraries(fzgmod-profile-pfpl PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-pfpl PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-pfpl PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
+# ── FZ-GPU (LorenzoQuant NOA → BitplaneRZE) ───────────────────────────────────
+# Fused single-kernel back-end. Expected fastest compress/decompress path.
+# Graph-capturable (NOA value_base injected during Phase B capture).
+add_executable(fzgmod-profile-fzgpu fzgpu_profile.cpp)
+target_link_libraries(fzgmod-profile-fzgpu PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-fzgpu PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-fzgpu PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
+# ── cuSZ-Hi TP (GInterp multi-branch DAG, MINIMAL) ───────────────────────────
+# Most complex pipeline: two parallel lossless chains post-GInterp.
+# MINIMAL strategy (outlier size is data-dependent); no graph capture.
+add_executable(fzgmod-profile-cuszhi-tp cuszhi_tp_profile.cpp)
+target_link_libraries(fzgmod-profile-cuszhi-tp PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-cuszhi-tp PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-cuszhi-tp PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()

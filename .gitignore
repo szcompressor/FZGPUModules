@@ -5,7 +5,6 @@ memory/
 .claude/
 Testing/
 .github/agents/
-CLAUDE.md
 settings.json
 load-env
 
