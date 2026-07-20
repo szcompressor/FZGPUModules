@@ -31,9 +31,16 @@ vendored LC chunk kernels (`modules/coders/lc_common/lc_chunk_components.cuh`).
 ## Stage settings
 
 ```cpp
-rze->setChunkSize(16384);   // bytes; only 16384 is currently supported (default)
+rze->setChunkSize(16384);   // bytes; 4096, 8192, or 16384 (default 16384)
 rze->setWordSize(1);        // word granularity: 1, 2, 4, or 8 (default 1 = LC RZE_1)
 ```
+
+`chunk_size` is restricted to this small set because each CUDA block holds the
+whole chunk (`in` + `out` + a fixed 4 KB scratch buffer) in **static**
+`__shared__` memory — the three supported sizes (12 KB / 20 KB / 36 KB total)
+all fit comfortably under the 48 KB static cap. Larger chunk sizes would need
+the dynamic-shared-memory opt-in `GInterpStage` uses for its 3-D `double`
+path; not implemented here.
 
 `word_size` selects the LC `RZE_1` / `RZE_2` / `RZE_4` / `RZE_8` variant — the
 `_N` suffix is the **word size** (not a recursion-level count). The cuSZ-Hi
