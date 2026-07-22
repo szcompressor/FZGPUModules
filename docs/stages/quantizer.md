@@ -48,6 +48,9 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | `setInplaceOutliers(enable)` | Embed outliers in codes | ABS/NOA only; see constraints below |
 | `setLinearMode(enable)` | Signed codes, no outliers | ABS/NOA only; cuSZp-style; see below |
 | `setValueBase(v)` | Precomputed value range | NOA only; optional, see below |
+| `setDither(enable)` | Dithered ("_R"-style) reconstruction | ABS/NOA/REL; incompatible with linear/inplace modes; see below |
+| `setDitherSeed(seed)` | Seed for the dither offset | Persisted in the header; default 0 |
+| `setDitherStrength(s)` | Dither offset amplitude, fraction of abs_eb | Range `(0,1]`; default `1.0`; see below |
 
 ```cpp
 quant->setErrorBound(1e-4f);
@@ -192,6 +195,77 @@ outliers. There is no unused range large enough to safely embed raw IEEE-754
 bit patterns without collisions, and REL already needs the scatter buffers to
 preserve special values (zero, denormals, inf, NaN) exactly. For REL, outliers
 must remain in the explicit scatter buffers.
+
+---
+
+## Dithered ("_R"-style) reconstruction
+
+By default (`setDither(false)`, matching LC's `QUANT_*_0` modes), every value in
+a given quantization bin reconstructs to the same deterministic point (the bin
+center for ABS/NOA, the log-bin midpoint for REL). That makes the reconstruction
+error *correlated with the signal* — smooth input regions produce smooth,
+structured error, which shows up as visible banding/contouring and is worse for
+downstream spectral analysis than the same amount of error spread out as noise.
+
+`setDither(true)` (matching LC's `QUANT_*_R` modes) reconstructs each value to a
+deterministic pseudo-random point within the bin/error-bound interval instead —
+same worst-case error-bound guarantee, decorrelated error. The offset is a pure
+function of `(element index, dither_seed)` — no extra bytes are stored per
+element; `dither_seed` (persisted in the header) is all decode needs to
+reproduce the identical offsets.
+
+```cpp
+quant->setDither(true);
+quant->setDitherSeed(0x1234ABCDULL);  // any fixed value; default 0
+```
+
+**Cost: outlier rate increases substantially.** Since the dither offset spans
+the *full* bin width (the same range the deterministic reconstruction could
+have landed at LC's error-bound edge), any element whose original quantization
+error already used up a meaningful fraction of the bound has a real chance of
+being pushed over it once dithered — and any such element is escalated to a
+lossless outlier (the encoder verifies the dithered reconstruction against the
+true error bound *before* accepting a code; only the resulting compressed
+stream — not the input value — is available to decode, so there is no way to
+"try again" with a smaller offset). Empirically this lands around **~25% of
+elements** for a smooth signal (the sum of two independent roughly-uniform
+errors — the original quantization error and the dither offset — exceeding the
+bound is a geometrically-derivable ~25% tail probability). Size
+`outlier_capacity` accordingly (e.g. `0.3`–`0.5` rather than the `0.05`–`0.1`
+typical for non-dithered use) — an undersized capacity silently drops excess
+outliers past the buffer, corrupting reconstruction for those elements.
+
+Incompatible with `setLinearMode(true)` and `setInplaceOutliers(true)` (both
+throw at `compress()` if combined with `setDither(true)`) — neither has a
+per-element outlier-escalation path: linear mode has no outlier ports at all,
+and inplace mode's raw-bit escalation mechanism isn't wired up for dithering.
+
+### Dialing back the outlier rate: `setDitherStrength()`
+
+The ~25% outlier rate above comes from dithering across the *full* bin width.
+`setDitherStrength(s)` scales the offset amplitude to `s × abs_eb` (or, in REL
+mode, `s ×` half a log-bin width) for `s` in `(0, 1]` — the error-bound check
+itself is never scaled, only how far the offset can reach. Lower `s` trades
+decorrelation strength for fewer outliers, smoothly:
+
+```cpp
+quant->setDither(true);
+quant->setDitherStrength(0.3f);  // less aggressive than the LC-literal default of 1.0
+```
+
+`s = 1.0` (default) exactly matches LC's `_R` definition and the ~25% figure
+above. `s = 0.0` disables the offset entirely — reconstruction becomes
+bit-identical to `dither=false` (bin center every time), so it's not a useful
+end state, just the bottom of the dial. There's no way to make the offset
+*data-adaptive* (e.g. only as large as whatever headroom a specific value has
+left in its bin) — decode only ever sees the bin index, not where the original
+value sat within it, so the amplitude must be this same fixed quantity on both
+sides regardless of `s`.
+
+Not currently available on `LorenzoQuantStage` — see that stage's docs for why
+(the fused predictor+quantizer reconstructs via a running prefix-sum, so an
+individual element's error depends on every prior dithered residual in its
+block, not just its own bin).
 
 ---
 

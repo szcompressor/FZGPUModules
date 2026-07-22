@@ -72,20 +72,32 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
         }
 
         case StageType::DIFFERENCE: {
-            // Header: [0] TIn DataType, [1] TOut DataType, [2..5] chunk_size.
-            // TIn == TOut → same-type (legacy); TIn signed + TOut unsigned → negabinary-fused.
+            // Header: [0] TIn DataType, [1] TOut DataType, [2..5] chunk_size, [6] FusionMode (fused only).
+            // TIn == TOut → same-type (legacy); TIn signed + TOut unsigned → fused
+            // (byte 6 selects NEGABINARY (default, for 6-byte legacy headers) vs. ZIGZAG).
             if (config_size >= 2) {
                 DataType tin_dt  = static_cast<DataType>(config[0]);
                 DataType tout_dt = static_cast<DataType>(config[1]);
-                // Negabinary-fused instantiations
-                if      (tin_dt == DataType::INT8  && tout_dt == DataType::UINT8)
-                    stage = new DifferenceStage<int8_t,  uint8_t>();
-                else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16)
-                    stage = new DifferenceStage<int16_t, uint16_t>();
-                else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32)
-                    stage = new DifferenceStage<int32_t, uint32_t>();
-                else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64)
-                    stage = new DifferenceStage<int64_t, uint64_t>();
+                FusionMode mode = FusionMode::NEGABINARY;
+                if (config_size >= 7) mode = static_cast<FusionMode>(config[6]);
+                // Negabinary/zigzag-fused instantiations
+                if (tin_dt == DataType::INT8 && tout_dt == DataType::UINT8) {
+                    stage = (mode == FusionMode::ZIGZAG)
+                        ? static_cast<Stage*>(new DifferenceStage<int8_t, uint8_t, FusionMode::ZIGZAG>())
+                        : static_cast<Stage*>(new DifferenceStage<int8_t, uint8_t, FusionMode::NEGABINARY>());
+                } else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16) {
+                    stage = (mode == FusionMode::ZIGZAG)
+                        ? static_cast<Stage*>(new DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG>())
+                        : static_cast<Stage*>(new DifferenceStage<int16_t, uint16_t, FusionMode::NEGABINARY>());
+                } else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32) {
+                    stage = (mode == FusionMode::ZIGZAG)
+                        ? static_cast<Stage*>(new DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG>())
+                        : static_cast<Stage*>(new DifferenceStage<int32_t, uint32_t, FusionMode::NEGABINARY>());
+                } else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64) {
+                    stage = (mode == FusionMode::ZIGZAG)
+                        ? static_cast<Stage*>(new DifferenceStage<int64_t, uint64_t, FusionMode::ZIGZAG>())
+                        : static_cast<Stage*>(new DifferenceStage<int64_t, uint64_t, FusionMode::NEGABINARY>());
+                }
                 // Same-type instantiations
                 else if (tin_dt == DataType::FLOAT32)  stage = new DifferenceStage<float>();
                 else if (tin_dt == DataType::FLOAT64)  stage = new DifferenceStage<double>();

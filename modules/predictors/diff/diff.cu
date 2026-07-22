@@ -1,5 +1,6 @@
 #include "predictors/diff/diff.h"
 #include "transforms/negabinary/negabinary.h"
+#include "transforms/zigzag/zigzag.h"
 #include "log.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
@@ -9,17 +10,18 @@
 
 namespace fz {
 
-// ─── Forward kernel: difference with optional chunking + negabinary output ────
+// ─── Forward kernel: difference with optional chunking + fused output ────────
 //
 // chunk_elems == 0  → whole array is one chunk (only idx 0 is a boundary).
 // chunk_elems  > 0  → first element of each chunk is stored as-is.
 //
-// When TOut != T the computed difference is negabinary-encoded before writing.
+// When TOut != T the computed difference is encoded (negabinary or zigzag,
+// selected by Mode) before writing.
 //
 // Uses a grid-stride loop so each thread processes multiple elements, matching
-// the PFPL reference pattern (d_DIFFNB).  This improves instruction-level
-// parallelism and reduces grid launch overhead for large arrays.
-template<typename T, typename TOut>
+// the PFPL reference pattern (d_DIFFNB/d_DIFFMS).  This improves instruction-
+// level parallelism and reduces grid launch overhead for large arrays.
+template<typename T, typename TOut, FusionMode Mode>
 __global__ void diffKernel(const T* __restrict__ in,
                             TOut* __restrict__ out,
                             size_t n,
@@ -40,27 +42,34 @@ __global__ void diffKernel(const T* __restrict__ in,
 
         if constexpr (std::is_same_v<T, TOut>) {
             out[idx] = diff;
-        } else {
+        } else if constexpr (Mode == FusionMode::NEGABINARY) {
             out[idx] = Negabinary<T>::encode(diff);
+        } else {
+            out[idx] = Zigzag<T>::encode(diff);
         }
     }
 }
 
-// ─── Negabinary decode pass: TOut[] → T[] ────────────────────────────────────
+// ─── Fused decode pass: TOut[] → T[] ─────────────────────────────────────────
 //
-// Used as the first step of the inverse pass when TOut != T.
-// Grid-stride loop for multi-element-per-thread throughput.
-template<typename T, typename TOut>
-__global__ void negabinaryDecodePassKernel(const TOut* __restrict__ in,
-                                            T* __restrict__ out,
-                                            size_t n)
+// Used as the first step of the inverse pass when TOut != T. Undoes whichever
+// transform Mode selected. Grid-stride loop for multi-element-per-thread
+// throughput.
+template<typename T, typename TOut, FusionMode Mode>
+__global__ void fusionDecodePassKernel(const TOut* __restrict__ in,
+                                        T* __restrict__ out,
+                                        size_t n)
 {
     const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
     for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
          idx < n;
          idx += stride)
     {
-        out[idx] = Negabinary<T>::decode(in[idx]);
+        if constexpr (Mode == FusionMode::NEGABINARY) {
+            out[idx] = Negabinary<T>::decode(in[idx]);
+        } else {
+            out[idx] = Zigzag<T>::decode(in[idx]);
+        }
     }
 }
 
@@ -105,7 +114,7 @@ __global__ void cumsumChunkedKernel(T* __restrict__ data,
 }
 
 // ─── Helper: forward diff launch ─────────────────────────────────────────────
-template<typename T, typename TOut>
+template<typename T, typename TOut, FusionMode Mode>
 static void launchDiff(const T* in, TOut* out, size_t n,
                        size_t chunk_elems, cudaStream_t stream)
 {
@@ -120,7 +129,7 @@ static void launchDiff(const T* in, TOut* out, size_t n,
     int fullGrid = static_cast<int>((n + kBlock - 1) / kBlock);
     int grid = fullGrid < (fullGrid / 8 + 1) ? fullGrid : (fullGrid / 8 + 1);
     if (grid < 1) grid = 1;
-    diffKernel<T, TOut><<<grid, kBlock, 0, stream>>>(in, out, n, chunk_elems);
+    diffKernel<T, TOut, Mode><<<grid, kBlock, 0, stream>>>(in, out, n, chunk_elems);
 }
 
 // ─── Helper: block-scan chunked inclusive sum (in-place) ─────────────────────
@@ -162,8 +171,8 @@ static void launchGlobalCumsum(const T* in, T* out, size_t n, cudaStream_t strea
 }
 
 // ─── execute() ───────────────────────────────────────────────────────────────
-template<typename T, typename TOut>
-void DifferenceStage<T, TOut>::execute(
+template<typename T, typename TOut, FusionMode Mode>
+void DifferenceStage<T, TOut, Mode>::execute(
     cudaStream_t stream,
     MemoryPool* pool,
     const std::vector<void*>& inputs,
@@ -181,16 +190,16 @@ void DifferenceStage<T, TOut>::execute(
     if (n == 0) { actual_output_size_ = 0; return; }
 
     if (!is_inverse_) {
-        // ── Forward: difference ± negabinary encode ───────────────────────────
-        launchDiff<T, TOut>(
+        // ── Forward: difference ± fused negabinary/zigzag encode ──────────────
+        launchDiff<T, TOut, Mode>(
             static_cast<const T*>(inputs[0]),
             static_cast<TOut*>(outputs[0]),
             n, chunk_elems, stream);
     } else {
-        // ── Inverse: (decode negabinary) → cumulative sum ─────────────────────
+        // ── Inverse: (decode negabinary/zigzag) → cumulative sum ──────────────
         //
-        // if constexpr guards ensure Negabinary<T> is only instantiated for the
-        // signed→unsigned pairs; unreachable code is excluded at compile time.
+        // if constexpr guards ensure Negabinary<T>/Zigzag<T> are only instantiated
+        // for the signed→unsigned pairs; unreachable code is excluded at compile time.
         if constexpr (!std::is_same_v<T, TOut>) {
             // Step 1: decode each TOut element back to T into a scratch buffer.
             T* d_decoded = nullptr;
@@ -207,7 +216,7 @@ void DifferenceStage<T, TOut>::execute(
                 int fullGrid = static_cast<int>((n + kBlock - 1) / kBlock);
                 int grid = fullGrid < (fullGrid / 8 + 1) ? fullGrid : (fullGrid / 8 + 1);
                 if (grid < 1) grid = 1;
-                negabinaryDecodePassKernel<T, TOut><<<grid, kBlock, 0, stream>>>(
+                fusionDecodePassKernel<T, TOut, Mode><<<grid, kBlock, 0, stream>>>(
                     static_cast<const TOut*>(inputs[0]), d_decoded, n);
             }
 
@@ -228,7 +237,7 @@ void DifferenceStage<T, TOut>::execute(
                 FZ_CUDA_CHECK_WARN(cudaFree(d_decoded));
             }
         } else {
-            // No negabinary — TOut == T.
+            // No fusion — TOut == T.
             const T* in_ptr  = static_cast<const T*>(inputs[0]);
             T*       out_ptr = static_cast<T*>(outputs[0]);
 
@@ -266,16 +275,28 @@ template class DifferenceStage<uint16_t>;
 template class DifferenceStage<uint8_t>;
 template class DifferenceStage<uint32_t>;
 
-// Negabinary-fused (TOut = unsigned counterpart of T)
+// Negabinary-fused (TOut = unsigned counterpart of T; Mode defaults to NEGABINARY)
 template class DifferenceStage<int8_t,  uint8_t>;
 template class DifferenceStage<int16_t, uint16_t>;
 template class DifferenceStage<int32_t, uint32_t>;
 template class DifferenceStage<int64_t, uint64_t>;
 
+// Zigzag-fused (TOut = unsigned counterpart of T, Mode = ZIGZAG)
+template class DifferenceStage<int8_t,  uint8_t,  FusionMode::ZIGZAG>;
+template class DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG>;
+template class DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG>;
+template class DifferenceStage<int64_t, uint64_t, FusionMode::ZIGZAG>;
+
 // Kernels used by negabinary-fused instantiations
-template __global__ void negabinaryDecodePassKernel<int8_t,  uint8_t> (const  uint8_t*,  int8_t*, size_t);
-template __global__ void negabinaryDecodePassKernel<int16_t, uint16_t>(const uint16_t*, int16_t*, size_t);
-template __global__ void negabinaryDecodePassKernel<int32_t, uint32_t>(const uint32_t*, int32_t*, size_t);
-template __global__ void negabinaryDecodePassKernel<int64_t, uint64_t>(const uint64_t*, int64_t*, size_t);
+template __global__ void fusionDecodePassKernel<int8_t,  uint8_t,  FusionMode::NEGABINARY>(const  uint8_t*,  int8_t*, size_t);
+template __global__ void fusionDecodePassKernel<int16_t, uint16_t, FusionMode::NEGABINARY>(const uint16_t*, int16_t*, size_t);
+template __global__ void fusionDecodePassKernel<int32_t, uint32_t, FusionMode::NEGABINARY>(const uint32_t*, int32_t*, size_t);
+template __global__ void fusionDecodePassKernel<int64_t, uint64_t, FusionMode::NEGABINARY>(const uint64_t*, int64_t*, size_t);
+
+// Kernels used by zigzag-fused instantiations
+template __global__ void fusionDecodePassKernel<int8_t,  uint8_t,  FusionMode::ZIGZAG>(const  uint8_t*,  int8_t*, size_t);
+template __global__ void fusionDecodePassKernel<int16_t, uint16_t, FusionMode::ZIGZAG>(const uint16_t*, int16_t*, size_t);
+template __global__ void fusionDecodePassKernel<int32_t, uint32_t, FusionMode::ZIGZAG>(const uint32_t*, int32_t*, size_t);
+template __global__ void fusionDecodePassKernel<int64_t, uint64_t, FusionMode::ZIGZAG>(const uint64_t*, int64_t*, size_t);
 
 } // namespace fz

@@ -202,19 +202,20 @@ identical values.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| data_type | string | "uint16" | Element type. One of "uint8", "uint16", "uint32", "int32". |
+| data_type | string | "uint16" | Element type. One of "uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "int64". |
 
 ### Difference
 
-First-order difference coding with optional negabinary fusion.
+First-order difference coding with optional negabinary or zigzag fusion.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | input_type | string | "float32" | Input element type. |
-| output_type | string | (same as input_type) | Output element type. When output_type is the unsigned counterpart of a signed input_type, negabinary encoding is fused into the forward pass. |
+| output_type | string | (same as input_type) | Output element type. When output_type is the unsigned counterpart of a signed input_type, the transform selected by fusion_mode is fused into the forward pass. |
+| fusion_mode | string | "negabinary" | "negabinary" (LC's DIFFNB) or "zigzag" (LC's DIFFMS, sign-magnitude/TCMS). Ignored when input_type == output_type. |
 | chunk_size | integer | 0 | Chunk size in bytes (0 = no chunking, process whole array as one context). When > 0, differences reset at each chunk boundary, enabling parallel decompression. |
 
-**Negabinary-fused instantiations** (when input_type != output_type):
+**Fused instantiations** (when input_type != output_type; fusion_mode selects negabinary vs. zigzag):
 
 | input_type | output_type |
 |---|---|
@@ -250,6 +251,9 @@ supports ABS, NOA, and REL (log-space) error bound modes.
 | zigzag_codes | boolean | true | Zigzag-encode codes before output to improve downstream compressibility. No effect in REL mode. |
 | outlier_threshold | float | inf | ABS/NOA: values with |x| >= threshold are forced to lossless outlier regardless of bin. Omit (default) to disable. |
 | inplace_outliers | boolean | false | ABS/NOA: encode outlier raw bits in-place in the codes array (no scatter buffers). Cannot be used with REL mode. |
+| dither | boolean | false | ABS/NOA/REL: reconstruct to a deterministic pseudo-random point within the bin/bound instead of always the bin center (LC's QUANT_*_R). Decorrelates reconstruction error from the signal. Roughly quadruples the outlier rate (~25% for smooth data) — size outlier_capacity accordingly. Cannot be used with linear_mode or inplace_outliers. |
+| dither_seed | integer | 0 | Seed for the deterministic per-element dither offset. Only meaningful when dither = true. |
+| dither_strength | float | 1.0 | Dither offset amplitude as a fraction of abs_eb, in (0,1]. 1.0 matches LC's literal definition (~25% outlier rate); lower values trade decorrelation strength for fewer outliers. Only meaningful when dither = true. |
 
 **Output ports:** "codes", "outlier_vals", "outlier_idxs", "outlier_count".
 In inplace-outlier mode only "codes" is produced; the other three outputs

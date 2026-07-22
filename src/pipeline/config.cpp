@@ -230,6 +230,9 @@ static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
 
         quant->setInplaceOutliers(optBool(t, "inplace_outliers", false));
         quant->setLinearMode(linear);
+        quant->setDither(optBool(t, "dither", false));
+        quant->setDitherSeed(static_cast<uint64_t>(optInt(t, "dither_seed", 0)));
+        quant->setDitherStrength(static_cast<float>(optDbl(t, "dither_strength", 1.0)));
         s = quant;
     };
 
@@ -285,12 +288,31 @@ static Stage* addDifferenceStage(Pipeline& p, const toml::table& t) {
                 throw std::runtime_error("loadConfig: unsupported Difference input_type");
         }
     }
-    // Negabinary-fused instantiations (signed → unsigned of same width)
+    // Negabinary/zigzag-fused instantiations (signed → unsigned of same width).
+    // fusion_mode = "negabinary" (default, LC's DIFFNB) or "zigzag" (LC's DIFFMS).
     size_t cs = static_cast<size_t>(optInt(t, "chunk_size", 0));
-    if (in_dt == DataType::INT8  && out_dt == DataType::UINT8)  { auto* s = p.addStage<DifferenceStage<int8_t,  uint8_t>>();  s->setChunkSize(cs); return s; }
-    if (in_dt == DataType::INT16 && out_dt == DataType::UINT16) { auto* s = p.addStage<DifferenceStage<int16_t, uint16_t>>(); s->setChunkSize(cs); return s; }
-    if (in_dt == DataType::INT32 && out_dt == DataType::UINT32) { auto* s = p.addStage<DifferenceStage<int32_t, uint32_t>>(); s->setChunkSize(cs); return s; }
-    if (in_dt == DataType::INT64 && out_dt == DataType::UINT64) { auto* s = p.addStage<DifferenceStage<int64_t, uint64_t>>(); s->setChunkSize(cs); return s; }
+    std::string fusion_str = optStr(t, "fusion_mode", "negabinary");
+    FusionMode mode;
+    if      (fusion_str == "negabinary") mode = FusionMode::NEGABINARY;
+    else if (fusion_str == "zigzag")     mode = FusionMode::ZIGZAG;
+    else throw std::runtime_error("loadConfig: unsupported Difference fusion_mode \"" + fusion_str + "\" (expected \"negabinary\" or \"zigzag\")");
+
+    if (in_dt == DataType::INT8 && out_dt == DataType::UINT8) {
+        if (mode == FusionMode::ZIGZAG) { auto* s = p.addStage<DifferenceStage<int8_t, uint8_t, FusionMode::ZIGZAG>>();     s->setChunkSize(cs); return s; }
+        else                            { auto* s = p.addStage<DifferenceStage<int8_t, uint8_t, FusionMode::NEGABINARY>>(); s->setChunkSize(cs); return s; }
+    }
+    if (in_dt == DataType::INT16 && out_dt == DataType::UINT16) {
+        if (mode == FusionMode::ZIGZAG) { auto* s = p.addStage<DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG>>();     s->setChunkSize(cs); return s; }
+        else                            { auto* s = p.addStage<DifferenceStage<int16_t, uint16_t, FusionMode::NEGABINARY>>(); s->setChunkSize(cs); return s; }
+    }
+    if (in_dt == DataType::INT32 && out_dt == DataType::UINT32) {
+        if (mode == FusionMode::ZIGZAG) { auto* s = p.addStage<DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG>>();     s->setChunkSize(cs); return s; }
+        else                            { auto* s = p.addStage<DifferenceStage<int32_t, uint32_t, FusionMode::NEGABINARY>>(); s->setChunkSize(cs); return s; }
+    }
+    if (in_dt == DataType::INT64 && out_dt == DataType::UINT64) {
+        if (mode == FusionMode::ZIGZAG) { auto* s = p.addStage<DifferenceStage<int64_t, uint64_t, FusionMode::ZIGZAG>>();     s->setChunkSize(cs); return s; }
+        else                            { auto* s = p.addStage<DifferenceStage<int64_t, uint64_t, FusionMode::NEGABINARY>>(); s->setChunkSize(cs); return s; }
+    }
 
     throw std::runtime_error("loadConfig: unsupported Difference type combination");
 }
@@ -522,6 +544,11 @@ static void saveQuantizerStage(Stage* s, std::ostringstream& out) {
         if (std::isfinite(thr)) out << "outlier_threshold = " << thr << "\n";
         if (q->getInplaceOutliers())  out << "inplace_outliers = true\n";
         if (q->getLinearMode())       out << "linear_mode = true\n";
+        if (q->getDither()) {
+            out << "dither = true\n";
+            out << "dither_seed = " << static_cast<int64_t>(q->getDitherSeed()) << "\n";
+            out << "dither_strength = " << static_cast<double>(q->getDitherStrength()) << "\n";
+        }
     };
     if      (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16) write(static_cast<QuantizerStage<float,  uint16_t>*>(s));
     else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT32) write(static_cast<QuantizerStage<float,  uint32_t>*>(s));
@@ -589,16 +616,20 @@ static void saveRLEStage(Stage* s, std::ostringstream& out) {
 }
 
 static void saveDifferenceStage(Stage* s, std::ostringstream& out) {
-    out << "input_type = \""
-        << dataTypeToString(static_cast<DataType>(s->getInputDataType(0)))  << "\"\n";
-    out << "output_type = \""
-        << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+    DataType in_dt  = static_cast<DataType>(s->getInputDataType(0));
+    DataType out_dt = static_cast<DataType>(s->getOutputDataType(0));
+    out << "input_type = \""  << dataTypeToString(in_dt)  << "\"\n";
+    out << "output_type = \"" << dataTypeToString(out_dt) << "\"\n";
     uint8_t buf[8] = {};
     size_t sz = s->serializeHeader(0, buf, sizeof(buf));
     if (sz >= 6) {
         uint32_t cs = 0;
         std::memcpy(&cs, buf + 2, sizeof(uint32_t));
         out << "chunk_size = " << static_cast<int64_t>(cs) << "\n";
+    }
+    if (sz >= 7 && in_dt != out_dt) {
+        FusionMode mode = static_cast<FusionMode>(buf[6]);
+        out << "fusion_mode = \"" << (mode == FusionMode::ZIGZAG ? "zigzag" : "negabinary") << "\"\n";
     }
 }
 

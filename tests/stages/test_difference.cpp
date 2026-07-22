@@ -25,12 +25,19 @@
  *   DD16  DifferenceStage/HeaderSerializationPreservesChunkSize — chunk_size survives header bytes
  *   DD17  DifferenceStage/DoubleRoundTrip               — double-precision exact reconstruction
  *   DD18  DifferenceStage/LegacyFloatHeaderCompatible   — vanilla float header is 6 bytes, chunk_size=0
+ *   DD19  DifferenceStage/ZigzagFusedInt32RoundTrip     — int32→uint32 zigzag-fused round-trip
+ *   DD20  DifferenceStage/ZigzagFusedInt16RoundTrip     — int16→uint16 zigzag-fused round-trip
+ *   DD21  DifferenceStage/NegabinaryAndZigzagDiffer     — same residuals, different Mode → different codes
+ *   DD22  DifferenceStage/FusedHeaderEncodesFusionMode  — serializeHeader byte[6] reflects Mode; same-type header stays 6 bytes
+ *   DD23  DifferenceStage/FactoryDispatchesZigzagMode   — stage_factory::createStage picks the Zigzag decoder from a hand-built 7-byte header
  */
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
 #include "predictors/diff/diff.h"
 #include "transforms/negabinary/negabinary.h"
+#include "transforms/zigzag/zigzag.h"
+#include "stage/stage_factory.h"
 
 #include <cmath>
 #include <cstring>
@@ -264,10 +271,10 @@ TEST(DifferenceStage, OneMillion) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: run typed DifferenceStage<TIn, TOut> forward pass; return TOut vector.
+// Helper: run typed DifferenceStage<TIn, TOut, Mode> forward pass; return TOut vector.
 // ─────────────────────────────────────────────────────────────────────────────
-template<typename TIn, typename TOut>
-static std::vector<TOut> run_diff_fwd(DifferenceStage<TIn, TOut>& stage,
+template<typename TIn, typename TOut, FusionMode Mode>
+static std::vector<TOut> run_diff_fwd(DifferenceStage<TIn, TOut, Mode>& stage,
                                       const std::vector<TIn>& h_in,
                                       cudaStream_t stream,
                                       fz::MemoryPool& pool)
@@ -290,8 +297,8 @@ static std::vector<TOut> run_diff_fwd(DifferenceStage<TIn, TOut>& stage,
 }
 
 // Helper: run inverse pass; TOut input → TIn output.
-template<typename TIn, typename TOut>
-static std::vector<TIn> run_diff_inv(DifferenceStage<TIn, TOut>& stage,
+template<typename TIn, typename TOut, FusionMode Mode>
+static std::vector<TIn> run_diff_inv(DifferenceStage<TIn, TOut, Mode>& stage,
                                       const std::vector<TOut>& h_in,
                                       cudaStream_t stream,
                                       fz::MemoryPool& pool)
@@ -564,7 +571,7 @@ TEST(DifferenceStage, HeaderSerializationPreservesChunkSize) {
 
     uint8_t buf[16] = {};
     size_t written = original.serializeHeader(0, buf, sizeof(buf));
-    ASSERT_EQ(written, 6u) << "Expected 6-byte header (TIn + TOut + chunk_size)";
+    ASSERT_EQ(written, 7u) << "Expected 7-byte header (TIn + TOut + chunk_size + fusion_mode)";
 
     Stage restored;
     restored.deserializeHeader(buf, written);
@@ -623,4 +630,154 @@ TEST(DifferenceStage, LegacyFloatHeaderCompatible) {
     uint32_t cs = 0;
     std::memcpy(&cs, buf + 2, 4);
     EXPECT_EQ(cs, uint32_t(0));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DD19: ZigzagFusedInt32RoundTrip — int32→uint32 zigzag (TCMS/DIFFMS) fusion, round-trip exact
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, ZigzagFusedInt32RoundTrip) {
+    CudaStream stream;
+    constexpr size_t N = 1024;
+    auto pool = make_test_pool(N * sizeof(int32_t) * 4);
+
+    std::vector<int32_t> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = static_cast<int32_t>(std::sin(static_cast<float>(i) * 0.1f) * 500.0f);
+
+    DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG> fwd;
+    auto h_encoded = run_diff_fwd(fwd, h_input, stream, *pool);
+    ASSERT_EQ(h_encoded.size(), N);
+
+    // Spot-check: first element is stored as-is, then zigzag-encoded
+    EXPECT_EQ(h_encoded[0], fz::Zigzag<int32_t>::encode(h_input[0]));
+
+    DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG> inv;
+    inv.setInverse(true);
+    auto h_recon = run_diff_inv(inv, h_encoded, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(h_recon[i], h_input[i]) << "Mismatch at index " << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DD20: ZigzagFusedInt16RoundTrip — int16→uint16 zigzag fusion, round-trip exact
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, ZigzagFusedInt16RoundTrip) {
+    CudaStream stream;
+    constexpr size_t N = 2000;
+    auto pool = make_test_pool(N * sizeof(int16_t) * 4);
+
+    std::vector<int16_t> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = static_cast<int16_t>((static_cast<int>(i % 500) - 250) * 3);
+
+    DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG> fwd;
+    auto h_enc = run_diff_fwd(fwd, h_input, stream, *pool);
+    ASSERT_EQ(h_enc.size(), N);
+
+    DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG> inv;
+    inv.setInverse(true);
+    auto h_recon = run_diff_inv(inv, h_enc, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        EXPECT_EQ(h_recon[i], h_input[i]) << "Mismatch at index " << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DD21: NegabinaryAndZigzagDiffer — same residual stream, different Mode → different
+//       codes for at least one value (sanity that Mode actually changes behavior,
+//       not just a no-op template parameter).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, NegabinaryAndZigzagDiffer) {
+    CudaStream stream;
+    constexpr size_t N = 256;
+    auto pool = make_test_pool(N * sizeof(int32_t) * 4);
+
+    std::vector<int32_t> h_input(N);
+    for (size_t i = 0; i < N; ++i)
+        h_input[i] = static_cast<int32_t>((static_cast<int>(i % 64) - 32) * 7);
+
+    DifferenceStage<int32_t, uint32_t, FusionMode::NEGABINARY> fwd_nb;
+    auto h_nb = run_diff_fwd(fwd_nb, h_input, stream, *pool);
+
+    DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG> fwd_zz;
+    auto h_zz = run_diff_fwd(fwd_zz, h_input, stream, *pool);
+
+    ASSERT_EQ(h_nb.size(), h_zz.size());
+    bool any_different = false;
+    for (size_t i = 0; i < h_nb.size(); ++i) {
+        if (h_nb[i] != h_zz[i]) { any_different = true; break; }
+    }
+    EXPECT_TRUE(any_different)
+        << "Negabinary and zigzag fusion should not produce identical code streams "
+           "for a mixed-sign residual sequence";
+
+    // Both still round-trip correctly for a shared negative-diff element.
+    EXPECT_EQ(fz::Negabinary<int32_t>::decode(h_nb[1]), h_input[1] - h_input[0]);
+    EXPECT_EQ(fz::Zigzag<int32_t>::decode(h_zz[1]), h_input[1] - h_input[0]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DD22: FusedHeaderEncodesFusionMode — serializeHeader byte[6] reflects Mode for
+//       fused instantiations; same-type (non-fused) headers stay 6 bytes (legacy).
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, FusedHeaderEncodesFusionMode) {
+    DifferenceStage<int32_t, uint32_t, FusionMode::NEGABINARY> nb;
+    uint8_t buf_nb[16] = {};
+    size_t written_nb = nb.serializeHeader(0, buf_nb, sizeof(buf_nb));
+    ASSERT_EQ(written_nb, 7u);
+    EXPECT_EQ(buf_nb[6], static_cast<uint8_t>(FusionMode::NEGABINARY));
+
+    DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG> zz;
+    uint8_t buf_zz[16] = {};
+    size_t written_zz = zz.serializeHeader(0, buf_zz, sizeof(buf_zz));
+    ASSERT_EQ(written_zz, 7u);
+    EXPECT_EQ(buf_zz[6], static_cast<uint8_t>(FusionMode::ZIGZAG));
+
+    // Same-type (no fusion): header stays 6 bytes, matching LegacyFloatHeaderCompatible.
+    DifferenceStage<int32_t> same_type;
+    uint8_t buf_same[16] = {};
+    size_t written_same = same_type.serializeHeader(0, buf_same, sizeof(buf_same));
+    EXPECT_EQ(written_same, 6u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DD23: FactoryDispatchesZigzagMode — stage_factory::createStage builds the
+//       Zigzag-fused instantiation from a hand-built 7-byte header (byte[6]=1),
+//       verified by round-tripping a known negative-diff value through it.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DifferenceStage, FactoryDispatchesZigzagMode) {
+    uint8_t header[7] = {
+        static_cast<uint8_t>(fz::DataType::INT32),
+        static_cast<uint8_t>(fz::DataType::UINT32),
+        0, 0, 0, 0,               // chunk_size = 0
+        static_cast<uint8_t>(FusionMode::ZIGZAG),
+    };
+
+    Stage* built = createStage(StageType::DIFFERENCE, header, sizeof(header));
+    ASSERT_NE(built, nullptr);
+
+    // Confirm it behaves like the zigzag-fused stage, not negabinary: encode a
+    // known negative first-element diff and check it matches Zigzag, not Negabinary
+    // (they disagree for this value).
+    CudaStream stream;
+    auto pool = make_test_pool(4096);
+    std::vector<int32_t> h_input = {-7};
+    CudaBuffer<int32_t> d_in(1);
+    CudaBuffer<uint32_t> d_out(1);
+    d_in.upload(h_input, stream);
+    std::vector<void*> inputs  = {d_in.void_ptr()};
+    std::vector<void*> outputs = {d_out.void_ptr()};
+    std::vector<size_t> sizes  = {sizeof(int32_t)};
+    built->execute(stream, pool.get(), inputs, outputs, sizes);
+    cudaStreamSynchronize(stream);
+    auto h_out = d_out.download(stream);
+
+    ASSERT_EQ(h_out.size(), 1u);
+    EXPECT_EQ(h_out[0], fz::Zigzag<int32_t>::encode(-7));
+    EXPECT_NE(h_out[0], fz::Negabinary<int32_t>::encode(-7));
+
+    delete built;
 }

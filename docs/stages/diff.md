@@ -1,7 +1,7 @@
 # DifferenceStage {#stage_diff}
 
 **Header:** `modules/predictors/diff/diff.h`  
-**Class:** `fz::DifferenceStage<T, TOut = T>`  
+**Class:** `fz::DifferenceStage<T, TOut = T, Mode = FusionMode::NEGABINARY>`  
 **Category:** Predictor / transform (lossless)
 
 ---
@@ -12,10 +12,15 @@
   `output[0] = input[0]`.
 - **Inverse (decompression):** cumulative sum.
 
-When `TOut != T`, the stage writes the forward deltas in negabinary form into the
-unsigned output type, and the inverse path decodes negabinary before the prefix sum.
-This is equivalent to `DifferenceStage<T>` followed by a `NegabinaryStage`, but
-fused into one kernel.
+When `TOut != T`, the stage writes the forward deltas in fused form into the
+unsigned output type — negabinary (`FusionMode::NEGABINARY`, LC's DIFFNB) or
+zigzag/sign-magnitude (`FusionMode::ZIGZAG`, LC's DIFFMS) — and the inverse path
+decodes that transform before the prefix sum. This is equivalent to
+`DifferenceStage<T>` followed by a `NegabinaryStage`/`ZigzagStage`, but fused into
+one kernel. Neither mode dominates universally: negabinary tends to produce denser
+zero runs at high bit-planes for smooth, symmetric-around-zero residuals, but
+zigzag can win on other residual distributions — both are exposed so a pipeline
+search can pick per-dataset, mirroring LC's own DIFFNB/DIFFMS split.
 
 Output is the same byte size as input (`sizeof(T) == sizeof(TOut)` is enforced).
 
@@ -26,11 +31,12 @@ Output is the same byte size as input (`sizeof(T) == sizeof(TOut)` is enforced).
 | Parameter | Constraint |
 |---|---|
 | `T` | Numeric type (input / output when `TOut == T`, see available instantiations) |
-| `TOut` | Defaults to `T`. When different: unsigned counterpart of signed `T` (negabinary fusion) |
+| `TOut` | Defaults to `T`. When different: unsigned counterpart of signed `T` (fused transform) |
+| `Mode` | `FusionMode::NEGABINARY` (default) or `FusionMode::ZIGZAG`. Ignored when `TOut == T` |
 
 ## Available instantiations
 
-Single-parameter (no negabinary fusion):
+Single-parameter (no fusion):
 - `DifferenceStage<float>`
 - `DifferenceStage<double>`
 - `DifferenceStage<uint8_t>`
@@ -39,13 +45,31 @@ Single-parameter (no negabinary fusion):
 - `DifferenceStage<int32_t>`
 - `DifferenceStage<int64_t>`
 
-Negabinary-fused pairs (`<signed, unsigned>`):
+Negabinary-fused pairs (`<signed, unsigned>`, `Mode` defaults to `NEGABINARY`):
 - `DifferenceStage<int8_t, uint8_t>`
 - `DifferenceStage<int16_t, uint16_t>`
 - `DifferenceStage<int32_t, uint32_t>`
 - `DifferenceStage<int64_t, uint64_t>`
 
-Using any other combination will result in a linker error. Common choices: `DifferenceStage<int32_t, uint32_t>` (after quantizer codes), or `DifferenceStage<int32_t>` (plain delta coding).
+Zigzag-fused pairs (`<signed, unsigned, FusionMode::ZIGZAG>`):
+- `DifferenceStage<int8_t, uint8_t, FusionMode::ZIGZAG>`
+- `DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG>`
+- `DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG>`
+- `DifferenceStage<int64_t, uint64_t, FusionMode::ZIGZAG>`
+
+Using any other combination will result in a linker error. Common choices: `DifferenceStage<int32_t, uint32_t>` (after quantizer codes, negabinary fusion), or `DifferenceStage<int32_t>` (plain delta coding).
+
+### TOML
+
+```toml
+[[stage]]
+name        = "diff"
+type        = "Difference"
+input_type  = "int32"
+output_type = "uint32"
+fusion_mode = "zigzag"    # or "negabinary" (default); ignored when input_type == output_type
+chunk_size  = 16384
+```
 
 ---
 

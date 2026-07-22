@@ -1,6 +1,7 @@
 // Algorithm adapted from the LC/PFPL framework (Burtscher et al., BSD-3-Clause).
 // Upstream: https://github.com/burtscher/LC-framework — see THIRD_PARTY.md.
 #include "quantizers/quantizer/quantizer.h"
+#include "quantizers/dither.cuh"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
 #include <cuda_runtime.h>
@@ -27,11 +28,25 @@ namespace fz {
  * stored = 0 is the outlier sentinel (never a valid quantised value because
  * round(value/step) = -quant_radius would require |value| = quant_radius * step,
  * which exceeds the outlier threshold anyway).
+ *
+ * When Dither is set, the bin/code selection is unchanged (identical to the
+ * non-dithered path — the compressed stream is bit-for-bit the same), but the
+ * element is only accepted if its *dithered* reconstruction (bin center +
+ * ditherUnit(i, seed) * dither_amp, matching what the inverse kernel will
+ * compute) still satisfies the error bound; otherwise it is escalated to a
+ * lossless outlier, same mechanism as the existing radius/threshold checks.
+ * dither_amp = abs_eb * dither_strength — the offset amplitude is a tunable
+ * fraction of the bound, but the bound itself (abs_eb, used in the check
+ * below) is never scaled.
  */
-template<typename TInput, typename TCode, bool ZigzagCodes = false>
+template<typename TInput, typename TCode, bool ZigzagCodes = false, bool Dither = false>
 __global__ void quantizer_abs_fwd_kernel(
     const TInput* __restrict__ in, size_t n,
     TInput ebx2_r,          // 1 / (2 * abs_eb)
+    TInput ebx2,            // 2 * abs_eb (only used when Dither)
+    TInput abs_eb,          // true error bound; only used when Dither
+    TInput dither_amp,      // abs_eb * dither_strength; only used when Dither
+    uint64_t dither_seed,   // only used when Dither
     float  threshold,       // |x| >= threshold → forced outlier (pass inf to disable)
     TCode  quant_radius,
     TCode* __restrict__     codes,
@@ -48,7 +63,19 @@ __global__ void quantizer_abs_fwd_kernel(
     int q = __float2int_rn((float)x * (float)ebx2_r);
 
     // |q| < quant_radius and |x| < threshold → representable
-    if (q > -(int)quant_radius && q < (int)quant_radius && fabsf((float)x) < threshold) {
+    bool representable = (q > -(int)quant_radius && q < (int)quant_radius && fabsf((float)x) < threshold);
+
+    if constexpr (Dither) {
+        if (representable) {
+            float offset = ditherUnit(i, dither_seed) * static_cast<float>(dither_amp);
+            float recon  = static_cast<float>(q) * static_cast<float>(ebx2) + offset;
+            if (fabsf(static_cast<float>(x) - recon) > static_cast<float>(abs_eb)) {
+                representable = false;  // dither pushed this element over bound → escalate
+            }
+        }
+    }
+
+    if (representable) {
         if constexpr (ZigzagCodes) {
             // Zigzag-encode: signed q → unsigned code clustering near 0
             using SCode = typename std::make_signed<TCode>::type;
@@ -135,11 +162,16 @@ __global__ void quantizer_linear_fwd_kernel(
  *
  * code = 0 means outlier — those positions are left as 0 (from the preceding
  * cudaMemset) and will be overwritten by scatter_assign_kernel.
+ *
+ * When Dither is set, adds the same ditherUnit(i, seed) * abs_eb offset the
+ * forward kernel verified against, reproducing the identical dithered value.
  */
-template<typename TInput, typename TCode, bool ZigzagCodes = false>
+template<typename TInput, typename TCode, bool ZigzagCodes = false, bool Dither = false>
 __global__ void quantizer_abs_inv_kernel(
     const TCode* __restrict__ codes, size_t n,
     TInput ebx2,            // 2 * abs_eb
+    TInput dither_amp,      // abs_eb * dither_strength; only used when Dither
+    uint64_t dither_seed,   // only used when Dither
     TCode  quant_radius,
     TInput* __restrict__ out
 ) {
@@ -157,7 +189,11 @@ __global__ void quantizer_abs_inv_kernel(
         // so whatever dequant writes there is harmless.
         q = static_cast<int>(static_cast<typename std::make_signed<TCode>::type>(codes[i]));
     }
-    out[i] = static_cast<TInput>(q) * ebx2;
+    float recon = static_cast<float>(q) * static_cast<float>(ebx2);
+    if constexpr (Dither) {
+        recon += ditherUnit(i, dither_seed) * static_cast<float>(dither_amp);
+    }
+    out[i] = static_cast<TInput>(recon);
 }
 
 /**
@@ -253,13 +289,15 @@ __device__ __forceinline__ uint32_t pack_rel_code(int log_bin, bool x_negative) 
     return code_val + 1u;  // +1 so that 0 is free as the outlier sentinel
 }
 
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool Dither = false>
 __global__ void quantizer_rel_fwd_kernel(
     const TInput* __restrict__ in, size_t n,
     float log2eb,               // 2 * log2(1 + epsilon)
     float log2eb_r,             // 1 / log2eb
     float one_plus_eb,          // 1 + epsilon
     float one_over_one_plus_eb, // 1 / (1 + epsilon)
+    uint64_t dither_seed,       // only used when Dither
+    float dither_strength,      // offset amplitude fraction of a log-bin half-width; only used when Dither
     float threshold,            // |x| >= threshold → forced outlier (pass inf to disable)
     TCode quant_radius,
     TCode* __restrict__    codes,
@@ -325,7 +363,16 @@ __global__ void quantizer_rel_fwd_kernel(
         // Use __exp2f (hardware, ~2 ULP) instead of pow2approx: the linear
         // 1+frac approximation has ~5% error at frac≈0.6, far exceeding
         // the ±0.1% window at eb=1e-3.
+        //
+        // Dithering perturbs log_recon by up to ± half a log-bin width
+        // (log2eb / 2 — the log-space analogue of ABS/NOA's ± abs_eb around
+        // the linear bin center) before verifying; the inverse kernel adds the
+        // identical perturbation, so an element only lands in the outlier path
+        // here if the dither would have actually violated its bound.
         float log_recon = static_cast<float>(log_bin) * log2eb;
+        if constexpr (Dither) {
+            log_recon += ditherUnit(i, dither_seed) * (log2eb * 0.5f * dither_strength);
+        }
         float abs_recon = exp2f(log_recon);
         float lower     = abs_x * one_over_one_plus_eb;
         float upper     = abs_x * one_plus_eb;
@@ -350,11 +397,16 @@ __global__ void quantizer_rel_fwd_kernel(
  *
  * code == 0 → outlier placeholder (position already 0 from memset;
  *             scatter_assign_kernel will overwrite with the original).
+ *
+ * When Dither is set, adds the identical ± log2eb/2 * dither_strength
+ * perturbation the forward kernel verified against (see quantizer_rel_fwd_kernel).
  */
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool Dither = false>
 __global__ void quantizer_rel_inv_kernel(
     const TCode* __restrict__ codes, size_t n,
     float log2eb,
+    uint64_t dither_seed,   // only used when Dither
+    float dither_strength,  // only used when Dither
     TInput* __restrict__ out
 ) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
@@ -372,7 +424,11 @@ __global__ void quantizer_rel_inv_kernel(
     // Use __exp2f (hardware, ~2 ULP) for accurate reconstruction.
     // pow2approx has ~5% error at fractional parts near 0.6, which exceeds
     // even loose error bounds and corrupts the decompressed data.
-    float abs_recon = exp2f(static_cast<float>(log_bin) * log2eb);
+    float log_recon = static_cast<float>(log_bin) * log2eb;
+    if constexpr (Dither) {
+        log_recon += ditherUnit(i, dither_seed) * (log2eb * 0.5f * dither_strength);
+    }
+    float abs_recon = exp2f(log_recon);
     out[i] = static_cast<TInput>(is_neg_x ? -abs_recon : abs_recon);
 }
 
@@ -447,6 +503,17 @@ void QuantizerStage<TInput, TCode>::execute(
     const std::vector<void*>& outputs,
     const std::vector<size_t>& sizes
 ) {
+    // Dithering escalates any element whose dithered reconstruction would
+    // violate the error bound to a lossless outlier — linear_mode has no
+    // outlier ports at all, and inplace_outliers has a different (raw-bit)
+    // escalation mechanism not wired up for dithering. Checked unconditionally
+    // (forward and inverse) so a decode-only stage built from a bad config
+    // fails the same way.
+    if (config_.dither && (isLinearMode() || isInplaceMode()))
+        throw std::runtime_error(
+            "QuantizerStage: dither is incompatible with linear_mode and "
+            "inplace_outliers (neither has a per-element outlier-escalation path)");
+
     // =========================================================================
     // DECOMPRESSION MODE — 3 inputs → 1 output (1 input in inplace mode)
     // =========================================================================
@@ -473,9 +540,10 @@ void QuantizerStage<TInput, TCode>::execute(
             TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
             constexpr int kBlk = 256;
             int g = static_cast<int>((num_elements + kBlk - 1) / kBlk);
-            quantizer_abs_inv_kernel<TInput, TCode, false><<<g, kBlk, 0, stream>>>(
+            quantizer_abs_inv_kernel<TInput, TCode, false, false><<<g, kBlk, 0, stream>>>(
                 static_cast<const TCode*>(inputs[0]),
                 num_elements, ebx2,
+                static_cast<TInput>(0), uint64_t(0),  // dither_amp/dither_seed unused (Dither=false)
                 static_cast<TCode>(config_.quant_radius),  // unused in non-zigzag path
                 static_cast<TInput*>(outputs[0]));
             FZ_CUDA_CHECK(cudaGetLastError());
@@ -503,12 +571,25 @@ void QuantizerStage<TInput, TCode>::execute(
             // REL inverse: decode packed log-bin codes
             float log2eb = 2.0f * std::log2(1.0f + config_.error_bound);
 
-            quantizer_rel_inv_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TCode*>(inputs[0]),
-                num_elements,
-                log2eb,
-                static_cast<TInput*>(outputs[0])
-            );
+            if (config_.dither) {
+                quantizer_rel_inv_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements,
+                    log2eb,
+                    config_.dither_seed,
+                    config_.dither_strength,
+                    static_cast<TInput*>(outputs[0])
+                );
+            } else {
+                quantizer_rel_inv_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements,
+                    log2eb,
+                    uint64_t(0),
+                    0.0f,
+                    static_cast<TInput*>(outputs[0])
+                );
+            }
         } else {
             // ABS / NOA inverse: dequantize with stored abs_eb
             TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
@@ -526,17 +607,34 @@ void QuantizerStage<TInput, TCode>::execute(
                 return;
             }
 
-            if (config_.zigzag_codes) {
-                quantizer_abs_inv_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+            const TInput   dither_amp  = computed_abs_eb_ * static_cast<TInput>(config_.dither_strength);
+            const uint64_t dither_seed = config_.dither_seed;
+
+            if (config_.zigzag_codes && config_.dither) {
+                quantizer_abs_inv_kernel<TInput, TCode, true, true><<<grid, kBlock, 0, stream>>>(
                     static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2,
+                    num_elements, ebx2, dither_amp, dither_seed,
+                    static_cast<TCode>(config_.quant_radius),
+                    static_cast<TInput*>(outputs[0])
+                );
+            } else if (config_.zigzag_codes) {
+                quantizer_abs_inv_kernel<TInput, TCode, true, false><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements, ebx2, dither_amp, dither_seed,
+                    static_cast<TCode>(config_.quant_radius),
+                    static_cast<TInput*>(outputs[0])
+                );
+            } else if (config_.dither) {
+                quantizer_abs_inv_kernel<TInput, TCode, false, true><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]),
+                    num_elements, ebx2, dither_amp, dither_seed,
                     static_cast<TCode>(config_.quant_radius),
                     static_cast<TInput*>(outputs[0])
                 );
             } else {
-                quantizer_abs_inv_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+                quantizer_abs_inv_kernel<TInput, TCode, false, false><<<grid, kBlock, 0, stream>>>(
                     static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2,
+                    num_elements, ebx2, dither_amp, dither_seed,
                     static_cast<TCode>(config_.quant_radius),
                     static_cast<TInput*>(outputs[0])
                 );
@@ -679,22 +777,42 @@ void QuantizerStage<TInput, TCode>::execute(
         FZ_LOG(INFO, "QuantizerStage REL: param epsilon=%.6g log2eb=%.6g max_outliers=%zu num_elements=%zu",
                static_cast<double>(epsilon), static_cast<double>(log2eb), max_outliers, num_elements);
 
-        quantizer_rel_fwd_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-            static_cast<const TInput*>(inputs[0]),
-            num_elements,
-            log2eb, log2eb_r, opp_eb, oopp_eb,
-            config_.outlier_threshold,
-            static_cast<TCode>(config_.quant_radius),
-            static_cast<TCode*>(outputs[0]),
-            static_cast<TInput*>(outputs[1]),
-            static_cast<uint32_t*>(outputs[2]),
-            d_outlier_count_scratch_,
-            max_outliers
-        );
+        if (config_.dither) {
+            quantizer_rel_fwd_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements,
+                log2eb, log2eb_r, opp_eb, oopp_eb,
+                config_.dither_seed,
+                config_.dither_strength,
+                config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0]),
+                static_cast<TInput*>(outputs[1]),
+                static_cast<uint32_t*>(outputs[2]),
+                d_outlier_count_scratch_,
+                max_outliers
+            );
+        } else {
+            quantizer_rel_fwd_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements,
+                log2eb, log2eb_r, opp_eb, oopp_eb,
+                uint64_t(0),
+                0.0f,
+                config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0]),
+                static_cast<TInput*>(outputs[1]),
+                static_cast<uint32_t*>(outputs[2]),
+                d_outlier_count_scratch_,
+                max_outliers
+            );
+        }
     } else {
         // ABS / NOA
         TInput ebx2_r = static_cast<TInput>(1)
                         / (static_cast<TInput>(2) * computed_abs_eb_);
+        TInput ebx2   = static_cast<TInput>(2) * computed_abs_eb_;
 
         if (isLinearMode()) {
             // Linear / no-outlier: pure map, single codes output.
@@ -730,10 +848,36 @@ void QuantizerStage<TInput, TCode>::execute(
             return;
         }
 
-        if (config_.zigzag_codes) {
-            quantizer_abs_fwd_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+        const TInput   abs_eb      = computed_abs_eb_;
+        const TInput   dither_amp  = abs_eb * static_cast<TInput>(config_.dither_strength);
+        const uint64_t dither_seed = config_.dither_seed;
+
+        if (config_.zigzag_codes && config_.dither) {
+            quantizer_abs_fwd_kernel<TInput, TCode, true, true><<<grid, kBlock, 0, stream>>>(
                 static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r, config_.outlier_threshold,
+                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0]),
+                static_cast<TInput*>(outputs[1]),
+                static_cast<uint32_t*>(outputs[2]),
+                d_outlier_count_scratch_,
+                max_outliers
+            );
+        } else if (config_.zigzag_codes) {
+            quantizer_abs_fwd_kernel<TInput, TCode, true, false><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
+                static_cast<TCode>(config_.quant_radius),
+                static_cast<TCode*>(outputs[0]),
+                static_cast<TInput*>(outputs[1]),
+                static_cast<uint32_t*>(outputs[2]),
+                d_outlier_count_scratch_,
+                max_outliers
+            );
+        } else if (config_.dither) {
+            quantizer_abs_fwd_kernel<TInput, TCode, false, true><<<grid, kBlock, 0, stream>>>(
+                static_cast<const TInput*>(inputs[0]),
+                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
                 static_cast<TCode>(config_.quant_radius),
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
@@ -742,9 +886,9 @@ void QuantizerStage<TInput, TCode>::execute(
                 max_outliers
             );
         } else {
-            quantizer_abs_fwd_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+            quantizer_abs_fwd_kernel<TInput, TCode, false, false><<<grid, kBlock, 0, stream>>>(
                 static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r, config_.outlier_threshold,
+                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
                 static_cast<TCode>(config_.quant_radius),
                 static_cast<TCode*>(outputs[0]),
                 static_cast<TInput*>(outputs[1]),
@@ -817,6 +961,9 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
     cfg.outlier_threshold = config_.outlier_threshold;
     cfg.inplace_outliers  = config_.inplace_outliers ? uint8_t{1} : uint8_t{0};
     cfg.linear_mode       = config_.linear_mode ? uint8_t{1} : uint8_t{0};
+    cfg.dither            = config_.dither ? uint8_t{1} : uint8_t{0};
+    cfg.dither_seed       = config_.dither_seed;
+    cfg.dither_strength   = config_.dither_strength;
 
     std::memcpy(buf, &cfg, sizeof(QuantizerConfig));
     return sizeof(QuantizerConfig);
@@ -826,8 +973,11 @@ template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::deserializeHeader(
     const uint8_t* buf, size_t size
 ) {
-    // Accept both old (28-byte) and new (36-byte) header formats.
-    constexpr size_t kMinSize = 28;  // size before outlier_threshold/inplace_outliers fields
+    // Accept old (28-byte), pre-dither (36-byte), pre-dither_strength (48-byte),
+    // and current (52-byte) header formats.
+    constexpr size_t kMinSize                 = 28;  // size before outlier_threshold/inplace_outliers fields
+    constexpr size_t kSizeBeforeDither         = 36;  // size before dither/dither_seed fields
+    constexpr size_t kSizeBeforeDitherStrength = 48;  // size before dither_strength field
     if (size < kMinSize)
         throw std::runtime_error(
             "QuantizerConfig header too small: got " + std::to_string(size) +
@@ -846,7 +996,7 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
     computed_abs_eb_      = static_cast<TInput>(cfg.abs_error_bound);
     computed_value_base_  = cfg.value_base;
     // New fields: default to safe values when reading old-format headers
-    if (size >= sizeof(QuantizerConfig)) {
+    if (size >= kSizeBeforeDither) {
         config_.outlier_threshold = cfg.outlier_threshold;
         config_.inplace_outliers  = (cfg.inplace_outliers != 0);
         config_.linear_mode       = (cfg.linear_mode != 0);
@@ -854,6 +1004,19 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
         config_.outlier_threshold = std::numeric_limits<float>::infinity();
         config_.inplace_outliers  = false;
         config_.linear_mode       = false;
+    }
+    if (size >= kSizeBeforeDitherStrength) {
+        config_.dither      = (cfg.dither != 0);
+        config_.dither_seed = cfg.dither_seed;
+    } else {
+        config_.dither      = false;
+        config_.dither_seed = 0;
+    }
+    if (size >= sizeof(QuantizerConfig)) {
+        config_.dither_strength = cfg.dither_strength;
+    } else {
+        // Pre-dither_strength headers always meant full-amplitude dithering.
+        config_.dither_strength = 1.0f;
     }
 }
 

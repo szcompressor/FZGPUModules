@@ -15,17 +15,34 @@
 namespace fz {
 
 /**
+ * Fusion applied at the final write of the forward difference kernel (and
+ * undone as the first step of the inverse kernel) when `TOut` is the unsigned
+ * counterpart of a signed `T`.  Both transforms are O(1), bitwise-only, and
+ * size-preserving (see `modules/transforms/negabinary/negabinary.h` and
+ * `modules/transforms/zigzag/zigzag.h`); neither dominates universally —
+ * negabinary tends to produce denser zero runs at high bit-planes for smooth,
+ * symmetric-around-zero residuals, but zigzag/TCMS can win on other residual
+ * distributions.  This mirrors the LC framework's decision to keep DIFFNB and
+ * DIFFMS as two separate searchable components rather than picking one.
+ */
+enum class FusionMode : uint8_t {
+    NEGABINARY = 0,  ///< LC's DIFFNB — Negabinary<T>::encode/decode.
+    ZIGZAG     = 1,  ///< LC's DIFFMS — Zigzag<T>::encode/decode (sign-magnitude/TCMS).
+};
+
+/**
  * Difference coding stage.
  *
- * @note **Prior work:** kernel follows the `d_DIFFNB` algorithm from the LC/PFPL
- *       framework (Burtscher et al., BSD-3-Clause). See `THIRD_PARTY.md`.
+ * @note **Prior work:** kernel follows the `d_DIFFNB`/`d_DIFFMS` algorithms from
+ *       the LC/PFPL framework (Burtscher et al., BSD-3-Clause). See `THIRD_PARTY.md`.
  *
- * Forward (compression): first-order differences with optional negabinary output
+ * Forward (compression): first-order differences with optional fused output
  *   output[0] = input[0]
- *   output[i] = input[i] - input[i-1]           (when TOut == T)
- *   output[i] = Negabinary<T>::encode(diff)      (when TOut != T)
+ *   output[i] = input[i] - input[i-1]                     (when TOut == T)
+ *   output[i] = Negabinary<T>::encode(diff) or             (when TOut != T,
+ *               Zigzag<T>::encode(diff)                     selected by Mode)
  *
- * Inverse (decompression): cumulative sum with optional negabinary decode first
+ * Inverse (decompression): cumulative sum with optional fused decode first
  *
  * Optional chunking (setChunkSize > 0):
  *   The difference/cumsum resets at each chunk boundary.  Each chunk is a
@@ -38,16 +55,19 @@ namespace fz {
  *   T    — input element type (signed/unsigned integer or float).
  *   TOut — output element type (defaults to T).
  *          When TOut != T:  T must be a signed integer and TOut its unsigned
- *          counterpart of the same width; negabinary encoding is fused at the
- *          final write of the forward kernel and the decode is the first step
- *          of the inverse kernel.
+ *          counterpart of the same width; the transform selected by `Mode` is
+ *          fused at the final write of the forward kernel and undone as the
+ *          first step of the inverse kernel.
+ *   Mode — FusionMode::NEGABINARY (default) or FusionMode::ZIGZAG. Ignored
+ *          when TOut == T (no fusion).
  *
- * Serialized header layout (6 bytes):
+ * Serialized header layout (6 bytes same-type, 7 bytes fused):
  *   [0]     DataType T     (1 byte)
  *   [1]     DataType TOut  (1 byte)
  *   [2..5]  chunk_size     (uint32_t, little-endian, 0 = no chunking)
+ *   [6]     FusionMode     (1 byte; present only when TOut != T)
  */
-template<typename T = float, typename TOut = T>
+template<typename T = float, typename TOut = T, FusionMode Mode = FusionMode::NEGABINARY>
 class DifferenceStage : public Stage {
     static_assert(
         std::is_same_v<T, TOut> ||
@@ -116,17 +136,22 @@ public:
 
     size_t serializeHeader(size_t output_index, uint8_t* buf, size_t max_size) const override {
         (void)output_index;
-        if (max_size < 6) return 0;
+        // The mode byte only disambiguates fused (TOut != T) instantiations;
+        // same-type headers stay 6 bytes (preserves the legacy contract, see
+        // LegacyFloatHeaderCompatible).
+        constexpr size_t needed = std::is_same_v<T, TOut> ? 6 : 7;
+        if (max_size < needed) return 0;
         buf[0] = static_cast<uint8_t>(getInDataTypeEnum());
         buf[1] = static_cast<uint8_t>(getOutDataTypeEnum());
         uint32_t cs = static_cast<uint32_t>(chunk_size_);
         std::memcpy(buf + 2, &cs, sizeof(uint32_t));
-        return 6;
+        if constexpr (needed == 7) buf[6] = static_cast<uint8_t>(Mode);
+        return needed;
     }
 
     void deserializeHeader(const uint8_t* buf, size_t size) override {
-        // DataTypes are baked into the template; factory picks the right instantiation.
-        // Only chunk_size needs to be restored at runtime.
+        // DataTypes and FusionMode are baked into the template; factory picks
+        // the right instantiation. Only chunk_size needs to be restored at runtime.
         if (size >= 6) {
             uint32_t cs = 0;
             std::memcpy(&cs, buf + 2, sizeof(uint32_t));
@@ -136,7 +161,7 @@ public:
 
     size_t getMaxHeaderSize(size_t output_index) const override {
         (void)output_index;
-        return 6;
+        return std::is_same_v<T, TOut> ? 6 : 7;
     }
 
     void saveState() override {
@@ -195,10 +220,16 @@ extern template class DifferenceStage<uint16_t>;
 extern template class DifferenceStage<uint8_t>;
 extern template class DifferenceStage<uint32_t>;
 
-// ─── Negabinary-fused instantiations (TOut = unsigned counterpart of T) ───────
+// ─── Negabinary-fused instantiations (TOut = unsigned counterpart of T; Mode defaults to NEGABINARY) ───
 extern template class DifferenceStage<int8_t,  uint8_t>;
 extern template class DifferenceStage<int16_t, uint16_t>;
 extern template class DifferenceStage<int32_t, uint32_t>;
 extern template class DifferenceStage<int64_t, uint64_t>;
+
+// ─── Zigzag-fused instantiations (TOut = unsigned counterpart of T, Mode = ZIGZAG) ──────
+extern template class DifferenceStage<int8_t,  uint8_t,  FusionMode::ZIGZAG>;
+extern template class DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG>;
+extern template class DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG>;
+extern template class DifferenceStage<int64_t, uint64_t, FusionMode::ZIGZAG>;
 
 } // namespace fz

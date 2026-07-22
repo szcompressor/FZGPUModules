@@ -103,6 +103,22 @@ use `QuantizerStage` with `ErrorBoundMode::REL`.
 
 ---
 
+## No dithered ("_R"-style) reconstruction
+
+Unlike `QuantizerStage`, `LorenzoQuantStage` does not support `setDither()`.
+This stage quantizes prediction *residuals*, and reconstruction is a running
+prefix-sum over dequantized residuals within each block — an individual
+element's reconstructed value depends on the accumulated sum of every prior
+residual in its block, not just its own bin. Verifying (and, when needed,
+escalating to a lossless outlier) a dithered residual against the true
+*per-element* error bound would require accounting for how that perturbation
+propagates through every subsequent prefix-sum step in the block, which is a
+materially harder problem than `QuantizerStage`'s independent per-element
+verification. Use `QuantizerStage` (direct-value quantization) if dithering is
+needed.
+
+---
+
 ## Dimension setup — critical ordering rule
 
 `addStage()` pushes the pipeline's current dims into the stage immediately.
