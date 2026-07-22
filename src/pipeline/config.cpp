@@ -255,7 +255,11 @@ static Stage* addRLEStage(Pipeline& p, const toml::table& t) {
         case DataType::UINT8:  return p.addStage<RLEStage<uint8_t>>();
         case DataType::UINT16: return p.addStage<RLEStage<uint16_t>>();
         case DataType::UINT32: return p.addStage<RLEStage<uint32_t>>();
+        case DataType::UINT64: return p.addStage<RLEStage<uint64_t>>();
+        case DataType::INT8:   return p.addStage<RLEStage<int8_t>>();
+        case DataType::INT16:  return p.addStage<RLEStage<int16_t>>();
         case DataType::INT32:  return p.addStage<RLEStage<int32_t>>();
+        case DataType::INT64:  return p.addStage<RLEStage<int64_t>>();
         default:
             throw std::runtime_error("loadConfig: unsupported RLE data_type \""
                 + optStr(t, "data_type", "uint16") + "\"");

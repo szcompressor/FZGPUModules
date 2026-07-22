@@ -14,6 +14,9 @@
  *   RL5  RLEStage/AlternatingRoundTrip   — alternating values (worst case) round-trips exactly
  *   RL6  RLEStage/LargeSparseRoundTrip   — 16 K elements ~90% zeros, correct reconstruction
  *   RL7  RLEStage/HeaderSerialization    — serializeHeader/deserializeHeader preserves stage config
+ *   RL8  RLEStageWordSizeTest/RoundTrip  — round-trips for every registered word size
+ *                                          (1/2/4/8 bytes, signed and unsigned), matching
+ *                                          the LC framework's RLE_1/2/4/8.
  */
 
 #include <gtest/gtest.h>
@@ -260,4 +263,38 @@ TEST(RLEStage, HeaderSerialization) {
         << "deserializeHeader must not throw on valid header bytes";
 
     EXPECT_EQ(restored.getStageTypeId(), stage.getStageTypeId());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RL8: WordSizeCoverage — round-trips for every registered word size (1/2/4/8
+//      bytes, signed and unsigned), matching the LC framework's RLE_1/2/4/8.
+// ─────────────────────────────────────────────────────────────────────────────
+template <typename T>
+class RLEStageWordSizeTest : public ::testing::Test {};
+
+using RLEWordSizeTypes = ::testing::Types<
+    uint8_t, uint16_t, uint32_t, uint64_t,
+    int8_t,  int16_t,  int32_t,  int64_t>;
+TYPED_TEST_SUITE(RLEStageWordSizeTest, RLEWordSizeTypes);
+
+TYPED_TEST(RLEStageWordSizeTest, RoundTrip) {
+    using T = TypeParam;
+    CudaStream stream;
+    auto pool = make_test_pool(4096 * 8);
+
+    constexpr size_t N = 300;
+    std::vector<T> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = static_cast<T>((i / 7) % 5);  // runs of varying length
+
+    RLEStage<T> fwd;
+    auto h_encoded = run_rle_forward(fwd, h_input, stream, *pool);
+
+    RLEStage<T> inv;
+    inv.setInverse(true);
+    auto h_decoded = run_rle_inverse(inv, h_encoded, N, stream, *pool);
+
+    ASSERT_EQ(h_decoded.size(), N);
+    for (size_t i = 0; i < N; i++)
+        EXPECT_EQ(h_decoded[i], h_input[i]) << "Mismatch at index " << i;
 }

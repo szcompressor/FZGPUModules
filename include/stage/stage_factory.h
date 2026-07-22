@@ -159,7 +159,11 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
                     case DataType::UINT8:    stage = new RLEStage<uint8_t>(); break;
                     case DataType::UINT16:   stage = new RLEStage<uint16_t>(); break;
                     case DataType::UINT32:   stage = new RLEStage<uint32_t>(); break;
+                    case DataType::UINT64:   stage = new RLEStage<uint64_t>(); break;
+                    case DataType::INT8:     stage = new RLEStage<int8_t>(); break;
+                    case DataType::INT16:    stage = new RLEStage<int16_t>(); break;
                     case DataType::INT32:    stage = new RLEStage<int32_t>(); break;
+                    case DataType::INT64:    stage = new RLEStage<int64_t>(); break;
                     default:
                         throw std::runtime_error("Unsupported RLE data type: "
                             + std::to_string(static_cast<int>(dt)));
