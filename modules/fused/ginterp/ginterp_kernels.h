@@ -10,7 +10,7 @@
  * compile-time cost.
  */
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -66,7 +66,7 @@ void launchGInterpForward3D(
     uint32_t* d_outlier_count_scratch,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Inverse (decompress) launcher — reads ectrl + anchor + scattered outliers
@@ -86,7 +86,7 @@ void launchGInterpInverse3D(
     TInput* d_out,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Forward (compress) launcher for 2-D input. Identical contract to the 3-D
@@ -108,7 +108,7 @@ void launchGInterpForward2D(
     uint32_t* d_outlier_count_scratch,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Inverse (decompress) launcher for 2-D input. Mirrors the 3-D variant; the
@@ -123,13 +123,13 @@ void launchGInterpInverse2D(
     TInput* d_out,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Reset the 36-float profiling-errors scratch to zero. One-block, one-thread
  * kernel — used between profiling passes when reusing the same scratch buffer.
  */
-void launchGInterpResetErrors(float* d_errors, cudaStream_t stream);
+void launchGInterpResetErrors(float* d_errors, fz::stream_t stream);
 
 /**
  * Profiling mode 1 — runs the cheap `c_spline_profiling_data` kernel that
@@ -143,7 +143,7 @@ template <typename TInput>
 void launchGInterpProfileMode1(
     const TInput* d_data, dim3 data_len3,
     float* d_errors,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Profiling mode 2 — runs the alternate cheap `c_spline_profiling_data_2`
@@ -160,7 +160,7 @@ void launchGInterpProfileMode2(
     const TInput* d_data, dim3 data_len3,
     int dim,
     float* d_errors,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Profiling mode 3 — runs the structural `pa_spline_infprecis_data` kernel
@@ -202,7 +202,7 @@ void launchGInterpProfileMode3(
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
     bool workflow,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 /**
  * Scatter outlier-pair entries into a full-N temp buffer. The count `n` is
@@ -219,7 +219,7 @@ void launchScatterOutliers(
     const uint32_t* d_outlier_idxs,
     uint32_t n,
     TInput* d_outlier_tmp,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 } // namespace ginterp
 } // namespace fz

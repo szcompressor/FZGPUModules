@@ -8,7 +8,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "log.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -53,7 +53,7 @@ public:
     bool isInverse() const override { return is_inverse_; }
 
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
@@ -65,7 +65,7 @@ public:
      * execute() and sets actual_output_sizes_.  Must be called after the
      * stream passed to execute() has been synchronized.
      */
-    void postStreamSync(cudaStream_t stream) override;
+    void postStreamSync(fz::stream_t stream) override;
     
     std::string getName() const override { return "RLE"; }
     size_t getNumInputs() const override { return 1; }
@@ -180,7 +180,7 @@ private:
     // readback even when called on a const Stage reference.
     mutable uint32_t*           h_num_runs_          = nullptr;
     mutable bool                fwd_sync_pending_    = false;
-    mutable cudaStream_t        fwd_last_stream_     = nullptr;
+    mutable fz::stream_t        fwd_last_stream_     = nullptr;
     mutable std::vector<size_t> actual_output_sizes_;
 
     // Complete a pending forward-path readback (if any) by syncing the stream

@@ -28,7 +28,7 @@
 #include "fzm_format.h"
 #include "coders/huffman/phf/hf.h"   // phf_header, phf_stream_t
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -130,7 +130,7 @@ public:
 
     // ── Execution ─────────────────────────────────────────────────────────────
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool*  pool,
         const std::vector<void*>&   inputs,
         const std::vector<void*>&   outputs,

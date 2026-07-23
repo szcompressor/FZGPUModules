@@ -4,9 +4,9 @@
  */
 #pragma once
 
+#include "backend/types.h"
 #include "fzm_format.h"
 #include <array>
-#include <cuda_runtime.h>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -46,7 +46,7 @@ public:
      * In a linear pipeline there are no siblings and no extra cost.
      */
     virtual void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
@@ -205,7 +205,7 @@ public:
      * outlier count readback).  The stream is already idle so a plain
      * cudaMemcpy is safe here.
      */
-    virtual void postStreamSync(cudaStream_t stream) { (void)stream; }
+    virtual void postStreamSync(fz::stream_t stream) { (void)stream; }
 
     /** Maximum bytes this stage writes into its per-output FZM header slot. */
     virtual size_t getMaxHeaderSize(size_t output_index) const {

@@ -7,7 +7,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -91,7 +91,7 @@ public:
     }
 
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
@@ -185,28 +185,28 @@ extern template class LorenzoStage<int64_t>;
 
 template<typename T>
 void launchLorenzoDeltaKernel1D(
-    const T* d_input, T* d_output, size_t n, cudaStream_t stream,
+    const T* d_input, T* d_output, size_t n, fz::stream_t stream,
     unsigned block_threads = 256);
 
 template<typename T>
 void launchLorenzoPrefixSumKernel1D(
-    const T* d_input, T* d_output, size_t n, cudaStream_t stream,
+    const T* d_input, T* d_output, size_t n, fz::stream_t stream,
     unsigned block_threads = 256);
 
 template<typename T>
 void launchLorenzoDeltaKernel2D(
-    const T* d_input, T* d_output, size_t nx, size_t ny, cudaStream_t stream);
+    const T* d_input, T* d_output, size_t nx, size_t ny, fz::stream_t stream);
 
 template<typename T>
 void launchLorenzoPrefixSumKernel2D(
-    const T* d_input, T* d_output, size_t nx, size_t ny, cudaStream_t stream);
+    const T* d_input, T* d_output, size_t nx, size_t ny, fz::stream_t stream);
 
 template<typename T>
 void launchLorenzoDeltaKernel3D(
-    const T* d_input, T* d_output, size_t nx, size_t ny, size_t nz, cudaStream_t stream);
+    const T* d_input, T* d_output, size_t nx, size_t ny, size_t nz, fz::stream_t stream);
 
 template<typename T>
 void launchLorenzoPrefixSumKernel3D(
-    const T* d_input, T* d_output, size_t nx, size_t ny, size_t nz, cudaStream_t stream);
+    const T* d_input, T* d_output, size_t nx, size_t ny, size_t nz, fz::stream_t stream);
 
 } // namespace fz

@@ -27,7 +27,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -88,13 +88,13 @@ public:
 
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
-    void postStreamSync(cudaStream_t stream) override;
+    void postStreamSync(fz::stream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
     std::string getName() const override { return "RZE"; }
@@ -193,7 +193,7 @@ private:
     uint32_t* d_clean_dev_;
     uint32_t* d_dst_off_dev_;
     mutable bool         tail_readback_pending_ = false;
-    mutable cudaStream_t tail_readback_stream_ = nullptr;
+    mutable fz::stream_t tail_readback_stream_ = nullptr;
     mutable uint32_t     tail_last_index_ = 0;
     mutable uint8_t*     tail_output_ptr_ = nullptr;
     size_t    scratch_capacity_;

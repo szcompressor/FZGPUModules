@@ -5,7 +5,7 @@
  * @brief Stream-ordered CUDA memory pool for pipeline buffer management.
  */
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 
 #include <cstddef>
 #include <memory>
@@ -99,11 +99,11 @@ public:
      *                    if false, `reset()` will free it.
      * @return Device pointer, or nullptr on failure.
      */
-    void* allocate(size_t size, cudaStream_t stream,
+    void* allocate(size_t size, fz::stream_t stream,
                    const std::string& tag = "", bool persistent = false);
 
     /** Free `ptr` back to the pool, ordered on `stream`. */
-    void free(void* ptr, cudaStream_t stream);
+    void free(void* ptr, fz::stream_t stream);
 
     // ── Persistent allocation (stage-internal scratch) ────────────────────────
 
@@ -141,7 +141,7 @@ public:
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
     /** Free all non-persistent allocations. Call between compression runs. */
-    void reset(cudaStream_t stream);
+    void reset(fz::stream_t stream);
 
     /** Release pool memory back to the OS if usage exceeds the release threshold. */
     void trim();
@@ -157,7 +157,7 @@ public:
     void setReleaseThreshold(size_t bytes);
 
     /** Block until all stream-ordered operations on `stream` complete. */
-    void synchronize(cudaStream_t stream);
+    void synchronize(fz::stream_t stream);
 
     // ── Stats & debug ─────────────────────────────────────────────────────────
 
@@ -167,20 +167,16 @@ public:
     /** Bytes currently held in persistent pinned-host allocations. */
     size_t getPersistentPinnedBytes() const { return persistent_pinned_bytes_; }
 
-    /** Current live bytes (queries `cudaMemPoolAttrUsedMemCurrent`). */
+    /** Current live bytes (queries the backend pool's "used mem current" attribute). */
     size_t getCurrentUsage() const {
         if (!mem_pool_) return current_allocated_bytes_;
-        uint64_t used = 0;
-        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemCurrent, &used);
-        return static_cast<size_t>(used);
+        return fz::getPoolUsedMemCurrent(mem_pool_);
     }
 
-    /** Peak live bytes since last reset (queries `cudaMemPoolAttrUsedMemHigh`). */
+    /** Peak live bytes since last reset (queries the backend pool's "used mem high" attribute). */
     size_t getPeakUsage() const {
         if (!mem_pool_) return current_allocated_bytes_;
-        uint64_t high = 0;
-        cudaMemPoolGetAttribute(mem_pool_, cudaMemPoolAttrUsedMemHigh, &high);
-        return static_cast<size_t>(high);
+        return fz::getPoolUsedMemHigh(mem_pool_);
     }
 
     /** Total number of currently live allocations (stream + graph). */
@@ -194,8 +190,8 @@ public:
      */
     size_t getConfiguredSize() const { return config_.getPoolSize(); }
 
-    /** Raw `cudaMemPool_t` handle for advanced usage. */
-    cudaMemPool_t getMemPool() const { return mem_pool_; }
+    /** Raw backend memory-pool handle for advanced usage. */
+    fz::mempool_t getMemPool() const { return mem_pool_; }
 
     /** Returns true if operating in cudaMalloc fallback mode (pool creation failed or was forced). */
     bool isFallbackMode() const { return mem_pool_ == nullptr; }
@@ -204,7 +200,7 @@ public:
 
 private:
     MemoryPoolConfig config_;
-    cudaMemPool_t    mem_pool_;
+    fz::mempool_t    mem_pool_;
 
     std::unordered_map<void*, AllocationInfo> allocations_;
     std::unordered_map<void*, AllocationInfo> graph_allocations_; ///< Persistent for graph replay.

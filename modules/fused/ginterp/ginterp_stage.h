@@ -14,7 +14,7 @@
 #include "fzm_format.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -264,14 +264,14 @@ public:
 
     // ── Stage interface ──────────────────────────────────────────────────────
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
 
-    void postStreamSync(cudaStream_t stream) override;
+    void postStreamSync(fz::stream_t stream) override;
 
     /// In PREALLOCATE mode + auto-tuning > 0, pre-allocate the persistent
     /// profiling-errors scratch (36 floats device + pinned host) via the pool's

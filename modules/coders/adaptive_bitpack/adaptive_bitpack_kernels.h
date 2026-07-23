@@ -20,7 +20,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cuda_runtime.h>
+#include "backend/types.h"
 
 namespace fz {
 namespace adaptive_bitpack {
@@ -62,25 +62,25 @@ inline size_t maxArchiveBytes(const Config& c, unsigned bits_per_elem) {
 // region) and the per-block payload byte cost into `d_cost`.
 template<typename T>
 void launchEncodeRate(const T* d_in, const Config& c,
-                      uint8_t* d_rate, uint32_t* d_cost, cudaStream_t stream);
+                      uint8_t* d_rate, uint32_t* d_cost, fz::stream_t stream);
 
 // Pass B: pack sign + bit-planes for each block at `d_payload + d_offset[b]`,
 // where `d_offset` is the exclusive scan of `d_cost`.
 template<typename T>
 void launchEncodePack(const T* d_in, const Config& c,
                       const uint8_t* d_rate, const uint32_t* d_offset,
-                      uint8_t* d_payload, cudaStream_t stream);
+                      uint8_t* d_payload, fz::stream_t stream);
 
 // ── Decode ────────────────────────────────────────────────────────────────
 // Pass A: per-block payload byte cost from the rate region (for the scan).
 void launchDecodeCost(const uint8_t* d_rate, const Config& c,
-                      uint32_t* d_cost, cudaStream_t stream);
+                      uint32_t* d_cost, fz::stream_t stream);
 
 // Pass B: unpack each block from `d_payload + d_offset[b]` into `d_out`.
 template<typename T>
 void launchDecodeUnpack(const uint8_t* d_rate, const uint32_t* d_offset,
                         const uint8_t* d_payload, const Config& c,
-                        T* d_out, cudaStream_t stream);
+                        T* d_out, fz::stream_t stream);
 
 // ── Outlier-selection mode (cuSZp2) ─────────────────────────────────────────
 // Per block, choose the cheaper of (a) plain packing of all elements or
@@ -89,17 +89,17 @@ void launchDecodeUnpack(const uint8_t* d_rate, const uint32_t* d_offset,
 // is_outlier and (when set) sel bits1-2 = outlier_byte_num - 1.
 template<typename T>
 void launchEncodeRateOutlier(const T* d_in, const Config& c,
-                             uint8_t* d_meta, uint32_t* d_cost, cudaStream_t stream);
+                             uint8_t* d_meta, uint32_t* d_cost, fz::stream_t stream);
 template<typename T>
 void launchEncodePackOutlier(const T* d_in, const Config& c,
                              const uint8_t* d_meta, const uint32_t* d_offset,
-                             uint8_t* d_payload, cudaStream_t stream);
+                             uint8_t* d_payload, fz::stream_t stream);
 void launchDecodeCostOutlier(const uint8_t* d_meta, const Config& c,
-                             uint32_t* d_cost, cudaStream_t stream);
+                             uint32_t* d_cost, fz::stream_t stream);
 template<typename T>
 void launchDecodeUnpackOutlier(const uint8_t* d_meta, const uint32_t* d_offset,
                                const uint8_t* d_payload, const Config& c,
-                               T* d_out, cudaStream_t stream);
+                               T* d_out, fz::stream_t stream);
 
 } // namespace adaptive_bitpack
 } // namespace fz

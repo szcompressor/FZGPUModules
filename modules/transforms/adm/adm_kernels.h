@@ -3,7 +3,7 @@
 // Shared constants, scratch-pointer struct, and host wrapper declarations
 // for the ADM (Adaptive Data Mapping) encode/decode kernels.
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstdint>
 #include <cstddef>
 
@@ -83,12 +83,12 @@ struct AdmScratch {
 void compress_u16(
     const uint16_t* d_input, size_t num_elements,
     uint8_t* d_output, size_t& output_size,
-    const AdmScratch& s, cudaStream_t stream);
+    const AdmScratch& s, fz::stream_t stream);
 
 void decompress_u16(
     const uint8_t* d_input, size_t input_size,
     uint16_t* d_output, size_t num_elements,
-    const AdmScratch& s, cudaStream_t stream);
+    const AdmScratch& s, fz::stream_t stream);
 
 size_t get_max_u16_payload_bytes(size_t num_elements);
 
@@ -97,12 +97,12 @@ size_t get_max_u16_payload_bytes(size_t num_elements);
 void compress_u32(
     const uint32_t* d_input, size_t num_elements,
     uint8_t* d_output, size_t& output_size,
-    const AdmScratch& s, cudaStream_t stream);
+    const AdmScratch& s, fz::stream_t stream);
 
 void decompress_u32(
     const uint8_t* d_input, size_t input_size,
     uint32_t* d_output, size_t num_elements,
-    const AdmScratch& s, cudaStream_t stream);
+    const AdmScratch& s, fz::stream_t stream);
 
 size_t get_max_u32_payload_bytes(size_t num_elements);
 

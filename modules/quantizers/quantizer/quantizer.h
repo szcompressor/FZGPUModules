@@ -8,7 +8,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -166,14 +166,14 @@ public:
     ~QuantizerStage() override;
 
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
 
-    void postStreamSync(cudaStream_t stream) override;
+    void postStreamSync(fz::stream_t stream) override;
 
     /// Pre-allocate the stage-private 4-byte outlier-count device scratch
     /// (via `pool->allocatePersistentDevice`) in PREALLOCATE mode. In MINIMAL

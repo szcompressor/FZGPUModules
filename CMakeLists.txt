@@ -1,4 +1,20 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
+
+# GPU backend selection. Exactly one backend is compiled into any given build
+# (a compile-time choice, not a runtime switch) — see include/backend/types.h
+# for the corresponding C++-side type aliases. Only CUDA is implemented today;
+# HIP and SYCL are planned (see memory/hip_sycl_backend_plan.md).
+set(FZGMOD_BACKEND "CUDA" CACHE STRING "GPU backend to build against: CUDA, HIP, or SYCL")
+set_property(CACHE FZGMOD_BACKEND PROPERTY STRINGS CUDA HIP SYCL)
+
+if(FZGMOD_BACKEND STREQUAL "HIP")
+  message(FATAL_ERROR "FZGMOD_BACKEND=HIP is not implemented yet.")
+elseif(FZGMOD_BACKEND STREQUAL "SYCL")
+  message(FATAL_ERROR "FZGMOD_BACKEND=SYCL is not implemented yet.")
+elseif(NOT FZGMOD_BACKEND STREQUAL "CUDA")
+  message(FATAL_ERROR "Unknown FZGMOD_BACKEND '${FZGMOD_BACKEND}' — must be CUDA, HIP, or SYCL.")
+endif()
+
 project(FZGPUModules LANGUAGES CUDA CXX VERSION 2.0.0)
 
 ########################
@@ -469,6 +485,7 @@ endif()
 ###############
 
 message(STATUS "FZGPUModules configuration complete")
+message(STATUS "  Backend: ${FZGMOD_BACKEND}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")

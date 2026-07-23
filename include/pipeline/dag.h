@@ -6,7 +6,7 @@
 
 #include "pipeline/perf.h"
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -63,11 +63,11 @@ struct DAGNode {
 
     int          level;
     int          execution_order;
-    cudaStream_t stream;
+    fz::stream_t stream;
 
     bool         is_executed;
-    cudaEvent_t  completion_event;
-    cudaEvent_t  start_event;  ///< Non-null only when profiling is enabled.
+    fz::event_t  completion_event;
+    fz::event_t  start_event;  ///< Non-null only when profiling is enabled.
 
     // Pre-sized vectors for execute() — allocated at finalize(), reused every call
     // to avoid per-call heap allocations of the input/output/sizes arrays.
@@ -136,16 +136,16 @@ public:
 
     // ── Execution ─────────────────────────────────────────────────────────────
 
-    void execute(cudaStream_t stream);
+    void execute(fz::stream_t stream);
 
     /**
      * Pre-allocate all buffers upfront. Called automatically by finalize() for
      * PREALLOCATE strategy; call explicitly when input sizes change between runs.
      */
-    void preallocateBuffers(cudaStream_t stream = 0);
+    void preallocateBuffers(fz::stream_t stream = 0);
 
     /** Free non-persistent buffers and reset execution state. */
-    void reset(cudaStream_t stream = 0);
+    void reset(fz::stream_t stream = 0);
 
     // ── Buffer access ─────────────────────────────────────────────────────────
 
@@ -239,7 +239,7 @@ private:
     int  next_buffer_id_;
     bool is_finalized_;
 
-    std::vector<cudaStream_t> streams_;
+    std::vector<fz::stream_t> streams_;
     bool owns_streams_;
 
     std::vector<std::vector<DAGNode*>> levels_;
@@ -262,8 +262,8 @@ private:
 
     void assignLevels();
     void assignStreams();
-    void allocateBuffer(int buffer_id, cudaStream_t stream);
-    void freeBuffer(int buffer_id, cudaStream_t stream);
+    void allocateBuffer(int buffer_id, fz::stream_t stream);
+    void freeBuffer(int buffer_id, fz::stream_t stream);
     void planPreallocation();
     void colorBuffers();
 };

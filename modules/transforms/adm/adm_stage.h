@@ -26,7 +26,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -68,7 +68,7 @@ public:
 
     // ── Execution ─────────────────────────────────────────────────────────────
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool*  pool,
         const std::vector<void*>&  inputs,
         const std::vector<void*>&  outputs,

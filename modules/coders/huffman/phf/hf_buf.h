@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstddef>
 #include <cstdint>
 

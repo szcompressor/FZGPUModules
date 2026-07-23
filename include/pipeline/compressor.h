@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "backend/types.h"
 #include "pipeline/dag.h"
 #include "pipeline/perf.h"
 #include "pipeline/config.h"
@@ -106,7 +107,7 @@ public:
      * Eliminates the first-call latency spike from CUDA's lazy PTX→SASS compilation.
      * Requires a non-zero input_size_hint in the constructor.
      */
-    void warmup(cudaStream_t stream = 0);
+    void warmup(fz::stream_t stream = 0);
 
     /** When true, finalize() automatically calls warmup(). Must be set before finalize(). */
     void setWarmupOnFinalize(bool enable) { warmup_on_finalize_ = enable; }
@@ -177,7 +178,7 @@ public:
         size_t      input_size,
         void**      d_output,
         size_t*     output_size,
-        cudaStream_t stream = 0
+        fz::stream_t stream = 0
     );
 
     /**
@@ -212,7 +213,7 @@ public:
         void*       d_output_buf,
         size_t      output_buf_capacity,
         size_t*     actual_output_size,
-        cudaStream_t stream = 0
+        fz::stream_t stream = 0
     );
 
     /**
@@ -234,7 +235,7 @@ public:
         size_t      input_size,
         void**      d_output,
         size_t*     output_size,
-        cudaStream_t stream = 0
+        fz::stream_t stream = 0
     );
 
     /**
@@ -263,7 +264,7 @@ public:
         void*       d_output_buf,
         size_t      output_buf_capacity,
         size_t*     actual_output_size,
-        cudaStream_t stream = 0
+        fz::stream_t stream = 0
     );
 
     /**
@@ -309,7 +310,7 @@ public:
         void*       d_output_buf,
         size_t      output_buf_capacity,
         size_t*     actual_output_size,
-        cudaStream_t stream = 0
+        fz::stream_t stream = 0
     );
 
     /**
@@ -339,7 +340,7 @@ public:
     void prepareInverse(size_t uncompressed_size);
 
     /** Free non-persistent buffers and reset execution state for re-use. */
-    void reset(cudaStream_t stream = 0);
+    void reset(fz::stream_t stream = 0);
 
     // ── Profiling ─────────────────────────────────────────────────────────────
 
@@ -409,7 +410,7 @@ public:
      * Can be called again to re-capture. Must be called after finalize() and
      * before the first compress().
      */
-    void captureGraph(cudaStream_t stream = 0);
+    void captureGraph(fz::stream_t stream = 0);
     bool isGraphCaptured() const { return graph_captured_; }
 
     size_t getPeakMemoryUsage() const;
@@ -426,7 +427,7 @@ public:
     };
 
     /** Write compressed data to an FZM file. compress() must have been called first. */
-    void writeToFile(const std::string& filename, cudaStream_t stream = 0);
+    void writeToFile(const std::string& filename, fz::stream_t stream = 0);
 
     /** Parse the FZM header from a file without decompressing the payload. */
     static FZMFileHeader readHeader(const std::string& filename);
@@ -491,7 +492,7 @@ public:
         const std::string&  filename,
         void**              d_output,
         size_t*             output_size,
-        cudaStream_t        stream             = 0,
+        fz::stream_t        stream             = 0,
         PipelinePerfResult* perf_out           = nullptr,
         size_t              pool_override_bytes = 0
     );
@@ -517,7 +518,7 @@ public:
         const std::string&  filename,
         void**              d_output,
         size_t*             output_size,
-        cudaStream_t        stream   = 0,
+        fz::stream_t        stream   = 0,
         PipelinePerfResult* perf_out = nullptr
     );
 
@@ -552,7 +553,7 @@ public:
         size_t       blob_size,
         void**       d_output,
         size_t*      output_size,
-        cudaStream_t stream = 0
+        fz::stream_t stream = 0
     );
 
     // ── Config File ───────────────────────────────────────────────────────────
@@ -596,10 +597,10 @@ private:
         PoolBuffer(const PoolBuffer&)         = delete;
         PoolBuffer& operator=(const PoolBuffer&) = delete;
 
-        void free(cudaStream_t s) {
+        void free(fz::stream_t s) {
             if (ptr && pool) { pool->free(ptr, s); ptr = nullptr; capacity = 0; }
         }
-        bool allocate(MemoryPool* p, size_t bytes, cudaStream_t s,
+        bool allocate(MemoryPool* p, size_t bytes, fz::stream_t s,
                       const char* tag, bool persistent = false) {
             free(s);
             pool = p;
@@ -665,7 +666,7 @@ private:
     static void* loadCompressedData(
         const std::string&   filename,
         const FZMFileHeader& header,
-        cudaStream_t         stream = 0,
+        fz::stream_t         stream = 0,
         MemoryPool*          pool   = nullptr
     );
 
@@ -688,7 +689,7 @@ private:
     // compress() helper: handles graph-mode copy or alignment padding.
     // Returns the effective source pointer and padded source size.
     std::pair<const void*, size_t> prepareInputSource(
-        const void* d_input, size_t input_size, cudaStream_t stream);
+        const void* d_input, size_t input_size, fz::stream_t stream);
 
     /**
      * Propagate buffer sizes through the DAG from source sizes.
@@ -717,7 +718,7 @@ private:
         const PipelineOutputMap& po_map,
         Stage*       src_stage,
         size_t       src_sz,
-        cudaStream_t stream);
+        fz::stream_t stream);
 
     /**
      * Shared inverse-execution core behind all decompress() overloads.
@@ -739,7 +740,7 @@ private:
         bool        synchronize,
         void**      d_output,
         size_t*     output_size,
-        cudaStream_t stream);
+        fz::stream_t stream);
 
     /**
      * Populate buffer_metadata_ from the finalized forward topology
@@ -756,7 +757,7 @@ private:
      * matches the pipeline's pipeline-output count. Single D2H copy of the header.
      */
     std::vector<size_t> readConcatSegmentSizes(
-        const void* d_blob, size_t n, cudaStream_t stream) const;
+        const void* d_blob, size_t n, fz::stream_t stream) const;
 
     // decompressFromFile() helpers.
     /** Parse + validate an FZM header from an in-memory byte buffer (mirrors readHeader()). */
@@ -801,10 +802,10 @@ private:
     size_t writeConcatBuffer(
         const std::vector<OutputBufferInfo>& outputs,
         uint8_t*     d_concat_bytes,
-        cudaStream_t stream
+        fz::stream_t stream
     ) const;
 
-    void concatOutputs(void** d_output, size_t* output_size, cudaStream_t stream);
+    void concatOutputs(void** d_output, size_t* output_size, fz::stream_t stream);
 
     // ── Member variables ──────────────────────────────────────────────────────
 
@@ -910,8 +911,8 @@ private:
     PoolBuffer d_graph_input_;
     size_t     d_graph_input_size_;
 
-    cudaGraph_t     captured_graph_;
-    cudaGraphExec_t graph_exec_;
+    fz::graph_t      captured_graph_;
+    fz::graph_exec_t graph_exec_;
 };
 
 // ── Template implementation ───────────────────────────────────────────────────

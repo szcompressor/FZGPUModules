@@ -17,7 +17,7 @@
  * symbols packed two-per-word, matching FZ-GPU's quantizer codes.
  */
 
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -83,7 +83,7 @@ size_t maxArchiveBytes(size_t data_len);
 void launchEncode(
     const uint16_t* d_in, const Config& cfg,
     uint32_t* d_offset_counter, uint32_t* d_bitflag, uint32_t* d_start_pos,
-    uint8_t* d_comp_out, uint32_t* d_comp_len, cudaStream_t stream);
+    uint8_t* d_comp_out, uint32_t* d_comp_len, fz::stream_t stream);
 
 /**
  * Inverse (decompress). Reconstruct `pad_len` uint16 symbols into `d_out` from
@@ -93,7 +93,7 @@ void launchEncode(
 void launchDecode(
     const uint8_t* d_bitstream, const uint32_t* d_bitflag,
     const uint32_t* d_start_pos, uint16_t* d_out, const Config& cfg,
-    cudaStream_t stream);
+    fz::stream_t stream);
 
 }  // namespace bitplane_rze
 }  // namespace fz

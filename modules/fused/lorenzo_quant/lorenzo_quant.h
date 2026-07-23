@@ -6,7 +6,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <array>
 #include <cstdint>
 #include <cmath>
@@ -122,7 +122,7 @@ public:
     ~LorenzoQuantStage() override;
 
     void execute(
-        cudaStream_t stream,
+        fz::stream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
@@ -134,7 +134,7 @@ public:
      * actual_output_sizes_ to the real values.  Called by Pipeline::compress()
      * after the stream is synchronized — avoids a mid-pipeline stall.
      */
-    void postStreamSync(cudaStream_t stream) override;
+    void postStreamSync(fz::stream_t stream) override;
 
     /// Pre-allocate the stage-private 4-byte outlier-count device scratch
     /// (via `pool->allocatePersistentDevice`) in PREALLOCATE mode. In MINIMAL
@@ -382,7 +382,7 @@ void launchLorenzoKernel(
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
     size_t max_outliers, int grid_size,
     bool zigzag_codes,
-    cudaStream_t stream
+    fz::stream_t stream
 );
 
 template<typename TInput, typename TCode>
@@ -394,7 +394,7 @@ void launchLorenzoInverseKernel(
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
-    cudaStream_t stream, MemoryPool* pool
+    fz::stream_t stream, MemoryPool* pool
 );
 
 /// 2-D forward Lorenzo kernel launcher. `nx` is the fast (x) dimension.
@@ -406,7 +406,7 @@ void launchLorenzoKernel2D(
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
     size_t max_outliers,
     bool zigzag_codes,
-    cudaStream_t stream
+    fz::stream_t stream
 );
 
 /// 2-D inverse Lorenzo kernel launcher.
@@ -419,7 +419,7 @@ void launchLorenzoInverseKernel2D(
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
-    cudaStream_t stream, MemoryPool* pool
+    fz::stream_t stream, MemoryPool* pool
 );
 
 /// 3-D forward Lorenzo kernel launcher.
@@ -431,7 +431,7 @@ void launchLorenzoKernel3D(
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
     size_t max_outliers,
     bool zigzag_codes,
-    cudaStream_t stream
+    fz::stream_t stream
 );
 
 /// 3-D inverse Lorenzo kernel launcher.
@@ -444,7 +444,7 @@ void launchLorenzoInverseKernel3D(
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
-    cudaStream_t stream, MemoryPool* pool
+    fz::stream_t stream, MemoryPool* pool
 );
 
 } // namespace fz

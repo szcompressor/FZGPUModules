@@ -5,9 +5,9 @@
  * @brief FZGPUModules main API header — include this to access the full library.
  */
 
-#include <cuda_runtime.h>
 #include <vector>
 
+#include "backend/types.h"
 #include "fzm_format.h"
 
 #include "pipeline/compressor.h"

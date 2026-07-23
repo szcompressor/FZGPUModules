@@ -1,14 +1,19 @@
 #pragma once
 
-#include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
 
+#include "backend/types.h"
 #include "log.h"
 
 /**
  * @file include/cuda_check.h
- * @brief CUDA API error-checking macros.
+ * @brief GPU backend API error-checking macros.
+ *
+ * Despite the "CUDA" name (kept for call-site stability — this macro is used
+ * at ~30 call sites across the codebase), the implementation is backend-neutral:
+ * it checks against `fz::error_t`/`fz::kBackendSuccess`, which alias to the
+ * active backend's native error type (see include/backend/types.h).
  *
  * FZ_CUDA_CHECK(call)
  *   Evaluates a CUDA API call and throws std::runtime_error on failure.
@@ -33,23 +38,23 @@
 
 #define FZ_CUDA_CHECK(call)                                                      \
     do {                                                                         \
-        cudaError_t _fz_cuda_err_ = (call);                                      \
-        if (_fz_cuda_err_ != cudaSuccess) {                                      \
+        fz::error_t _fz_cuda_err_ = (call);                                      \
+        if (_fz_cuda_err_ != fz::kBackendSuccess) {                              \
             throw std::runtime_error(                                            \
                 std::string("[fzgmod] CUDA error at " __FILE__ ":") +             \
                 std::to_string(__LINE__) +                                       \
                 " — " #call " → " +                                              \
-                cudaGetErrorString(_fz_cuda_err_));                              \
+                fz::getBackendErrorString(_fz_cuda_err_));                       \
         }                                                                        \
     } while (0)
 
 #define FZ_CUDA_CHECK_WARN(call)                                                 \
     do {                                                                         \
-        cudaError_t _fz_cuda_err_ = (call);                                      \
-        if (_fz_cuda_err_ != cudaSuccess) {                                      \
+        fz::error_t _fz_cuda_err_ = (call);                                      \
+        if (_fz_cuda_err_ != fz::kBackendSuccess) {                              \
             FZ_LOG(WARN,                                                         \
                    "CUDA error at %s:%d — " #call " → %s",                      \
                    __FILE__, __LINE__,                                           \
-                   cudaGetErrorString(_fz_cuda_err_));                           \
+                   fz::getBackendErrorString(_fz_cuda_err_));                    \
         }                                                                        \
     } while (0)
