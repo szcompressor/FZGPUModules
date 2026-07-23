@@ -104,7 +104,7 @@ __global__ void rle_extract_runs_kernel(
 
 /**
  * Pack scratch arrays into the compact output wire format:
- *   [num_runs: u32][values: T×num_runs, 4B-aligned][run_lengths: u32×num_runs]
+ *   [num_runs: u32][pad to alignof(T)][values: T×num_runs, 4B-aligned][run_lengths: u32×num_runs]
  *
  * Uses *d_num_runs (device pointer) for all layout arithmetic — no host
  * involvement required.  Grid is launched at the worst-case size (n
@@ -113,8 +113,11 @@ __global__ void rle_extract_runs_kernel(
  * The header write (i==0) and the values/lengths writes touch disjoint
  * byte ranges and do not race:
  *   header   → [0, 4)
- *   values   → [4, 4 + num_runs*sizeof(T))
- *   lengths  → [4 + values_aligned, 4 + values_aligned + num_runs*4)
+ *   values   → [values_offset, values_offset + num_runs*sizeof(T))
+ *   lengths  → [values_offset + values_aligned, values_offset + values_aligned + num_runs*4)
+ * where values_offset = rleValuesOffset<T>() (4 for T ≤ 4 bytes, 8 for 8-byte T
+ * — required so the reinterpret_cast<T*> below never issues a misaligned wide
+ * load for uint64_t/int64_t).
  */
 template<typename T>
 __global__ void rle_pack_kernel(
@@ -124,6 +127,7 @@ __global__ void rle_pack_kernel(
     const uint32_t* __restrict__ d_num_runs,
     const size_t n
 ) {
+    constexpr uint32_t values_offset = static_cast<uint32_t>(rleValuesOffset<T>());
     const uint32_t num_runs     = *d_num_runs;
     const uint32_t values_bytes = num_runs * static_cast<uint32_t>(sizeof(T));
     const uint32_t values_aligned = (values_bytes + 3u) & ~3u;
@@ -131,18 +135,20 @@ __global__ void rle_pack_kernel(
 
     if (i == 0) {
         *reinterpret_cast<uint32_t*>(output_base) = num_runs;
-        // Zero the alignment padding between the values section and the lengths
-        // section.  values_aligned may be up to 3 bytes larger than values_bytes
-        // (4-byte alignment).  Those pad bytes are never written by the per-run
-        // threads below, leaving them uninitialized.  Zero them here so the full
-        // [0, actual_output_size_) range is always initialized.
-        uint8_t* pad_base = output_base + sizeof(uint32_t) + values_bytes;
+        // Zero the header-to-values pad (present when alignof(T) > 4) and the
+        // alignment padding between the values section and the lengths section.
+        // Neither range is written by the per-run threads below, leaving them
+        // uninitialized.  Zero them here so the full [0, actual_output_size_)
+        // range is always initialized.
+        for (uint32_t b = sizeof(uint32_t); b < values_offset; b++)
+            output_base[b] = 0;
+        uint8_t* pad_base = output_base + values_offset + values_bytes;
         for (uint32_t b = 0; b < values_aligned - values_bytes; b++)
             pad_base[b] = 0;
     }
     if (i < num_runs) {
-        reinterpret_cast<T*>(output_base + sizeof(uint32_t))[i] = values_scratch[i];
-        reinterpret_cast<uint32_t*>(output_base + sizeof(uint32_t) + values_aligned)[i]
+        reinterpret_cast<T*>(output_base + values_offset)[i] = values_scratch[i];
+        reinterpret_cast<uint32_t*>(output_base + values_offset + values_aligned)[i]
             = lengths_scratch[i];
     }
 }
@@ -211,12 +217,12 @@ void RLEStage<T>::execute(
 
         const uint8_t* input_base = static_cast<const uint8_t*>(inputs[0]);
         const T* compressed_values = reinterpret_cast<const T*>(
-            input_base + sizeof(uint32_t));
+            input_base + rleValuesOffset<T>());
 
         const size_t values_bytes   = num_runs * sizeof(T);
         const size_t values_aligned = (values_bytes + 3) & ~3;
         const uint32_t* run_lengths = reinterpret_cast<const uint32_t*>(
-            input_base + sizeof(uint32_t) + values_aligned);
+            input_base + rleValuesOffset<T>() + values_aligned);
 
         // Prefix sum of run_lengths → run_offsets (for scattered decompression)
         uint32_t* d_run_offsets = nullptr;
@@ -396,11 +402,19 @@ void RLEStage<T>::postStreamSync(cudaStream_t /*stream*/) {
 template class RLEStage<uint8_t>;
 template class RLEStage<uint16_t>;
 template class RLEStage<uint32_t>;
+template class RLEStage<uint64_t>;
+template class RLEStage<int8_t>;
+template class RLEStage<int16_t>;
 template class RLEStage<int32_t>;
+template class RLEStage<int64_t>;
 
 template void launchRLEDecompressKernel<uint8_t>(const uint8_t*, const uint32_t*, const uint32_t*, uint8_t*, uint32_t, cudaStream_t);
 template void launchRLEDecompressKernel<uint16_t>(const uint16_t*, const uint32_t*, const uint32_t*, uint16_t*, uint32_t, cudaStream_t);
 template void launchRLEDecompressKernel<uint32_t>(const uint32_t*, const uint32_t*, const uint32_t*, uint32_t*, uint32_t, cudaStream_t);
+template void launchRLEDecompressKernel<uint64_t>(const uint64_t*, const uint32_t*, const uint32_t*, uint64_t*, uint32_t, cudaStream_t);
+template void launchRLEDecompressKernel<int8_t>(const int8_t*, const uint32_t*, const uint32_t*, int8_t*, uint32_t, cudaStream_t);
+template void launchRLEDecompressKernel<int16_t>(const int16_t*, const uint32_t*, const uint32_t*, int16_t*, uint32_t, cudaStream_t);
 template void launchRLEDecompressKernel<int32_t>(const int32_t*, const uint32_t*, const uint32_t*, int32_t*, uint32_t, cudaStream_t);
+template void launchRLEDecompressKernel<int64_t>(const int64_t*, const uint32_t*, const uint32_t*, int64_t*, uint32_t, cudaStream_t);
 
 } // namespace fz

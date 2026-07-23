@@ -29,18 +29,20 @@
 
 namespace fz {
 
-static constexpr int RRE_CS   = 16384;  // chunk size in bytes (must match lc_chunk_components.cuh CS)
 static constexpr int RRE_TPB  = 512;    // threads per block (must match lc_chunk_components.cuh TPB)
 static constexpr int RRE_TEMP = 4096;   // shared bytes for prefix-sum scratch + bitmap levels
+                                         // (sized for the largest supported CS = 16384; see
+                                         // RREStage::execute() for the supported set)
 
 using fz::lc_detail::byte;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Encode kernel — one block per chunk.  Runs d_RRE<T> on the chunk in shared
+// Encode kernel — one block per chunk.  Runs d_RRE<T,CS> on the chunk in shared
 // memory; falls back to verbatim storage (high-bit flag) when RRE fails or
-// fails to shrink the chunk.
+// fails to shrink the chunk.  CS is compile-time; see launchEncode for the
+// supported instantiations.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-template <typename T>
+template <typename T, int CS>
 static __global__ void __launch_bounds__(RRE_TPB)
 rreEncodeKernel(
     const byte* __restrict__ d_in,
@@ -48,23 +50,23 @@ rreEncodeKernel(
     uint32_t*   __restrict__ d_sizes,
     uint32_t total_in_bytes)
 {
-    __shared__ __align__(16) byte s_in[RRE_CS];
-    __shared__ __align__(16) byte s_out[RRE_CS];
+    __shared__ __align__(16) byte s_in[CS];
+    __shared__ __align__(16) byte s_out[CS];
     __shared__ __align__(16) byte s_temp[RRE_TEMP];
 
     const uint32_t cid     = blockIdx.x;
-    const uint32_t in_off  = cid * (uint32_t)RRE_CS;
+    const uint32_t in_off  = cid * (uint32_t)CS;
     const int      in_size = static_cast<int>(
-        min((uint32_t)RRE_CS, total_in_bytes - in_off));
+        min((uint32_t)CS, total_in_bytes - in_off));
 
     // Load chunk into shared memory; zero-pad the remainder of s_in so that
     // word/long reads past in_size (rounded up) see deterministic zeros.
-    for (int i = threadIdx.x; i < RRE_CS; i += RRE_TPB)
+    for (int i = threadIdx.x; i < CS; i += RRE_TPB)
         s_in[i] = (i < in_size) ? d_in[in_off + i] : (byte)0;
     __syncthreads();
 
     int  csize = in_size;
-    bool good  = lc_detail::d_RRE<T>(csize, s_in, s_out, s_temp);
+    bool good  = lc_detail::d_RRE<T, CS>(csize, s_in, s_out, s_temp);
     // d_RRE writes its final bitmap level to s_out without a trailing barrier,
     // so the reads below can race the last writers (compute-sanitizer racecheck
     // flags d_RRE:1527/1540/1541 vs this kernel). The inverse path (d_iRRE)
@@ -73,7 +75,7 @@ rreEncodeKernel(
     // that exercises the compressible path heavily (e.g. NYX temperature).
     __syncthreads();
 
-    byte* out = d_scratch + (size_t)cid * (uint32_t)RRE_CS;
+    byte* out = d_scratch + (size_t)cid * (uint32_t)CS;
 
     if (good && csize < in_size) {
         for (int i = threadIdx.x; i < csize; i += RRE_TPB)
@@ -94,7 +96,7 @@ rreEncodeKernel(
 // Decode kernel — one block per (compressed) chunk.  Raw chunks (comp_size == 0)
 // are copied by the host and skipped here.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-template <typename T>
+template <typename T, int CS>
 static __global__ void __launch_bounds__(RRE_TPB)
 rreDecodeKernel(
     const byte*     __restrict__ d_in,
@@ -104,8 +106,8 @@ rreDecodeKernel(
     const uint32_t* __restrict__ d_out_offsets,
     const uint32_t* __restrict__ d_orig_sizes)
 {
-    __shared__ __align__(16) byte s_in[RRE_CS];
-    __shared__ __align__(16) byte s_out[RRE_CS];
+    __shared__ __align__(16) byte s_in[CS];
+    __shared__ __align__(16) byte s_out[CS];
     __shared__ __align__(16) byte s_temp[RRE_TEMP];
 
     const uint32_t cid       = blockIdx.x;
@@ -122,7 +124,7 @@ rreDecodeKernel(
     __syncthreads();
 
     int csize = (int)comp_size;
-    lc_detail::d_iRRE<T>(csize, s_in, s_out, s_temp);  // sets csize = orig_size
+    lc_detail::d_iRRE<T, CS>(csize, s_in, s_out, s_temp);  // sets csize = orig_size
     __syncthreads();
 
     for (int i = threadIdx.x; i < (int)orig_size; i += RRE_TPB)
@@ -164,32 +166,54 @@ static __global__ void rrePackKernel(
         dst[i] = src[i];
 }
 
-// ━━━━ word-size dispatch helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-static void launchEncode(uint8_t word_size, int n_chunks, cudaStream_t stream,
+// ━━━━ word-size × chunk-size dispatch helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// chunk_size selects the compile-time CS template argument; word_size selects
+// T. Supported chunk sizes: 4096, 8192, 16384 (see RREStage::execute()).
+static void launchEncode(uint8_t word_size, uint32_t chunk_size, int n_chunks, cudaStream_t stream,
                          const byte* d_in, byte* d_scratch,
                          uint32_t* d_sizes, uint32_t in_bytes)
 {
-    switch (word_size) {
-        case 1: rreEncodeKernel<uint8_t> <<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        case 2: rreEncodeKernel<uint16_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        case 4: rreEncodeKernel<uint32_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        case 8: rreEncodeKernel<uint64_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break;
-        default: throw std::runtime_error("RREStage: word_size must be 1, 2, 4, or 8");
+#define FZ_RRE_ENCODE_CASE(CS_VAL)                                                                          \
+    case CS_VAL:                                                                                             \
+        switch (word_size) {                                                                                 \
+            case 1: rreEncodeKernel<uint8_t,  CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break; \
+            case 2: rreEncodeKernel<uint16_t, CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break; \
+            case 4: rreEncodeKernel<uint32_t, CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break; \
+            case 8: rreEncodeKernel<uint64_t, CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_scratch, d_sizes, in_bytes); break; \
+            default: throw std::runtime_error("RREStage: word_size must be 1, 2, 4, or 8");                  \
+        }                                                                                                     \
+        break;
+    switch (chunk_size) {
+        FZ_RRE_ENCODE_CASE(4096)
+        FZ_RRE_ENCODE_CASE(8192)
+        FZ_RRE_ENCODE_CASE(16384)
+        default: throw std::runtime_error("RREStage: chunk_size must be 4096, 8192, or 16384");
     }
+#undef FZ_RRE_ENCODE_CASE
 }
 
-static void launchDecode(uint8_t word_size, int n_chunks, cudaStream_t stream,
+static void launchDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks, cudaStream_t stream,
                          const byte* d_in, byte* d_out,
                          const uint32_t* in_off, const uint32_t* comp_sz,
                          const uint32_t* out_off, const uint32_t* orig_sz)
 {
-    switch (word_size) {
-        case 1: rreDecodeKernel<uint8_t> <<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        case 2: rreDecodeKernel<uint16_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        case 4: rreDecodeKernel<uint32_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        case 8: rreDecodeKernel<uint64_t><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break;
-        default: throw std::runtime_error("RREStage: word_size must be 1, 2, 4, or 8");
+#define FZ_RRE_DECODE_CASE(CS_VAL)                                                                          \
+    case CS_VAL:                                                                                             \
+        switch (word_size) {                                                                                 \
+            case 1: rreDecodeKernel<uint8_t,  CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break; \
+            case 2: rreDecodeKernel<uint16_t, CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break; \
+            case 4: rreDecodeKernel<uint32_t, CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break; \
+            case 8: rreDecodeKernel<uint64_t, CS_VAL><<<n_chunks, RRE_TPB, 0, stream>>>(d_in, d_out, in_off, comp_sz, out_off, orig_sz); break; \
+            default: throw std::runtime_error("RREStage: word_size must be 1, 2, 4, or 8");                  \
+        }                                                                                                     \
+        break;
+    switch (chunk_size) {
+        FZ_RRE_DECODE_CASE(4096)
+        FZ_RRE_DECODE_CASE(8192)
+        FZ_RRE_DECODE_CASE(16384)
+        default: throw std::runtime_error("RREStage: chunk_size must be 4096, 8192, or 16384");
     }
+#undef FZ_RRE_DECODE_CASE
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -278,9 +302,9 @@ void RREStage::execute(
     const size_t in_bytes = sizes[0];
     if (in_bytes == 0) { actual_output_size_ = 0; return; }
 
-    if (chunk_size_ != 16384)
+    if (chunk_size_ != 4096 && chunk_size_ != 8192 && chunk_size_ != 16384)
         throw std::runtime_error(
-            "RREStage: only chunk_size == 16384 is currently supported; got "
+            "RREStage: chunk_size must be 4096, 8192, or 16384; got "
             + std::to_string(chunk_size_));
     if (word_size_ != 1 && word_size_ != 2 && word_size_ != 4 && word_size_ != 8)
         throw std::runtime_error(
@@ -335,7 +359,7 @@ void RREStage::execute(
         const size_t header_size = 4 + 4 + 4 * n_chunks;
 
         // (1) Encode each chunk into uniform scratch, recording flagged sizes.
-        launchEncode(word_size_, (int)n_chunks, stream,
+        launchEncode(word_size_, (uint32_t)chunk_size_, (int)n_chunks, stream,
                      (const byte*)inputs[0], d_scratch_, d_sizes_dev_, in_bytes_u);
         FZ_CUDA_CHECK(cudaGetLastError());
 
@@ -441,7 +465,7 @@ void RREStage::execute(
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_out_off, h_out_off.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_orig_sz, h_orig_sz.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
 
-        launchDecode(word_size_, (int)num_chunks, stream,
+        launchDecode(word_size_, (uint32_t)chunk_size_, (int)num_chunks, stream,
                      d_in, d_out, d_in_off, d_comp_sz, d_out_off, d_orig_sz);
         FZ_CUDA_CHECK(cudaGetLastError());
 

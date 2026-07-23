@@ -20,7 +20,7 @@ namespace fz {
 /**
  * Serialized quantizer configuration stored in FZMBufferEntry.stage_config.
  * Written by `serializeHeader()`; read back by `deserializeHeader()`.
- * 36 bytes — fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
+ * 52 bytes — fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
 struct QuantizerConfig {
     float    abs_error_bound;   ///< Absolute EB after mode conversion (0 for REL).
@@ -36,7 +36,10 @@ struct QuantizerConfig {
     float    outlier_threshold; ///< ABS/NOA: |x| >= threshold → forced outlier (inf = disabled).
     uint8_t  inplace_outliers;  ///< 1 if outliers are encoded in-place in the codes array.
     uint8_t  linear_mode;       ///< 1 if linear/no-outlier mode (signed codes, no outlier ports).
-    uint8_t  _pad[2];           ///< Alignment padding — must be zero.
+    uint8_t  dither;            ///< 1 if "_R"-style dithered reconstruction is enabled (LC QUANT_*_R).
+    uint8_t  _pad[5];           ///< Alignment padding (dither_seed needs 8-byte alignment) — must be zero.
+    uint64_t dither_seed;       ///< Deterministic per-element dither seed; meaningful only when dither.
+    float    dither_strength;   ///< Dither offset amplitude as a fraction of abs_eb, in (0,1]; meaningful only when dither.
 
     QuantizerConfig()
         : abs_error_bound(0.0f), user_error_bound(0.0f), value_base(0.0f),
@@ -44,7 +47,8 @@ struct QuantizerConfig {
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           eb_mode(0), zigzag_codes(0),
           outlier_threshold(std::numeric_limits<float>::infinity()),
-          inplace_outliers(0), linear_mode(0), _pad{} {}
+          inplace_outliers(0), linear_mode(0), dither(0), _pad{}, dither_seed(0),
+          dither_strength(1.0f) {}
 };
 static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
               "QuantizerConfig must fit in FZM_STAGE_CONFIG_SIZE");
@@ -130,6 +134,26 @@ public:
         /// Intended front-end for `→ LorenzoStage(blockSize=32) → AdaptiveBitpackStage`.
         /// Mutually exclusive with REL, inplace_outliers, and zigzag_codes.
         bool  linear_mode            = false;
+        /// ABS/NOA/REL: reconstruct to a deterministic pseudo-random point within
+        /// the bin/error-bound interval instead of always the bin center (LC's
+        /// QUANT_*_R vs. QUANT_*_0). Decorrelates reconstruction error from the
+        /// signal at no extra storage cost — the offset is a pure function of
+        /// (element index, dither_seed), reproduced identically on decode. Any
+        /// element whose dithered reconstruction would violate the error bound
+        /// is escalated to a lossless outlier instead (same mechanism used for
+        /// out-of-radius values). Mutually exclusive with linear_mode and
+        /// inplace_outliers (both lack a per-element outlier-escalation path).
+        bool     dither              = false;
+        /// Seed for the deterministic dither offset. Persisted in the serialized
+        /// header so decode reproduces identical offsets with no extra storage.
+        uint64_t dither_seed         = 0;
+        /// Dither offset amplitude as a fraction of abs_eb (or, in REL mode, of
+        /// half a log-bin width), in (0, 1]. 1.0 (default) matches LC's literal
+        /// "_R" definition — offset spans the full bin — and empirically
+        /// escalates ~25% of elements to lossless outliers for smooth data.
+        /// Lower values trade decorrelation strength for fewer outliers; 0.0
+        /// disables the offset entirely (bit-identical to dither=false).
+        float    dither_strength     = 1.0f;
 
         Config() = default;
         Config(TInput eb, ErrorBoundMode mode = ErrorBoundMode::ABS,
@@ -259,6 +283,13 @@ public:
     void setInplaceOutliers(bool enable)     { config_.inplace_outliers = enable; }
     /// ABS/NOA: linear / no-outlier mode (cuSZp-style signed codes; see Config::linear_mode).
     void setLinearMode(bool enable)          { config_.linear_mode = enable; }
+    /// ABS/NOA/REL: dithered ("_R"-style) reconstruction; see Config::dither.
+    /// Throws at execute() if combined with linear_mode or inplace_outliers.
+    void setDither(bool enable)              { config_.dither = enable; }
+    /// Seed for the deterministic per-element dither offset (see Config::dither_seed).
+    void setDitherSeed(uint64_t seed)        { config_.dither_seed = seed; }
+    /// Dither offset amplitude as a fraction of abs_eb, in (0,1]; see Config::dither_strength.
+    void setDitherStrength(float strength)   { config_.dither_strength = strength; }
 
     TInput         getErrorBound()        const { return static_cast<TInput>(config_.error_bound); }
     int            getQuantRadius()       const { return config_.quant_radius; }
@@ -269,6 +300,9 @@ public:
     float          getOutlierThreshold()  const { return config_.outlier_threshold; }
     bool           getInplaceOutliers()   const { return config_.inplace_outliers; }
     bool           getLinearMode()        const { return config_.linear_mode; }
+    bool           getDither()            const { return config_.dither; }
+    uint64_t       getDitherSeed()        const { return config_.dither_seed; }
+    float          getDitherStrength()    const { return config_.dither_strength; }
 
 private:
     Config config_;

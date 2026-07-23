@@ -37,9 +37,16 @@ value, not just zeros.
 ## Stage settings
 
 ```cpp
-rre->setChunkSize(16384);   // bytes; only 16384 is currently supported (default)
+rre->setChunkSize(16384);   // bytes; 4096, 8192, or 16384 (default 16384)
 rre->setWordSize(1);        // word granularity in bytes: 1, 2, 4, or 8 (default 1)
 ```
+
+`chunk_size` is restricted to this small set because each CUDA block holds the
+whole chunk (`in` + `out` + a fixed 4 KB scratch buffer) in **static**
+`__shared__` memory — the three supported sizes (12 KB / 20 KB / 36 KB total)
+all fit comfortably under the 48 KB static cap. Larger chunk sizes would need
+the dynamic-shared-memory opt-in `GInterpStage` uses for its 3-D `double`
+path; not implemented here.
 
 `word_size` selects the LC `RRE_1` / `RRE_2` / `RRE_4` / `RRE_8` variant. The
 cuSZ-Hi chains use `RRE1` (speed, on quant codes), `RRE2` (anchor/outlier), and
@@ -49,7 +56,7 @@ cuSZ-Hi chains use `RRE1` (speed, on quant codes), `RRE2` (anchor/outlier), and
 
 ## Alignment requirement
 
-Requires input to be a multiple of `chunk_size` (16384) bytes. The pipeline pads
+Requires input to be a multiple of `chunk_size` bytes. The pipeline pads
 automatically when an upstream byte-oriented stage uses a matching block size.
 
 ---

@@ -512,8 +512,18 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             auto* diff = pipeline->addStage<DifferenceStage<uint16_t>>();
             diff->setChunkSize(s.chunk_size);
             connect_next(diff);
-        } else if (name == "rle") {
-            auto* rle = pipeline->addStage<RLEStage<uint16_t>>();
+        } else if (name == "rle" || name == "rle1" || name == "rle2" ||
+                   name == "rle4" || name == "rle8") {
+            // Optional trailing digit selects the word size (default 2, matching
+            // the historical uint16_t default); mirrors rze[1|2|4|8]/rre[1|2|4|8].
+            Stage* rle = nullptr;
+            const int width = name.size() > 3 ? (name[3] - '0') : 2;
+            switch (width) {
+                case 1: rle = pipeline->addStage<RLEStage<uint8_t>>();  break;
+                case 2: rle = pipeline->addStage<RLEStage<uint16_t>>(); break;
+                case 4: rle = pipeline->addStage<RLEStage<uint32_t>>(); break;
+                case 8: rle = pipeline->addStage<RLEStage<uint64_t>>(); break;
+            }
             connect_next(rle);
         } else if (name == "huffman" || name == "huf") {
             // When following a predictor with zigzag_codes=true, codes are in [0, 2*radius-2];
@@ -538,7 +548,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         } else {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
-                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], diff, rle, huffman, ans, adm");
+                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm");
         }
     }
 
@@ -581,7 +591,7 @@ static void print_root_usage(const char* argv0) {
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
-        << "                                                      rze[1|2|4|8], rre[1|2|4|8], diff, rle, huffman, ans, adm\n"
+        << "                                                      rze[1|2|4|8], rre[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

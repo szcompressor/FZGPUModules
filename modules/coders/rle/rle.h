@@ -16,16 +16,32 @@
 namespace fz {
 
 /**
+ * Byte offset of the values section within the packed RLE wire format,
+ * rounded up to `alignof(T)`.  The 4-byte `num_runs` header alone only
+ * guarantees 4-byte alignment; for 8-byte `T` (`int64_t`/`uint64_t`) the
+ * values section must start on an 8-byte boundary or the `reinterpret_cast<T*>`
+ * reads/writes in `rle_pack_kernel`/`execute()` fault with an unaligned
+ * 64-bit load (found via the RLE_8 word-size round-trip test).
+ */
+template<typename T>
+constexpr size_t rleValuesOffset() {
+    return (alignof(T) > sizeof(uint32_t)) ? alignof(T) : sizeof(uint32_t);
+}
+
+/**
  * Run-Length Encoding stage. Lossless; effective when data has long runs of
  * identical values (e.g. quantized codes).
  *
- * Forward wire format: `[num_runs:u32][values:T×n (4B-aligned)][lengths:u32×n]`
+ * Forward wire format: `[num_runs:u32][pad to alignof(T)][values:T×n (4B-aligned)][lengths:u32×n]`
+ * The header-to-values pad is 0 bytes for T ≤ 4 bytes, 4 bytes for 8-byte T.
  *
  * Worst-case output is 2× input + 4 bytes (no repeated values), so RLE should
  * follow a predictor/quantizer stage that creates repetition.
  *
- * @tparam T  Element type (`uint8_t`, `uint16_t`, `uint32_t`, …). Run counts
- *            are always `uint32_t`.
+ * @tparam T  Element type (`uint8_t`/`uint16_t`/`uint32_t`/`uint64_t`,
+ *            `int8_t`/`int16_t`/`int32_t`/`int64_t` — full 1/2/4/8-byte
+ *            word-size coverage, matching the LC framework's RLE_1/2/4/8).
+ *            Run counts are always `uint32_t`.
  */
 template<typename T = uint16_t>
 class RLEStage : public Stage {
@@ -94,7 +110,7 @@ public:
             size_t n = input_sizes[0] / sizeof(T);
             size_t values_bytes   = n * sizeof(T);
             size_t values_aligned = (values_bytes + 3u) & ~3u;
-            return {sizeof(uint32_t) + values_aligned + n * sizeof(uint32_t)};
+            return {rleValuesOffset<T>() + values_aligned + n * sizeof(uint32_t)};
         }
     }
     
@@ -177,7 +193,7 @@ private:
         const size_t   values_bytes  = num_runs * sizeof(T);
         const size_t   values_aligned = (values_bytes + 3) & ~3;
         actual_output_sizes_ = {
-            sizeof(uint32_t) + values_aligned + num_runs * sizeof(uint32_t)
+            rleValuesOffset<T>() + values_aligned + num_runs * sizeof(uint32_t)
         };
         fwd_sync_pending_ = false;
         // Log run count and effective compression ratio.
@@ -209,6 +225,10 @@ private:
 extern template class RLEStage<uint8_t>;
 extern template class RLEStage<uint16_t>;
 extern template class RLEStage<uint32_t>;
+extern template class RLEStage<uint64_t>;
+extern template class RLEStage<int8_t>;
+extern template class RLEStage<int16_t>;
 extern template class RLEStage<int32_t>;
+extern template class RLEStage<int64_t>;
 
 } // namespace fz

@@ -17,10 +17,17 @@
  *   RZ9   RZEStage/WordSize8RoundTrip            — 8-byte word granularity round-trip
  *   RZ10  RZEStage/ConstantRunCompressesSmall    — constant run compresses far below input
  *   RZ11  RZEStage/HeaderSerialization           — serializeHeader/deserializeHeader preserves config
- *   RZ12  RZEStage/UnsupportedChunkSizeThrows    — chunk_size≠16384 throws at execute()
+ *   RZ12  RZEStage/UnsupportedChunkSizeThrows    — chunk_size not in {4096,8192,16384} throws at execute()
  *   RZ13  RZEStage/UnsupportedWordSizeThrows     — word_size∉{1,2,4,8} throws at execute()
  *   RZ14  RZEStage/IsGraphCompatible             — forward=true, inverse=false
  *   RZ15  RZEStage/RepeatedRoundTripStable       — repeated round-trips on same objects stable
+ *   RZ16  RZEStage/ChunkSize4096RandomBytesRoundTrip   — chunk_size=4096, multi-chunk random bytes
+ *   RZ17  RZEStage/ChunkSize4096AllZerosRoundTrip      — chunk_size=4096, all-zeros fast path
+ *   RZ18  RZEStage/ChunkSize4096ConstantRunRoundTrip   — chunk_size=4096, single repeated value
+ *   RZ19  RZEStage/ChunkSize4096PartialChunkRoundTrip  — chunk_size=4096, input < one chunk
+ *   RZ20  RZEStage/ChunkSize8192RandomBytesRoundTrip   — chunk_size=8192, multi-chunk random bytes
+ *   RZ21  RZEStage/ChunkSize8192PartialChunkRoundTrip  — chunk_size=8192, input not a multiple of chunk_size
+ *   RZ22  RZEStage/ChunkSize4096WordSize2RoundTrip     — chunk_size=4096, word_size=2 (byteshort fallback path)
  */
 
 #include <gtest/gtest.h>
@@ -62,24 +69,26 @@ static std::vector<uint8_t> run_rze(
 }
 
 // Compress then decompress; verify byte-exact round-trip.
-static void round_trip(const std::vector<uint8_t>& original, int word_size = 1) {
+static void round_trip(const std::vector<uint8_t>& original, int word_size = 1,
+                        size_t chunk_size = 16384) {
     CudaStream cs;
     auto pool = make_test_pool(original.size() + 65536);
 
     RZEStage enc;
-    enc.setChunkSize(16384);
+    enc.setChunkSize(chunk_size);
     enc.setWordSize(word_size);
     const size_t enc_cap = enc.estimateOutputSizes({original.size()})[0];
     const auto compressed = run_rze(enc, original, enc_cap, cs.stream, *pool);
 
     RZEStage dec;
-    dec.setChunkSize(16384);
+    dec.setChunkSize(chunk_size);
     dec.setWordSize(word_size);
     dec.setInverse(true);
     const auto restored = run_rze(dec, compressed, original.size() + 4096, cs.stream, *pool);
 
     ASSERT_EQ(restored.size(), original.size());
-    EXPECT_EQ(restored, original) << "RZE round-trip mismatch (word_size=" << word_size << ")";
+    EXPECT_EQ(restored, original) << "RZE round-trip mismatch (word_size=" << word_size
+                                   << ", chunk_size=" << chunk_size << ")";
 }
 
 TEST(RZEStage, RandomBytesRoundTrip) {
@@ -180,7 +189,7 @@ TEST(RZEStage, UnsupportedChunkSizeThrows) {
     std::vector<uint8_t> data(4096, 1);
     auto pool = make_test_pool(data.size() + 65536);
     RZEStage s;
-    s.setChunkSize(8192);
+    s.setChunkSize(12345);  // not in the supported set {4096, 8192, 16384}
     CudaBuffer<uint8_t> d_in(data.size()), d_out(data.size() + 4096);
     d_in.upload(data, cs.stream);
     cudaStreamSynchronize(cs.stream);
@@ -217,4 +226,56 @@ TEST(RZEStage, RepeatedRoundTripStable) {
     std::vector<uint8_t> data(2 * 16384);
     for (auto& b : data) b = (uint8_t)dist(rng);
     for (int i = 0; i < 5; i++) round_trip(data);
+}
+
+TEST(RZEStage, ChunkSize4096RandomBytesRoundTrip) {
+    std::mt19937 rng(101);
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::vector<uint8_t> data(3 * 4096);  // multi-chunk
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    round_trip(data, 1, 4096);
+}
+
+TEST(RZEStage, ChunkSize4096AllZerosRoundTrip) {
+    round_trip(std::vector<uint8_t>(2 * 4096, 0), 1, 4096);
+}
+
+TEST(RZEStage, ChunkSize4096ConstantRunRoundTrip) {
+    round_trip(std::vector<uint8_t>(2 * 4096, 0x5A), 1, 4096);
+}
+
+TEST(RZEStage, ChunkSize4096PartialChunkRoundTrip) {
+    std::mt19937 rng(102);
+    std::uniform_int_distribution<int> dist(0, 5);
+    std::vector<uint8_t> data(1500);  // < one 4096-byte chunk
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    round_trip(data, 1, 4096);
+}
+
+TEST(RZEStage, ChunkSize8192RandomBytesRoundTrip) {
+    std::mt19937 rng(103);
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::vector<uint8_t> data(3 * 8192);  // multi-chunk
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    round_trip(data, 1, 8192);
+}
+
+TEST(RZEStage, ChunkSize8192PartialChunkRoundTrip) {
+    std::mt19937 rng(104);
+    std::uniform_int_distribution<int> dist(0, 5);
+    std::vector<uint8_t> data(2 * 8192 + 3000);  // not a multiple of chunk_size
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    round_trip(data, 1, 8192);
+}
+
+// chunk_size=4096 + word_size=2 gives < 1 meaningful bitmap byte per thread
+// in the byteshort fast path (8 threads*512 bytes/thread=4096B chunk, but
+// bytesperthread/(8*sizeof(uint16_t)) = 8/16 = 0) — the dispatcher must fall
+// back to the general path here instead of taking byteshort.
+TEST(RZEStage, ChunkSize4096WordSize2RoundTrip) {
+    std::mt19937 rng(105);
+    std::uniform_int_distribution<int> dist(0, 7);
+    std::vector<uint8_t> data(3 * 4096);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    round_trip(data, 2, 4096);
 }

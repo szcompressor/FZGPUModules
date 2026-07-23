@@ -54,6 +54,21 @@
  * double-precision variants (QD1-QD2):
  *   QD1   QuantizerTypeMatrix/DoubleUint16_PipelineRoundTrip  — <double,uint16_t> ABS via Pipeline
  *   QD2   QuantizerTypeMatrix/DoubleUint32_PipelineRoundTrip  — <double,uint32_t> ABS via Pipeline
+ *
+ * Dithered ("_R"-style) reconstruction (QDT1-QDT8):
+ *   QDT1  DitherABS/RoundTripWithinBound       — dithered ABS still respects |x-x_hat|<=eb
+ *   QDT2  DitherABS/DiffersFromNonDithered     — dithered recon != bin-center recon somewhere
+ *   QDT3  DitherABS/ReproducibleAcrossRuns     — same seed -> byte-identical reconstruction
+ *   QDT4  DitherABS/DifferentSeedsDiffer       — different seeds -> different reconstruction
+ *   QDT5  DitherNOA/RoundTripWithinBound       — dithered NOA still respects the derived bound
+ *   QDT6  DitherREL/RoundTripWithinBound       — dithered REL still respects the relative bound
+ *   QDT7  DitherHeaderSerialization            — dither/seed round-trip; pre-dither header defaults false
+ *   QDT8  DitherIncompatible/LinearAndInplaceThrow — dither+linear_mode / dither+inplace_outliers both throw
+ *
+ * Dither strength (QDS1-QDS3):
+ *   QDS1  DitherStrength/ZeroMatchesNonDithered   — strength=0.0 reconstructs bit-identical to dither=false
+ *   QDS2  DitherStrength/LowerStrengthFewerOutliers — strength=0.3 escalates fewer outliers than strength=1.0
+ *   QDS3  DitherStrength/HeaderRoundTripAndBackwardCompat — strength round-trips; pre-strength header defaults to 1.0
  */
 
 #include <gtest/gtest.h>
@@ -1571,4 +1586,407 @@ TEST(QuantizerLinear, IncompatibleModesThrow) {
         s.setZigzagCodes(true);
         EXPECT_THROW(run_linear_forward(s, h_input, stream, *pool), std::runtime_error);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QDT1-QDT8: Dithered ("_R"-style) reconstruction
+//
+// NOTE ON outlier_capacity: dithering perturbs the reconstruction by a random
+// offset spanning the *full* bin width (matching LC's "_R" definition — a
+// random value within the provided error bound), so any element whose
+// non-dithered error was already more than half the bin width from center has
+// a real chance of being pushed over the bound and escalated to a lossless
+// outlier. For a smooth signal this empirically lands around ~25% of elements
+// (two independent uniform errors summing past the bound — a triangular-
+// distribution tail), several times the non-dithered outlier rate. Tests use
+// a generously large outlier_capacity to avoid overflowing the buffer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(DitherABS, RoundTripWithinBound) {
+    CudaStream stream;
+    constexpr size_t N  = 1024;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    QuantizerStage<float, uint16_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setQuantRadius(32768);
+    fwd.setOutlierCapacity(0.5f);
+    fwd.setDither(true);
+    fwd.setDitherSeed(0x1234ABCDULL);
+
+    auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
+    EXPECT_GT(fwd_result.codes_bytes, 0u);
+
+    QuantizerStage<float, uint16_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+
+    auto h_recon = run_quantizer_inverse(inv, fwd_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, EB * 1.01f)
+        << "Dithered ABS round-trip max_err=" << max_err << " exceeds bound " << EB;
+}
+
+TEST(DitherABS, DiffersFromNonDithered) {
+    CudaStream stream;
+    constexpr size_t N  = 1024;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    // Non-dithered reference.
+    QuantizerStage<float, uint16_t> fwd0;
+    fwd0.setErrorBound(EB);
+    fwd0.setQuantRadius(32768);
+    fwd0.setOutlierCapacity(0.1f);
+    auto fwd0_result = run_quantizer_forward(fwd0, h_input, stream, *pool);
+    QuantizerStage<float, uint16_t> inv0;
+    inv0.setInverse(true);
+    uint8_t cfg0[128] = {};
+    inv0.deserializeHeader(cfg0, fwd0.serializeHeader(0, cfg0, sizeof(cfg0)));
+    auto h_recon0 = run_quantizer_inverse(inv0, fwd0_result, N, stream, *pool);
+
+    // Dithered.
+    QuantizerStage<float, uint16_t> fwd1;
+    fwd1.setErrorBound(EB);
+    fwd1.setQuantRadius(32768);
+    fwd1.setOutlierCapacity(0.5f);
+    fwd1.setDither(true);
+    fwd1.setDitherSeed(42);
+    auto fwd1_result = run_quantizer_forward(fwd1, h_input, stream, *pool);
+    QuantizerStage<float, uint16_t> inv1;
+    inv1.setInverse(true);
+    uint8_t cfg1[128] = {};
+    inv1.deserializeHeader(cfg1, fwd1.serializeHeader(0, cfg1, sizeof(cfg1)));
+    auto h_recon1 = run_quantizer_inverse(inv1, fwd1_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon0.size(), N);
+    ASSERT_EQ(h_recon1.size(), N);
+
+    bool any_different = false;
+    for (size_t i = 0; i < N; i++) {
+        if (h_recon0[i] != h_recon1[i]) { any_different = true; break; }
+    }
+    EXPECT_TRUE(any_different)
+        << "Dithered reconstruction should differ from bin-center reconstruction "
+           "for at least one element";
+}
+
+TEST(DitherABS, ReproducibleAcrossRuns) {
+    CudaStream stream;
+    constexpr size_t N  = 1024;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    auto run_once = [&]() {
+        QuantizerStage<float, uint16_t> fwd;
+        fwd.setErrorBound(EB);
+        fwd.setQuantRadius(32768);
+        fwd.setOutlierCapacity(0.5f);
+        fwd.setDither(true);
+        fwd.setDitherSeed(0xC0FFEEULL);
+        auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
+
+        QuantizerStage<float, uint16_t> inv;
+        inv.setInverse(true);
+        uint8_t cfg[128] = {};
+        inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+        return run_quantizer_inverse(inv, fwd_result, N, stream, *pool);
+    };
+
+    auto h_recon_a = run_once();
+    auto h_recon_b = run_once();
+
+    ASSERT_EQ(h_recon_a.size(), h_recon_b.size());
+    for (size_t i = 0; i < N; i++)
+        EXPECT_EQ(h_recon_a[i], h_recon_b[i])
+            << "Same seed must reproduce byte-identical reconstruction at index " << i;
+}
+
+TEST(DitherABS, DifferentSeedsDiffer) {
+    CudaStream stream;
+    constexpr size_t N  = 1024;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    auto run_with_seed = [&](uint64_t seed) {
+        QuantizerStage<float, uint16_t> fwd;
+        fwd.setErrorBound(EB);
+        fwd.setQuantRadius(32768);
+        fwd.setOutlierCapacity(0.5f);
+        fwd.setDither(true);
+        fwd.setDitherSeed(seed);
+        auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
+
+        QuantizerStage<float, uint16_t> inv;
+        inv.setInverse(true);
+        uint8_t cfg[128] = {};
+        inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+        return run_quantizer_inverse(inv, fwd_result, N, stream, *pool);
+    };
+
+    auto h_recon_seed1 = run_with_seed(1);
+    auto h_recon_seed2 = run_with_seed(2);
+
+    ASSERT_EQ(h_recon_seed1.size(), h_recon_seed2.size());
+    bool any_different = false;
+    for (size_t i = 0; i < N; i++) {
+        if (h_recon_seed1[i] != h_recon_seed2[i]) { any_different = true; break; }
+    }
+    EXPECT_TRUE(any_different)
+        << "Different dither seeds should produce different reconstructions";
+}
+
+TEST(DitherNOA, RoundTripWithinBound) {
+    CudaStream stream;
+    constexpr size_t N       = 1024;
+    constexpr float  USER_EB = 0.01f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    float vmin = *std::min_element(h_input.begin(), h_input.end());
+    float vmax = *std::max_element(h_input.begin(), h_input.end());
+    float expected_abs_eb = USER_EB * (vmax - vmin);
+
+    QuantizerStage<float, uint16_t> fwd;
+    fwd.setErrorBound(USER_EB);
+    fwd.setErrorBoundMode(ErrorBoundMode::NOA);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.5f);
+    fwd.setDither(true);
+    fwd.setDitherSeed(777);
+
+    auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
+
+    QuantizerStage<float, uint16_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+    auto h_recon = run_quantizer_inverse(inv, fwd_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    float max_err = max_abs_error(h_input, h_recon);
+    EXPECT_LE(max_err, expected_abs_eb * 1.02f)
+        << "Dithered NOA round-trip max_err=" << max_err
+        << " exceeds expected_abs_eb=" << expected_abs_eb;
+}
+
+TEST(DitherREL, RoundTripWithinBound) {
+    CudaStream stream;
+    constexpr size_t N   = 1024;
+    constexpr float  EPS = 0.01f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = (std::abs(std::sin(static_cast<float>(i) * 0.05f)) + 0.1f) * 10.0f;
+
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(EPS);
+    fwd.setErrorBoundMode(ErrorBoundMode::REL);
+    fwd.setQuantRadius(512);
+    fwd.setOutlierCapacity(0.5f);
+    fwd.setDither(true);
+    fwd.setDitherSeed(99);
+
+    auto fwd_result = run_quantizer_forward(fwd, h_input, stream, *pool);
+    EXPECT_GT(fwd_result.codes_bytes, 0u);
+
+    QuantizerStage<float, uint32_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+    auto h_recon = run_quantizer_inverse(inv, fwd_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon.size(), N);
+    uint32_t outlier_count = fwd_result.outlier_count;
+    std::vector<uint32_t> outlier_idxs;
+    if (fwd_result.idxs_raw.size() >= outlier_count * sizeof(uint32_t)) {
+        outlier_idxs.resize(outlier_count);
+        std::memcpy(outlier_idxs.data(), fwd_result.idxs_raw.data(),
+                    outlier_count * sizeof(uint32_t));
+    }
+    std::sort(outlier_idxs.begin(), outlier_idxs.end());
+
+    float max_rel_err = 0.0f;
+    for (size_t i = 0; i < N; i++) {
+        bool is_outlier = std::binary_search(outlier_idxs.begin(), outlier_idxs.end(),
+                                              static_cast<uint32_t>(i));
+        if (is_outlier) {
+            EXPECT_FLOAT_EQ(h_recon[i], h_input[i])
+                << "REL outlier not exactly reconstructed at index " << i;
+        } else {
+            float orig_abs = std::abs(h_input[i]);
+            if (orig_abs > 0.0f) {
+                float rel = std::abs(h_recon[i] - h_input[i]) / orig_abs;
+                max_rel_err = std::max(max_rel_err, rel);
+            }
+        }
+    }
+    EXPECT_LE(max_rel_err, EPS * 1.5f)
+        << "Dithered REL round-trip max relative error=" << max_rel_err
+        << " exceeds eps=" << EPS;
+}
+
+TEST(DitherHeaderSerialization, RoundTripAndBackwardCompat) {
+    QuantizerStage<float, uint16_t> fwd;
+    fwd.setErrorBound(5e-3f);
+    fwd.setQuantRadius(1024);
+    fwd.setOutlierCapacity(0.05f);
+    fwd.setDither(true);
+    fwd.setDitherSeed(0xDEADBEEFULL);
+
+    uint8_t buf[128] = {};
+    size_t sz = fwd.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(sz, sizeof(QuantizerConfig));
+
+    QuantizerStage<float, uint16_t> dst;
+    dst.deserializeHeader(buf, sz);
+    EXPECT_TRUE(dst.getDither());
+    EXPECT_EQ(dst.getDitherSeed(), 0xDEADBEEFULL);
+
+    // Pre-dither (36-byte) header: dither must default to false/0, not garbage,
+    // even though buf's bytes past offset 36 still hold the real dither fields.
+    QuantizerStage<float, uint16_t> old;
+    old.deserializeHeader(buf, 36);
+    EXPECT_FALSE(old.getDither());
+    EXPECT_EQ(old.getDitherSeed(), uint64_t(0));
+}
+
+TEST(DitherIncompatible, LinearAndInplaceThrow) {
+    CudaStream stream;
+    constexpr size_t N = 256;
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    // dither + linear_mode → throw
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setLinearMode(true);
+        s.setDither(true);
+        EXPECT_THROW(run_linear_forward(s, h_input, stream, *pool), std::runtime_error);
+    }
+    // dither + inplace_outliers → throw
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setInplaceOutliers(true);
+        s.setZigzagCodes(true);   // inplace requires zigzag_codes
+        s.setDither(true);
+        EXPECT_THROW(run_quantizer_forward_inplace(s, h_input, stream, *pool), std::runtime_error);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QDS1-QDS3: Dither strength — setDitherStrength() scales the offset amplitude
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(DitherStrength, ZeroMatchesNonDithered) {
+    CudaStream stream;
+    constexpr size_t N  = 1024;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    // Non-dithered reference.
+    QuantizerStage<float, uint16_t> fwd0;
+    fwd0.setErrorBound(EB);
+    fwd0.setQuantRadius(32768);
+    fwd0.setOutlierCapacity(0.1f);
+    auto fwd0_result = run_quantizer_forward(fwd0, h_input, stream, *pool);
+    QuantizerStage<float, uint16_t> inv0;
+    inv0.setInverse(true);
+    uint8_t cfg0[128] = {};
+    inv0.deserializeHeader(cfg0, fwd0.serializeHeader(0, cfg0, sizeof(cfg0)));
+    auto h_recon0 = run_quantizer_inverse(inv0, fwd0_result, N, stream, *pool);
+
+    // Dithered with strength=0.0: offset is always zero, so this must be
+    // bit-identical to the non-dithered reconstruction.
+    QuantizerStage<float, uint16_t> fwd1;
+    fwd1.setErrorBound(EB);
+    fwd1.setQuantRadius(32768);
+    fwd1.setOutlierCapacity(0.1f);
+    fwd1.setDither(true);
+    fwd1.setDitherStrength(0.0f);
+    fwd1.setDitherSeed(123);
+    auto fwd1_result = run_quantizer_forward(fwd1, h_input, stream, *pool);
+    QuantizerStage<float, uint16_t> inv1;
+    inv1.setInverse(true);
+    uint8_t cfg1[128] = {};
+    inv1.deserializeHeader(cfg1, fwd1.serializeHeader(0, cfg1, sizeof(cfg1)));
+    auto h_recon1 = run_quantizer_inverse(inv1, fwd1_result, N, stream, *pool);
+
+    ASSERT_EQ(h_recon0.size(), N);
+    ASSERT_EQ(h_recon1.size(), N);
+    EXPECT_EQ(fwd0_result.outlier_count, fwd1_result.outlier_count)
+        << "strength=0 must escalate exactly as many outliers as no dithering at all";
+    for (size_t i = 0; i < N; i++)
+        EXPECT_EQ(h_recon0[i], h_recon1[i])
+            << "strength=0 dithering must be bit-identical to dither=false at index " << i;
+}
+
+TEST(DitherStrength, LowerStrengthFewerOutliers) {
+    CudaStream stream;
+    constexpr size_t N  = 4096;
+    constexpr float  EB = 1e-2f;
+
+    auto pool = make_test_pool(N * sizeof(float) * 20);
+    auto h_input = make_sine_floats(N, 0.05f, 10.0f);
+
+    auto run_with_strength = [&](float strength) {
+        QuantizerStage<float, uint16_t> fwd;
+        fwd.setErrorBound(EB);
+        fwd.setQuantRadius(32768);
+        fwd.setOutlierCapacity(0.5f);
+        fwd.setDither(true);
+        fwd.setDitherStrength(strength);
+        fwd.setDitherSeed(999);
+        return run_quantizer_forward(fwd, h_input, stream, *pool);
+    };
+
+    auto full_strength  = run_with_strength(1.0f);
+    auto lower_strength = run_with_strength(0.3f);
+
+    EXPECT_LT(lower_strength.outlier_count, full_strength.outlier_count)
+        << "strength=0.3 should escalate noticeably fewer outliers than strength=1.0 "
+           "(full=" << full_strength.outlier_count
+        << ", lower=" << lower_strength.outlier_count << ")";
+}
+
+TEST(DitherStrength, HeaderRoundTripAndBackwardCompat) {
+    QuantizerStage<float, uint16_t> fwd;
+    fwd.setErrorBound(5e-3f);
+    fwd.setQuantRadius(1024);
+    fwd.setOutlierCapacity(0.3f);
+    fwd.setDither(true);
+    fwd.setDitherSeed(0xABCDEF01ULL);
+    fwd.setDitherStrength(0.42f);
+
+    uint8_t buf[128] = {};
+    size_t sz = fwd.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(sz, sizeof(QuantizerConfig));
+
+    QuantizerStage<float, uint16_t> dst;
+    dst.deserializeHeader(buf, sz);
+    EXPECT_TRUE(dst.getDither());
+    EXPECT_FLOAT_EQ(dst.getDitherStrength(), 0.42f);
+
+    // Pre-dither_strength (48-byte) header: strength must default to 1.0
+    // (matching the only behavior that format could have meant), not 0.
+    QuantizerStage<float, uint16_t> old;
+    old.deserializeHeader(buf, 48);
+    EXPECT_TRUE(old.getDither());  // dither/dither_seed already existed at 48 bytes
+    EXPECT_FLOAT_EQ(old.getDitherStrength(), 1.0f);
 }

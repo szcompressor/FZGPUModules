@@ -104,7 +104,7 @@ static __device__ inline T block_prefix_sum(T val, void* buffer)  // returns inc
 // ─────────────────────────────────────────────────────────────────────────
 
 //special case for byte and short data
-template <typename T, bool check = false>
+template <typename T, int maxsize = CS, bool check = false>
 static __device__ inline bool d_REencodebyteshort(const T* const in, const int insize, T* const dataout, int& datasize, T* const bmout, int* const temp_w)  // all sizes in number of words
 {
   using type = T;
@@ -112,7 +112,7 @@ static __device__ inline bool d_REencodebyteshort(const T* const in, const int i
   const int bitsperword = 8 * sizeof(type);
   const int bitsperlong = 8 * sizeof(ull);
   const int wordsperlong = bitsperlong / bitsperword;
-  const int bytesperthread = CS / TPB;
+  const int bytesperthread = maxsize / TPB;
   const ull* const in_l = (ull*)in;
   const int csize = insize * sizeof(T);
   assert(bytesperthread % sizeof(ull) == 0);
@@ -140,14 +140,18 @@ static __device__ inline bool d_REencodebyteshort(const T* const in, const int i
     if (tid * bytesperthread - (csize - bytesperthread) > 0) {
       bmp &= ~(-1 << ((csize % bytesperthread + sizeof(type) - 1) / sizeof(type)));
     }
-    if constexpr (sizeof(type) == 1) {
-      bmout[tid * 4] = bmp;
-      bmout[tid * 4 + 1] = bmp >> 8;
-      bmout[tid * 4 + 2] = bmp >> 16;
-      bmout[tid * 4 + 3] = bmp >> 24;
-    }
-    if constexpr (sizeof(type) == 2) bmout[tid] = bmp;
-    if constexpr (sizeof(type) == 4) ((byte*)bmout)[tid] = bmp;
+    // Write bmp as a *tightly packed* bitmap (no per-thread padding): the
+    // consumer (recursive d_REencode/d_REdecode calls, or the caller's own
+    // bitmap recursion) expects ceil(insize/8) contiguous bytes, one bit per
+    // input word. Each thread contributes exactly
+    // bytesperthread/(8*sizeof(type)) meaningful bytes (>= 1 whenever this
+    // function is actually selected — see the dispatch guard in d_REencode);
+    // the old code hardcoded a 4-byte (or sizeof(type)-byte) stride that only
+    // happened to match this value for the original CS=16384/TPB=512 config.
+    byte* const bmout_b = (byte*)bmout;
+    const int bitmap_bytes_per_thread = bytesperthread / (8 * (int)sizeof(type));
+    for (int k = 0; k < bitmap_bytes_per_thread; k++)
+      bmout_b[tid * bitmap_bytes_per_thread + k] = (byte)(bmp >> (8 * k));
     cnt = __popc(bmp);
   }
 
@@ -457,9 +461,13 @@ static __device__ inline bool d_REencode(const T* const in, const int insize, T*
   assert(maxsize % sizeof(T) == 0);
   assert((maxsize / sizeof(T) % TPB == 0) || (maxsize / sizeof(T) < TPB));
   const int wordsperthread = maxsize / sizeof(T) / TPB;
-  if constexpr ((sizeof(T) <= 2) && (maxsize > 2048)) {
+  // The byteshort fast path needs >= 1 full bitmap byte per thread (8 words
+  // worth of bits); below that (wordsperthread < 8) its per-thread write
+  // stride degenerates (see the comment in d_REencodebyteshort), so fall
+  // through to the general path instead, which is correct for any maxsize.
+  if constexpr ((sizeof(T) <= 2) && (maxsize > 2048) && (wordsperthread >= 8)) {
     // special case for byte and short data
-    return d_REencodebyteshort<T, check>(in, insize, dataout, datasize, bmout, temp_w);
+    return d_REencodebyteshort<T, maxsize, check>(in, insize, dataout, datasize, bmout, temp_w);
   } else if constexpr (wordsperthread <= 1) {
     return d_REencode1wordperthread<T, check>(in, insize, dataout, datasize, bmout, temp_w);
   } else if constexpr (wordsperthread == 2) {
@@ -822,7 +830,7 @@ static __device__ inline void d_REdecode(const int decsize, const T* const datai
 // ─────────────────────────────────────────────────────────────────────────
 
 //special case for byte and short data
-template <typename T, bool check = false>
+template <typename T, int maxsize = CS, bool check = false>
 static __device__ inline bool d_ZEencodebyteshort(const T* const in, const int insize, T* const dataout, int& datasize, T* const bmout, int* const temp_w)
 {
   using type = T;
@@ -830,7 +838,7 @@ static __device__ inline bool d_ZEencodebyteshort(const T* const in, const int i
   const int bitsperword = 8 * sizeof(type);
   const int bitsperlong = 8 * sizeof(ull);
   const int wordsperlong = bitsperlong / bitsperword;
-  const int bytesperthread = CS / TPB;
+  const int bytesperthread = maxsize / TPB;
   const ull* const in_l = (ull*)in;
   const int csize = insize * sizeof(T);
   assert(std::is_unsigned<type>::value);
@@ -850,14 +858,12 @@ static __device__ inline bool d_ZEencodebyteshort(const T* const in, const int i
     if (tid * bytesperthread - (csize - bytesperthread) > 0) {
       bmp &= ~(-1 << ((csize % bytesperthread + sizeof(type) - 1) / sizeof(type)));
     }
-    if constexpr (sizeof(type) == 1) {
-      bmout[tid * 4] = bmp;
-      bmout[tid * 4 + 1] = bmp >> 8;
-      bmout[tid * 4 + 2] = bmp >> 16;
-      bmout[tid * 4 + 3] = bmp >> 24;
-    }
-    if constexpr (sizeof(type) == 2) bmout[tid] = bmp;
-    if constexpr (sizeof(type) == 4) ((byte*)bmout)[tid] = bmp;
+    // Tightly packed bitmap write — see the comment in d_REencodebyteshort
+    // (same fix, same rationale).
+    byte* const bmout_b = (byte*)bmout;
+    const int bitmap_bytes_per_thread = bytesperthread / (8 * (int)sizeof(type));
+    for (int k = 0; k < bitmap_bytes_per_thread; k++)
+      bmout_b[tid * bitmap_bytes_per_thread + k] = (byte)(bmp >> (8 * k));
     cnt = __popc(bmp);
   }
 
@@ -1138,8 +1144,9 @@ template <typename T, int maxsize = CS, bool check = false>
 static __device__ inline bool d_ZEencode(const T* const in, const int insize, T* const dataout, int& datasize, T* const bmout, int* const temp_w)
 {
   const int wordsperthread = maxsize / sizeof(T) / TPB;
-  if constexpr ((sizeof(T) <= 2) && (maxsize > 2048)) {
-    return d_ZEencodebyteshort<T, check>(in, insize, dataout, datasize, bmout, temp_w);
+  // See d_REencode for why wordsperthread >= 8 gates the byteshort fast path.
+  if constexpr ((sizeof(T) <= 2) && (maxsize > 2048) && (wordsperthread >= 8)) {
+    return d_ZEencodebyteshort<T, maxsize, check>(in, insize, dataout, datasize, bmout, temp_w);
   } else if constexpr (wordsperthread <= 1) {
     return d_ZEencode1wordperthread<T, check>(in, insize, dataout, datasize, bmout, temp_w);
   } else if constexpr (wordsperthread == 2) {
@@ -1466,21 +1473,29 @@ static __device__ inline void d_ZEdecode(const int decsize, const T* const datai
 // ─────────────────────────────────────────────────────────────────────────
 // d_RRE.h — single-chunk Repetition-Reduction Encode / Decode.
 // ─────────────────────────────────────────────────────────────────────────
-template <typename T>
-static __device__ inline bool d_RRE(int& csize, byte in [CS], byte out [CS], byte temp [CS])
+template <typename T, int ChunkBytes = CS>
+static __device__ inline bool d_RRE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
 {
+  // The bitmap recursion below is a fixed 4-level hierarchy (L1/L2/L3/L4 =
+  // ChunkBytes/8/64/512/4096 bytes); ChunkBytes >= 4096 keeps L4 >= 1 byte.
+  static_assert((ChunkBytes & (ChunkBytes - 1)) == 0 && ChunkBytes >= 4096,
+                "ChunkBytes must be a power of two >= 4096");
+  constexpr int L1 = ChunkBytes / 8;
+  constexpr int L2 = ChunkBytes / 64;
+  constexpr int L3 = ChunkBytes / 512;
+  constexpr int L4 = ChunkBytes / 4096;
+
   const int tid = threadIdx.x;
   const int size = csize / sizeof(T);  // words in chunk (rounded down)
   const int extra = csize % sizeof(T);
-  const int avail = CS - 2 - extra;
+  const int avail = ChunkBytes - 2 - extra;
   const int bits = 8 * sizeof(T);
-  assert(CS == 16384);
 
   // zero out end of bitmap
   int* const temp_w = (int*)temp;
   byte* const bitmap = (byte*)&temp_w[WS + 1];
-  if (csize < CS) {
-    for (int i = csize / bits + tid; i < CS / bits; i += TPB) {
+  if (csize < ChunkBytes) {
+    for (int i = csize / bits + tid; i < ChunkBytes / bits; i += TPB) {
       bitmap[i] = 0;
     }
     __syncthreads();
@@ -1488,7 +1503,7 @@ static __device__ inline bool d_RRE(int& csize, byte in [CS], byte out [CS], byt
 
   // copy non-repeating values and generate bitmap
   int wpos = 0;
-  if (size > 0) d_REencode((T*)in, size, (T*)out, wpos, (T*)bitmap, temp_w);
+  if (size > 0) d_REencode<T, ChunkBytes>((T*)in, size, (T*)out, wpos, (T*)bitmap, temp_w);
   wpos *= sizeof(T);
   if (wpos >= avail) return false;
   __syncthreads();
@@ -1496,34 +1511,34 @@ static __device__ inline bool d_RRE(int& csize, byte in [CS], byte out [CS], byt
   // check if not all zeros
   if (wpos != 0) {
     // iteratively compress bitmaps
-    int base = 0 / sizeof(T);
-    int range = 2048 / sizeof(T);
+    int base = 0;
+    int range = L1 / sizeof(T);
     int cnt = avail - wpos;
-    if (!d_REencode<byte, 2048 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
+    if (!d_REencode<byte, L1 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
     wpos += cnt;
     __syncthreads();
 
-    base = 2048 / sizeof(T);
-    range = 256 / sizeof(T);
+    base = L1 / sizeof(T);
+    range = L2 / sizeof(T);
     cnt = avail - wpos;
-    if (!d_REencode<byte, 256 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
+    if (!d_REencode<byte, L2 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
     wpos += cnt;
     __syncthreads();
 
-    base = (2048 + 256) / sizeof(T);
-    range = 32 / sizeof(T);
+    base = (L1 + L2) / sizeof(T);
+    range = L3 / sizeof(T);
     if constexpr (sizeof(T) < 8) {
       cnt = avail - wpos;
-      if (!d_REencode<byte, 32 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
+      if (!d_REencode<byte, L3 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
       wpos += cnt;
 
-      base = (2048 + 256 + 32) / sizeof(T);
-      range = 4 / sizeof(T);
+      base = (L1 + L2 + L3) / sizeof(T);
+      range = L4 / sizeof(T);
     }
 
     // output last level of bitmap
     if (wpos >= avail - range) return false;
-    if (tid < range) {  // 4 / sizeof(T)
+    if (tid < range) {  // L4 / sizeof(T)
       out[wpos + tid] = bitmap[base + tid];
     }
     wpos += range;
@@ -1545,15 +1560,21 @@ static __device__ inline bool d_RRE(int& csize, byte in [CS], byte out [CS], byt
 }
 
 
-template <typename T>
-static __device__ inline void d_iRRE(int& csize, byte in [CS], byte out [CS], byte temp [CS])
+template <typename T, int ChunkBytes = CS>
+static __device__ inline void d_iRRE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
 {
+  static_assert((ChunkBytes & (ChunkBytes - 1)) == 0 && ChunkBytes >= 4096,
+                "ChunkBytes must be a power of two >= 4096");
+  constexpr int L1 = ChunkBytes / 8;
+  constexpr int L2 = ChunkBytes / 64;
+  constexpr int L3 = ChunkBytes / 512;
+  constexpr int L4 = ChunkBytes / 4096;
+
   const int tid = threadIdx.x;
   int rpos = csize;
   csize = (int)in[--rpos] << 8;  // second byte
   csize |= in[--rpos];  // bottom byte
   const int size = csize / sizeof(T);  // words in chunk (rounded down)
-  assert(CS == 16384);
   assert(TPB >= 256);
 
   // copy leftover byte
@@ -1576,29 +1597,29 @@ static __device__ inline void d_iRRE(int& csize, byte in [CS], byte out [CS], by
     // iteratively decompress bitmaps
     int base, range;
     if constexpr (sizeof(T) == 8) {
-      base = (2048 + 256) / sizeof(T);
-      range = 32 / sizeof(T);
+      base = (L1 + L2) / sizeof(T);
+      range = L3 / sizeof(T);
       // read in last level of bitmap
       rpos -= range;
       if (tid < range) bitmap[base + tid] = in[rpos + tid];
     } else {
-      base = (2048 + 256 + 32) / sizeof(T);
-      range = 4 / sizeof(T);
+      base = (L1 + L2 + L3) / sizeof(T);
+      range = L4 / sizeof(T);
       // read in last level of bitmap
       rpos -= range;
       if (tid < range) bitmap[base + tid] = in[rpos + tid];
 
       rpos -= __syncthreads_count((tid < range * 8) && ((in[rpos + tid / 8] >> (tid % 8)) & 1));
-      base = (2048 + 256) / sizeof(T);
-      range = 32 / sizeof(T);
-      d_REdecode<byte, 32 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+      base = (L1 + L2) / sizeof(T);
+      range = L3 / sizeof(T);
+      d_REdecode<byte, L3 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
     }
     __syncthreads();
 
     rpos -= __syncthreads_count((tid < range * 8) && ((bitmap[base + tid / 8] >> (tid % 8)) & 1));
-    base = 2048 / sizeof(T);
-    range = 256 / sizeof(T);
-    d_REdecode<byte, 256 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    base = L1 / sizeof(T);
+    range = L2 / sizeof(T);
+    d_REdecode<byte, L2 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
     __syncthreads();
 
     if constexpr (sizeof(T) >= 4) {
@@ -1616,13 +1637,13 @@ static __device__ inline void d_iRRE(int& csize, byte in [CS], byte out [CS], by
       }
       rpos -= sum;
     }
-    base = 0 / sizeof(T);
-    range = 2048 / sizeof(T);
-    d_REdecode<byte, 2048 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    base = 0;
+    range = L1 / sizeof(T);
+    d_REdecode<byte, L1 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
     __syncthreads();
 
     // copy non-repeating values based on bitmap
-    if (size > 0) d_REdecode(size, (T*)in, (T*)bitmap, (T*)out, temp_w);
+    if (size > 0) d_REdecode<T, ChunkBytes>(size, (T*)in, (T*)bitmap, (T*)out, temp_w);
   }
 }
 
@@ -1630,53 +1651,59 @@ static __device__ inline void d_iRRE(int& csize, byte in [CS], byte out [CS], by
 // d_RZE.h — single-chunk Zero-Elimination Encode / Decode (ZE at T-byte words
 // + the same recursive bitmap compression as d_RRE).
 // ─────────────────────────────────────────────────────────────────────────
-template <typename T>
-static __device__ inline bool d_RZE(int& csize, byte in [CS], byte out [CS], byte temp [CS])
+template <typename T, int ChunkBytes = CS>
+static __device__ inline bool d_RZE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
 {
+  static_assert((ChunkBytes & (ChunkBytes - 1)) == 0 && ChunkBytes >= 4096,
+                "ChunkBytes must be a power of two >= 4096");
+  constexpr int L1 = ChunkBytes / 8;
+  constexpr int L2 = ChunkBytes / 64;
+  constexpr int L3 = ChunkBytes / 512;
+  constexpr int L4 = ChunkBytes / 4096;
+
   const int tid = threadIdx.x;
   const int size = csize / sizeof(T);
   const int extra = csize % sizeof(T);
-  const int avail = CS - 2 - extra;
+  const int avail = ChunkBytes - 2 - extra;
   const int bits = 8 * sizeof(T);
-  assert(CS == 16384);
 
   int* const temp_w = (int*)temp;
   byte* const bitmap = (byte*)&temp_w[WS + 1];
-  if (csize < CS) {
-    for (int i = csize / bits + tid; i < CS / bits; i += TPB) bitmap[i] = 0;
+  if (csize < ChunkBytes) {
+    for (int i = csize / bits + tid; i < ChunkBytes / bits; i += TPB) bitmap[i] = 0;
     __syncthreads();
   }
 
   int wpos = 0;
-  if (size > 0) d_ZEencode((T*)in, size, (T*)out, wpos, (T*)bitmap, temp_w);
+  if (size > 0) d_ZEencode<T, ChunkBytes>((T*)in, size, (T*)out, wpos, (T*)bitmap, temp_w);
   wpos *= sizeof(T);
   if (wpos >= avail) return false;
   __syncthreads();
 
   if (wpos != 0) {
-    int base = 0 / sizeof(T);
-    int range = 2048 / sizeof(T);
+    int base = 0;
+    int range = L1 / sizeof(T);
     int cnt = avail - wpos;
-    if (!d_REencode<byte, 2048 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
+    if (!d_REencode<byte, L1 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
     wpos += cnt;
     __syncthreads();
 
-    base = 2048 / sizeof(T);
-    range = 256 / sizeof(T);
+    base = L1 / sizeof(T);
+    range = L2 / sizeof(T);
     cnt = avail - wpos;
-    if (!d_REencode<byte, 256 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
+    if (!d_REencode<byte, L2 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
     wpos += cnt;
     __syncthreads();
 
-    base = (2048 + 256) / sizeof(T);
-    range = 32 / sizeof(T);
+    base = (L1 + L2) / sizeof(T);
+    range = L3 / sizeof(T);
     if constexpr (sizeof(T) < 8) {
       cnt = avail - wpos;
-      if (!d_REencode<byte, 32 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
+      if (!d_REencode<byte, L3 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], temp_w)) return false;
       wpos += cnt;
 
-      base = (2048 + 256 + 32) / sizeof(T);
-      range = 4 / sizeof(T);
+      base = (L1 + L2 + L3) / sizeof(T);
+      range = L4 / sizeof(T);
     }
 
     if (wpos >= avail - range) return false;
@@ -1698,15 +1725,21 @@ static __device__ inline bool d_RZE(int& csize, byte in [CS], byte out [CS], byt
 }
 
 
-template <typename T>
-static __device__ inline void d_iRZE(int& csize, byte in [CS], byte out [CS], byte temp [CS])
+template <typename T, int ChunkBytes = CS>
+static __device__ inline void d_iRZE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
 {
+  static_assert((ChunkBytes & (ChunkBytes - 1)) == 0 && ChunkBytes >= 4096,
+                "ChunkBytes must be a power of two >= 4096");
+  constexpr int L1 = ChunkBytes / 8;
+  constexpr int L2 = ChunkBytes / 64;
+  constexpr int L3 = ChunkBytes / 512;
+  constexpr int L4 = ChunkBytes / 4096;
+
   const int tid = threadIdx.x;
   int rpos = csize;
   csize = (int)in[--rpos] << 8;
   csize |= in[--rpos];
   const int size = csize / sizeof(T);
-  assert(CS == 16384);
   assert(TPB >= 256);
 
   if constexpr (sizeof(T) > 1) {
@@ -1724,27 +1757,27 @@ static __device__ inline void d_iRZE(int& csize, byte in [CS], byte out [CS], by
 
     int base, range;
     if constexpr (sizeof(T) == 8) {
-      base = (2048 + 256) / sizeof(T);
-      range = 32 / sizeof(T);
+      base = (L1 + L2) / sizeof(T);
+      range = L3 / sizeof(T);
       rpos -= range;
       if (tid < range) bitmap[base + tid] = in[rpos + tid];
     } else {
-      base = (2048 + 256 + 32) / sizeof(T);
-      range = 4 / sizeof(T);
+      base = (L1 + L2 + L3) / sizeof(T);
+      range = L4 / sizeof(T);
       rpos -= range;
       if (tid < range) bitmap[base + tid] = in[rpos + tid];
 
       rpos -= __syncthreads_count((tid < range * 8) && ((in[rpos + tid / 8] >> (tid % 8)) & 1));
-      base = (2048 + 256) / sizeof(T);
-      range = 32 / sizeof(T);
-      d_REdecode<byte, 32 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+      base = (L1 + L2) / sizeof(T);
+      range = L3 / sizeof(T);
+      d_REdecode<byte, L3 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
     }
     __syncthreads();
 
     rpos -= __syncthreads_count((tid < range * 8) && ((bitmap[base + tid / 8] >> (tid % 8)) & 1));
-    base = 2048 / sizeof(T);
-    range = 256 / sizeof(T);
-    d_REdecode<byte, 256 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    base = L1 / sizeof(T);
+    range = L2 / sizeof(T);
+    d_REdecode<byte, L2 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
     __syncthreads();
 
     if constexpr (sizeof(T) >= 4) {
@@ -1762,13 +1795,13 @@ static __device__ inline void d_iRZE(int& csize, byte in [CS], byte out [CS], by
       }
       rpos -= sum;
     }
-    base = 0 / sizeof(T);
-    range = 2048 / sizeof(T);
-    d_REdecode<byte, 2048 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    base = 0;
+    range = L1 / sizeof(T);
+    d_REdecode<byte, L1 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
     __syncthreads();
 
     // copy non-zero values based on bitmap
-    if (size > 0) d_ZEdecode(size, (T*)in, (T*)bitmap, (T*)out, temp_w);
+    if (size > 0) d_ZEdecode<T, ChunkBytes>(size, (T*)in, (T*)bitmap, (T*)out, temp_w);
   }
 }
 
