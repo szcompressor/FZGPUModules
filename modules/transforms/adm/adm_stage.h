@@ -159,6 +159,7 @@ private:
     uint8_t*  d_bit_signals_    = nullptr;  // num_elements × kMaxSignalBytes (thrust path)
     int*      d_loc_offset_     = nullptr;  // (gsize+1) × sizeof(int)
     int*      d_prefix_state_   = nullptr;  // (gsize+1) × sizeof(int)
+    int*      d_block_resolved_ = nullptr;  // (num_blocks+1) × sizeof(int)
     unsigned int* d_overflow_flag_ = nullptr; // 1 word; checked after kernels in debug builds
 
     // saveState / restoreState snapshots.

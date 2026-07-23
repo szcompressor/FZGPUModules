@@ -4,10 +4,7 @@
 #
 # Build:
 #   cmake --build <builddir> --target fzgmod-profile-cuszp2
-#   cmake --build <builddir> --target fzgmod-profile-speed
-#   cmake --build <builddir> --target fzgmod-profile-pfpl
-#   cmake --build <builddir> --target fzgmod-profile-fzgpu
-#   cmake --build <builddir> --target fzgmod-profile-cuszhi-tp
+#   cmake --build <builddir> --target fzgmod-profile-repeat
 #
 # Run under nsys:
 #   nsys profile --trace=cuda,nvtx --capture-range=cudaProfilerApi \
@@ -19,6 +16,11 @@ if(NOT BUILD_PROFILING)
 endif()
 
 message(STATUS "Profiling mode enabled — NVTX3/nsys instrumentation active")
+
+# Sample dataset shipped in-repo (data/CLDHGH.f32); profiling programs read
+# this instead of a hardcoded absolute path so they work on any checkout.
+target_compile_definitions(fzgmod_compile_settings INTERFACE
+    FZ_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
 
 # Retain frame pointers so nsys CPU-sampling stack walks are complete.
 target_compile_options(fzgmod_compile_settings INTERFACE
@@ -47,7 +49,10 @@ find_path(NVTX3_INCLUDE_DIR
         "/opt/nvidia/nsight-systems/2024.5.1/target-linux-x64/nvtx/include"
         "/opt/nvidia/nsight-systems/2024.4.2/target-linux-x64/nvtx/include"
         # Fallback: CUDA toolkit headers
-        "${CUDAToolkit_ROOT_DIR}/targets/x86_64-linux/include"
+        # Note: CUDAToolkit_ROOT_DIR is an internal FindCUDAToolkit variable
+        # that the module unsets before returning — use the public result
+        # variable CUDAToolkit_INCLUDE_DIRS instead (nvtx3/ ships inside it).
+        ${CUDAToolkit_INCLUDE_DIRS}
     DOC "Path containing nvtx3/nvtx3.hpp"
 )
 
@@ -81,31 +86,19 @@ if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-cuszp2 PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
-# ── Speed preset (Quantizer REL → Bitshuffle → RZE) ──────────────────────────
-# Fewest stages — throughput ceiling / minimum framework overhead baseline.
-# Graph-capturable (REL value_base injected so scan is skipped during capture).
-add_executable(fzgmod-profile-speed speed_profile.cpp)
-target_link_libraries(fzgmod-profile-speed PRIVATE fzgmod)
-set_target_properties(fzgmod-profile-speed PROPERTIES
+# ── cuSZ-Hi throughput-mode nsys / NVTX3 harness ─────────────────────────────
+# Pipeline: GInterp → {Zigzag→Bitshuffle→RRE} / {Merge→Bitshuffle→RRE→RZE}
+# Matches examples/presets/cusz_hi_tp.toml.
+add_executable(fzgmod-profile-cuszhi-tp cuszhi_tp_profile.cpp)
+target_link_libraries(fzgmod-profile-cuszhi-tp PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-cuszhi-tp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
 if(NVTX3_INCLUDE_DIR)
-    target_include_directories(fzgmod-profile-speed PRIVATE ${NVTX3_INCLUDE_DIR})
+    target_include_directories(fzgmod-profile-cuszhi-tp PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
-# ── PFPL (Quantizer NOA → Difference → Bitshuffle → RZE) ─────────────────────
-# SZ-style workhorse. Bitshuffle + RZE lossless back-end bottleneck target.
-# Graph-capturable (NOA value_base injected during Phase B capture).
-add_executable(fzgmod-profile-pfpl pfpl_profile.cpp)
-target_link_libraries(fzgmod-profile-pfpl PRIVATE fzgmod)
-set_target_properties(fzgmod-profile-pfpl PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
-if(NVTX3_INCLUDE_DIR)
-    target_include_directories(fzgmod-profile-pfpl PRIVATE ${NVTX3_INCLUDE_DIR})
-endif()
-
-# ── FZ-GPU (LorenzoQuant NOA → BitplaneRZE) ───────────────────────────────────
-# Fused single-kernel back-end. Expected fastest compress/decompress path.
-# Graph-capturable (NOA value_base injected during Phase B capture).
+# ── FZ-GPU nsys / NVTX3 harness ──────────────────────────────────────────────
+# Pipeline: LorenzoQuant → BitplaneRZE. Matches examples/presets/fzgpu.toml.
 add_executable(fzgmod-profile-fzgpu fzgpu_profile.cpp)
 target_link_libraries(fzgmod-profile-fzgpu PRIVATE fzgmod)
 set_target_properties(fzgmod-profile-fzgpu PROPERTIES
@@ -114,13 +107,22 @@ if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-fzgpu PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
-# ── cuSZ-Hi TP (GInterp multi-branch DAG, MINIMAL) ───────────────────────────
-# Most complex pipeline: two parallel lossless chains post-GInterp.
-# MINIMAL strategy (outlier size is data-dependent); no graph capture.
-add_executable(fzgmod-profile-cuszhi-tp cuszhi_tp_profile.cpp)
-target_link_libraries(fzgmod-profile-cuszhi-tp PRIVATE fzgmod)
-set_target_properties(fzgmod-profile-cuszhi-tp PROPERTIES
+# ── PFPL nsys / NVTX3 harness ────────────────────────────────────────────────
+# Pipeline: Quantizer → Difference → Bitshuffle → RZE. Matches examples/presets/pfpl.toml.
+add_executable(fzgmod-profile-pfpl pfpl_profile.cpp)
+target_link_libraries(fzgmod-profile-pfpl PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-pfpl PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
 if(NVTX3_INCLUDE_DIR)
-    target_include_directories(fzgmod-profile-cuszhi-tp PRIVATE ${NVTX3_INCLUDE_DIR})
+    target_include_directories(fzgmod-profile-pfpl PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
+# ── Speed preset nsys / NVTX3 harness ────────────────────────────────────────
+# Pipeline: Quantizer → Bitshuffle → RZE. Matches examples/presets/speed.toml.
+add_executable(fzgmod-profile-speed speed_profile.cpp)
+target_link_libraries(fzgmod-profile-speed PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-speed PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-speed PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()

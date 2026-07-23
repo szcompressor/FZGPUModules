@@ -239,21 +239,24 @@ __global__ static void adm_map_decoupled_u16(
     const uint16_t* data, uint8_t* code, uint8_t* bit_signal,
     uint16_t* centers, int* signal_length, uint32_t* block_flags,
     volatile int* __restrict__ locOffset, volatile int* __restrict__ cmpOffset,
-    volatile int* __restrict__ prefix_state,
+    volatile int* __restrict__ prefix_state, volatile int* __restrict__ blockResolved,
     int data_size, int shift, unsigned int* d_overflow_flag)
 {
     (void)block_flags;
-    __shared__ unsigned int excl_sum;
-    // warp=0 blocks never enter the lookback path, so initialize excl_sum=0
-    // (correct exclusive prefix sum for the first warp block).
-    if (!threadIdx.x) excl_sum = 0u;
-    __syncthreads();
+    // Two-level scan: each warp's total goes in s_warp_totals, the block leader
+    // (warp_in_block==0, lane 0) does one decoupled look-back per BLOCK (not per
+    // warp) into s_block_excl, then every warp adds its own intra-block exclusive
+    // offset. See kWarpsPerBlock in adm_kernels.h for why.
+    __shared__ int s_warp_totals[kWarpsPerBlock];
+    __shared__ int s_warp_excl[kWarpsPerBlock];
+    __shared__ int s_block_excl;
 
     const int tid  = threadIdx.x;
     const int bid  = blockIdx.x;
     const int idx  = bid * blockDim.x + tid;
     const int lane = idx & 0x1f;
-    const int warp = idx >> 5;
+    const int warp = idx >> 5;             // global warp index -- still used for data slicing
+    const int warp_in_block = tid >> 5;
     const int block_num = kChunk >> 4;  // kChunk / k = 16 / 4 = 1
 
     int base_block = warp * kChunk * kBlockThreads;
@@ -336,42 +339,65 @@ __global__ static void adm_map_decoupled_u16(
         local_bits[cur_byte] = (bit_offset % 8 == 0) ? 0xFF
                                                       : (local_bits[cur_byte] | mask);
 
-    // Decoupled look-back prefix sum (writes signals directly to their final position).
+    // signal_length/centers are read back per-warp on the host (and signal_length
+    // is part of the archive's byte-accounting), so they stay warp-indexed even
+    // though bid no longer equals warp.
     if (lane == 31) {
-        signal_length[bid] = max_bits;
-        centers[bid]       = static_cast<uint16_t>(center);
-        locOffset[warp + 1] = max_bits;
-        __threadfence();
-        if (warp == 0) { prefix_state[0] = 2; __threadfence(); prefix_state[1] = 1; __threadfence(); }
-        else           { prefix_state[warp + 1] = 1; __threadfence(); }
+        signal_length[warp] = max_bits;
+        centers[warp]       = static_cast<uint16_t>(center);
+        s_warp_totals[warp_in_block] = static_cast<int>(max_bits);
     }
     __syncthreads();
 
-    if (warp > 0) {
-        if (!lane) {
-            int lookback = warp, loc_excl = 0;
+    if (warp_in_block == 0 && lane == 0) {
+        int running = 0;
+        #pragma unroll
+        for (int w = 0; w < kWarpsPerBlock; w++) {
+            s_warp_excl[w] = running;
+            running += s_warp_totals[w];
+        }
+        int block_total = running;
+
+        if (bid == 0) {
+            locOffset[1] = block_total;
+            __threadfence();
+            prefix_state[0] = 2;
+            __threadfence();
+            prefix_state[1] = 1;
+            __threadfence();
+            s_block_excl = 0;
+        } else {
+            locOffset[bid + 1] = block_total;
+            __threadfence();
+            prefix_state[bid + 1] = 1;
+            __threadfence();
+
+            int lookback = bid, loc_excl = 0;
             while (lookback > 0) {
                 int status;
-                do { status = prefix_state[lookback]; __threadfence(); } while (status == 0);
-                if (status == 2) { loc_excl += cmpOffset[lookback]; __threadfence(); break; }
+                do { status = prefix_state[lookback]; } while (status == 0);
+                __threadfence();
+                if (status == 2) { loc_excl += blockResolved[lookback]; __threadfence(); break; }
                 if (status == 1)   loc_excl += locOffset[lookback];
                 lookback--;
                 __threadfence();
             }
-            excl_sum = static_cast<unsigned int>(loc_excl);
-        }
-        __syncthreads();
-    }
+            s_block_excl = loc_excl;
 
-    if (warp > 0) {
-        if (!lane) cmpOffset[warp] = static_cast<int>(excl_sum);
-        __threadfence();
-        if (!lane) prefix_state[warp] = 2;
-        __threadfence();
+            blockResolved[bid] = s_block_excl;
+            __threadfence();
+            prefix_state[bid] = 2;
+            __threadfence();
+        }
     }
     __syncthreads();
 
-    int write_pos = static_cast<int>(excl_sum) * kBlockThreads + lane * max_bits;
+    // cmpOffset (= d_output_lengths, part of the serialized archive) still needs
+    // one entry per warp -- every warp writes its own global exclusive offset.
+    int warp_excl_global = s_block_excl + s_warp_excl[warp_in_block];
+    if (!lane) cmpOffset[warp] = warp_excl_global;
+
+    int write_pos = warp_excl_global * kBlockThreads + lane * max_bits;
     #pragma unroll
     for (int i = 0; i < max_bits; i++)
         bit_signal[write_pos + i] = local_bits[i];
@@ -415,18 +441,22 @@ void compress_u16(
         static_cast<size_t>(num_elements) * kMaxSignalBytesU16, stream));
 
     if (use_dec) {
+        const int num_blocks = static_cast<int>(adm_num_blocks(static_cast<size_t>(gsize)));
+
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_loc_offset,   0,
             static_cast<size_t>(gsize + 1) * sizeof(int), stream));
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_prefix_state, 0,
             static_cast<size_t>(gsize + 1) * sizeof(int), stream));
+        FZ_CUDA_CHECK(cudaMemsetAsync(s.d_block_resolved, 0,
+            static_cast<size_t>(num_blocks + 1) * sizeof(int), stream));
 #ifndef NDEBUG
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_overflow_flag, 0, sizeof(unsigned int), stream));
 #endif
-        adm_map_decoupled_u16<<<gsize, bsize, sizeof(unsigned int) * 2, stream>>>(
+        adm_map_decoupled_u16<<<num_blocks, kWarpsPerBlock * bsize, sizeof(unsigned int) * 2, stream>>>(
             d_input, s.d_codes, s.d_concat_signals,
             static_cast<uint16_t*>(s.d_centers),
             s.d_signal_length, s.d_block_flags,
-            s.d_loc_offset, s.d_output_lengths, s.d_prefix_state,
+            s.d_loc_offset, s.d_output_lengths, s.d_prefix_state, s.d_block_resolved,
             static_cast<int>(num_elements), kShift, s.d_overflow_flag);
         FZ_CUDA_CHECK(cudaGetLastError());
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));

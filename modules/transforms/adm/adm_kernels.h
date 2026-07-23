@@ -21,6 +21,22 @@ static constexpr int kBlockElems    = kBlockThreads * kChunk;  // 512
 // Decoupled look-back prefix-sum limit (warps). Above this, Thrust fallback is used.
 static constexpr int kDecoupledMaxGsize = 1024;
 
+// Multi-warp-block redesign: group this many 32-thread "warp blocks" into one
+// CUDA thread block, so the decoupled look-back chain walks blocks (length
+// gsize/kWarpsPerBlock) instead of individual warps (length gsize). Profiling
+// (ncu) showed the decoupled kernel was ~7% achieved occupancy against a 50%
+// theoretical ceiling, with 63% of warp cycles stalled on the look-back's
+// memory-barrier spin — a latency/serialization problem, not a register or
+// local-memory-spill one (only 32 regs/thread, local_code/local_bits are
+// tiny). That profile is why this lever is expected to help here, unlike the
+// register-bound cuSZp3 compress kernels it's adapted from.
+static constexpr int kWarpsPerBlock = 8;
+
+inline size_t adm_num_blocks(size_t gsize) {
+    return (gsize + static_cast<size_t>(kWarpsPerBlock) - 1)
+         / static_cast<size_t>(kWarpsPerBlock);
+}
+
 // Center-relative shift (1 = code 1 means "equal to center").
 static constexpr int kShift = 1;
 
@@ -56,6 +72,9 @@ struct AdmScratch {
     uint8_t*  d_bit_signals;      // num_elements × kMaxSignalBytes (thrust path)
     int*      d_loc_offset;       // (gsize+1) × sizeof(int)  (decoupled path)
     int*      d_prefix_state;     // (gsize+1) × sizeof(int)  (decoupled path)
+    int*      d_block_resolved;   // (num_blocks+1) × sizeof(int) (decoupled path,
+                                   //  block-level look-back "resolved" value —
+                                   //  see kWarpsPerBlock)
     unsigned int* d_overflow_flag; // 1 word; written by kernels only in debug builds
 };
 

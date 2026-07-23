@@ -48,7 +48,7 @@ using namespace fz;
 using Clock = std::chrono::high_resolution_clock;
 
 // ── Dataset ────────────────────────────────────────────────────────────────────
-static const char*      DATA_PATH = "/home/skyler/data/SDRB/CESM_ATM_1800x3600/CLDHGH.f32";
+static const char*      DATA_PATH = FZ_DATA_DIR "/CLDHGH.f32";
 static constexpr size_t DIM_X     = 3600;
 static constexpr size_t DIM_Y     = 1800;
 static constexpr size_t N_ELEMS   = DIM_X * DIM_Y;

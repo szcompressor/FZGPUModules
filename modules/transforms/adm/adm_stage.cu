@@ -33,15 +33,30 @@ void ADMStage::initScratch(size_t num_elements, MemoryPool* pool)
     const int    sig_bytes   = maxSignalBytes();
     const size_t ctr_bytes   = centerElemBytes();
 
+    // The decoupled-look-back kernel now groups kWarpsPerBlock warps into one
+    // CUDA thread block (see adm_kernels.h). When gsize isn't a multiple of
+    // kWarpsPerBlock, the last CUDA block launches a few "phantom" warps whose
+    // global warp index is >= gsize; their data-dependent loops are already
+    // bounds-checked against data_size and naturally produce max_bits=0, but
+    // they still perform unconditional vectorised writes (signal_length[warp],
+    // centers[warp], cmpOffset[warp], and the int4 store into d_codes_) at
+    // indices up to num_blocks*kWarpsPerBlock-1. gsize_padded rounds every
+    // per-warp buffer up to that bound so those writes land in harmless
+    // padding instead of out-of-bounds memory; host-side readbacks still only
+    // copy the first (real) gsize entries, so this is transparent downstream.
+    const size_t num_blocks    = adm::adm_num_blocks(gsize);
+    const size_t gsize_padded  = num_blocks * static_cast<size_t>(adm::kWarpsPerBlock);
+
     // The ADM map kernels each write a full `kBlockElems` slice per grid
     // block (32 lanes × 16 bytes via vectorised int4 stores into d_codes_;
     // 32 lanes × 16 × sig_bytes via int2 stores into the signal buffers),
     // regardless of how many of those elements actually exist in the input.
     // d_codes_, d_concat_signals_, and d_bit_signals_ therefore need to be
-    // padded up to a full multiple of kBlockElems or the trailing lanes
-    // write past the allocation. Only the first num_elements bytes (resp.
+    // padded up to a full multiple of kBlockElems (now kBlockElems ×
+    // kWarpsPerBlock, per gsize_padded above) or the trailing lanes write
+    // past the allocation. Only the first num_elements bytes (resp.
     // num_elements × sig_bytes) are copied to the user output later.
-    const size_t padded_n = gsize * static_cast<size_t>(adm::kBlockElems);
+    const size_t padded_n = gsize_padded * static_cast<size_t>(adm::kBlockElems);
 
     // Release existing allocations before resizing.
     if (d_signal_length_)  pool->freePersistentDevice(d_signal_length_);
@@ -53,14 +68,15 @@ void ADMStage::initScratch(size_t num_elements, MemoryPool* pool)
     if (d_bit_signals_)    pool->freePersistentDevice(d_bit_signals_);
     if (d_loc_offset_)     pool->freePersistentDevice(d_loc_offset_);
     if (d_prefix_state_)   pool->freePersistentDevice(d_prefix_state_);
+    if (d_block_resolved_) pool->freePersistentDevice(d_block_resolved_);
     if (d_overflow_flag_)  pool->freePersistentDevice(d_overflow_flag_);
 
     d_signal_length_  = static_cast<int*>(pool->allocatePersistentDevice(
-        gsize * sizeof(int), "adm.signal_length"));
+        gsize_padded * sizeof(int), "adm.signal_length"));
     d_output_lengths_ = static_cast<int*>(pool->allocatePersistentDevice(
-        (gsize + 1) * sizeof(int), "adm.output_lengths"));
+        (gsize_padded + 1) * sizeof(int), "adm.output_lengths"));
     d_centers_        = pool->allocatePersistentDevice(
-        gsize * ctr_bytes, "adm.centers");
+        gsize_padded * ctr_bytes, "adm.centers");
     d_block_flags_    = static_cast<uint32_t*>(pool->allocatePersistentDevice(
         flags_words * sizeof(uint32_t), "adm.block_flags"));
     d_codes_          = static_cast<uint8_t*>(pool->allocatePersistentDevice(
@@ -73,6 +89,8 @@ void ADMStage::initScratch(size_t num_elements, MemoryPool* pool)
         (gsize + 1) * sizeof(int), "adm.loc_offset"));
     d_prefix_state_   = static_cast<int*>(pool->allocatePersistentDevice(
         (gsize + 1) * sizeof(int), "adm.prefix_state"));
+    d_block_resolved_ = static_cast<int*>(pool->allocatePersistentDevice(
+        (num_blocks + 1) * sizeof(int), "adm.block_resolved"));
     d_overflow_flag_  = static_cast<unsigned int*>(pool->allocatePersistentDevice(
         sizeof(unsigned int), "adm.overflow_flag"));
 
@@ -100,16 +118,20 @@ size_t ADMStage::estimateDeviceFootprintBytes(size_t inlen) const
     const size_t flags_w    = adm::adm_flags_words(g);
     const size_t sig_bytes  = static_cast<size_t>(maxSignalBytes());
     const size_t ctr_bytes  = centerElemBytes();
+    const size_t num_blocks   = adm::adm_num_blocks(g);
+    const size_t g_padded     = num_blocks * static_cast<size_t>(adm::kWarpsPerBlock);
+    const size_t padded_n     = g_padded * static_cast<size_t>(adm::kBlockElems);
 
-    return g * sizeof(int)               // d_signal_length_
-         + (g + 1) * sizeof(int)         // d_output_lengths_
-         + g * ctr_bytes                 // d_centers_
+    return g_padded * sizeof(int)        // d_signal_length_
+         + (g_padded + 1) * sizeof(int)  // d_output_lengths_
+         + g_padded * ctr_bytes          // d_centers_
          + flags_w * sizeof(uint32_t)    // d_block_flags_
-         + n                             // d_codes_
-         + n * sig_bytes                 // d_concat_signals_
-         + n * sig_bytes                 // d_bit_signals_
+         + padded_n                      // d_codes_
+         + padded_n * sig_bytes          // d_concat_signals_
+         + padded_n * sig_bytes          // d_bit_signals_
          + (g + 1) * sizeof(int)         // d_loc_offset_
          + (g + 1) * sizeof(int)         // d_prefix_state_
+         + (num_blocks + 1) * sizeof(int) // d_block_resolved_
          + sizeof(unsigned int);         // d_overflow_flag_
 }
 
@@ -181,6 +203,7 @@ void ADMStage::execute(
         s.d_bit_signals    = d_bit_signals_;
         s.d_loc_offset     = d_loc_offset_;
         s.d_prefix_state   = d_prefix_state_;
+        s.d_block_resolved = d_block_resolved_;
         s.d_overflow_flag  = d_overflow_flag_;
 
         size_t out_size = 0;
@@ -216,6 +239,7 @@ void ADMStage::execute(
         s.d_bit_signals    = d_bit_signals_;
         s.d_loc_offset     = d_loc_offset_;
         s.d_prefix_state   = d_prefix_state_;
+        s.d_block_resolved = d_block_resolved_;
         s.d_overflow_flag  = d_overflow_flag_;
 
         if (dtype_ == ADMDtype::U16) {
