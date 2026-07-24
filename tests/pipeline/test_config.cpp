@@ -22,10 +22,15 @@
  *   CL12  ConfigLoad/QuantizerLorenzoRoundTrip — Quantizer→Lorenzo pipeline via TOML config
  */
 
-#include <gtest/gtest.h>
-#include "helpers/fz_test_utils.h"
-#include "fzgpumodules.h"
-
+// toml.hpp must be included before fzgpumodules.h/any HIP-pulling header in
+// this translation unit: HIP's host_defines.h #defines __noinline__ to
+// __attribute__((noinline)) (it's a legitimate CUDA/HIP function qualifier,
+// mirrored from CUDA), which collides with toml++'s own use of __noinline__
+// as a plain identifier argument to __has_attribute(__noinline__) --
+// "macro '__has_attribute' requires an identifier" once that argument is
+// itself macro-expanded first. config.cpp (which includes both) avoids this
+// by the same ordering; matched here.
+//
 // nvc++ attribute misoptimization — see config.cpp for full explanation.
 #if defined(__NVCOMPILER)
 #  define TOML_ASSUME(expr)   static_cast<void>(0)
@@ -35,6 +40,10 @@
 #endif
 #define TOML_HEADER_ONLY 1
 #include <toml++/toml.hpp>
+
+#include <gtest/gtest.h>
+#include "helpers/fz_test_utils.h"
+#include "fzgpumodules.h"
 
 #include <cmath>
 #include <cstdio>

@@ -32,6 +32,25 @@ public:
     virtual ~Stage() = default;
 
     /**
+     * Whether this stage type is supported on the backend the library was
+     * built for. Default true (every stage supports every backend) — a
+     * stage that doesn't (e.g. ANSStage on HIP/SYCL, whose vendored PTX
+     * lanemask assembly has no translation) hides this with its own
+     * `static constexpr bool isSupportedOnBackend()`.
+     *
+     * Deliberately `static constexpr`, not `virtual`: `Pipeline::addStage<T>()`
+     * must be able to check this *before* `T` is ever constructed, via
+     * `if constexpr`, so that on an unsupported backend the `new T()` branch
+     * is never instantiated at all — not merely never executed. That matters
+     * because an unsupported stage's own translation unit may be excluded
+     * from the build entirely (see CMakeLists.txt's `HEADER_FILE_ONLY`
+     * handling for ans_stage.cu on HIP); a virtual/instance method can't be
+     * called without an object to call it on, which would require the very
+     * constructor this mechanism exists to avoid referencing.
+     */
+    static constexpr bool isSupportedOnBackend() { return true; }
+
+    /**
      * Execute the stage. Inputs, outputs, and sizes are device pointers/bytes.
      *
      * Stages may call cudaStreamSynchronize(stream) or issue blocking D2H copies

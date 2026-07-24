@@ -36,6 +36,21 @@ namespace fz {
 
 class ANSStage : public Stage {
 public:
+    // Vendored dietgpu tree (modules/coders/ans/dietgpu/) uses inline NVPTX
+    // lanemask assembly (%laneid, %lanemask_lt/le/gt/ge) and a hardcoded
+    // 32-lane warp model with no HIP/SYCL translation — excluded rather than
+    // ported (see memory/hip_sycl_backend_plan.md, Phase 1.4). Its .cu
+    // sources aren't compiled on HIP (CMakeLists.txt), so this must hide
+    // Stage::isSupportedOnBackend() rather than override it — see that
+    // method's doc comment for why it's static, not virtual.
+    static constexpr bool isSupportedOnBackend() {
+#if defined(FZGMOD_BACKEND_HIP) || defined(FZGMOD_BACKEND_SYCL)
+        return false;
+#else
+        return true;
+#endif
+    }
+
     ANSStage()  = default;
     ~ANSStage() override = default;
 

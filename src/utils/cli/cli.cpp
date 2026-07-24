@@ -536,14 +536,11 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             huf->setBklen(bklen);
             connect_next(huf);
         } else if (name == "ans") {
-#if !defined(FZGMOD_BACKEND_HIP)
+            // addStage<ANSStage>() itself throws a clear runtime_error on a
+            // backend that doesn't support it (see
+            // Stage::isSupportedOnBackend()'s doc comment) -- no guard needed.
             auto* ans = pipeline->addStage<ANSStage>();
             connect_next(ans);
-#else
-            // ANSStage (vendored dietgpu) is excluded on HIP -- see the
-            // matching guard in src/pipeline/config.cpp.
-            throw std::runtime_error("'ans' stage is not available on the HIP backend");
-#endif
         } else if (name == "adm") {
             auto* adm = pipeline->addStage<ADMStage>();
             // If upstream emits uint16_t codes (predictor), use U16; otherwise U16 is the default.

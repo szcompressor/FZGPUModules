@@ -923,25 +923,38 @@ StageT* Pipeline::addStage(Args&&... args) {
         throw std::runtime_error("Cannot add stages after finalization");
     }
 
-    auto stage_ptr = std::make_unique<StageT>(std::forward<Args>(args)...);
-    StageT* stage  = stage_ptr.get();
+    // if constexpr, not a runtime check: on an unsupported backend, StageT's
+    // constructor may not exist in the build at all (its .cu translation
+    // unit excluded — see Stage::isSupportedOnBackend()'s doc comment), so
+    // every line below that references `new StageT()` must never be
+    // instantiated at all, not merely never executed — hence the whole rest
+    // of the function lives in the `if constexpr` branch rather than after
+    // a standalone early-throw.
+    if constexpr (!StageT::isSupportedOnBackend()) {
+        throw std::runtime_error(
+            "addStage(): this stage type is not supported on the current "
+            "GPU backend (FZGMOD_BACKEND) this library was built for");
+    } else {
+        auto stage_ptr = std::make_unique<StageT>(std::forward<Args>(args)...);
+        StageT* stage  = stage_ptr.get();
 
-    stage->setDims(dims_);
+        stage->setDims(dims_);
 
-    DAGNode* node        = dag_->addStage(stage, stage->getName());
-    size_t   num_outputs = stage->getNumOutputs();
-    auto     output_names = stage->getOutputNames();
+        DAGNode* node        = dag_->addStage(stage, stage->getName());
+        size_t   num_outputs = stage->getNumOutputs();
+        auto     output_names = stage->getOutputNames();
 
-    // Pre-allocate all output slots as unconnected (size=1 placeholder).
-    // connect() will promote any that get wired to downstream stages.
-    for (size_t i = 0; i < num_outputs; i++) {
-        std::string out_name = i < output_names.size() ? output_names[i] : std::to_string(i);
-        dag_->addUnconnectedOutput(node, 1, i, stage->getName() + "." + out_name + "_unconnected");
+        // Pre-allocate all output slots as unconnected (size=1 placeholder).
+        // connect() will promote any that get wired to downstream stages.
+        for (size_t i = 0; i < num_outputs; i++) {
+            std::string out_name = i < output_names.size() ? output_names[i] : std::to_string(i);
+            dag_->addUnconnectedOutput(node, 1, i, stage->getName() + "." + out_name + "_unconnected");
+        }
+
+        stage_to_node_[stage] = node;
+        stages_.push_back(std::move(stage_ptr));
+        return stage;
     }
-
-    stage_to_node_[stage] = node;
-    stages_.push_back(std::move(stage_ptr));
-    return stage;
 }
 
 } // namespace fz

@@ -311,14 +311,19 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
         }
 
         case StageType::ANS: {
-#if !defined(FZGMOD_BACKEND_HIP)
+#if !defined(FZGMOD_BACKEND_HIP) && !defined(FZGMOD_BACKEND_SYCL)
             auto* s = new ANSStage();
             s->deserializeHeader(config, config_size);
             stage = s;
 #else
-            // ANSStage (vendored dietgpu) is excluded on HIP -- see the
-            // matching guard in src/pipeline/config.cpp.
-            throw std::runtime_error("'ANS' stage is not available on the HIP backend");
+            // Unlike Pipeline::addStage<T>() (see Stage::isSupportedOnBackend()'s
+            // doc comment), this switch is not a template, so `if constexpr`
+            // can't gate the `new ANSStage()` above -- needs its own #if to
+            // avoid referencing ANSStage's constructor, whose .cu translation
+            // unit isn't compiled on this backend.
+            throw std::runtime_error(
+                "deserializeStage(): 'ANS' stage is not supported on the "
+                "current GPU backend");
 #endif
             break;
         }

@@ -380,6 +380,11 @@ TEST(ADMStage, FileRoundTrip) {
 // within the Lorenzo error bound.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(ADMStage, LorenzoQuantADMANS) {
+#if defined(FZGMOD_BACKEND_HIP) || defined(FZGMOD_BACKEND_SYCL)
+    GTEST_SKIP() << "ANSStage is not supported on the current GPU backend "
+                    "(vendored dietgpu PTX lanemask assembly, no HIP/SYCL "
+                    "translation)";
+#endif
     constexpr size_t N  = 1 << 14;  // 16 K floats
     constexpr float  EB = 1e-2f;
     const size_t in_bytes = N * sizeof(float);

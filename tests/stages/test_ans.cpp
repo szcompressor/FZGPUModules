@@ -35,6 +35,25 @@
 using namespace fz;
 using namespace fz_test;
 
+// ANSStage (vendored dietgpu) is excluded on HIP/SYCL — its inline NVPTX
+// lanemask assembly has no translation, and its .cu translation unit isn't
+// compiled at all on those backends (see Stage::isSupportedOnBackend()'s
+// doc comment). Every test below constructs a real `ANSStage` directly
+// (stack-allocated, not via Pipeline::addStage<T>()), so none of them can
+// compile on an unsupported backend regardless of the isSupportedOnBackend
+// mechanism — that mechanism only protects Pipeline::addStage<T>()'s own
+// `new T()`, not arbitrary direct construction elsewhere. Report one
+// skipped test instead of a link failure.
+#if defined(FZGMOD_BACKEND_HIP) || defined(FZGMOD_BACKEND_SYCL)
+
+TEST(ANSStage, NotSupportedOnThisBackend) {
+    GTEST_SKIP() << "ANSStage is not supported on the current GPU backend "
+                    "(vendored dietgpu PTX lanemask assembly, no HIP/SYCL "
+                    "translation)";
+}
+
+#else
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers: single-pass encode / decode via stage API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -384,3 +403,5 @@ TEST(ANSStage, UnsupportedProbBitsThrows) {
     EXPECT_THROW(stage.execute(cs.stream, pool.get(), inputs, outputs, sizes),
                  std::runtime_error);
 }
+
+#endif // FZGMOD_BACKEND_HIP || FZGMOD_BACKEND_SYCL
