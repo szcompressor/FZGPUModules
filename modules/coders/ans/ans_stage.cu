@@ -16,7 +16,7 @@
 #include "mem/mempool.h"
 #include "cuda_check.h"
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <sched.h>
 #include <algorithm>
 #include <cstring>

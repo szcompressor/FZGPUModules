@@ -17,26 +17,28 @@
  * `thrust::exclusive_scan` directly (no scratch-buffer dance — thrust manages
  * its own temporary storage internally).
  *
- * Only the CUDA backend is implemented; HIP/SYCL branches are added when
- * those backends land (hipMalloc + hipCUB/rocThrust under HIP; oneDPL under
- * SYCL for exclusiveScan(), since oneDPL has no direct cub::Device* analogue).
+ * CUDA and HIP are implemented. The two share one implementation: the
+ * allocation calls below are spelled with their CUDA names and re-pointed at
+ * HIP by backend/api.h, and hipCUB mirrors cub's API closely enough that the
+ * `cub::Device*` calls left at the call sites are a namespace swap. The only
+ * genuine divergence is thrust's execution policy (`thrust::cuda::par` vs
+ * rocThrust's `thrust::hip::par`), isolated in `detail::parOn()` below.
+ *
+ * SYCL is added when that backend lands (oneDPL for exclusiveScan(), since
+ * oneDPL has no direct cub::Device* analogue).
  */
 
+#include "backend/api.h"
 #include "backend/types.h"
 #include "cuda_check.h"
 #include "mem/mempool.h"
 
-#if defined(FZGMOD_BACKEND_HIP)
-
-#error "FZGMOD_BACKEND=HIP is not implemented yet"
-
-#elif defined(FZGMOD_BACKEND_SYCL)
+#if defined(FZGMOD_BACKEND_SYCL)
 
 #error "FZGMOD_BACKEND=SYCL is not implemented yet"
 
-#else // FZGMOD_BACKEND_CUDA (default)
+#endif
 
-#include <cuda_runtime.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
@@ -45,6 +47,19 @@
 
 namespace fz {
 namespace backend {
+
+namespace detail {
+
+/** The active backend's stream-bound thrust execution policy. */
+inline auto parOn(fz::stream_t stream) {
+#if defined(FZGMOD_BACKEND_HIP)
+    return thrust::hip::par.on(stream);
+#else
+    return thrust::cuda::par.on(stream);
+#endif
+}
+
+} // namespace detail
 
 /**
  * Scratch pointer returned by withTempStorage(), tagged with where it came
@@ -101,10 +116,8 @@ template<typename T>
 void exclusiveScan(fz::stream_t stream, T* d_in, T* d_out, size_t n) {
     thrust::device_ptr<T> in_ptr(d_in);
     thrust::device_ptr<T> out_ptr(d_out);
-    thrust::exclusive_scan(thrust::cuda::par.on(stream), in_ptr, in_ptr + n, out_ptr);
+    thrust::exclusive_scan(detail::parOn(stream), in_ptr, in_ptr + n, out_ptr);
 }
 
 } // namespace backend
 } // namespace fz
-
-#endif

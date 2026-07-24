@@ -25,7 +25,7 @@
  * re-checking the word-layout assertions inside d_REencode.
  */
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <cstdint>
 #include <cassert>
 #include <type_traits>

@@ -4,7 +4,7 @@
 #include "quantizers/dither.cuh"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <cstdint>
 #include <limits>
 #include <stdexcept>

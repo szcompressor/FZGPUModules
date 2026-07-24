@@ -20,7 +20,7 @@
 // one graph with a fixed, O(1) update pattern.
 
 #include "pipeline/concat_kernel.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 
 namespace fz {
 

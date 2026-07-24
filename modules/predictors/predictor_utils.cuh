@@ -13,7 +13,7 @@
  *  - scatter_assign_kernel   : scatter (outlier_value = original) for Quantizer
  */
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <vector>
 #include <algorithm>
 #include "fused/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode

@@ -8,7 +8,7 @@
  * Not part of the public API — include only from .cu files in this directory.
  */
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <cstdint>
 
 namespace fz {

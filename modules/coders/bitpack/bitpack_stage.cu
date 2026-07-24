@@ -2,8 +2,8 @@
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
-#include <cub/device/device_reduce.cuh>
-#include <cuda_runtime.h>
+#include "backend/cub.h"
+#include "backend/api.h"
 #include <stdexcept>
 #include <string>
 

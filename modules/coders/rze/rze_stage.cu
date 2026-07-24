@@ -20,8 +20,8 @@
 #include "mem/mempool.h"
 #include "cuda_check.h"
 
-#include <cuda_runtime.h>
-#include <cub/device/device_scan.cuh>
+#include "backend/api.h"
+#include "backend/cub.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>

@@ -44,6 +44,17 @@
     },
 
     {
+      "name": "hip",
+      "inherits": "base",
+      "displayName": "HIP (AMD ROCm)",
+      "description": "Release build against the HIP backend. Defaults to gfx908 (MI100); override with -DCMAKE_HIP_ARCHITECTURES=. Requires the ROCm root on CMAKE_PREFIX_PATH, e.g. export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FZGMOD_BACKEND":   "HIP"
+      }
+    },
+
+    {
       "name": "compute-san",
       "inherits": "base",
       "displayName": "Compute Sanitizer",
@@ -71,6 +82,11 @@
       "name": "asan",
       "configurePreset": "asan",
       "displayName": "Build ASan + UBSan"
+    },
+    {
+      "name": "hip",
+      "configurePreset": "hip",
+      "displayName": "Build HIP (AMD ROCm)"
     },
     {
       "name": "compute-san",
@@ -104,6 +120,14 @@
       "description": "Run only tests labelled 'pipeline'.",
       "output": { "outputOnFailure": true },
       "filter": { "include": { "label": "pipeline" } }
+    },
+
+    {
+      "name": "hip",
+      "configurePreset": "hip",
+      "displayName": "All tests (HIP)",
+      "description": "Run the full test suite against the HIP build. ANSStage is excluded on HIP (see Stage::isSupportedOnBackend).",
+      "output": { "outputOnFailure": true }
     },
 
     {

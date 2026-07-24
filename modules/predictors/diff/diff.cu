@@ -2,9 +2,8 @@
 #include "transforms/negabinary/negabinary.h"
 #include "transforms/zigzag/zigzag.h"
 #include "log.h"
-#include <cuda_runtime.h>
-#include <cub/cub.cuh>
-#include <cub/block/block_scan.cuh>
+#include "backend/api.h"
+#include "backend/cub.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 

@@ -2,7 +2,7 @@
 #include "transforms/negabinary/negabinary.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <stdexcept>
 
 namespace fz {

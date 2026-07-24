@@ -9,7 +9,7 @@
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "fused/lorenzo_quant/lorenzo_quant_kernels.cuh"
 #include "transforms/zigzag/zigzag.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <cstdint>
 #include <cstdio>
 #include <type_traits>

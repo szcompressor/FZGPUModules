@@ -31,7 +31,7 @@
 #include <numeric>
 #include <stdexcept>
 
-#include <cub/cub.cuh>
+#include "backend/cub.h"
 
 #include "cuda_check.h"
 #include "hf_buf.h"

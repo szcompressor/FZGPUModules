@@ -7,6 +7,10 @@
 
 #pragma once
 
+// nvcc declares threadIdx/blockDim/__syncthreads/atomicAdd implicitly; HIP's
+// clang requires the runtime header to be included for them to be visible.
+#include "backend/api.h"
+
 #include <cstddef>
 #include <cstdint>
 

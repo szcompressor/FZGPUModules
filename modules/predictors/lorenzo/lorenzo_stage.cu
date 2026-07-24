@@ -1,7 +1,7 @@
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <stdexcept>
 #include <string>
 

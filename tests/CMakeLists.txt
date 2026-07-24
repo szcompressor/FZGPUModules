@@ -58,7 +58,7 @@ function(fz_add_test)
         PRIVATE
             ${ARG_LIBS}
             GTest::gtest_main
-            CUDA::cudart
+            ${FZGMOD_GPU_RUNTIME}
     )
 
     target_link_libraries(${ARG_NAME} PRIVATE fzgmod_compile_settings)
@@ -75,8 +75,12 @@ function(fz_add_test)
 
     add_test(NAME ${ARG_NAME} COMMAND ${ARG_NAME})
 
-    set(FZ_TEST_ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
-    list(APPEND FZ_TEST_ENVIRONMENT "CUDA_MODULE_LOADING=${FZGMOD_CUDA_MODULE_LOADING_VALUE}")
+    if(FZGMOD_BACKEND STREQUAL "CUDA")
+        set(FZ_TEST_ENVIRONMENT "CUDA_VISIBLE_DEVICES=0")
+        list(APPEND FZ_TEST_ENVIRONMENT "CUDA_MODULE_LOADING=${FZGMOD_CUDA_MODULE_LOADING_VALUE}")
+    else()
+        set(FZ_TEST_ENVIRONMENT "HIP_VISIBLE_DEVICES=0")
+    endif()
 
     set_tests_properties(${ARG_NAME} PROPERTIES
         ENVIRONMENT "${FZ_TEST_ENVIRONMENT}"
@@ -88,8 +92,9 @@ endfunction()
 # Header-only except for ScaleStage, which has a CUDA kernel.
 # Build as a small object library so any test or dev example can link it.
 add_library(fz_test_stages OBJECT helpers/test_stages.cu)
+fzgmod_set_gpu_source_language(fz_test_stages)
 target_include_directories(fz_test_stages PUBLIC ${FZ_TEST_INCLUDE_DIR})
-target_link_libraries(fz_test_stages PUBLIC fzgmod CUDA::cudart)
+target_link_libraries(fz_test_stages PUBLIC fzgmod ${FZGMOD_GPU_RUNTIME})
 target_link_libraries(fz_test_stages PRIVATE fzgmod_compile_settings)
 
 # ─── Stage unit tests ─────────────────────────────────────────────────────────

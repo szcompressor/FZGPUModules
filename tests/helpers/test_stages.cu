@@ -1,5 +1,5 @@
 #include "helpers/test_stages.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 
 namespace fz_test {
 

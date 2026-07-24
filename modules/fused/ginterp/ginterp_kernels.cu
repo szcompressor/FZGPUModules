@@ -23,7 +23,7 @@
 #include "fused/ginterp/ginterp_kernels.h"
 #include "fused/ginterp/ginterp_md.inl"
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <algorithm>
 #include <cstdint>
 

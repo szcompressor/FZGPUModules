@@ -18,7 +18,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <cstdint>
 
 namespace fz_test {

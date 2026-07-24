@@ -11,7 +11,7 @@
 #include "cuda_check.h"
 #include "log.h"
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <stdexcept>
 
 namespace fz {

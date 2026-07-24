@@ -10,8 +10,8 @@
 #include "cuda_check.h"
 #include "log.h"
 
-#include <cuda_runtime.h>
-#include <cub/device/device_radix_sort.cuh>
+#include "backend/api.h"
+#include "backend/cub.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>

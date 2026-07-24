@@ -13,7 +13,7 @@
  *   - gpu_free_bytes       – current GPU free memory (for leak checks)
  */
 
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>

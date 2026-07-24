@@ -30,7 +30,10 @@
 #include <cstdint>
 #include <type_traits>
 
-#ifdef __CUDACC__
+// nvcc defines __CUDACC__; hipcc/amdclang++ defines __HIPCC__ instead. Without
+// the second arm these helpers stay host-only under HIP and every __global__
+// caller fails to resolve them.
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #  define FZ_HOST_DEVICE __host__ __device__
 #else
 #  define FZ_HOST_DEVICE

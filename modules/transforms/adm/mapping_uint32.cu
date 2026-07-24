@@ -8,7 +8,7 @@
 #include "transforms/adm/adm_kernels.h"
 #include "backend/algorithms.h"
 #include "cuda_check.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"
 #include <cstdint>
 #include <stdexcept>
 #include <vector>

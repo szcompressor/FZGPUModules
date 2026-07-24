@@ -1,7 +1,7 @@
 #include "coders/rle/rle.h"
 #include "log.h"
-#include <cuda_runtime.h>
-#include <cub/cub.cuh>
+#include "backend/api.h"
+#include "backend/cub.h"
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"

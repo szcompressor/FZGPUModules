@@ -2,20 +2,27 @@ cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
 # GPU backend selection. Exactly one backend is compiled into any given build
 # (a compile-time choice, not a runtime switch) — see include/backend/types.h
-# for the corresponding C++-side type aliases. Only CUDA is implemented today;
-# HIP and SYCL are planned (see memory/hip_sycl_backend_plan.md).
+# for the corresponding C++-side type aliases. CUDA and HIP are implemented;
+# SYCL is planned (see memory/hip_sycl_backend_plan.md).
 set(FZGMOD_BACKEND "CUDA" CACHE STRING "GPU backend to build against: CUDA, HIP, or SYCL")
 set_property(CACHE FZGMOD_BACKEND PROPERTY STRINGS CUDA HIP SYCL)
 
-if(FZGMOD_BACKEND STREQUAL "HIP")
-  message(FATAL_ERROR "FZGMOD_BACKEND=HIP is not implemented yet.")
+# The GPU language belongs in project()'s language list, so the backend has to be
+# resolved before project() runs. HIP is the exception: its language is enabled
+# after project() instead, because CMAKE_HIP_ARCHITECTURES has to be set first
+# (HIP's compiler probe otherwise tries to autodetect the installed GPU, which
+# fails on a GPU-less login/build node).
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+  set(FZGMOD_PROJECT_LANGUAGES CUDA CXX)
+elseif(FZGMOD_BACKEND STREQUAL "HIP")
+  set(FZGMOD_PROJECT_LANGUAGES CXX)
 elseif(FZGMOD_BACKEND STREQUAL "SYCL")
   message(FATAL_ERROR "FZGMOD_BACKEND=SYCL is not implemented yet.")
-elseif(NOT FZGMOD_BACKEND STREQUAL "CUDA")
+else()
   message(FATAL_ERROR "Unknown FZGMOD_BACKEND '${FZGMOD_BACKEND}' — must be CUDA, HIP, or SYCL.")
 endif()
 
-project(FZGPUModules LANGUAGES CUDA CXX VERSION 2.0.0)
+project(FZGPUModules LANGUAGES ${FZGMOD_PROJECT_LANGUAGES} VERSION 2.0.0)
 
 ########################
 ### GENERAL SETTINGS ###
@@ -48,17 +55,77 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-find_package(CUDAToolkit REQUIRED)
-if(CUDAToolkit_VERSION VERSION_LESS "11.2")
-  message(FATAL_ERROR
-    "FZGPUModules requires CUDA Toolkit 11.2 or newer.\n"
-    "  Reason: stream-ordered allocators (cudaMallocAsync / cudaMemPool_t) require 11.2+.\n"
-    "  Detected: ${CUDAToolkit_VERSION}")
-endif()
+###############################
+### GPU BACKEND TOOLCHAIN   ###
+###############################
+#
+# FZGMOD_GPU_RUNTIME holds the imported target(s) carrying the GPU runtime's
+# headers, defines, and link libraries for the selected backend. Everything
+# downstream links this rather than naming CUDA::cudart directly.
 
-enable_language(CUDA)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+  find_package(CUDAToolkit REQUIRED)
+  if(CUDAToolkit_VERSION VERSION_LESS "11.2")
+    message(FATAL_ERROR
+      "FZGPUModules requires CUDA Toolkit 11.2 or newer.\n"
+      "  Reason: stream-ordered allocators (cudaMallocAsync / cudaMemPool_t) require 11.2+.\n"
+      "  Detected: ${CUDAToolkit_VERSION}")
+  endif()
+
+  enable_language(CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
+  endif()
+
+  set(FZGMOD_GPU_RUNTIME CUDA::cudart)
+
+else() # HIP — SYCL and unknown values already rejected above
+
+  # Must precede enable_language(HIP); see the note by the backend selection.
+  # gfx908 = MI100 (CDNA1). Override for other targets, e.g.
+  #   cmake --preset hip -DCMAKE_HIP_ARCHITECTURES=gfx90a  (MI200 / CDNA2)
+  if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
+    set(CMAKE_HIP_ARCHITECTURES "gfx908" CACHE STRING
+        "AMD GPU architectures to compile for (gfx908=MI100, gfx90a=MI200, gfx942=MI300)")
+  endif()
+
+  enable_language(HIP)
+
+  # Tells hip-config which arch to bake into its own imported targets, and
+  # suppresses its "system GPU detection was unsuccessful" warning — autodetect
+  # (amdgpu-arch) necessarily fails when configuring on a GPU-less build node.
+  set(GPU_TARGETS "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "AMD GPU targets for hip-config" FORCE)
+
+  # These are CONFIG-mode packages living under the ROCm install root, so
+  # CMAKE_PREFIX_PATH (not just PATH) has to include it — e.g.
+  #   export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH
+  find_package(hip       CONFIG REQUIRED)
+  find_package(hipcub    CONFIG REQUIRED)  # cub facade — mirrors cub's API
+  find_package(rocthrust CONFIG REQUIRED)  # thrust facade, used by ADM's mappings
+
+  # hip::host, not hip::device. hip::device exists for the "compile .cpp as HIP
+  # via hipcc" workflow and carries `-x hip` as an INTERFACE compile option,
+  # which CMake would then apply to every plain C++ source in the project
+  # (g++: "language hip not recognized"). We use enable_language(HIP) instead,
+  # so CMake already drives -x hip / --offload-arch for exactly the sources
+  # tagged LANGUAGE HIP; hip::host supplies just the runtime headers,
+  # __HIP_PLATFORM_AMD__, and libamdhip64.
+  set(FZGMOD_GPU_RUNTIME hip::host)
+
+  # hipCUB / rocPRIM / rocThrust are header-only, but their imported targets all
+  # link roc::rocprim_hip → hip::device, so linking them would drag `-x hip` back
+  # in. Take their include paths directly instead.
+  set(FZGMOD_HIP_HEADER_ONLY_INCLUDES "")
+  foreach(_hdr_tgt hip::hipcub roc::rocprim roc::rocthrust)
+    if(TARGET ${_hdr_tgt})
+      get_target_property(_inc ${_hdr_tgt} INTERFACE_INCLUDE_DIRECTORIES)
+      if(_inc)
+        list(APPEND FZGMOD_HIP_HEADER_ONLY_INCLUDES ${_inc})
+      endif()
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES FZGMOD_HIP_HEADER_ONLY_INCLUDES)
+
 endif()
 
 #####################
@@ -165,6 +232,12 @@ elseif (USE_SANITIZER STREQUAL "TSan")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread")
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=thread")
 elseif (USE_SANITIZER STREQUAL "Compute")
+  if(NOT FZGMOD_BACKEND STREQUAL "CUDA")
+    message(FATAL_ERROR
+      "USE_SANITIZER=Compute requires the CUDA backend (compute-sanitizer is an "
+      "NVIDIA tool). Sanitizer parity for HIP is out of scope for now — see "
+      "memory/hip_sycl_backend_plan.md, Phase 1.5.")
+  endif()
   message(STATUS "Configuring for Compute Sanitizer")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo -Xcompiler -rdynamic")
   if(COMPUTE_SANITIZER_DEVICE_DEBUG)
@@ -192,8 +265,28 @@ target_compile_options(
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wno-assume-expression-discarded>
 )
 
-target_compile_features(fzgmod_compile_settings INTERFACE cxx_std_17 cuda_std_17)
-target_link_libraries(fzgmod_compile_settings INTERFACE CUDA::cudart)
+target_compile_features(fzgmod_compile_settings INTERFACE cxx_std_17)
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+  target_compile_features(fzgmod_compile_settings INTERFACE cuda_std_17)
+else()
+  set(CMAKE_HIP_STANDARD 17)
+  set(CMAKE_HIP_STANDARD_REQUIRED True)
+
+  # HIP declares the runtime API [[nodiscard]]; CUDA does not. Call sites that
+  # intentionally drop the status (destructors, teardown paths, and everything
+  # wrapped in FZ_CUDA_CHECK_WARN) would otherwise emit hundreds of warnings
+  # that are a header-convention difference, not a defect in this code.
+  target_compile_options(fzgmod_compile_settings INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX,HIP>:-Wno-unused-result>)
+endif()
+
+target_link_libraries(fzgmod_compile_settings INTERFACE ${FZGMOD_GPU_RUNTIME})
+
+# Selects the backend branch in include/backend/{types,api,algorithms}.h.
+# Those headers fall back to CUDA when nothing is defined, so this is what
+# actually switches the C++ side over to HIP.
+target_compile_definitions(fzgmod_compile_settings INTERFACE
+    FZGMOD_BACKEND_${FZGMOD_BACKEND})
 
 # ── Logging level
 # Controls which FZ_LOG() call sites are compiled into the binary.
@@ -225,6 +318,36 @@ target_include_directories(fzgmod_compile_settings INTERFACE
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzgmod>
 )
 
+# hipCUB / rocPRIM / rocThrust headers (HIP backend only; empty under CUDA).
+# SYSTEM so their warnings don't surface as ours.
+if(FZGMOD_HIP_HEADER_ONLY_INCLUDES)
+  target_include_directories(fzgmod_compile_settings SYSTEM INTERFACE
+    ${FZGMOD_HIP_HEADER_ONLY_INCLUDES})
+endif()
+
+###########################
+### GPU SOURCE LANGUAGE ###
+###########################
+
+# hipcc/amdclang++ compiles the existing .cu sources as-is (verified against
+# ROCm 6.4 on gfx908), so the HIP build keeps the current file names rather than
+# renaming ~38 files to .hip. CMake still maps the .cu extension to the CUDA
+# language by default, though, so each .cu source is retagged LANGUAGE HIP
+# explicitly. No-op under the CUDA backend.
+function(fzgmod_set_gpu_source_language target)
+  if(NOT FZGMOD_BACKEND STREQUAL "HIP")
+    return()
+  endif()
+  get_target_property(_srcs ${target} SOURCES)
+  foreach(_src IN LISTS _srcs)
+    if(_src MATCHES "\\.cu$")
+      set_source_files_properties(${_src}
+        TARGET_DIRECTORY ${target}
+        PROPERTIES LANGUAGE HIP)
+    endif()
+  endforeach()
+endfunction()
+
 #################
 ### LIBRARIES ###
 #################
@@ -247,6 +370,7 @@ target_link_libraries(fzgmod_utils
   PUBLIC
     fzgmod_compile_settings
 )
+fzgmod_set_gpu_source_language(fzgmod_utils)
 add_library(FZGMOD::utils ALIAS fzgmod_utils)
 
 #### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
@@ -292,7 +416,7 @@ add_library(fzgmod_modules
 target_link_libraries(fzgmod_modules
   PUBLIC
     fzgmod_compile_settings
-    CUDA::cudart
+    ${FZGMOD_GPU_RUNTIME}
   PRIVATE
     fzgmod_utils
 )
@@ -300,6 +424,7 @@ target_include_directories(fzgmod_modules
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/coders/ans/dietgpu
 )
+fzgmod_set_gpu_source_language(fzgmod_modules)
 add_library(FZGMOD::modules ALIAS fzgmod_modules)
 
 add_library(fzgmod_pipeline
@@ -320,8 +445,9 @@ target_link_libraries(fzgmod_pipeline
   fzgmod_compile_settings
   fzgmod_mem
   fzgmod_modules
-  CUDA::cudart
+  ${FZGMOD_GPU_RUNTIME}
 )
+fzgmod_set_gpu_source_language(fzgmod_pipeline)
 add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
 
 #### Combined Library
@@ -335,7 +461,7 @@ target_link_libraries(fzgmod
   fzgmod_mem
   fzgmod_modules
   fzgmod_pipeline
-  CUDA::cudart
+  ${FZGMOD_GPU_RUNTIME}
 )
 
 # Tool identity for the --report-json artifact.
@@ -487,7 +613,11 @@ endif()
 message(STATUS "FZGPUModules configuration complete")
 message(STATUS "  Backend: ${FZGMOD_BACKEND}")
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+  message(STATUS "  CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+else()
+  message(STATUS "  HIP architectures: ${CMAKE_HIP_ARCHITECTURES}")
+endif()
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  Build examples: ${BUILD_EXAMPLES}")
 message(STATUS "  Build profiling: ${BUILD_PROFILING}")
