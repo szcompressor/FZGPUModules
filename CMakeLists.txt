@@ -428,6 +428,24 @@ target_include_directories(fzgmod_modules
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/coders/ans/dietgpu
 )
 fzgmod_set_gpu_source_language(fzgmod_modules)
+
+# The vendored dietgpu ANS tree uses inline NVPTX lanemask assembly and a
+# hardcoded 32-lane warp model with no HIP translation (see
+# memory/hip_sycl_backend_plan.md, Phase 1.4) -- excluded from compilation
+# entirely on HIP rather than ported. This is a build-level stopgap:
+# ANSStage's symbols are simply absent from the HIP library. The intended
+# runtime mechanism (Stage::isSupportedOnBackend() + a clear error from
+# Pipeline::addStage<ANSStage>() instead of an undefined-symbol link failure)
+# is not yet wired up -- TODO before Phase 1 is considered complete.
+if(FZGMOD_BACKEND STREQUAL "HIP")
+  set_source_files_properties(
+    modules/coders/ans/ans_stage.cu
+    modules/coders/ans/dietgpu/GpuANS.cu
+    TARGET_DIRECTORY fzgmod_modules
+    PROPERTIES HEADER_FILE_ONLY TRUE
+  )
+endif()
+
 add_library(FZGMOD::modules ALIAS fzgmod_modules)
 
 add_library(fzgmod_pipeline

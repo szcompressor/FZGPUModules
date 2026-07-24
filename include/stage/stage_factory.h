@@ -311,9 +311,15 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
         }
 
         case StageType::ANS: {
+#if !defined(FZGMOD_BACKEND_HIP)
             auto* s = new ANSStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+#else
+            // ANSStage (vendored dietgpu) is excluded on HIP -- see the
+            // matching guard in src/pipeline/config.cpp.
+            throw std::runtime_error("'ANS' stage is not available on the HIP backend");
+#endif
             break;
         }
 

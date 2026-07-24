@@ -1,4 +1,5 @@
 #include "fused/bitplane_rze/bitplane_rze_kernels.h"
+#include "backend/warp.h"
 #include "cuda_check.h"
 
 #include "bitplane_rze_encode.inl"

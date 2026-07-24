@@ -432,11 +432,20 @@ static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
     throw std::runtime_error("loadConfig: unsupported TiledLorenzo data_type");
 }
 
+#if !defined(FZGMOD_BACKEND_HIP)
+// ANSStage (vendored dietgpu) is excluded on HIP: inline NVPTX lanemask
+// assembly with no translation, out of scope for Phase 1 (see
+// memory/hip_sycl_backend_plan.md). Its .cu sources aren't compiled on HIP
+// (CMakeLists.txt), so any reference to it here would be an undefined vtable
+// at link time -- guard the whole entry out instead. TODO: replace with
+// Stage::isSupportedOnBackend() + a clear addStage<ANSStage>() throw instead
+// of this being compiled out entirely (tracked as remaining Phase 1.2 work).
 static Stage* addANSStage(Pipeline& p, const toml::table& t) {
     auto* s = p.addStage<ANSStage>();
     s->setProbBits(static_cast<uint8_t>(optInt(t, "prob_bits", 10)));
     return s;
 }
+#endif
 
 static Stage* addADMStage(Pipeline& p, const toml::table& t) {
     auto* s = p.addStage<ADMStage>();
@@ -659,10 +668,12 @@ static void saveBitpackStage(Stage* s, std::ostringstream& out) {
     out << "nbits = "        << static_cast<int64_t>(nbits) << "\n";
 }
 
+#if !defined(FZGMOD_BACKEND_HIP)
 static void saveANSStage(Stage* s, std::ostringstream& out) {
     auto* ans = static_cast<ANSStage*>(s);
     out << "prob_bits = " << static_cast<int64_t>(ans->getProbBits()) << "\n";
 }
+#endif
 
 static void saveADMStage(Stage* s, std::ostringstream& out) {
     auto* adm = static_cast<ADMStage*>(s);
@@ -788,7 +799,9 @@ static const StageEntry kStageRegistry[] = {
     { "Negabinary",   StageType::NEGABINARY,   addNegabinaryStage,   saveNegabinaryStage   },
     { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage      },
     { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage      },
+#if !defined(FZGMOD_BACKEND_HIP)
     { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
+#endif
     { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
     { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
     { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage  },

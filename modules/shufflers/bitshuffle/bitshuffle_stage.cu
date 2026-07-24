@@ -46,6 +46,7 @@
 #include "cuda_check.h"
 #include "log.h"
 #include "backend/api.h"
+#include "backend/warp.h"
 #include <stdexcept>
 #include <string>
 #include <algorithm>
@@ -77,29 +78,29 @@ __global__ void bitshuffleEncodeKernel32(
     for (int i = tid; i < (int)N_chunk; i += (int)blockDim.x) {
         unsigned int a = in[in_base + i];
 
-        unsigned int q = __shfl_xor_sync(0xFFFFFFFFu, a, 16);
+        unsigned int q = fz::backend::shflXor(a, 16, 32);
         a = ((sublane & 16) == 0)
             ? __byte_perm(a, q, (3u<<12)|(2u<<8)|(7u<<4)|6u)
             : __byte_perm(a, q, (5u<<12)|(4u<<8)|(1u<<4)|0u);
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 8);
+        q = fz::backend::shflXor(a, 8, 32);
         a = ((sublane & 8) == 0)
             ? __byte_perm(a, q, (3u<<12)|(7u<<8)|(1u<<4)|5u)
             : __byte_perm(a, q, (6u<<12)|(2u<<8)|(4u<<4)|0u);
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 4);
+        q = fz::backend::shflXor(a, 4, 32);
         unsigned int mask = 0x0F0F0F0Fu;
         a = ((sublane & 4) == 0)
             ? ((a & ~mask) | ((q >> 4) & mask))
             : (((q << 4) & ~mask) | (a & mask));
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 2);
+        q = fz::backend::shflXor(a, 2, 32);
         mask = 0x33333333u;
         a = ((sublane & 2) == 0)
             ? ((a & ~mask) | ((q >> 2) & mask))
             : (((q << 2) & ~mask) | (a & mask));
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 1);
+        q = fz::backend::shflXor(a, 1, 32);
         mask = 0x55555555u;
         a = ((sublane & 1) == 0)
             ? ((a & ~mask) | ((q >> 1) & mask))
@@ -125,29 +126,29 @@ __global__ void bitshuffleDecodeKernel32(
         // Read from plane-organised layout (butterfly is self-inverse)
         unsigned int a = in[in_base + i / 32 + sublane * npp];
 
-        unsigned int q = __shfl_xor_sync(0xFFFFFFFFu, a, 16);
+        unsigned int q = fz::backend::shflXor(a, 16, 32);
         a = ((sublane & 16) == 0)
             ? __byte_perm(a, q, (3u<<12)|(2u<<8)|(7u<<4)|6u)
             : __byte_perm(a, q, (5u<<12)|(4u<<8)|(1u<<4)|0u);
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 8);
+        q = fz::backend::shflXor(a, 8, 32);
         a = ((sublane & 8) == 0)
             ? __byte_perm(a, q, (3u<<12)|(7u<<8)|(1u<<4)|5u)
             : __byte_perm(a, q, (6u<<12)|(2u<<8)|(4u<<4)|0u);
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 4);
+        q = fz::backend::shflXor(a, 4, 32);
         unsigned int mask = 0x0F0F0F0Fu;
         a = ((sublane & 4) == 0)
             ? ((a & ~mask) | ((q >> 4) & mask))
             : (((q << 4) & ~mask) | (a & mask));
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 2);
+        q = fz::backend::shflXor(a, 2, 32);
         mask = 0x33333333u;
         a = ((sublane & 2) == 0)
             ? ((a & ~mask) | ((q >> 2) & mask))
             : (((q << 2) & ~mask) | (a & mask));
 
-        q = __shfl_xor_sync(0xFFFFFFFFu, a, 1);
+        q = fz::backend::shflXor(a, 1, 32);
         mask = 0x55555555u;
         a = ((sublane & 1) == 0)
             ? ((a & ~mask) | ((q >> 1) & mask))
@@ -197,32 +198,32 @@ __global__ void bitshuffleEncodeKernel64(
 
         unsigned long long q0, q1;
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 16);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 16);
+        q0 = fz::backend::shflXor(a0, 16, 32);
+        q1 = fz::backend::shflXor(a1, 16, 32);
         m = 0x0000FFFF0000FFFFull;
         a0 = ((sublane & 16) == 0) ? ((a0 & ~m) | ((q0 >> 16) & m)) : ((a0 & m) | ((q0 << 16) & ~m));
         a1 = ((sublane & 16) == 0) ? ((a1 & ~m) | ((q1 >> 16) & m)) : ((a1 & m) | ((q1 << 16) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 8);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 8);
+        q0 = fz::backend::shflXor(a0, 8, 32);
+        q1 = fz::backend::shflXor(a1, 8, 32);
         m = 0x00FF00FF00FF00FFull;
         a0 = ((sublane & 8) == 0) ? ((a0 & ~m) | ((q0 >> 8) & m)) : ((a0 & m) | ((q0 << 8) & ~m));
         a1 = ((sublane & 8) == 0) ? ((a1 & ~m) | ((q1 >> 8) & m)) : ((a1 & m) | ((q1 << 8) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 4);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 4);
+        q0 = fz::backend::shflXor(a0, 4, 32);
+        q1 = fz::backend::shflXor(a1, 4, 32);
         m = 0x0F0F0F0F0F0F0F0Full;
         a0 = ((sublane & 4) == 0) ? ((a0 & ~m) | ((q0 >> 4) & m)) : ((a0 & m) | ((q0 << 4) & ~m));
         a1 = ((sublane & 4) == 0) ? ((a1 & ~m) | ((q1 >> 4) & m)) : ((a1 & m) | ((q1 << 4) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 2);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 2);
+        q0 = fz::backend::shflXor(a0, 2, 32);
+        q1 = fz::backend::shflXor(a1, 2, 32);
         m = 0x3333333333333333ull;
         a0 = ((sublane & 2) == 0) ? ((a0 & ~m) | ((q0 >> 2) & m)) : ((a0 & m) | ((q0 << 2) & ~m));
         a1 = ((sublane & 2) == 0) ? ((a1 & ~m) | ((q1 >> 2) & m)) : ((a1 & m) | ((q1 << 2) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 1);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 1);
+        q0 = fz::backend::shflXor(a0, 1, 32);
+        q1 = fz::backend::shflXor(a1, 1, 32);
         m = 0x5555555555555555ull;
         a0 = ((sublane & 1) == 0) ? ((a0 & ~m) | ((q0 >> 1) & m)) : ((a0 & m) | ((q0 << 1) & ~m));
         a1 = ((sublane & 1) == 0) ? ((a1 & ~m) | ((q1 >> 1) & m)) : ((a1 & m) | ((q1 << 1) & ~m));
@@ -257,32 +258,32 @@ __global__ void bitshuffleDecodeKernel64(
 
         unsigned long long q0, q1;
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 16);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 16);
+        q0 = fz::backend::shflXor(a0, 16, 32);
+        q1 = fz::backend::shflXor(a1, 16, 32);
         m = 0x0000FFFF0000FFFFull;
         a0 = ((sublane & 16) == 0) ? ((a0 & ~m) | ((q0 >> 16) & m)) : ((a0 & m) | ((q0 << 16) & ~m));
         a1 = ((sublane & 16) == 0) ? ((a1 & ~m) | ((q1 >> 16) & m)) : ((a1 & m) | ((q1 << 16) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 8);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 8);
+        q0 = fz::backend::shflXor(a0, 8, 32);
+        q1 = fz::backend::shflXor(a1, 8, 32);
         m = 0x00FF00FF00FF00FFull;
         a0 = ((sublane & 8) == 0) ? ((a0 & ~m) | ((q0 >> 8) & m)) : ((a0 & m) | ((q0 << 8) & ~m));
         a1 = ((sublane & 8) == 0) ? ((a1 & ~m) | ((q1 >> 8) & m)) : ((a1 & m) | ((q1 << 8) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 4);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 4);
+        q0 = fz::backend::shflXor(a0, 4, 32);
+        q1 = fz::backend::shflXor(a1, 4, 32);
         m = 0x0F0F0F0F0F0F0F0Full;
         a0 = ((sublane & 4) == 0) ? ((a0 & ~m) | ((q0 >> 4) & m)) : ((a0 & m) | ((q0 << 4) & ~m));
         a1 = ((sublane & 4) == 0) ? ((a1 & ~m) | ((q1 >> 4) & m)) : ((a1 & m) | ((q1 << 4) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 2);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 2);
+        q0 = fz::backend::shflXor(a0, 2, 32);
+        q1 = fz::backend::shflXor(a1, 2, 32);
         m = 0x3333333333333333ull;
         a0 = ((sublane & 2) == 0) ? ((a0 & ~m) | ((q0 >> 2) & m)) : ((a0 & m) | ((q0 << 2) & ~m));
         a1 = ((sublane & 2) == 0) ? ((a1 & ~m) | ((q1 >> 2) & m)) : ((a1 & m) | ((q1 << 2) & ~m));
 
-        q0 = __shfl_xor_sync(0xFFFFFFFFu, a0, 1);
-        q1 = __shfl_xor_sync(0xFFFFFFFFu, a1, 1);
+        q0 = fz::backend::shflXor(a0, 1, 32);
+        q1 = fz::backend::shflXor(a1, 1, 32);
         m = 0x5555555555555555ull;
         a0 = ((sublane & 1) == 0) ? ((a0 & ~m) | ((q0 >> 1) & m)) : ((a0 & m) | ((q0 << 1) & ~m));
         a1 = ((sublane & 1) == 0) ? ((a1 & ~m) | ((q1 >> 1) & m)) : ((a1 & m) | ((q1 << 1) & ~m));
@@ -313,7 +314,7 @@ __global__ void bitshuffleEncodeKernelBallot(
         T val = in[in_base + i];
 #pragma unroll
         for (int b = 0; b < W; b++) {
-            uint32_t ballot = __ballot_sync(0xFFFFFFFFu,
+            uint32_t ballot = fz::backend::ballotSync32(
                                              static_cast<uint32_t>((val >> b) & T(1)));
             // MSB-first to match 4/8-byte butterfly convention: bit (W-1) at plane 0
             if (lane == 0)

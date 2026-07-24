@@ -106,7 +106,7 @@ __global__ void KERNEL_fused_decode(
 #pragma unroll 32
   for (auto i = 0; i < 32; i++) {
     s_data_chunk[threadIdx.y][i] =
-        __ballot_sync(0xFFFFFFFFU, buffer & (1U << i));
+        fz::backend::ballotSync32(buffer & (1U << i));
   }
   __syncthreads();
 

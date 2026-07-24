@@ -43,7 +43,7 @@ __global__ void KERNEL_fused_encode(
 
 #pragma unroll 32
   for (auto i = 0; i < 32; i++) {
-    s_data_chunk[threadIdx.y][i] = __ballot_sync(0xFFFFFFFFU, v & (1U << i));
+    s_data_chunk[threadIdx.y][i] = fz::backend::ballotSync32(v & (1U << i));
   }
   __syncthreads();
 
@@ -61,7 +61,7 @@ __global__ void KERNEL_fused_encode(
   uint32_t buffer;
   if (threadIdx.y < 8) {
     buffer = s_byteflag_array[threadIdx.y * 32 + threadIdx.x];
-    s_bitflag_array[threadIdx.y] = __ballot_sync(0xFFFFFFFFU, buffer);
+    s_bitflag_array[threadIdx.y] = fz::backend::ballotSync32(buffer);
   }
   __syncthreads();
 

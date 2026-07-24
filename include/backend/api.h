@@ -93,6 +93,7 @@
 #define cudaMemcpyDeviceToDevice    hipMemcpyDeviceToDevice
 #define cudaMemset                  hipMemset
 #define cudaMemsetAsync             hipMemsetAsync
+#define cudaMemGetInfo              hipMemGetInfo
 #define cudaPointerGetAttributes    hipPointerGetAttributes
 #define cudaMemoryTypeDevice        hipMemoryTypeDevice
 #define cudaMemoryTypeHost          hipMemoryTypeHost

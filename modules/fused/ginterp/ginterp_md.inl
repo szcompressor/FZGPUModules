@@ -1329,16 +1329,16 @@ volatile T2 s_ectrl[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
 
 }  // namespace
 
-template <typename T, int SPLINE_DIM = 3,
-int PROFILE_BLOCK_SIZE_X = 4,
-int PROFILE_BLOCK_SIZE_Y = 4,
-int PROFILE_BLOCK_SIZE_Z = 4,
-int PROFILE_NUM_BLOCK_X = 4,
-int PROFILE_NUM_BLOCK_Y = 4,
-int PROFILE_NUM_BLOCK_Z = 4,
+template <typename T, int SPLINE_DIM,
+int PROFILE_BLOCK_SIZE_X,
+int PROFILE_BLOCK_SIZE_Y,
+int PROFILE_BLOCK_SIZE_Z,
+int PROFILE_NUM_BLOCK_X,
+int PROFILE_NUM_BLOCK_Y,
+int PROFILE_NUM_BLOCK_Z,
 int  LINEAR_BLOCK_SIZE>
-__device__ void fz::ginterp::device_api::auto_tuning(volatile T s_data[PROFILE_BLOCK_SIZE_Z * PROFILE_NUM_BLOCK_Z]       
-    [PROFILE_BLOCK_SIZE_Y * PROFILE_NUM_BLOCK_Y][PROFILE_BLOCK_SIZE_X * PROFILE_NUM_BLOCK_X],  volatile T local_errs[2], DIM3  data_size,  T * errs){
+__device__ void fz::ginterp::device_api::auto_tuning(volatile T s_data[PROFILE_BLOCK_SIZE_Z * PROFILE_NUM_BLOCK_Z]
+    [PROFILE_BLOCK_SIZE_Y * PROFILE_NUM_BLOCK_Y][PROFILE_BLOCK_SIZE_X * PROFILE_NUM_BLOCK_X],  volatile T local_errs[2], DIM3  data_size,  volatile T * errs){
  
     if(TIX < 2)
         local_errs[TIX] = 0;
@@ -1384,12 +1384,12 @@ __device__ void fz::ginterp::device_api::auto_tuning(volatile T s_data[PROFILE_B
 }
 
 template <typename T,
-int SPLINE_DIM = 3,
-int PROFILE_NUM_BLOCK_X = 4,
-int PROFILE_NUM_BLOCK_Y = 4,
-int PROFILE_NUM_BLOCK_Z = 4, 
+int SPLINE_DIM,
+int PROFILE_NUM_BLOCK_X,
+int PROFILE_NUM_BLOCK_Y,
+int PROFILE_NUM_BLOCK_Z,
 int  LINEAR_BLOCK_SIZE>
-__device__ void fz::ginterp::device_api::auto_tuning_2(volatile T s_data[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z], volatile T s_nx[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z][4], volatile T s_ny[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z][4], volatile T s_nz[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z][4],  volatile T local_errs[6], DIM3  data_size,  T * errs){
+__device__ void fz::ginterp::device_api::auto_tuning_2(volatile T s_data[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z], volatile T s_nx[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z][4], volatile T s_ny[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z][4], volatile T s_nz[PROFILE_NUM_BLOCK_X * PROFILE_NUM_BLOCK_Y * PROFILE_NUM_BLOCK_Z][4],  volatile T local_errs[6], DIM3  data_size,  volatile T * errs){
     
     if CONSTEXPR (SPLINE_DIM == 3){
         if(TIX<6)

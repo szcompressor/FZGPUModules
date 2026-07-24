@@ -3,6 +3,7 @@
 // kernel fusion / warp-cooperative packing is left to the downstream compiler.
 
 #include "coders/adaptive_bitpack/adaptive_bitpack_kernels.h"
+#include "backend/warp.h"
 #include "cuda_check.h"
 
 #include <type_traits>
@@ -182,7 +183,7 @@ __global__ void encode_rate_kernel_warp(
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
-        acc |= __shfl_xor_sync(0xffffffffu, acc, off);
+        acc |= fz::backend::shflXor(acc, off, 32);
 
     if (lane == 0) {
         const int r = bitWidth32(acc);
@@ -225,13 +226,13 @@ __global__ void encode_pack_kernel_warp(
 
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) {
-        const uint32_t sign_mask = __ballot_sync(0xffffffffu, active[m] && v[m] < 0);
+        const uint32_t sign_mask = fz::backend::ballotSync32(active[m] && v[m] < 0);
         if (lane < 4) base[4u * m + lane] = static_cast<uint8_t>((sign_mask >> (8u * lane)) & 0xFFu);
     }
     for (int p = 0; p < r; ++p) {
         #pragma unroll
         for (int m = 0; m < ElemsPerLane; ++m) {
-            const uint32_t plane_mask = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+            const uint32_t plane_mask = fz::backend::ballotSync32(active[m] && ((av[m] >> p) & 1u));
             if (lane < 4)
                 base[word_bytes * (1u + p) + 4u * m + lane] =
                     static_cast<uint8_t>((plane_mask >> (8u * lane)) & 0xFFu);
@@ -513,8 +514,8 @@ __global__ void encode_rate_outlier_kernel_warp(
     }
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
-        acc_all  |= __shfl_xor_sync(0xffffffffu, acc_all, off);
-        acc_rest |= __shfl_xor_sync(0xffffffffu, acc_rest, off);
+        acc_all  |= fz::backend::shflXor(acc_all, off, 32);
+        acc_rest |= fz::backend::shflXor(acc_rest, off, 32);
     }
 
     if (lane == 0) {
@@ -572,13 +573,13 @@ __global__ void encode_pack_outlier_kernel_warp(
         }
         #pragma unroll
         for (int m = 0; m < ElemsPerLane; ++m) {
-            const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && v[m] < 0);
+            const uint32_t sm = fz::backend::ballotSync32(active[m] && v[m] < 0);
             if (lane < 4) base[4u * m + lane] = static_cast<uint8_t>((sm >> (8u * lane)) & 0xFFu);
         }
         for (int p = 0; p < r; ++p) {
             #pragma unroll
             for (int m = 0; m < ElemsPerLane; ++m) {
-                const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+                const uint32_t pm = fz::backend::ballotSync32(active[m] && ((av[m] >> p) & 1u));
                 if (lane < 4)
                     base[word_bytes * (1u + p) + 4u * m + lane] =
                         static_cast<uint8_t>((pm >> (8u * lane)) & 0xFFu);
@@ -610,13 +611,13 @@ __global__ void encode_pack_outlier_kernel_warp(
     }
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) {
-        const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && v[m] < 0);
+        const uint32_t sm = fz::backend::ballotSync32(active[m] && v[m] < 0);
         if (lane < 4) sign[4u * m + lane] = static_cast<uint8_t>((sm >> (8u * lane)) & 0xFFu);
     }
     for (int p = 0; p < r; ++p) {
         #pragma unroll
         for (int m = 0; m < ElemsPerLane; ++m) {
-            const uint32_t pm = __ballot_sync(0xffffffffu, plane_active[m] && ((av[m] >> p) & 1u));
+            const uint32_t pm = fz::backend::ballotSync32(plane_active[m] && ((av[m] >> p) & 1u));
             if (lane < 4)
                 planes[word_bytes * p + 4u * m + lane] =
                     static_cast<uint8_t>((pm >> (8u * lane)) & 0xFFu);
