@@ -198,9 +198,9 @@ private:
     // and conditional (vGPU) code paths at once — see ans_stage.cu for why this
     // matters (an nvc++ host-codegen bug producing a misaligned stack-argument
     // store for CUDA kernel launches in the combined function).
-    void executeForward(cudaStream_t stream, MemoryPool* pool,
+    void executeForward(fz::stream_t stream, MemoryPool* pool,
                         uint8_t* in, uint8_t* out, size_t byte_size);
-    void executeInverse(cudaStream_t stream, MemoryPool* pool,
+    void executeInverse(fz::stream_t stream, MemoryPool* pool,
                         uint8_t* in, uint8_t* out);
 
     // Per-block scratch stride (bytes): ANSWarpState (128 B) + max raw compressed
