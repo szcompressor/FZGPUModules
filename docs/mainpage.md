@@ -172,6 +172,10 @@ pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
 
 Call `compress()` only after `captureGraph()`; use the same stream for capture and replay.
 
+See the \ref performance_tuning "Performance Tuning" page for this and every other
+performance lever (memory strategy, stage-level config, build flags) with measured
+effect sizes where available.
+
 ---
 
 ### Compressor Config File 
