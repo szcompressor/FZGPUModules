@@ -73,8 +73,13 @@ class HuffmanStage : public Stage {
         "HuffmanStage: T must be uint8_t, uint16_t, or uint32_t.");
 
 public:
-    HuffmanStage();
-    ~HuffmanStage() override;
+    // __host__-only: HIP's clang infers __host__ __device__ for defaulted
+    // special members by default, but ~unique_ptr<phf::Buf<T>> (the type this
+    // destructor implicitly invokes, defined in huffman_stage.cu) is
+    // host-only, so that inference fails to compile under HIP. Neither
+    // function touches device code at all — pin them host-only explicitly.
+    __host__ HuffmanStage();
+    __host__ ~HuffmanStage() override;
 
     // ── Configuration ─────────────────────────────────────────────────────────
 

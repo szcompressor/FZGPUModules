@@ -23,10 +23,10 @@ namespace fz {
 // destructor can see the complete phf::Buf<T> type.
 
 template <typename T>
-HuffmanStage<T>::HuffmanStage() = default;
+__host__ HuffmanStage<T>::HuffmanStage() = default;
 
 template <typename T>
-HuffmanStage<T>::~HuffmanStage() = default;
+__host__ HuffmanStage<T>::~HuffmanStage() = default;
 
 // ── initBuf ───────────────────────────────────────────────────────────────────
 // Allocates phf::Buf<T> from pool and runs the histogram optimizer.

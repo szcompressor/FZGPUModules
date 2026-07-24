@@ -149,6 +149,10 @@
 #define cudaGraphDestroy            hipGraphDestroy
 #define cudaGraphExecDestroy        hipGraphExecDestroy
 
+// Device-side unconditional abort. CUDA exposes this as the named intrinsic
+// __trap(); HIP's clang only provides the compiler builtin __builtin_trap().
+#define __trap() __builtin_trap()
+
 #elif defined(FZGMOD_BACKEND_SYCL)
 
 #error "FZGMOD_BACKEND=SYCL is not implemented yet"

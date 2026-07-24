@@ -128,6 +128,26 @@ else() # HIP — SYCL and unknown values already rejected above
 
 endif()
 
+# hipcc/amdclang++ compiles the existing .cu sources as-is (verified against
+# ROCm 6.4 on gfx908), so the HIP build keeps the current file names rather than
+# renaming ~38 files to .hip. CMake still maps the .cu extension to the CUDA
+# language by default, though, so each .cu source is retagged LANGUAGE HIP
+# explicitly. No-op under the CUDA backend. Defined here (before any
+# add_subdirectory() call) so subdirectories such as tests/ can use it too.
+function(fzgmod_set_gpu_source_language target)
+  if(NOT FZGMOD_BACKEND STREQUAL "HIP")
+    return()
+  endif()
+  get_target_property(_srcs ${target} SOURCES)
+  foreach(_src IN LISTS _srcs)
+    if(_src MATCHES "\\.cu$")
+      set_source_files_properties(${_src}
+        TARGET_DIRECTORY ${target}
+        PROPERTIES LANGUAGE HIP)
+    endif()
+  endforeach()
+endfunction()
+
 #####################
 ### WSL DETECTION ###
 #####################
@@ -330,29 +350,6 @@ if(FZGMOD_HIP_HEADER_ONLY_INCLUDES)
   target_include_directories(fzgmod_compile_settings SYSTEM INTERFACE
     ${FZGMOD_HIP_HEADER_ONLY_INCLUDES})
 endif()
-
-###########################
-### GPU SOURCE LANGUAGE ###
-###########################
-
-# hipcc/amdclang++ compiles the existing .cu sources as-is (verified against
-# ROCm 6.4 on gfx908), so the HIP build keeps the current file names rather than
-# renaming ~38 files to .hip. CMake still maps the .cu extension to the CUDA
-# language by default, though, so each .cu source is retagged LANGUAGE HIP
-# explicitly. No-op under the CUDA backend.
-function(fzgmod_set_gpu_source_language target)
-  if(NOT FZGMOD_BACKEND STREQUAL "HIP")
-    return()
-  endif()
-  get_target_property(_srcs ${target} SOURCES)
-  foreach(_src IN LISTS _srcs)
-    if(_src MATCHES "\\.cu$")
-      set_source_files_properties(${_src}
-        TARGET_DIRECTORY ${target}
-        PROPERTIES LANGUAGE HIP)
-    endif()
-  endforeach()
-endfunction()
 
 #################
 ### LIBRARIES ###

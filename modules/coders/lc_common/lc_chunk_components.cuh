@@ -26,6 +26,7 @@
  */
 
 #include "backend/api.h"
+#include "backend/warp.h"
 #include <cstdint>
 #include <cassert>
 #include <type_traits>
@@ -54,15 +55,15 @@ static __device__ inline T block_prefix_sum(T val, void* buffer)  // returns inc
   T* const carry = (T*)buffer;
   assert(WS >= warps);
 
-  T tmp = __shfl_up_sync(~0, val, 1);
+  T tmp = fz::backend::shflUp(val, 1, 32);
   if (lane >= 1) val += tmp;
-  tmp = __shfl_up_sync(~0, val, 2);
+  tmp = fz::backend::shflUp(val, 2, 32);
   if (lane >= 2) val += tmp;
-  tmp = __shfl_up_sync(~0, val, 4);
+  tmp = fz::backend::shflUp(val, 4, 32);
   if (lane >= 4) val += tmp;
-  tmp = __shfl_up_sync(~0, val, 8);
+  tmp = fz::backend::shflUp(val, 8, 32);
   if (lane >= 8) val += tmp;
-  tmp = __shfl_up_sync(~0, val, 16);
+  tmp = fz::backend::shflUp(val, 16, 32);
   if (lane >= 16) val += tmp;
 
   if (lane == WS - 1) carry[warp] = val;
@@ -71,19 +72,19 @@ static __device__ inline T block_prefix_sum(T val, void* buffer)  // returns inc
   if constexpr (warps > 1) {
     if (warp == 0) {
       T sum = carry[lane];
-      T tmp2 = __shfl_up_sync(~0, sum, 1);
+      T tmp2 = fz::backend::shflUp(sum, 1, 32);
       if (lane >= 1) sum += tmp2;
       if constexpr (warps > 2) {
-        tmp2 = __shfl_up_sync(~0, sum, 2);
+        tmp2 = fz::backend::shflUp(sum, 2, 32);
         if (lane >= 2) sum += tmp2;
         if constexpr (warps > 4) {
-          tmp2 = __shfl_up_sync(~0, sum, 4);
+          tmp2 = fz::backend::shflUp(sum, 4, 32);
           if (lane >= 4) sum += tmp2;
           if constexpr (warps > 8) {
-            tmp2 = __shfl_up_sync(~0, sum, 8);
+            tmp2 = fz::backend::shflUp(sum, 8, 32);
             if (lane >= 8) sum += tmp2;
             if constexpr (warps > 16) {
-              tmp2 = __shfl_up_sync(~0, sum, 16);
+              tmp2 = fz::backend::shflUp(sum, 16, 32);
               if (lane >= 16) sum += tmp2;
             }
           }
@@ -196,7 +197,7 @@ static __device__ inline bool d_REencode1wordperthread(const T* const in, const 
   const T prev = !active ? 0 : ((tid == 0) ? 0 : in[tid - 1]);
   const T val = active ? in[tid] : 0;
   const bool havenonrepval = (active && (val != prev));
-  const int bm = __ballot_sync(~0, havenonrepval);
+  const int bm = fz::backend::ballotSync32(havenonrepval);
   const int cnt = __popc(bm);
   const int subwarps = TPB / 32;
   const int sublane = lane;
@@ -217,7 +218,7 @@ static __device__ inline bool d_REencode1wordperthread(const T* const in, const 
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -258,19 +259,19 @@ static __device__ inline bool d_REencode2wordsperthread(const T* const in, const
   const T val2 = active2 ? in[tid2] : 0;
   const bool havenonrepval1 = (active1 && (val1 != prev));
   const bool havenonrepval2 = (active2 && (val2 != val1));
-  const int bm1 = __ballot_sync(~0, havenonrepval1);
-  const int bm2 = __ballot_sync(~0, havenonrepval2);
+  const int bm1 = fz::backend::ballotSync32(havenonrepval1);
+  const int bm2 = fz::backend::ballotSync32(havenonrepval2);
   const int cnt = __popc(bm1) + __popc(bm2);
   const int comb = havenonrepval1 + havenonrepval2 * 2;
   const int sublane = lane;
-  const int tmp1 = __shfl_sync(~0, comb, lane / 2) >> (lane % 2);
-  const int bmlo = __ballot_sync(~0, tmp1 & 1);
-  const int tmp2 = __shfl_sync(~0, comb, 16 + lane / 2) >> (lane % 2);
-  const int bmhi = __ballot_sync(~0, tmp2 & 1);
+  const int tmp1 = fz::backend::shfl(comb, lane / 2, 32) >> (lane % 2);
+  const int bmlo = fz::backend::ballotSync32(tmp1 & 1);
+  const int tmp2 = fz::backend::shfl(comb, 16 + lane / 2, 32) >> (lane % 2);
+  const int bmhi = fz::backend::ballotSync32(tmp2 & 1);
   const int subwarps = TPB / 32;
   const int subwarp = warp;
-  if (__any_sync(~0, active1) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8] = bmlo >> lane;
-  if (__any_sync(~0, active2) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8 + 4] = bmhi >> lane;
+  if (fz::backend::anySync32(active1) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8] = bmlo >> lane;
+  if (fz::backend::anySync32(active2) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8 + 4] = bmhi >> lane;
   if constexpr (sizeof(T) > 1) {
     if (warp == 0) {
       const int base = (insize + 7) / 8;
@@ -286,7 +287,7 @@ static __device__ inline bool d_REencode2wordsperthread(const T* const in, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -334,27 +335,27 @@ static __device__ inline bool d_REencode4wordsperthread(const T* const in, const
   const bool havenonrepval2 = (active2 && (val2 != val1));
   const bool havenonrepval3 = (active3 && (val3 != val2));
   const bool havenonrepval4 = (active4 && (val4 != val3));
-  const int bm1 = __ballot_sync(~0, havenonrepval1);
-  const int bm2 = __ballot_sync(~0, havenonrepval2);
-  const int bm3 = __ballot_sync(~0, havenonrepval3);
-  const int bm4 = __ballot_sync(~0, havenonrepval4);
+  const int bm1 = fz::backend::ballotSync32(havenonrepval1);
+  const int bm2 = fz::backend::ballotSync32(havenonrepval2);
+  const int bm3 = fz::backend::ballotSync32(havenonrepval3);
+  const int bm4 = fz::backend::ballotSync32(havenonrepval4);
   const int cnt = __popc(bm1) + __popc(bm2) + __popc(bm3) + __popc(bm4);
   const int comb = havenonrepval1 + havenonrepval2 * 2 + havenonrepval3 * 4 + havenonrepval4 * 8;
   const int sublane = lane;
-  const int tmp1 = __shfl_sync(~0, comb, lane / 4) >> (lane % 4);
-  const int bmA = __ballot_sync(~0, tmp1 & 1);
-  const int tmp2 = __shfl_sync(~0, comb, 8 + lane / 4) >> (lane % 4);
-  const int bmB = __ballot_sync(~0, tmp2 & 1);
-  const int tmp3 = __shfl_sync(~0, comb, 16 + lane / 4) >> (lane % 4);
-  const int bmC = __ballot_sync(~0, tmp3 & 1);
-  const int tmp4 = __shfl_sync(~0, comb, 24 + lane / 4) >> (lane % 4);
-  const int bmD = __ballot_sync(~0, tmp4 & 1);
+  const int tmp1 = fz::backend::shfl(comb, lane / 4, 32) >> (lane % 4);
+  const int bmA = fz::backend::ballotSync32(tmp1 & 1);
+  const int tmp2 = fz::backend::shfl(comb, 8 + lane / 4, 32) >> (lane % 4);
+  const int bmB = fz::backend::ballotSync32(tmp2 & 1);
+  const int tmp3 = fz::backend::shfl(comb, 16 + lane / 4, 32) >> (lane % 4);
+  const int bmC = fz::backend::ballotSync32(tmp3 & 1);
+  const int tmp4 = fz::backend::shfl(comb, 24 + lane / 4, 32) >> (lane % 4);
+  const int bmD = fz::backend::ballotSync32(tmp4 & 1);
   const int subwarps = TPB / 32;
   const int subwarp = warp;
-  if (__any_sync(~0, active1) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8] = bmA >> lane;
-  if (__any_sync(~0, active2) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 4] = bmB >> lane;
-  if (__any_sync(~0, active3) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 8] = bmC >> lane;
-  if (__any_sync(~0, active4) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 12] = bmD >> lane;
+  if (fz::backend::anySync32(active1) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8] = bmA >> lane;
+  if (fz::backend::anySync32(active2) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 4] = bmB >> lane;
+  if (fz::backend::anySync32(active3) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 8] = bmC >> lane;
+  if (fz::backend::anySync32(active4) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 12] = bmD >> lane;
   if constexpr (sizeof(T) > 1) {
     if (warp == 0) {
       const int base = (insize + 7) / 8;
@@ -370,7 +371,7 @@ static __device__ inline bool d_REencode4wordsperthread(const T* const in, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -509,7 +510,7 @@ static __device__ inline void d_REdecode_specialized(const int decsize, const T*
   }
 
   for (int i = 1; i < subWS; i *= 2) {
-    cnt += __shfl_xor_sync(~0, cnt, i, subWS);
+    cnt += fz::backend::shflXor(cnt, i, 32);
   }
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -518,7 +519,7 @@ static __device__ inline void d_REdecode_specialized(const int decsize, const T*
     const int lane = tid % WS;
     int sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -531,12 +532,12 @@ static __device__ inline void d_REdecode_specialized(const int decsize, const T*
     int bm;
     if constexpr (sizeof(U) == 1) {
       bm = (int)bmin_t[i * 4 + sublane / 8] << (sublane & ~7);
-      bm |= __shfl_xor_sync(~0, bm, 8, subWS);
-      bm |= __shfl_xor_sync(~0, bm, 16, subWS);
+      bm |= fz::backend::shflXor(bm, 8, 32);
+      bm |= fz::backend::shflXor(bm, 16, 32);
     }
     if constexpr (sizeof(U) == 2) {
       bm = (int)bmin_t[i * 2 + sublane / 16] << (sublane & ~15);
-      bm |= __shfl_xor_sync(~0, bm, 16, subWS);
+      bm |= fz::backend::shflXor(bm, 16, 32);
     }
     if constexpr (sizeof(U) == 4) {
       bm = bmin_t[i];
@@ -567,7 +568,7 @@ static __device__ inline void d_REdecode1wordperthread(const int decsize, const 
   // read bitmap and count non-repeating values
   const bool active = (tid < decsize);
   const bool havenonrepval = (active && ((bmin_b[tid / 8] >> (tid % 8)) & 1));
-  const int bm = __ballot_sync(~0, havenonrepval);
+  const int bm = fz::backend::ballotSync32(havenonrepval);
   const int cnt = __popc(bm);
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -577,7 +578,7 @@ static __device__ inline void d_REdecode1wordperthread(const int decsize, const 
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -613,8 +614,8 @@ static __device__ inline void d_REdecode2wordsperthread(const int decsize, const
   const byte b = active1 ? (bmin_b[tid1 / 8] >> (tid1 % 8)) : 0;
   const bool havenonrepval1 = (active1 && (b & 1));
   const bool havenonrepval2 = (active2 && (b & 2));
-  const int bm1 = __ballot_sync(~0, havenonrepval1);
-  const int bm2 = __ballot_sync(~0, havenonrepval2);
+  const int bm1 = fz::backend::ballotSync32(havenonrepval1);
+  const int bm2 = fz::backend::ballotSync32(havenonrepval2);
   const int cnt = __popc(bm1) + __popc(bm2);
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -624,7 +625,7 @@ static __device__ inline void d_REdecode2wordsperthread(const int decsize, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -667,10 +668,10 @@ static __device__ inline void d_REdecode4wordsperthread(const int decsize, const
   const bool havenonrepval2 = (active2 && (b & 2));
   const bool havenonrepval3 = (active3 && (b & 4));
   const bool havenonrepval4 = (active4 && (b & 8));
-  const int bm1 = __ballot_sync(~0, havenonrepval1);
-  const int bm2 = __ballot_sync(~0, havenonrepval2);
-  const int bm3 = __ballot_sync(~0, havenonrepval3);
-  const int bm4 = __ballot_sync(~0, havenonrepval4);
+  const int bm1 = fz::backend::ballotSync32(havenonrepval1);
+  const int bm2 = fz::backend::ballotSync32(havenonrepval2);
+  const int bm3 = fz::backend::ballotSync32(havenonrepval3);
+  const int bm4 = fz::backend::ballotSync32(havenonrepval4);
   const int cnt = __popc(bm1) + __popc(bm2) + __popc(bm3) + __popc(bm4);
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -680,7 +681,7 @@ static __device__ inline void d_REdecode4wordsperthread(const int decsize, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -903,7 +904,7 @@ static __device__ inline bool d_ZEencode1wordperthread(const T* const in, const 
   const bool active = (tid < insize);
   const T val = active ? in[tid] : 0;
   const bool havenonzeroval = (active && (val != 0));
-  const int bm = __ballot_sync(~0, havenonzeroval);
+  const int bm = fz::backend::ballotSync32(havenonzeroval);
   const int cnt = __popc(bm);
   const int subwarps = TPB / 32;
   const int sublane = lane;
@@ -923,7 +924,7 @@ static __device__ inline bool d_ZEencode1wordperthread(const T* const in, const 
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -961,19 +962,19 @@ static __device__ inline bool d_ZEencode2wordsperthread(const T* const in, const
   const T val2 = active2 ? in[tid2] : 0;
   const bool havenonzeroval1 = (active1 && (val1 != 0));
   const bool havenonzeroval2 = (active2 && (val2 != 0));
-  const int bm1 = __ballot_sync(~0, havenonzeroval1);
-  const int bm2 = __ballot_sync(~0, havenonzeroval2);
+  const int bm1 = fz::backend::ballotSync32(havenonzeroval1);
+  const int bm2 = fz::backend::ballotSync32(havenonzeroval2);
   const int cnt = __popc(bm1) + __popc(bm2);
   const int comb = havenonzeroval1 + havenonzeroval2 * 2;
   const int sublane = lane;
-  const int tmp1 = __shfl_sync(~0, comb, lane / 2) >> (lane % 2);
-  const int bmlo = __ballot_sync(~0, tmp1 & 1);
-  const int tmp2 = __shfl_sync(~0, comb, 16 + lane / 2) >> (lane % 2);
-  const int bmhi = __ballot_sync(~0, tmp2 & 1);
+  const int tmp1 = fz::backend::shfl(comb, lane / 2, 32) >> (lane % 2);
+  const int bmlo = fz::backend::ballotSync32(tmp1 & 1);
+  const int tmp2 = fz::backend::shfl(comb, 16 + lane / 2, 32) >> (lane % 2);
+  const int bmhi = fz::backend::ballotSync32(tmp2 & 1);
   const int subwarps = TPB / 32;
   const int subwarp = warp;
-  if (__any_sync(~0, active1) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8] = bmlo >> lane;
-  if (__any_sync(~0, active2) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8 + 4] = bmhi >> lane;
+  if (fz::backend::anySync32(active1) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8] = bmlo >> lane;
+  if (fz::backend::anySync32(active2) && (lane % 8 == 0)) bmout_b[warp * 8 + lane / 8 + 4] = bmhi >> lane;
   if constexpr (sizeof(T) > 1) {
     if (warp == 0) {
       const int base = (insize + 7) / 8;
@@ -988,7 +989,7 @@ static __device__ inline bool d_ZEencode2wordsperthread(const T* const in, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -1033,27 +1034,27 @@ static __device__ inline bool d_ZEencode4wordsperthread(const T* const in, const
   const bool havenonzeroval2 = (active2 && (val2 != 0));
   const bool havenonzeroval3 = (active3 && (val3 != 0));
   const bool havenonzeroval4 = (active4 && (val4 != 0));
-  const int bm1 = __ballot_sync(~0, havenonzeroval1);
-  const int bm2 = __ballot_sync(~0, havenonzeroval2);
-  const int bm3 = __ballot_sync(~0, havenonzeroval3);
-  const int bm4 = __ballot_sync(~0, havenonzeroval4);
+  const int bm1 = fz::backend::ballotSync32(havenonzeroval1);
+  const int bm2 = fz::backend::ballotSync32(havenonzeroval2);
+  const int bm3 = fz::backend::ballotSync32(havenonzeroval3);
+  const int bm4 = fz::backend::ballotSync32(havenonzeroval4);
   const int cnt = __popc(bm1) + __popc(bm2) + __popc(bm3) + __popc(bm4);
   const int comb = havenonzeroval1 + havenonzeroval2 * 2 + havenonzeroval3 * 4 + havenonzeroval4 * 8;
   const int sublane = lane;
-  const int tmp1 = __shfl_sync(~0, comb, lane / 4) >> (lane % 4);
-  const int bmA = __ballot_sync(~0, tmp1 & 1);
-  const int tmp2 = __shfl_sync(~0, comb, 8 + lane / 4) >> (lane % 4);
-  const int bmB = __ballot_sync(~0, tmp2 & 1);
-  const int tmp3 = __shfl_sync(~0, comb, 16 + lane / 4) >> (lane % 4);
-  const int bmC = __ballot_sync(~0, tmp3 & 1);
-  const int tmp4 = __shfl_sync(~0, comb, 24 + lane / 4) >> (lane % 4);
-  const int bmD = __ballot_sync(~0, tmp4 & 1);
+  const int tmp1 = fz::backend::shfl(comb, lane / 4, 32) >> (lane % 4);
+  const int bmA = fz::backend::ballotSync32(tmp1 & 1);
+  const int tmp2 = fz::backend::shfl(comb, 8 + lane / 4, 32) >> (lane % 4);
+  const int bmB = fz::backend::ballotSync32(tmp2 & 1);
+  const int tmp3 = fz::backend::shfl(comb, 16 + lane / 4, 32) >> (lane % 4);
+  const int bmC = fz::backend::ballotSync32(tmp3 & 1);
+  const int tmp4 = fz::backend::shfl(comb, 24 + lane / 4, 32) >> (lane % 4);
+  const int bmD = fz::backend::ballotSync32(tmp4 & 1);
   const int subwarps = TPB / 32;
   const int subwarp = warp;
-  if (__any_sync(~0, active1) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8] = bmA >> lane;
-  if (__any_sync(~0, active2) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 4] = bmB >> lane;
-  if (__any_sync(~0, active3) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 8] = bmC >> lane;
-  if (__any_sync(~0, active4) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 12] = bmD >> lane;
+  if (fz::backend::anySync32(active1) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8] = bmA >> lane;
+  if (fz::backend::anySync32(active2) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 4] = bmB >> lane;
+  if (fz::backend::anySync32(active3) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 8] = bmC >> lane;
+  if (fz::backend::anySync32(active4) && (lane % 8 == 0)) bmout_b[warp * 16 + lane / 8 + 12] = bmD >> lane;
   if constexpr (sizeof(T) > 1) {
     if (warp == 0) {
       const int base = (insize + 7) / 8;
@@ -1068,7 +1069,7 @@ static __device__ inline bool d_ZEencode4wordsperthread(const T* const in, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -1187,7 +1188,7 @@ static __device__ inline void d_ZEdecode_specialized(const int decsize, const T*
   }
 
   for (int i = 1; i < subWS; i *= 2) {
-    cnt += __shfl_xor_sync(~0, cnt, i, subWS);
+    cnt += fz::backend::shflXor(cnt, i, 32);
   }
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -1196,7 +1197,7 @@ static __device__ inline void d_ZEdecode_specialized(const int decsize, const T*
     const int lane = tid % WS;
     int sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -1208,12 +1209,12 @@ static __device__ inline void d_ZEdecode_specialized(const int decsize, const T*
     int bm;
     if constexpr (sizeof(U) == 1) {
       bm = (int)bmin_t[i * 4 + sublane / 8] << (sublane & ~7);
-      bm |= __shfl_xor_sync(~0, bm, 8, subWS);
-      bm |= __shfl_xor_sync(~0, bm, 16, subWS);
+      bm |= fz::backend::shflXor(bm, 8, 32);
+      bm |= fz::backend::shflXor(bm, 16, 32);
     }
     if constexpr (sizeof(U) == 2) {
       bm = (int)bmin_t[i * 2 + sublane / 16] << (sublane & ~15);
-      bm |= __shfl_xor_sync(~0, bm, 16, subWS);
+      bm |= fz::backend::shflXor(bm, 16, 32);
     }
     if constexpr (sizeof(U) == 4) {
       bm = bmin_t[i];
@@ -1241,7 +1242,7 @@ static __device__ inline void d_ZEdecode1wordperthread(const int decsize, const 
 
   const bool active = (tid < decsize);
   const bool havenonzeroval = (active && ((bmin_b[tid / 8] >> (tid % 8)) & 1));
-  const int bm = __ballot_sync(~0, havenonzeroval);
+  const int bm = fz::backend::ballotSync32(havenonzeroval);
   const int cnt = __popc(bm);
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -1250,7 +1251,7 @@ static __device__ inline void d_ZEdecode1wordperthread(const int decsize, const 
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -1284,8 +1285,8 @@ static __device__ inline void d_ZEdecode2wordsperthread(const int decsize, const
   const byte b = active1 ? (bmin_b[tid1 / 8] >> (tid1 % 8)) : 0;
   const bool havenonzeroval1 = (active1 && (b & 1));
   const bool havenonzeroval2 = (active2 && (b & 2));
-  const int bm1 = __ballot_sync(~0, havenonzeroval1);
-  const int bm2 = __ballot_sync(~0, havenonzeroval2);
+  const int bm1 = fz::backend::ballotSync32(havenonzeroval1);
+  const int bm2 = fz::backend::ballotSync32(havenonzeroval2);
   const int cnt = __popc(bm1) + __popc(bm2);
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -1294,7 +1295,7 @@ static __device__ inline void d_ZEdecode2wordsperthread(const int decsize, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
@@ -1335,10 +1336,10 @@ static __device__ inline void d_ZEdecode4wordsperthread(const int decsize, const
   const bool havenonzeroval2 = (active2 && (b & 2));
   const bool havenonzeroval3 = (active3 && (b & 4));
   const bool havenonzeroval4 = (active4 && (b & 8));
-  const int bm1 = __ballot_sync(~0, havenonzeroval1);
-  const int bm2 = __ballot_sync(~0, havenonzeroval2);
-  const int bm3 = __ballot_sync(~0, havenonzeroval3);
-  const int bm4 = __ballot_sync(~0, havenonzeroval4);
+  const int bm1 = fz::backend::ballotSync32(havenonzeroval1);
+  const int bm2 = fz::backend::ballotSync32(havenonzeroval2);
+  const int bm3 = fz::backend::ballotSync32(havenonzeroval3);
+  const int bm4 = fz::backend::ballotSync32(havenonzeroval4);
   const int cnt = __popc(bm1) + __popc(bm2) + __popc(bm3) + __popc(bm4);
   if (sublane == 0) temp_w[subwarp] = cnt;
   __syncthreads();
@@ -1347,7 +1348,7 @@ static __device__ inline void d_ZEdecode4wordsperthread(const int decsize, const
   if (warp == 0) {
     if (lane < subwarps) sum = temp_w[lane];
     for (int i = 1; i < subwarps; i *= 2) {
-      const int tmp = __shfl_up_sync(~0, sum, i);
+      const int tmp = fz::backend::shflUp(sum, i, 32);
       if (lane >= i) sum += tmp;
     }
     temp_w[lane] = sum;
