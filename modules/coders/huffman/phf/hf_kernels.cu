@@ -27,6 +27,7 @@
 //     i >= total_bw — the outer while loop catches that on the next iteration.
 //     Surfaced by compute-sanitizer as a 4-byte OOB read at address+1B-past-end.
 
+#include "backend/warp.h"
 #include <cstdio>
 #include <numeric>
 #include <stdexcept>
@@ -250,7 +251,7 @@ __global__ void KERNEL_CUHIP_Huffman_ReVISIT_lite(
     if (threadIdx.x % 32 == 0 && threadIdx.x / 32 > 0) p_wunits = s_wunits;
     __syncthreads();
 
-    p_wunits = __shfl_sync(0xffffffff, p_wunits, 0);
+    p_wunits = fz::backend::shfl(p_wunits, 0, 32);
 
     for (auto i = threadIdx.x; i < p_wunits; i += blockDim.x)
         hf_bitstream[id_base + i] = s_reduced[i];

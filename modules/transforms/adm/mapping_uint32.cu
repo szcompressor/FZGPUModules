@@ -5,6 +5,7 @@
 // Structural differences vs u16: uint32_t input/centers, max_signal_bytes=4,
 // decompress result vectors use int4 (4 bytes) rather than int4 (2-byte packed u16).
 
+#include "backend/warp.h"
 #include "transforms/adm/adm_kernels.h"
 #include "backend/algorithms.h"
 #include "cuda_check.h"
@@ -121,11 +122,11 @@ __global__ static void adm_map_thrust_u32(
     for (int i = base_th; i < end; i++) { local_sum += __ldg(&data[i]); local_count++; }
     #pragma unroll
     for (int off = 16; off > 0; off /= 2) {
-        local_sum   += __shfl_down_sync(0xffffffff, local_sum,   off);
-        local_count += __shfl_down_sync(0xffffffff, local_count, off);
+        local_sum   += fz::backend::shflDown(local_sum, off, 32);
+        local_count += fz::backend::shflDown(local_count, off, 32);
     }
     int center = (local_count > 0) ? static_cast<int>(local_sum / local_count) : 0;
-    center = __shfl_sync(0xffffffff, center, 0);
+    center = fz::backend::shfl(center, 0, 32);
 
     uint8_t local_code[kChunk] = {0};
     uint8_t local_bits[kChunk * kMaxSignalBytesU32] = {0};
@@ -168,9 +169,9 @@ __global__ static void adm_map_thrust_u32(
     uint16_t max_bits = static_cast<uint16_t>(bit_offset);
     #pragma unroll
     for (int off = 16; off > 0; off /= 2)
-        max_bits = max(max_bits, __shfl_down_sync(0xFFFFFFFF, max_bits, off));
+        max_bits = max(max_bits, fz::backend::shflDown(max_bits, off, 32));
     max_bits = static_cast<uint16_t>((max_bits + 7) / 8);
-    max_bits = __shfl_sync(0xffffffff, max_bits, 0);
+    max_bits = fz::backend::shfl(max_bits, 0, 32);
 
     if (lane == 0) { signal_length[blockIdx.x] = max_bits; centers[blockIdx.x] = static_cast<uint32_t>(center); }
 
@@ -244,11 +245,11 @@ __global__ static void adm_map_decoupled_u32(
     for (int i = base_th; i < end; i++) { local_sum += __ldg(&data[i]); local_count++; }
     #pragma unroll
     for (int off = 16; off > 0; off /= 2) {
-        local_sum   += __shfl_down_sync(0xffffffff, local_sum,   off);
-        local_count += __shfl_down_sync(0xffffffff, local_count, off);
+        local_sum   += fz::backend::shflDown(local_sum, off, 32);
+        local_count += fz::backend::shflDown(local_count, off, 32);
     }
     int center = (local_count > 0) ? static_cast<int>(local_sum / local_count) : 0;
-    center = __shfl_sync(0xffffffff, center, 0);
+    center = fz::backend::shfl(center, 0, 32);
 
     for (int j = 0; j < block_num; j++) {
         int bth = base_block + lane * kChunk + j * 16;
@@ -290,9 +291,9 @@ __global__ static void adm_map_decoupled_u32(
     uint16_t max_bits = static_cast<uint16_t>(bit_offset);
     #pragma unroll
     for (int off = 16; off > 0; off /= 2)
-        max_bits = max(max_bits, __shfl_down_sync(0xFFFFFFFF, max_bits, off));
+        max_bits = max(max_bits, fz::backend::shflDown(max_bits, off, 32));
     max_bits = static_cast<uint16_t>((max_bits + 7) / 8);
-    max_bits = __shfl_sync(0xffffffff, max_bits, 0);
+    max_bits = fz::backend::shfl(max_bits, 0, 32);
 
     int total_bits = max_bits * 8;
     int cur_byte   = bit_offset / 8;

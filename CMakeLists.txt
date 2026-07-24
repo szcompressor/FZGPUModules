@@ -278,6 +278,12 @@ else()
   # that are a header-convention difference, not a defect in this code.
   target_compile_options(fzgmod_compile_settings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX,HIP>:-Wno-unused-result>)
+
+  # __shfl_*_sync/__ballot_sync/__any_sync are declared only behind this flag
+  # (see include/backend/warp.h) — ROCm gates them because their emulated
+  # convergence semantics differ from CUDA's native ones.
+  target_compile_definitions(fzgmod_compile_settings INTERFACE
+    HIP_ENABLE_WARP_SYNC_BUILTINS)
 endif()
 
 target_link_libraries(fzgmod_compile_settings INTERFACE ${FZGMOD_GPU_RUNTIME})

@@ -1,5 +1,6 @@
 // Algorithm adapted from the cuSZ Lorenzo implementation (cuSZ team, BSD-3-Clause).
 // Upstream: https://github.com/szcompressor/cuSZ — see THIRD_PARTY.md.
+#include "backend/warp.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
@@ -35,14 +36,14 @@ __device__ void warp_inclusive_scan(T* thp_data) {
     // Warp-level scan using shuffle operations
     #pragma unroll
     for (int offset = 1; offset < 32; offset *= 2) {
-        T val = __shfl_up_sync(0xffffffff, thread_sum, offset);
+        T val = fz::backend::shflUp(thread_sum, offset, 32);
         if (lane_id >= offset) {
             thread_sum += val;
         }
     }
     
     // Get prefix sum from previous thread in warp
-    T prefix = __shfl_up_sync(0xffffffff, thread_sum, 1);
+    T prefix = fz::backend::shflUp(thread_sum, 1, 32);
     if (lane_id == 0) prefix = 0;
     
     // Add prefix to all elements in this thread
@@ -67,12 +68,17 @@ __device__ void block_exclusive_scan(T* thp_data, T* exch_in, T* exch_out) {
     if (warp_id == 0 && lane_id < NumWarps) {
         T val = exch_in[lane_id];
         
-        // Create mask for only the participating threads
-        unsigned mask = (1u << NumWarps) - 1;  // e.g., 0xFF for 8 warps
-        
+        // Mask for only the participating threads (lanes 0..NumWarps-1, always
+        // within the lower 32-lane software-warp — warp_id==0 covers
+        // threadIdx.x 0..31 unambiguously). Explicit width=32: unlike CUDA,
+        // HIP's __shfl_up_sync width defaults to warpSize (64 on MI100), so
+        // an unspecified width would pull from outside this software-warp.
+        fz::backend::warp_mask_t mask =
+            (static_cast<fz::backend::warp_mask_t>(1) << NumWarps) - 1;  // e.g., 0xFF for 8 warps
+
         #pragma unroll
         for (int offset = 1; offset < NumWarps; offset *= 2) {
-            T tmp = __shfl_up_sync(mask, val, offset);
+            T tmp = __shfl_up_sync(mask, val, offset, 32);
             if (lane_id >= offset) val += tmp;
         }
         exch_out[lane_id] = val;

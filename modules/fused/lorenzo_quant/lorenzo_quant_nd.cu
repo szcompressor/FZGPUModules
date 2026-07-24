@@ -6,6 +6,7 @@
  * The LorenzoQuantStage class implementation remains in lorenzo.cu.
  */
 
+#include "backend/warp.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "fused/lorenzo_quant/lorenzo_quant_kernels.cuh"
 #include "transforms/zigzag/zigzag.h"
@@ -73,7 +74,7 @@ __global__ void lorenzo_quantize_2d_kernel(
         // y-direction: subtract previous row
         center[i] -= center[i - 1];
         // x-direction: subtract west neighbour via full-warp shuffle
-        TInput west = __shfl_up_sync(0xffffffff, center[i], 1, 32);
+        TInput west = fz::backend::shflUp(center[i], 1, 32);
         if (threadIdx.x > 0) center[i] -= west;
 
         auto gid       = g_id(i - 1);
@@ -174,7 +175,7 @@ __global__ void lorenzo_dequantize_2d_kernel(
 #pragma unroll
     for (int i = 0; i < Yseq; i++) {
         for (int d = 1; d < TileDim; d *= 2) {
-            TInput n = __shfl_up_sync(0xffffffff, thp_data[i], d, 32);
+            TInput n = fz::backend::shflUp(thp_data[i], d, 32);
             if (threadIdx.x >= d) thp_data[i] += n;
         }
         thp_data[i] *= ebx2;
@@ -237,7 +238,7 @@ __global__ void lorenzo_quantize_3d_kernel(
 
         // x-direction: subtract west neighbour within 8-thread segment
         auto seg_tix = threadIdx.x % TileDim;
-        TInput prev_x = __shfl_up_sync(0xffffffff, delta[z], 1, 8);
+        TInput prev_x = fz::backend::shflUp(delta[z], 1, 8);
         if (seg_tix > 0) delta[z] -= prev_x;
 
         // y-direction: exchange via shared memory (ghost row at index 0)
@@ -331,7 +332,7 @@ __global__ void lorenzo_dequantize_3d_kernel(
 
         // x partial sum within 8-thread segment
         for (int dist = 1; dist < TileDim; dist *= 2) {
-            TInput addend = __shfl_up_sync(0xffffffff, val, dist, 8);
+            TInput addend = fz::backend::shflUp(val, dist, 8);
             if (seg_tix >= dist) val += addend;
         }
 
@@ -343,7 +344,7 @@ __global__ void lorenzo_dequantize_3d_kernel(
 
         // z partial sum within 8-thread segment
         for (int dist = 1; dist < TileDim; dist *= 2) {
-            TInput addend = __shfl_up_sync(0xffffffff, val, dist, 8);
+            TInput addend = fz::backend::shflUp(val, dist, 8);
             if (seg_tix >= dist) val += addend;
         }
 
