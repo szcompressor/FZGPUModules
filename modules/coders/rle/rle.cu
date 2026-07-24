@@ -2,6 +2,7 @@
 #include "log.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 
@@ -233,15 +234,11 @@ void RLEStage<T>::execute(
             FZ_CUDA_CHECK(cudaMalloc(&d_run_offsets, num_runs * sizeof(uint32_t)));
         }
 
-        void*  d_temp  = nullptr;
-        size_t tmp_sz  = 0;
-        cub::DeviceScan::InclusiveSum(d_temp, tmp_sz,
-                                      run_lengths, d_run_offsets, num_runs, stream);
-        d_temp = pool ? pool->allocate(tmp_sz, stream, "rle_cub_decomp_temp")
-                      : nullptr;
-        if (!pool) FZ_CUDA_CHECK(cudaMalloc(&d_temp, tmp_sz));
-        cub::DeviceScan::InclusiveSum(d_temp, tmp_sz,
-                                      run_lengths, d_run_offsets, num_runs, stream);
+        auto d_temp = fz::backend::withTempStorage(pool, stream, "rle_cub_decomp_temp",
+            [&](void* tmp, size_t& bytes) {
+                cub::DeviceScan::InclusiveSum(tmp, bytes,
+                                              run_lengths, d_run_offsets, num_runs, stream);
+            });
 
         // Read total output size (last element of prefix sum)
         uint32_t total_output_size;
@@ -255,12 +252,11 @@ void RLEStage<T>::execute(
 
         if (pool) {
             pool->free(d_run_offsets, stream);
-            pool->free(d_temp, stream);
         } else {
             FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(d_run_offsets));
-            FZ_CUDA_CHECK_WARN(cudaFree(d_temp));
         }
+        fz::backend::freeTempStorage(pool, d_temp, stream);
 
         actual_output_sizes_ = {total_output_size * sizeof(T)};
 
@@ -340,22 +336,13 @@ void RLEStage<T>::execute(
         // ── Phase 2: inclusive prefix sum → d_boundary_scan_ ─────────────────
         // d_boundary_scan_[n-1] == num_runs (used as device-side num_runs ptr)
         {
-            void*  d_tmp   = nullptr;
-            size_t tmp_sz  = 0;
-            cub::DeviceScan::InclusiveSum(d_tmp, tmp_sz,
-                                          d_is_boundary_, d_boundary_scan_,
-                                          static_cast<int>(n), stream);
-            d_tmp = pool ? pool->allocate(tmp_sz, stream, "rle_cub_scan_tmp")
-                         : nullptr;
-            if (!pool) FZ_CUDA_CHECK(cudaMalloc(&d_tmp, tmp_sz));
-            cub::DeviceScan::InclusiveSum(d_tmp, tmp_sz,
-                                          d_is_boundary_, d_boundary_scan_,
-                                          static_cast<int>(n), stream);
-            if (pool && d_tmp) pool->free(d_tmp, stream);
-            else if (d_tmp) {
-                FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
-                FZ_CUDA_CHECK_WARN(cudaFree(d_tmp));
-            }
+            auto d_tmp = fz::backend::withTempStorage(pool, stream, "rle_cub_scan_tmp",
+                [&](void* tmp, size_t& bytes) {
+                    cub::DeviceScan::InclusiveSum(tmp, bytes,
+                                                  d_is_boundary_, d_boundary_scan_,
+                                                  static_cast<int>(n), stream);
+                });
+            fz::backend::freeTempStorage(pool, d_tmp, stream);
         }
 
         // d_num_runs_ptr points into d_boundary_scan_ — no D2H needed

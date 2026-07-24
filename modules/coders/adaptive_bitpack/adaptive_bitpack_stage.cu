@@ -9,6 +9,7 @@
 
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_kernels.h"
+#include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
@@ -91,12 +92,11 @@ void AdaptiveBitpackStage<T>::execute(
         if (outlier_selection_) ab::launchDecodeCostOutlier(d_meta, cfg, d_cost, stream);
         else                    ab::launchDecodeCost(d_meta, cfg, d_cost, stream);
 
-        size_t tmp_bytes = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes, d_cost, d_offset,
-                                      cfg.num_blocks, stream);
-        auto* d_tmp = pool->allocate(tmp_bytes, stream, "ab_cub_tmp");
-        cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_cost, d_offset,
-                                      cfg.num_blocks, stream);
+        auto d_tmp = fz::backend::withTempStorage(pool, stream, "ab_cub_tmp",
+            [&](void* tmp, size_t& bytes) {
+                cub::DeviceScan::ExclusiveSum(tmp, bytes, d_cost, d_offset,
+                                              cfg.num_blocks, stream);
+            });
 
         if (outlier_selection_)
             ab::launchDecodeUnpackOutlier<T>(d_meta, d_offset, d_payload, cfg,
@@ -106,7 +106,7 @@ void AdaptiveBitpackStage<T>::execute(
                                       static_cast<T*>(outputs[0]), stream);
 
         actual_output_size_ = n * sizeof(T);
-        pool->free(d_tmp, stream);
+        fz::backend::freeTempStorage(pool, d_tmp, stream);
         pool->free(d_offset, stream);
         pool->free(d_cost, stream);
         return;
@@ -147,19 +147,18 @@ void AdaptiveBitpackStage<T>::execute(
     if (outlier_selection_) ab::launchEncodeRateOutlier<T>(d_in, cfg, d_meta, d_cost_, stream);
     else                    ab::launchEncodeRate<T>(d_in, cfg, d_meta, d_cost_, stream);
 
-    size_t tmp_bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, tmp_bytes, d_cost_, d_offset_,
-                                  cfg.num_blocks, stream);
-    auto* d_tmp = pool->allocate(tmp_bytes, stream, "ab_cub_tmp");
-    cub::DeviceScan::ExclusiveSum(d_tmp, tmp_bytes, d_cost_, d_offset_,
-                                  cfg.num_blocks, stream);
+    auto d_tmp = fz::backend::withTempStorage(pool, stream, "ab_cub_tmp",
+        [&](void* tmp, size_t& bytes) {
+            cub::DeviceScan::ExclusiveSum(tmp, bytes, d_cost_, d_offset_,
+                                          cfg.num_blocks, stream);
+        });
 
     if (outlier_selection_)
         ab::launchEncodePackOutlier<T>(d_in, cfg, d_meta, d_offset_, d_payload, stream);
     else
         ab::launchEncodePack<T>(d_in, cfg, d_meta, d_offset_, d_payload, stream);
 
-    pool->free(d_tmp, stream);
+    fz::backend::freeTempStorage(pool, d_tmp, stream);
 
     // The real archive length (meta_region + total payload) needs the scanned
     // tail, which we read in postStreamSync() once the stream is idle — doing a

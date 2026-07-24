@@ -12,11 +12,9 @@
 //   - Kernel logic is unchanged from the original.
 
 #include "transforms/adm/adm_kernels.h"
+#include "backend/algorithms.h"
 #include "cuda_check.h"
 #include <cuda_runtime.h>
-#include <thrust/scan.h>
-#include <thrust/device_ptr.h>
-#include <thrust/execution_policy.h>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -496,10 +494,8 @@ void compress_u16(
         }
 #endif
 
-        thrust::device_ptr<int> dev_sig(s.d_signal_length);
-        thrust::device_ptr<int> dev_out(s.d_output_lengths);
-        thrust::exclusive_scan(thrust::cuda::par.on(stream),
-            dev_sig, dev_sig + gsize, dev_out);
+        fz::backend::exclusiveScan(stream, s.d_signal_length, s.d_output_lengths,
+                                    static_cast<size_t>(gsize));
         FZ_CUDA_CHECK(cudaGetLastError());
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 

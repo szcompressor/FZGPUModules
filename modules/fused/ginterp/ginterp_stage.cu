@@ -5,6 +5,7 @@
 #include "fused/ginterp/ginterp_kernels.h"
 #include "fused/ginterp/cusz_type_subset.h"  // INTERPOLATION_PARAMS full def
 #include "predictors/predictor_utils.cuh"
+#include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
@@ -1095,17 +1096,16 @@ void GInterpStage<TInput, TCode>::execute(
                     pool->allocate(h_count * sizeof(uint32_t), stream, "ginterp_sort_idx"));
                 TInput*   d_val_out = static_cast<TInput*>(
                     pool->allocate(h_count * sizeof(TInput),   stream, "ginterp_sort_val"));
-                size_t tmp_bytes = 0;
-                cub::DeviceRadixSort::SortPairs(nullptr, tmp_bytes, d_idx, d_idx_out,
-                                                d_val, d_val_out, n, 0, 32, stream);
-                void* d_tmp = pool->allocate(tmp_bytes, stream, "ginterp_sort_tmp");
-                cub::DeviceRadixSort::SortPairs(d_tmp, tmp_bytes, d_idx, d_idx_out,
-                                                d_val, d_val_out, n, 0, 32, stream);
+                auto d_tmp = fz::backend::withTempStorage(pool, stream, "ginterp_sort_tmp",
+                    [&](void* tmp, size_t& bytes) {
+                        cub::DeviceRadixSort::SortPairs(tmp, bytes, d_idx, d_idx_out,
+                                                        d_val, d_val_out, n, 0, 32, stream);
+                    });
                 FZ_CUDA_CHECK(cudaMemcpyAsync(d_idx, d_idx_out, h_count * sizeof(uint32_t),
                                               cudaMemcpyDeviceToDevice, stream));
                 FZ_CUDA_CHECK(cudaMemcpyAsync(d_val, d_val_out, h_count * sizeof(TInput),
                                               cudaMemcpyDeviceToDevice, stream));
-                pool->free(d_tmp,     stream);
+                fz::backend::freeTempStorage(pool, d_tmp, stream);
                 pool->free(d_idx_out, stream);
                 pool->free(d_val_out, stream);
             }

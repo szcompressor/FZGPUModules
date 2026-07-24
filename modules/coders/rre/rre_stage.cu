@@ -15,6 +15,7 @@
 
 #include "coders/rre/rre_stage.h"
 #include "coders/lc_common/lc_chunk_components.cuh"
+#include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 
@@ -376,18 +377,13 @@ void RREStage::execute(
 
         // (4) Exclusive prefix sum of clean sizes → payload-relative offsets.
         {
-            size_t scan_tmp_bytes = 0;
-            cub::DeviceScan::ExclusiveSum(nullptr, scan_tmp_bytes,
-                                          d_clean_dev_, d_dst_off_dev_,
-                                          (int)n_chunks, stream);
-            void* d_scan_tmp = pool ? pool->allocate(scan_tmp_bytes, stream, "rre_cub_scan_tmp") : nullptr;
-            if (!d_scan_tmp && scan_tmp_bytes > 0)
-                FZ_CUDA_CHECK(cudaMalloc(&d_scan_tmp, scan_tmp_bytes));
-            cub::DeviceScan::ExclusiveSum(d_scan_tmp, scan_tmp_bytes,
-                                          d_clean_dev_, d_dst_off_dev_,
-                                          (int)n_chunks, stream);
-            if (pool && d_scan_tmp) pool->free(d_scan_tmp, stream);
-            else if (d_scan_tmp) { FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream)); FZ_CUDA_CHECK_WARN(cudaFree(d_scan_tmp)); }
+            auto scan_tmp = fz::backend::withTempStorage(pool, stream, "rre_cub_scan_tmp",
+                [&](void* tmp, size_t& bytes) {
+                    cub::DeviceScan::ExclusiveSum(tmp, bytes,
+                                                  d_clean_dev_, d_dst_off_dev_,
+                                                  (int)n_chunks, stream);
+                });
+            fz::backend::freeTempStorage(pool, scan_tmp, stream);
         }
 
         // (5) Convert to absolute output offsets (add header size).

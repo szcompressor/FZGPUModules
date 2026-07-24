@@ -1,4 +1,5 @@
 #include "coders/bitpack/bitpack_stage.h"
+#include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include <cub/device/device_reduce.cuh>
@@ -189,24 +190,15 @@ void BitpackStage<T>::execute(
             // Scan for the maximum value to pick the tightest valid nbits.
             // Scratch goes through the pool so all device memory stays tracked;
             // fall back to cudaMalloc if the pool returns null (vGPU / fallback mode).
-            T*     d_max = nullptr;
-            void*  d_tmp = nullptr;
-            size_t tmp_bytes = 0;
-
-            // Size query — d_max null here is fine; CUB ignores output ptr when sizing.
-            cub::DeviceReduce::Max(nullptr, tmp_bytes,
-                static_cast<const T*>(inputs[0]), d_max, static_cast<int>(n), stream);
-
-            d_max = static_cast<T*>(pool->allocate(sizeof(T), stream, "bitpack_max"));
+            T* d_max = static_cast<T*>(pool->allocate(sizeof(T), stream, "bitpack_max"));
             const bool max_pool = (d_max != nullptr);
             if (!max_pool) FZ_CUDA_CHECK(cudaMalloc(&d_max, sizeof(T)));
 
-            d_tmp = pool->allocate(tmp_bytes, stream, "bitpack_cub_tmp");
-            const bool tmp_pool = (d_tmp != nullptr);
-            if (!tmp_pool) FZ_CUDA_CHECK(cudaMalloc(&d_tmp, tmp_bytes));
-
-            cub::DeviceReduce::Max(d_tmp, tmp_bytes,
-                static_cast<const T*>(inputs[0]), d_max, static_cast<int>(n), stream);
+            auto d_tmp = fz::backend::withTempStorage(pool, stream, "bitpack_cub_tmp",
+                [&](void* tmp, size_t& bytes) {
+                    cub::DeviceReduce::Max(tmp, bytes,
+                        static_cast<const T*>(inputs[0]), d_max, static_cast<int>(n), stream);
+                });
 
             T h_max = T(0);
             FZ_CUDA_CHECK(cudaMemcpyAsync(&h_max, d_max, sizeof(T),
@@ -214,7 +206,7 @@ void BitpackStage<T>::execute(
             FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
             if (max_pool) pool->free(d_max, stream); else FZ_CUDA_CHECK(cudaFree(d_max));
-            if (tmp_pool) pool->free(d_tmp, stream); else FZ_CUDA_CHECK(cudaFree(d_tmp));
+            fz::backend::freeTempStorage(pool, d_tmp, stream);
 
             nbits_ = nbits_for_max(h_max);
         }
