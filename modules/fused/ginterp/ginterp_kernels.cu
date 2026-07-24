@@ -26,6 +26,8 @@
 #include "backend/api.h"
 #include <algorithm>
 #include <cstdint>
+#include <sstream>
+#include <stdexcept>
 
 namespace fz {
 namespace ginterp {
@@ -111,18 +113,46 @@ static inline size_t ginterpSplineSmemBytes(
 
 // Opt into the >48 KB dynamic shared-memory region for the given kernel when
 // needed. Below the static cap this is a no-op (the default 48 KB is always
-// available). On GPUs whose max is 48 KB (pre-Volta) the cudaFuncSetAttribute
-// call fails for large tiles and the subsequent launch surfaces the error.
+// available). Above it, the device has a hardware ceiling on how far it can
+// be raised (`cudaDevAttrMaxSharedMemoryPerBlockOptin`) — on NVIDIA Volta+
+// that ceiling scales with the GPU (up to ~227 KB on Hopper), but on AMD
+// CDNA (MI100/MI200/MI300, tested: 64 KB) it is fixed at the base LDS size,
+// i.e. there is no opt-in region at all. A double-precision 3-D spline tile
+// (17^3 elements x 2 tiles x 8 bytes ~= 76.8 KB) fits on the former and
+// cannot fit on the latter no matter what — cudaFuncSetAttribute would
+// silently fail and the kernel launch itself would later fail with an
+// opaque "invalid argument" from cudaGetLastError(). Check against the
+// hardware ceiling up front and fail with a clear, actionable message
+// instead.
 template <typename KernelPtr>
 static inline void ginterpRaiseSmemIfNeeded(KernelPtr kernel, size_t smem_bytes)
 {
     constexpr size_t kStaticSmemCap = 48u * 1024u;
-    if (smem_bytes > kStaticSmemCap) {
-        cudaFuncSetAttribute(
-            reinterpret_cast<const void*>(kernel),
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(smem_bytes));
+    if (smem_bytes <= kStaticSmemCap) return;
+
+    int max_optin = 0;
+    cudaDeviceGetAttribute(&max_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
+    if (max_optin <= 0 || smem_bytes > static_cast<size_t>(max_optin)) {
+        std::ostringstream oss;
+        oss << "GInterp: this kernel configuration requires " << smem_bytes
+            << " bytes of dynamic shared memory per block, which exceeds "
+               "this GPU's hardware shared-memory ceiling ("
+            << max_optin
+            << " bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin). This is a "
+               "hardware limit, not a software cap raisable via "
+               "cudaFuncSetAttribute — typically hit by double-precision "
+               "3-D GInterp (16^3 anchor tile) on GPUs with a fixed 64 KB "
+               "LDS/shared-memory size (e.g. AMD CDNA MI100/MI200/MI300). "
+               "Reduce the anchor tile size for this precision/dimension, "
+               "or use this stage on a GPU with a larger shared-memory "
+               "opt-in ceiling.";
+        throw std::runtime_error(oss.str());
     }
+
+    cudaFuncSetAttribute(
+        reinterpret_cast<const void*>(kernel),
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes));
 }
 
 // ─── outlier scatter (inverse path) ───────────────────────────────────────────

@@ -31,6 +31,25 @@ inline std::vector<float> make_smooth_3d(size_t nx, size_t ny, size_t nz,
             }
     return v;
 }
+
+// GInterp's double-precision 3-D path carves a 17^3 x 2 tiles x 8-byte
+// dynamic shared-memory allocation (~76.8 KB) out of the block's shared
+// memory. NVIDIA Volta+ can opt into that via cudaFuncSetAttribute, but GPUs
+// with a fixed shared-memory ceiling (e.g. AMD CDNA's 64 KB LDS) cannot fit
+// it no matter what — see the ginterpRaiseSmemIfNeeded() comment in
+// ginterp_kernels.cu. Query the actual hardware ceiling so this skips
+// cleanly on such devices instead of throwing mid-test.
+inline bool ginterpDouble3DTileFitsDeviceSharedMem()
+{
+    constexpr int    kAnchorTileEdge3D  = 16 + 1;  // 16^3 anchor tile + halo
+    constexpr size_t kRequiredSmemBytes =
+        static_cast<size_t>(kAnchorTileEdge3D) * kAnchorTileEdge3D *
+        kAnchorTileEdge3D * sizeof(double) * 2;  // data tile + ectrl tile
+
+    int max_optin = 0;
+    cudaDeviceGetAttribute(&max_optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0);
+    return max_optin > 0 && kRequiredSmemBytes <= static_cast<size_t>(max_optin);
+}
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1486,6 +1505,12 @@ inline std::vector<double> make_smooth_3d_d(size_t nx, size_t ny, size_t nz,
 
 // GI_D1: double 3-D ABS round-trip — exercises the dynamic-shmem double path.
 TEST(GInterpStage, GID1_RoundTripABS_Double3D) {
+    if (!ginterpDouble3DTileFitsDeviceSharedMem()) {
+        GTEST_SKIP() << "double 3-D GInterp needs ~76.8 KB dynamic shared "
+                         "memory per block, which exceeds this GPU's "
+                         "hardware shared-memory ceiling (fixed 64 KB LDS "
+                         "on AMD CDNA, no opt-in region)";
+    }
     const size_t NX = 32, NY = 32, NZ = 32;
     const size_t N = NX * NY * NZ;
     const double eb = 1e-2;
@@ -1528,6 +1553,12 @@ TEST(GInterpStage, GID2_RoundTrip2D_Double) {
 
 // GI_D3: double 3-D REL round-trip.
 TEST(GInterpStage, GID3_RoundTripREL_Double3D) {
+    if (!ginterpDouble3DTileFitsDeviceSharedMem()) {
+        GTEST_SKIP() << "double 3-D GInterp needs ~76.8 KB dynamic shared "
+                         "memory per block, which exceeds this GPU's "
+                         "hardware shared-memory ceiling (fixed 64 KB LDS "
+                         "on AMD CDNA, no opt-in region)";
+    }
     const size_t NX = 32, NY = 32, NZ = 32;
     const size_t N = NX * NY * NZ;
     const double rel_eb = 1e-2;
@@ -1553,6 +1584,12 @@ TEST(GInterpStage, GID3_RoundTripREL_Double3D) {
 // GI_D4: double 3-D file round-trip — exercises serialize/deserialize of the
 // double error_bound and the FLOAT64 factory dispatch on reload.
 TEST(GInterpStage, GID4_FileRoundTrip_Double3D) {
+    if (!ginterpDouble3DTileFitsDeviceSharedMem()) {
+        GTEST_SKIP() << "double 3-D GInterp needs ~76.8 KB dynamic shared "
+                         "memory per block, which exceeds this GPU's "
+                         "hardware shared-memory ceiling (fixed 64 KB LDS "
+                         "on AMD CDNA, no opt-in region)";
+    }
     const size_t NX = 32, NY = 32, NZ = 32;
     const size_t N = NX * NY * NZ;
     const double eb = 1e-2;
@@ -1576,6 +1613,12 @@ TEST(GInterpStage, GID4_FileRoundTrip_Double3D) {
 // GI_D5: tight bound on large-magnitude data — the increment (code-radius)*ebx2
 // must be applied in double, otherwise float ebx2 rounding would blow the bound.
 TEST(GInterpStage, GID5_TightBoundLargeMagnitude_Double3D) {
+    if (!ginterpDouble3DTileFitsDeviceSharedMem()) {
+        GTEST_SKIP() << "double 3-D GInterp needs ~76.8 KB dynamic shared "
+                         "memory per block, which exceeds this GPU's "
+                         "hardware shared-memory ceiling (fixed 64 KB LDS "
+                         "on AMD CDNA, no opt-in region)";
+    }
     const size_t NX = 32, NY = 32, NZ = 32;
     const size_t N = NX * NY * NZ;
     const double eb = 1.0;  // tiny relative to the 1e6 magnitude
