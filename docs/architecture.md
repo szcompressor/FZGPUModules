@@ -221,3 +221,4 @@ At runtime, `Logger::setMinLevel()` can filter within the compiled-in range, and
 | FZM binary file format specification | \ref fzm_format "FZM File Format" |
 | Build options and CMake presets | \ref building_from_source "Building from Source" |
 | CLI usage and TOML config syntax | \ref cli_overview "CLI & Config File" |
+| Performance tuning levers and measured effect sizes | \ref performance_tuning "Performance Tuning" |

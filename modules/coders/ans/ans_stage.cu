@@ -159,7 +159,19 @@ void ANSStage::execute(
     auto* in  = static_cast<uint8_t*>(inputs[0]);
     auto* out = static_cast<uint8_t*>(outputs[0]);
 
-    if (!is_inverse_) {
+    if (!is_inverse_) executeForward(stream, pool, in, out, byte_size);
+    else              executeInverse(stream, pool, in, out);
+}
+
+// ── executeForward ──────────────────────────────────────────────────────────
+// Split out of execute() (see ans_stage.h) so this function's stack frame
+// holds only the forward/compress path's locals and kernel launches.
+
+void ANSStage::executeForward(
+    cudaStream_t stream, MemoryPool* pool,
+    uint8_t* in, uint8_t* out, size_t byte_size)
+{
+    {
         // ── Forward (compress) ────────────────────────────────────────────────
         if (prob_bits_ != static_cast<uint8_t>(fz::ans::kANSDefaultProbBits))
             throw std::runtime_error(
@@ -282,8 +294,17 @@ void ANSStage::execute(
         if (vgpu_fallback) sched_yield();
         original_bytes_     = byte_size;
         if (vgpu_fallback) sched_yield();
+    }
+}
 
-    } else {
+// ── executeInverse ──────────────────────────────────────────────────────────
+// Split out of execute() (see ans_stage.h) so this function's stack frame
+// holds only the inverse/decompress path's locals and kernel launches.
+
+void ANSStage::executeInverse(
+    cudaStream_t stream, MemoryPool* pool, uint8_t* in, uint8_t* out)
+{
+    {
         // ── Inverse (decompress) ──────────────────────────────────────────────
 
         // Step 1: D2H header peek — reads prob_bits and total uncompressed word count.

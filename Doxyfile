@@ -22,6 +22,7 @@ INPUT                  = include/ \
                          docs/cli.md \
                          docs/api_reference.md \
                          docs/architecture.md \
+                         docs/performance_tuning.md \
                          docs/how_to_add_a_stage.md \
                          docs/fzm_format.md \
                          docs/docker.md \

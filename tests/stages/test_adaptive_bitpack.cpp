@@ -19,6 +19,17 @@
  *   AB11 CompressionRatio          — small-magnitude data compresses below input
  *   AB12 CuSZpPipeline             — Quantizer(linear)→Lorenzo(block)→AdaptiveBitpack
  *   AB20 GraphCaptureRoundTrip     — capture+replay the cuSZp compress graph, validate
+ *
+ * AB21-AB27: warp-cooperative encode/decode kernels (block=32/64 fast path vs.
+ * scalar fallback for other block sizes) — see adaptive_bitpack_kernels.cu.
+ *   AB21 Warp_Block64_EveryFixedRate — EveryFixedRate-style sweep at block=64 (elems/lane=2)
+ *   AB22 Warp_Block64_NegativeExtremes — INT_MIN/mixed signs at block=64
+ *   AB23 Warp_Block64_AllZero      — all-zero blocks at block=64
+ *   AB24 Warp_MaxBlockSize1024     — block_size=1024 (max elems/lane=32, plain kernel path)
+ *   AB25 NonMultipleOf32Fallback   — block sizes not a multiple of 32 still round-trip
+ *                                    exactly (scalar kernel path, untouched by the warp work)
+ *   AB26 Block64_TailNotMultipleOf32 — final block smaller than 32 within a block=64 series
+ *   AB27 Outlier_Block64_RoundTrip — outlier-selection mode at block=64
  */
 
 #include <gtest/gtest.h>
@@ -456,4 +467,87 @@ TEST(AdaptiveBitpackStage, GraphCaptureRoundTrip) {
         EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f)
             << "graph round-trip exceeded error bound on iter " << it;
     }
+}
+
+// ── AB21 ──────────────────────────────────────────────────────────────────────
+// Same magnitude sweep as AB4 (EveryFixedRate) but at block_size=64, exercising
+// the warp-cooperative kernels' elems_per_lane=2 path (cuszp3's configuration).
+TEST(AdaptiveBitpackStage, Warp_Block64_EveryFixedRate) {
+    const uint32_t block = 64;
+    std::vector<int32_t> h_in;
+    for (int r = 0; r <= 31; ++r) {
+        int32_t mag = (r == 0) ? 0 : ((r >= 31) ? (int32_t)0x7fffffff : (1 << r) - 1);
+        for (uint32_t j = 0; j < block; ++j)
+            h_in.push_back((j & 1) ? -mag : mag);
+    }
+    expect_exact_round_trip<int32_t>(h_in, block);
+}
+
+// ── AB22 ──────────────────────────────────────────────────────────────────────
+TEST(AdaptiveBitpackStage, Warp_Block64_NegativeExtremes) {
+    std::vector<int32_t> h_in = {
+        0, -1, 1, INT32_MIN, INT32_MAX, -123456, 123456, -1, 0, 7
+    };
+    h_in.resize(64, 0);
+    expect_exact_round_trip<int32_t>(h_in, 64);
+}
+
+// ── AB23 ──────────────────────────────────────────────────────────────────────
+TEST(AdaptiveBitpackStage, Warp_Block64_AllZero) {
+    const size_t N = 4096;
+    std::vector<int32_t> h_in(N, 0);
+    expect_exact_round_trip<int32_t>(h_in, 64);
+}
+
+// ── AB24 ──────────────────────────────────────────────────────────────────────
+// block_size=1024 is not a multiple-of-32 *fast-path* target (only 32/64 are
+// specialized) — this must take the scalar fallback and still round-trip.
+TEST(AdaptiveBitpackStage, Warp_MaxBlockSize1024) {
+    const uint32_t block = 1024;
+    std::vector<int32_t> h_in(block * 3);
+    for (size_t i = 0; i < h_in.size(); ++i)
+        h_in[i] = static_cast<int32_t>((i * 11) % 5000) - 2500;
+    expect_exact_round_trip<int32_t>(h_in, block);
+}
+
+// ── AB25 ──────────────────────────────────────────────────────────────────────
+// block_size values that are not multiples of 32 must still work correctly —
+// they take the untouched scalar kernel path (dispatch in
+// adaptive_bitpack_kernels.cu only fast-paths block_size 32/64).
+TEST(AdaptiveBitpackStage, NonMultipleOf32Fallback) {
+    for (uint32_t block : {1u, 17u, 50u, 100u, 1000u}) {
+        const size_t N = 733;  // deliberately not a multiple of any of these
+        std::vector<int32_t> h_in(N);
+        for (size_t i = 0; i < N; ++i)
+            h_in[i] = static_cast<int32_t>((i * 9) % 4001) - 2000;
+        expect_exact_round_trip<int32_t>(h_in, block);
+    }
+}
+
+// ── AB26 ──────────────────────────────────────────────────────────────────────
+// block=64 with N not a multiple of 32 within the final (partial) block —
+// exercises the warp kernels' idx<count ballot-predicate masking on a tail
+// that's neither a full block nor a full warp's worth of elements.
+TEST(AdaptiveBitpackStage, Block64_TailNotMultipleOf32) {
+    const uint32_t block = 64;
+    const size_t N = 64 * 10 + 17;
+    std::vector<int32_t> h_in(N);
+    for (size_t i = 0; i < N; ++i)
+        h_in[i] = static_cast<int32_t>((i * 7) % 3000) - 1500;
+    expect_exact_round_trip<int32_t>(h_in, block);
+}
+
+// ── AB27 ──────────────────────────────────────────────────────────────────────
+// Outlier-selection mode at block_size=64 (cuszp3_outlier's configuration) —
+// previously only exercised end-to-end via the preset, not unit-tested directly.
+TEST(AdaptiveBitpackStage, Outlier_Block64_RoundTrip) {
+    auto h_in = make_outlier_heavy(32, 64, 1 << 18);
+    expect_exact_round_trip<int32_t>(h_in, 64, /*outlier=*/true);
+
+    // Partial tail + single-element final block at block=64.
+    std::vector<int32_t> h_partial;
+    for (int i = 0; i < 129; ++i)
+        h_partial.push_back((i % 64 == 0) ? (100000 * ((i & 1) ? -1 : 1))
+                                           : (static_cast<int32_t>(i % 5) - 2));
+    expect_exact_round_trip<int32_t>(h_partial, 64, /*outlier=*/true);
 }

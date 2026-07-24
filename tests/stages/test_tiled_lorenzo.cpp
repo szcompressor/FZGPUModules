@@ -20,6 +20,10 @@
  *   TL12 CuSZp3PlainPipeline      — Quantizer(linear)→TiledLorenzo→AdaptiveBitpack(64)
  *   TL13 CuSZp3OutlierPipeline    — same + AdaptiveBitpack outlier selection
  *   TL14 FileRoundTrip            — full pipeline through writeToFile/decompressFromFile
+ *   TL15 PhasedScan_TileStampedSeeds — one-block-per-tile inverse: every tile's
+ *        Z/Y/X chain seed is a distinguishable value, so a phase-ordering bug
+ *        (e.g. reading shared mem before __syncthreads()) produces a visibly
+ *        wrong value instead of silently matching on a smooth/low-entropy field.
  */
 
 #include <gtest/gtest.h>
@@ -293,4 +297,39 @@ TEST(TiledLorenzoStage, FileRoundTrip) {
     for (size_t i = 0; i < h.size(); ++i)
         EXPECT_EQ(res.data[i], h[i]) << "mismatch at i=" << i;
     std::remove(path.c_str());
+}
+
+// ── TL15 ────────────────────────────────────────────────────────────────────
+// The phased inverse kernel (one CUDA block per tile) computes Z-chain (phase
+// 1) -> per-lz Y-chains (phase 2) -> per-(ly,lz) X-chains (phase 3) through
+// shared memory with two __syncthreads() barriers. A field with a distinct,
+// large "tile stamp" baked into every value makes any phase-ordering bug
+// (reading a seed before it's written, or from the wrong tile/lane) produce an
+// immediately-visible wrong value, rather than one that happens to coincide by
+// chance on a smooth low-entropy field like make_field() above.
+TEST(TiledLorenzoStage, PhasedScan_TileStampedSeeds) {
+    const size_t NX = 16, NY = 12, NZ = 8;   // 4 x 3 x 2 tiles at 4x4x4
+    const uint32_t tx = 4, ty = 4, tz = 4;
+    const uint32_t ntx = static_cast<uint32_t>((NX + tx - 1) / tx);
+    const uint32_t nty = static_cast<uint32_t>((NY + ty - 1) / ty);
+
+    std::vector<int32_t> h(NX * NY * NZ);
+    for (size_t z = 0; z < NZ; ++z)
+        for (size_t y = 0; y < NY; ++y)
+            for (size_t x = 0; x < NX; ++x) {
+                const uint32_t tix = static_cast<uint32_t>(x / tx);
+                const uint32_t tiy = static_cast<uint32_t>(y / ty);
+                const uint32_t tiz = static_cast<uint32_t>(z / tz);
+                const uint32_t tile_id = (tiz * nty + tiy) * ntx + tix;
+                // Every tile gets a unique 10000-wide stamp band; within a tile,
+                // the low-order digits still vary with (x,y,z) so every one of
+                // the tz/ty*tz/tx-length chains sees non-constant deltas.
+                const long val = static_cast<long>(tile_id) * 10000
+                                + static_cast<long>(z % tz) * 100
+                                + static_cast<long>(y % ty) * 10
+                                + static_cast<long>(x % tx);
+                h[(z * NY + y) * NX + x] = static_cast<int32_t>(val);
+            }
+
+    expect_exact_tiled_round_trip<int32_t>(h, NX, NY, NZ, tx, ty, tz);
 }

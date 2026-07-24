@@ -143,6 +143,147 @@ __global__ void decode_unpack_kernel(
     }
 }
 
+// ── Warp-cooperative plain-mode kernels ─────────────────────────────────────
+// One warp (not one thread) owns one logical data block. Lane l, sub-index m
+// (m = 0..ElemsPerLane-1) owns element `lane + 32*m` of the block. Byte k = 4m
+// + (l/8), bit j = l%8 reproduces the scalar kernels' `bit j of byte k = elem
+// 8k+j` layout exactly (substitute l=8q+j: 8(4m+q)+j = 32m+8q+j = 32m+l) — so
+// the on-disk archive format is unchanged, only how it's computed. A
+// __ballot_sync at fixed (p, m) yields a 32-bit mask whose byte b (bits
+// 8b..8b+7) is exactly the scalar kernels' base[4m+b] for that plane.
+// ElemsPerLane is a compile-time template parameter (not a runtime loop
+// bound) specifically so the tiny per-lane v[]/av[] arrays register-allocate
+// instead of spilling to local memory from dynamic indexing (the same issue
+// that made native cuSZp3's absQuant[] spill-bound, per prior profiling).
+// Only block_size 32 (ElemsPerLane=1, cuszp2) and 64 (ElemsPerLane=2, cuszp3)
+// are shipped/tested; any other block_size falls back to the scalar kernels
+// above, which are untouched.
+template<typename T, int ElemsPerLane>
+__global__ void encode_rate_kernel_warp(
+    const T* __restrict__ in, size_t num_elements,
+    uint32_t word_bytes, size_t num_blocks,
+    uint8_t* __restrict__ rate, uint32_t* __restrict__ cost)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+
+    uint32_t acc = 0;
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx < count) acc |= static_cast<uint32_t>(absU<T>(in[start + idx]));
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        acc |= __shfl_xor_sync(0xffffffffu, acc, off);
+
+    if (lane == 0) {
+        const int r = bitWidth32(acc);
+        rate[b] = static_cast<uint8_t>(r);
+        cost[b] = (r > 0) ? word_bytes * (static_cast<uint32_t>(r) + 1u) : 0u;
+    }
+}
+
+template<typename T, int ElemsPerLane>
+__global__ void encode_pack_kernel_warp(
+    const T* __restrict__ in, size_t num_elements,
+    uint32_t word_bytes, size_t num_blocks,
+    const uint8_t* __restrict__ rate, const uint32_t* __restrict__ offset,
+    uint8_t* __restrict__ payload)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    const int r = rate[b];
+    if (r == 0) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    uint8_t* base = payload + offset[b];
+
+    T v[ElemsPerLane];
+    uint32_t av[ElemsPerLane];
+    bool active[ElemsPerLane];
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        active[m] = idx < count;
+        v[m]  = active[m] ? in[start + idx] : static_cast<T>(0);
+        av[m] = active[m] ? static_cast<uint32_t>(absU<T>(v[m])) : 0u;
+    }
+
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const uint32_t sign_mask = __ballot_sync(0xffffffffu, active[m] && v[m] < 0);
+        if (lane < 4) base[4u * m + lane] = static_cast<uint8_t>((sign_mask >> (8u * lane)) & 0xFFu);
+    }
+    for (int p = 0; p < r; ++p) {
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const uint32_t plane_mask = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+            if (lane < 4)
+                base[word_bytes * (1u + p) + 4u * m + lane] =
+                    static_cast<uint8_t>((plane_mask >> (8u * lane)) & 0xFFu);
+        }
+    }
+}
+
+template<typename T, int ElemsPerLane>
+__global__ void decode_unpack_kernel_warp(
+    const uint8_t* __restrict__ rate, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload,
+    size_t num_elements, uint32_t word_bytes, size_t num_blocks,
+    T* __restrict__ out)
+{
+    using U = typename std::make_unsigned<T>::type;
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    const int r = rate[b];
+
+    if (r == 0) {
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx < count) out[start + idx] = static_cast<T>(0);
+        }
+        return;
+    }
+
+    const uint8_t* base = payload + offset[b];
+    const uint32_t q = lane >> 3;   // byte group 0..3 (matches k = 4m + q)
+    const uint32_t j = lane & 7u;   // bit position within that byte
+
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx >= count) continue;
+        const uint32_t k = 4u * m + q;
+        const uint8_t sgn = base[k];
+        uint32_t av = 0;
+        for (int p = 0; p < r; ++p)
+            av |= ((static_cast<uint32_t>(base[word_bytes * (1u + p) + k]) >> j) & 1u) << p;
+        out[start + idx] = applySign<T>(av, ((sgn >> j) & 1u) != 0);
+    }
+}
+
 // ── Outlier-selection mode (cuSZp2) ─────────────────────────────────────────
 // Metadata: 2 bytes per block — meta[2b]=rate, meta[2b+1]=sel
 //   sel bit0 = is_outlier; if set, sel bits1-2 = outlier_byte_num - 1.
@@ -338,17 +479,246 @@ __global__ void decode_unpack_outlier_kernel(
     }
 }
 
+// ── Warp-cooperative outlier-selection kernels ──────────────────────────────
+// Same lane mapping as the plain-mode warp kernels above. Element 0 (lane 0,
+// m=0) is excluded from the "rest" OR-accumulator and from the bit-plane
+// ballot predicate (idx>0) but included in the sign-region ballot (matches
+// the scalar kernels: sign[0] bit 0 legitimately holds element 0's sign,
+// which decode reads directly rather than via the `mag0`/outlier-byte path).
+template<typename T, int ElemsPerLane>
+__global__ void encode_rate_outlier_kernel_warp(
+    const T* __restrict__ in, size_t num_elements,
+    uint32_t word_bytes, size_t num_blocks,
+    uint8_t* __restrict__ meta, uint32_t* __restrict__ cost)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+
+    uint32_t acc_all = 0, acc_rest = 0;
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx < count) {
+            const uint32_t av = static_cast<uint32_t>(absU<T>(in[start + idx]));
+            acc_all |= av;
+            if (idx > 0) acc_rest |= av;
+        }
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        acc_all  |= __shfl_xor_sync(0xffffffffu, acc_all, off);
+        acc_rest |= __shfl_xor_sync(0xffffffffu, acc_rest, off);
+    }
+
+    if (lane == 0) {
+        const uint32_t mag0 = (count > 0) ? static_cast<uint32_t>(absU<T>(in[start])) : 0u;
+        const int fr_all  = bitWidth32(acc_all);
+        const int fr_rest = bitWidth32(acc_rest);
+        const uint32_t ob_bytes = static_cast<uint32_t>((bitWidth32(mag0) + 7) / 8);
+        const uint32_t cost_plain = (fr_all > 0) ? word_bytes * (fr_all + 1u) : 0u;
+        const uint32_t cost_out   = ob_bytes
+                                  + ((fr_rest > 0) ? word_bytes * (fr_rest + 1u) : word_bytes);
+        if (cost_plain <= cost_out) {
+            meta[2 * b]     = static_cast<uint8_t>(fr_all);
+            meta[2 * b + 1] = 0;
+            cost[b]         = cost_plain;
+        } else {
+            meta[2 * b]     = static_cast<uint8_t>(fr_rest);
+            meta[2 * b + 1] = static_cast<uint8_t>(1u | ((ob_bytes - 1u) << 1));
+            cost[b]         = cost_out;
+        }
+    }
+}
+
+template<typename T, int ElemsPerLane>
+__global__ void encode_pack_outlier_kernel_warp(
+    const T* __restrict__ in, size_t num_elements,
+    uint32_t word_bytes, size_t num_blocks,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    uint8_t* __restrict__ payload)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    const int     r   = meta[2 * b];
+    const uint8_t sel = meta[2 * b + 1];
+    const bool is_out = (sel & 1u) != 0;
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    uint8_t* base = payload + offset[b];
+
+    if (!is_out) {
+        if (r == 0) return;
+        T v[ElemsPerLane];
+        uint32_t av[ElemsPerLane];
+        bool active[ElemsPerLane];
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            active[m] = idx < count;
+            v[m]  = active[m] ? in[start + idx] : static_cast<T>(0);
+            av[m] = active[m] ? static_cast<uint32_t>(absU<T>(v[m])) : 0u;
+        }
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && v[m] < 0);
+            if (lane < 4) base[4u * m + lane] = static_cast<uint8_t>((sm >> (8u * lane)) & 0xFFu);
+        }
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) {
+                const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+                if (lane < 4)
+                    base[word_bytes * (1u + p) + 4u * m + lane] =
+                        static_cast<uint8_t>((pm >> (8u * lane)) & 0xFFu);
+            }
+        }
+        return;
+    }
+
+    // Outlier block: [ob_bytes elem0 magnitude LE][sign region][r planes for elems 1..].
+    const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+    if (lane == 0) {
+        const uint32_t mag0 = static_cast<uint32_t>(absU<T>(in[start]));
+        for (uint32_t k = 0; k < ob_bytes; ++k)
+            base[k] = static_cast<uint8_t>((mag0 >> (8u * k)) & 0xffu);
+    }
+    uint8_t* sign   = base + ob_bytes;
+    uint8_t* planes = base + ob_bytes + word_bytes;
+
+    T v[ElemsPerLane];
+    uint32_t av[ElemsPerLane];
+    bool active[ElemsPerLane], plane_active[ElemsPerLane];
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        active[m]       = idx < count;
+        plane_active[m] = active[m] && idx > 0;
+        v[m]  = active[m] ? in[start + idx] : static_cast<T>(0);
+        av[m] = active[m] ? static_cast<uint32_t>(absU<T>(v[m])) : 0u;
+    }
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && v[m] < 0);
+        if (lane < 4) sign[4u * m + lane] = static_cast<uint8_t>((sm >> (8u * lane)) & 0xFFu);
+    }
+    for (int p = 0; p < r; ++p) {
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const uint32_t pm = __ballot_sync(0xffffffffu, plane_active[m] && ((av[m] >> p) & 1u));
+            if (lane < 4)
+                planes[word_bytes * p + 4u * m + lane] =
+                    static_cast<uint8_t>((pm >> (8u * lane)) & 0xFFu);
+        }
+    }
+}
+
+template<typename T, int ElemsPerLane>
+__global__ void decode_unpack_outlier_kernel_warp(
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload,
+    size_t num_elements, uint32_t word_bytes, size_t num_blocks,
+    T* __restrict__ out)
+{
+    using U = typename std::make_unsigned<T>::type;
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    const int     r   = meta[2 * b];
+    const uint8_t sel = meta[2 * b + 1];
+    const bool is_out = (sel & 1u) != 0;
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    const uint8_t* base = payload + offset[b];
+
+    if (!is_out) {
+        if (r == 0) {
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) {
+                const size_t idx = static_cast<size_t>(lane) + 32u * m;
+                if (idx < count) out[start + idx] = static_cast<T>(0);
+            }
+            return;
+        }
+        const uint32_t q = lane >> 3, j = lane & 7u;
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx >= count) continue;
+            const uint32_t k = 4u * m + q;
+            const uint8_t sgn = base[k];
+            uint32_t av = 0;
+            for (int p = 0; p < r; ++p)
+                av |= ((static_cast<uint32_t>(base[word_bytes * (1u + p) + k]) >> j) & 1u) << p;
+            out[start + idx] = applySign<T>(av, ((sgn >> j) & 1u) != 0);
+        }
+        return;
+    }
+
+    // Outlier block.
+    const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+    const uint8_t* sign   = base + ob_bytes;
+    const uint8_t* planes = base + ob_bytes + word_bytes;
+
+    if (lane == 0) {
+        uint32_t mag0 = 0;
+        for (uint32_t k = 0; k < ob_bytes; ++k)
+            mag0 |= static_cast<uint32_t>(base[k]) << (8u * k);
+        out[start] = applySign<T>(mag0, (sign[0] & 1u) != 0);
+    }
+
+    const uint32_t q = lane >> 3, j = lane & 7u;
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx == 0 || idx >= count) continue;
+        const uint32_t k = 4u * m + q;
+        const uint8_t sgn = sign[k];
+        uint32_t av = 0;
+        for (int p = 0; p < r; ++p)
+            av |= ((static_cast<uint32_t>(planes[word_bytes * p + k]) >> j) & 1u) << p;
+        out[start + idx] = applySign<T>(av, ((sgn >> j) & 1u) != 0);
+    }
+}
+
 // ── Launchers ───────────────────────────────────────────────────────────────
 static constexpr int kBlk = 256;
+static constexpr int kWarpsPerCta = 8;
+static constexpr int kWarpCtaThreads = kWarpsPerCta * 32;
 
 template<typename T>
 void launchEncodeRate(const T* d_in, const Config& c,
                       uint8_t* d_rate, uint32_t* d_cost, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
-    int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
-    encode_rate_kernel<T><<<grid, kBlk, 0, stream>>>(
-        d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
-        d_rate, d_cost);
+    if (c.block_size == 32u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_rate_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_rate, d_cost);
+    } else if (c.block_size == 64u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_rate_kernel_warp<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_rate, d_cost);
+    } else {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        encode_rate_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
+            d_rate, d_cost);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -357,10 +727,20 @@ void launchEncodePack(const T* d_in, const Config& c,
                       const uint8_t* d_rate, const uint32_t* d_offset,
                       uint8_t* d_payload, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
-    int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
-    encode_pack_kernel<T><<<grid, kBlk, 0, stream>>>(
-        d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
-        d_rate, d_offset, d_payload);
+    if (c.block_size == 32u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_pack_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_rate, d_offset, d_payload);
+    } else if (c.block_size == 64u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_pack_kernel_warp<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_rate, d_offset, d_payload);
+    } else {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        encode_pack_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
+            d_rate, d_offset, d_payload);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -378,10 +758,20 @@ void launchDecodeUnpack(const uint8_t* d_rate, const uint32_t* d_offset,
                         const uint8_t* d_payload, const Config& c,
                         T* d_out, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
-    int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
-    decode_unpack_kernel<T><<<grid, kBlk, 0, stream>>>(
-        d_rate, d_offset, d_payload, c.num_elements, c.block_size,
-        c.word_bytes, c.num_blocks, d_out);
+    if (c.block_size == 32u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        decode_unpack_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_rate, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, d_out);
+    } else if (c.block_size == 64u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        decode_unpack_kernel_warp<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_rate, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, d_out);
+    } else {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        decode_unpack_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_rate, d_offset, d_payload, c.num_elements, c.block_size,
+            c.word_bytes, c.num_blocks, d_out);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -389,10 +779,20 @@ template<typename T>
 void launchEncodeRateOutlier(const T* d_in, const Config& c,
                              uint8_t* d_meta, uint32_t* d_cost, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
-    int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
-    encode_rate_outlier_kernel<T><<<grid, kBlk, 0, stream>>>(
-        d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
-        d_meta, d_cost);
+    if (c.block_size == 32u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_rate_outlier_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_meta, d_cost);
+    } else if (c.block_size == 64u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_rate_outlier_kernel_warp<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_meta, d_cost);
+    } else {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        encode_rate_outlier_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
+            d_meta, d_cost);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -401,10 +801,20 @@ void launchEncodePackOutlier(const T* d_in, const Config& c,
                              const uint8_t* d_meta, const uint32_t* d_offset,
                              uint8_t* d_payload, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
-    int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
-    encode_pack_outlier_kernel<T><<<grid, kBlk, 0, stream>>>(
-        d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
-        d_meta, d_offset, d_payload);
+    if (c.block_size == 32u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_pack_outlier_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_meta, d_offset, d_payload);
+    } else if (c.block_size == 64u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        encode_pack_outlier_kernel_warp<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_in, c.num_elements, c.word_bytes, c.num_blocks, d_meta, d_offset, d_payload);
+    } else {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        encode_pack_outlier_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
+            d_meta, d_offset, d_payload);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -422,10 +832,20 @@ void launchDecodeUnpackOutlier(const uint8_t* d_meta, const uint32_t* d_offset,
                                const uint8_t* d_payload, const Config& c,
                                T* d_out, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
-    int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
-    decode_unpack_outlier_kernel<T><<<grid, kBlk, 0, stream>>>(
-        d_meta, d_offset, d_payload, c.num_elements, c.block_size,
-        c.word_bytes, c.num_blocks, d_out);
+    if (c.block_size == 32u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        decode_unpack_outlier_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_meta, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, d_out);
+    } else if (c.block_size == 64u) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        decode_unpack_outlier_kernel_warp<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+            d_meta, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, d_out);
+    } else {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        decode_unpack_outlier_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_meta, d_offset, d_payload, c.num_elements, c.block_size,
+            c.word_bytes, c.num_blocks, d_out);
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 

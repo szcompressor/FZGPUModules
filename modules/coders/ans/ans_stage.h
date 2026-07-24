@@ -193,6 +193,16 @@ private:
     // params for the given input capacity.  Replaces any previous allocation.
     void initScratch(size_t inlen, MemoryPool* pool);
 
+    // execute()'s forward/inverse bodies, split into separate functions so that
+    // no single function holds both branches' local variables, kernel launches,
+    // and conditional (vGPU) code paths at once — see ans_stage.cu for why this
+    // matters (an nvc++ host-codegen bug producing a misaligned stack-argument
+    // store for CUDA kernel launches in the combined function).
+    void executeForward(cudaStream_t stream, MemoryPool* pool,
+                        uint8_t* in, uint8_t* out, size_t byte_size);
+    void executeInverse(cudaStream_t stream, MemoryPool* pool,
+                        uint8_t* in, uint8_t* out);
+
     // Per-block scratch stride (bytes): ANSWarpState (128 B) + max raw compressed
     // block (5120 B = roundUp(4096 + 4096/4, 16)).  Derived from dietGPU constants.
     static constexpr size_t kUncoalescedStride = 128 + 5120;  // 5248

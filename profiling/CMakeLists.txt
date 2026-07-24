@@ -86,6 +86,18 @@ if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-cuszp2 PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
+# ── cuSZp3 nsys / NVTX3 harness ──────────────────────────────────────────────
+# Pipeline: Quantizer(linear,ABS) → TiledLorenzo(8x8) → AdaptiveBitpack(64,outlier)
+# Matches examples/presets/cuszp3_outlier.toml.
+# Profiles PREALLOCATE (cold + steady-state) and CUDA Graph (compress replay).
+add_executable(fzgmod-profile-cuszp3 cuszp3_profile.cpp)
+target_link_libraries(fzgmod-profile-cuszp3 PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-cuszp3 PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-cuszp3 PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
 # ── cuSZ-Hi throughput-mode nsys / NVTX3 harness ─────────────────────────────
 # Pipeline: GInterp → {Zigzag→Bitshuffle→RRE} / {Merge→Bitshuffle→RRE→RZE}
 # Matches examples/presets/cusz_hi_tp.toml.

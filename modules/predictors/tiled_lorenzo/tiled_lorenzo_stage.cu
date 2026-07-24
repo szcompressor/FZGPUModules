@@ -64,55 +64,88 @@ __global__ void tiled_lorenzo_delta_kernel(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Inverse: tile-major separable deltas -> natural row-major codes.
-// One thread per tile; storage-free separable prefix-sum (3 running scalars),
-// mirroring the cuSZp3 decompress update rules. Writes only in-range coords.
+// Inverse (phased, one CUDA block per tile): the same separable prefix-sum as
+// tiled_lorenzo_scan_kernel above, but computed by tile_elems threads instead
+// of one. The three chains traced from the serial kernel's prevQuant_z/_y/_x
+// update rules are each independently parallelizable (addition is
+// associative) — this just stops running them all on a single thread:
+//   Phase 1 (thread 0):        Z-chain, length tz             -> s_zseed[tz]
+//   Phase 2 (threads 0..tz-1): per-lz Y-chain, length ty       -> s_yseed[ty*tz]
+//   Phase 3 (threads 0..ty*tz-1): per-(ly,lz) X-chain, length tx -> out[]
+// Every (lx,ly,lz) grid point is written exactly once: (0,0,lz) in phase 1,
+// (0,ly>0,lz) in phase 2, (lx>0,ly,lz) in phase 3 — matching the serial
+// kernel's unconditional per-iteration out[gidx] write.
 // ─────────────────────────────────────────────────────────────────────────────
 template<typename T>
-__global__ void tiled_lorenzo_scan_kernel(
+__global__ void tiled_lorenzo_scan_kernel_phased(
     const T* __restrict__ in, T* __restrict__ out,
     TiledGeom g, size_t num_tiles)
 {
-    const size_t t = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    extern __shared__ unsigned char s_raw[];
+    T* s_zseed = reinterpret_cast<T*>(s_raw);   // [tz]
+    T* s_yseed = s_zseed + g.tz;                // [ty*tz]
+
+    const size_t t = blockIdx.x;
     if (t >= num_tiles) return;
 
     const uint32_t tix = static_cast<uint32_t>(t % g.ntx);
     const uint32_t tiy = static_cast<uint32_t>((t / g.ntx) % g.nty);
     const uint32_t tiz = static_cast<uint32_t>(t / (static_cast<size_t>(g.ntx) * g.nty));
     const size_t base = t * g.tile_elems;
+    const uint32_t tid = threadIdx.x;
 
-    T prevQuant_z = 0;
-    for (uint32_t lz = 0; lz < g.tz; ++lz) {
+    auto writeIfInRange = [&](uint32_t lx, uint32_t ly, uint32_t lz, T cur) {
+        const uint32_t gx = tix * g.tx + lx;
+        const uint32_t gy = tiy * g.ty + ly;
         const uint32_t gz = tiz * g.tz + lz;
-        T prevQuant_y = 0;
-        for (uint32_t ly = 0; ly < g.ty; ++ly) {
-            const uint32_t gy = tiy * g.ty + ly;
-            T prevQuant_x = 0;
-            for (uint32_t lx = 0; lx < g.tx; ++lx) {
-                const uint32_t local = (lz * g.ty + ly) * g.tx + lx;
-                const T d = in[base + local];
-                T cur;
-                if (lx > 0) {
-                    cur = static_cast<T>(d + prevQuant_x);
-                } else if (ly > 0) {
-                    cur = static_cast<T>(d + prevQuant_y);
-                } else if (lz > 0) {
-                    cur = static_cast<T>(d + prevQuant_z);
-                    prevQuant_z = cur;
-                } else {
-                    cur = d;            // tile origin
-                    prevQuant_z = cur;  // seed Z-chain at the (0,0,0) corner
-                }
-                if (lx == 0) prevQuant_y = cur;  // leading x-column feeds Y-chain
-                prevQuant_x = cur;
+        if (gx < g.dx && gy < g.dy && gz < g.dz) {
+            const size_t gidx = (static_cast<size_t>(gz) * g.dy + gy) * g.dx + gx;
+            out[gidx] = cur;
+        }
+    };
 
-                const uint32_t gx = tix * g.tx + lx;
-                if (gx < g.dx && gy < g.dy && gz < g.dz) {
-                    const size_t gidx =
-                        (static_cast<size_t>(gz) * g.dy + gy) * g.dx + gx;
-                    out[gidx] = cur;
-                }
-            }
+    // Phase 1: Z-chain (thread 0 only; tz is small — 1 for 2-D, 4 for 3-D).
+    if (tid == 0) {
+        T prev = 0;
+        for (uint32_t lz = 0; lz < g.tz; ++lz) {
+            const uint32_t local = (lz * g.ty) * g.tx;  // (lx=0, ly=0, lz)
+            const T d = in[base + local];
+            const T cur = (lz > 0) ? static_cast<T>(d + prev) : d;
+            prev = cur;
+            s_zseed[lz] = cur;
+            writeIfInRange(0, 0, lz, cur);
+        }
+    }
+    __syncthreads();
+
+    // Phase 2: per-lz Y-chain, one thread per lz.
+    if (tid < g.tz) {
+        const uint32_t lz = tid;
+        T prev = s_zseed[lz];
+        s_yseed[0 * g.tz + lz] = prev;  // row ly=0 reuses the Z-chain value directly
+        for (uint32_t ly = 1; ly < g.ty; ++ly) {
+            const uint32_t local = (lz * g.ty + ly) * g.tx;  // (lx=0, ly, lz)
+            const T d = in[base + local];
+            const T cur = static_cast<T>(d + prev);
+            prev = cur;
+            s_yseed[ly * g.tz + lz] = cur;
+            writeIfInRange(0, ly, lz, cur);
+        }
+    }
+    __syncthreads();
+
+    // Phase 3: per-(ly,lz) X-chain, one thread per (ly,lz) pair.
+    const uint32_t rows = g.ty * g.tz;
+    if (tid < rows) {
+        const uint32_t ly = tid % g.ty;
+        const uint32_t lz = tid / g.ty;
+        T prev = s_yseed[ly * g.tz + lz];
+        for (uint32_t lx = 1; lx < g.tx; ++lx) {
+            const uint32_t local = (lz * g.ty + ly) * g.tx + lx;
+            const T d = in[base + local];
+            const T cur = static_cast<T>(d + prev);
+            prev = cur;
+            writeIfInRange(lx, ly, lz, cur);
         }
     }
 }
@@ -137,10 +170,10 @@ static void launchScan(const T* in, T* out, const TiledGeom& g,
                        size_t num_tiles, cudaStream_t stream)
 {
     if (num_tiles == 0) return;
-    const int kBlock = 128;
-    const size_t grid = (num_tiles + kBlock - 1) / kBlock;
-    tiled_lorenzo_scan_kernel<T>
-        <<<static_cast<unsigned>(grid), kBlock, 0, stream>>>(in, out, g, num_tiles);
+    const size_t smem_bytes = static_cast<size_t>(g.tz + g.ty * g.tz) * sizeof(T);
+    tiled_lorenzo_scan_kernel_phased<T>
+        <<<static_cast<unsigned>(num_tiles), g.tile_elems, smem_bytes, stream>>>(
+            in, out, g, num_tiles);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
