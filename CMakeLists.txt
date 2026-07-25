@@ -387,6 +387,8 @@ add_library(fzgmod_modules
   modules/coders/rle/rle.cu
   modules/coders/rze/rze_stage.cu
   modules/coders/rre/rre_stage.cu
+  modules/coders/rare/rare_stage.cu
+  modules/coders/raze/raze_stage.cu
   modules/structural/merge/merge_stage.cu
   modules/coders/bitpack/bitpack_stage.cu
   modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu

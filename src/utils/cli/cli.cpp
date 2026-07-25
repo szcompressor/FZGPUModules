@@ -508,6 +508,20 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             rre->setChunkSize(s.chunk_size);
             rre->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
             connect_next(rre);
+        } else if (name == "rare" || name == "rare1" || name == "rare2" ||
+                   name == "rare4" || name == "rare8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* rare = pipeline->addStage<RAREStage>();
+            rare->setChunkSize(s.chunk_size);
+            rare->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
+            connect_next(rare);
+        } else if (name == "raze" || name == "raze1" || name == "raze2" ||
+                   name == "raze4" || name == "raze8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* raze = pipeline->addStage<RAZEStage>();
+            raze->setChunkSize(s.chunk_size);
+            raze->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
+            connect_next(raze);
         } else if (name == "diff" || name == "difference") {
             auto* diff = pipeline->addStage<DifferenceStage<uint16_t>>();
             diff->setChunkSize(s.chunk_size);
@@ -551,7 +565,8 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         } else {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
-                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm");
+                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], "
+                "rare[1|2|4|8], raze[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm");
         }
     }
 
@@ -594,7 +609,8 @@ static void print_root_usage(const char* argv0) {
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
-        << "                                                      rze[1|2|4|8], rre[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm\n"
+        << "                                                      rze[1|2|4|8], rre[1|2|4|8], rare[1|2|4|8], raze[1|2|4|8],\n"
+        << "                                                      diff, rle[1|2|4|8], huffman, ans, adm\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

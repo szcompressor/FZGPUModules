@@ -97,6 +97,8 @@ enum class StageType : uint16_t {
     ADAPTIVE_BITPACK = 24, ///< Per-block adaptive fixed-rate bit-plane coder (cuSZp plain mode)
     TILED_LORENZO = 25, ///< Dimension-aware (tiled separable) Lorenzo predictor (cuSZp3 delta)
     RRE        = 26,   ///< Repetition-Reduction Encoding (LC framework lossless component)
+    RARE       = 27,   ///< Repetition-Adaptive Reduction Encoding (LC framework, auto-k generalization of RRE)
+    RAZE       = 28,   ///< Zero-Adaptive Reduction Encoding (LC framework, auto-k generalization of RZE)
 };
 
 /**
@@ -318,6 +320,8 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::BITSHUFFLE:  return "Bitshuffle";
         case StageType::RZE:         return "RZE";
         case StageType::RRE:         return "RRE";
+        case StageType::RARE:        return "RARE";
+        case StageType::RAZE:        return "RAZE";
         case StageType::LORENZO:     return "Lorenzo";
         case StageType::ANS:  return "ANS";
         case StageType::ADM:  return "ADM";

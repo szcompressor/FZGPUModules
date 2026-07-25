@@ -92,6 +92,22 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── RAREStage GPU round-trip ────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_rare_stage
+    SOURCES test_rare_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── RAZEStage GPU round-trip ────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_raze_stage
+    SOURCES test_raze_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── MergeStage (structural concat/split) ────────────────────────────────────
 fz_add_test(
     NAME    test_merge_stage

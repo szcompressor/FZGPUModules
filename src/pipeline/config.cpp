@@ -38,6 +38,8 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
 #include "coders/rre/rre_stage.h"
+#include "coders/rare/rare_stage.h"
+#include "coders/raze/raze_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
@@ -381,6 +383,20 @@ static Stage* addRREStage(Pipeline& p, const toml::table& t) {
     return rre;
 }
 
+static Stage* addRAREStage(Pipeline& p, const toml::table& t) {
+    auto* rare = p.addStage<RAREStage>();
+    rare->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
+    rare->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
+    return rare;
+}
+
+static Stage* addRAZEStage(Pipeline& p, const toml::table& t) {
+    auto* raze = p.addStage<RAZEStage>();
+    raze->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
+    raze->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
+    return raze;
+}
+
 static Stage* addMergeStage(Pipeline& p, const toml::table& t) {
     auto* mg = p.addStage<MergeStage>();
     std::vector<std::string> names;
@@ -578,6 +594,18 @@ static void saveRREStage(Stage* s, std::ostringstream& out) {
     auto* rre = static_cast<RREStage*>(s);
     out << "chunk_size = " << static_cast<int64_t>(rre->getChunkSize()) << "\n";
     out << "word_size = "  << static_cast<int64_t>(rre->getWordSize())  << "\n";
+}
+
+static void saveRAREStage(Stage* s, std::ostringstream& out) {
+    auto* rare = static_cast<RAREStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(rare->getChunkSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(rare->getWordSize())  << "\n";
+}
+
+static void saveRAZEStage(Stage* s, std::ostringstream& out) {
+    auto* raze = static_cast<RAZEStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(raze->getChunkSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(raze->getWordSize())  << "\n";
 }
 
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
@@ -787,6 +815,8 @@ static const StageEntry kStageRegistry[] = {
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage   },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage          },
     { "RRE",          StageType::RRE,          addRREStage,          saveRREStage          },
+    { "RARE",         StageType::RARE,         addRAREStage,         saveRAREStage         },
+    { "RAZE",         StageType::RAZE,         addRAZEStage,         saveRAZEStage         },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage        },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage          },
     { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage   },

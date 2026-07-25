@@ -98,6 +98,8 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_bitshuffle "BitshuffleStage"                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
 | \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Recursive zero-byte elimination                |
 | \ref stage_rre "RREStage"                         | `modules/coders/rre/rre_stage.h`                   | Repetition-reduction encoding (LC component)   |
+| \ref stage_rare "RAREStage"                       | `modules/coders/rare/rare_stage.h`                 | Repetition-adaptive reduction encoding (LC component, auto-k RRE) |
+| \ref stage_raze "RAZEStage"                       | `modules/coders/raze/raze_stage.h`                 | Zero-adaptive reduction encoding (LC component, auto-k RZE) |
 | \ref stage_zigzag "ZigzagStage<TIn, TOut>"           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | \ref stage_negabinary "NegabinaryStage<TIn, TOut>"       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |

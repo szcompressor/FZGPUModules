@@ -183,6 +183,32 @@ component used by cuSZ-Hi's LC pipelines). Eliminates runs of a repeated value
 | chunk_size | integer | 16384 | Chunk size in bytes. Only 16384 is currently supported. |
 | word_size | integer | 1 | Word granularity in bytes: 1, 2, 4, or 8 (LC RRE_1/RRE_2/RRE_4/RRE_8). |
 
+### RARE
+
+Repetition-Adaptive Reduction Encoding -- lossless byte-stream compressor (LC
+framework component). The auto-k generalization of RRE: instead of a binary
+repeat-or-drop test, picks one global bit-width `keep` that maximizes savings
+and bit-packs every word whose top bits match its predecessor at that width
+(the sibling of RAZE, which generalizes RZE the same way).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| chunk_size | integer | 16384 | Chunk size in bytes: 4096, 8192, or 16384. |
+| word_size | integer | 1 | Word granularity in bytes: 1, 2, 4, or 8 (LC RARE_1/RARE_2/RARE_4/RARE_8). |
+
+### RAZE
+
+Zero-Adaptive Reduction Encoding -- lossless byte-stream compressor (LC
+framework component). The auto-k generalization of RZE: instead of a binary
+zero-or-full test, picks one global bit-width `keep` that maximizes savings
+and bit-packs every word whose top bits are all zero at that width (the
+sibling of RARE, which generalizes RRE the same way).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| chunk_size | integer | 16384 | Chunk size in bytes: 4096, 8192, or 16384. |
+| word_size | integer | 1 | Word granularity in bytes: 1, 2, 4, or 8 (LC RAZE_1/RAZE_2/RAZE_4/RAZE_8). |
+
 ### Merge
 
 Structural stage: concatenates N producer ports into one buffer (forward) and

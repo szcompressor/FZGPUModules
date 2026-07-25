@@ -146,6 +146,8 @@ position within the payload.
 | 17 | `BITSHUFFLE`   | `BitshuffleStage` — GPU bit-matrix transpose |
 | 18 | `RZE`          | `RZEStage` — recursive zero-byte elimination |
 | 26 | `RRE`          | `RREStage` — repetition-reduction encoding (LC component) |
+| 27 | `RARE`         | `RAREStage` — repetition-adaptive reduction encoding (LC component, auto-k RRE) |
+| 28 | `RAZE`         | `RAZEStage` — zero-adaptive reduction encoding (LC component, auto-k RZE) |
 
 **Rule:** never reuse or renumber an existing value — stage type IDs are baked into
 `.fzm` files on disk.  New stages always take the next unused integer.
@@ -182,7 +184,7 @@ STAGE_TYPES = {
     4: "PassThrough", 5: "RLE", 6: "Huffman", 7: "BitPack",
     10: "Split", 11: "Merge", 12: "Lorenzo", 14: "Quantizer",
     15: "Zigzag", 16: "Negabinary", 17: "Bitshuffle", 18: "RZE",
-    26: "RRE",
+    26: "RRE", 27: "RARE", 28: "RAZE",
 }
 DATA_TYPES = {
     0: "uint8", 1: "uint16", 2: "uint32", 3: "uint64",
