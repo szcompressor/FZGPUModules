@@ -72,10 +72,16 @@ if(FZGMOD_BACKEND STREQUAL "CUDA")
       "  Detected: ${CUDAToolkit_VERSION}")
   endif()
 
-  enable_language(CUDA)
+  # Must precede enable_language(CUDA): CMake's own architecture autodetection
+  # runs during enable_language() and, on a GPU-less build host (e.g. a Docker
+  # builder with no GPU passed through), falls back to the oldest architecture
+  # it knows (sm_52) rather than our intended default — sm_52 predates
+  # block-scoped atomics (atomicAdd_block/atomicOr_block, compute capability
+  # 6.0+) used by the RARE/RAZE stages, so that fallback fails to compile.
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
   endif()
+  enable_language(CUDA)
 
   set(FZGMOD_GPU_RUNTIME CUDA::cudart)
 
