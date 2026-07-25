@@ -508,6 +508,55 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             rre->setChunkSize(s.chunk_size);
             rre->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
             connect_next(rre);
+        } else if (name == "rare" || name == "rare1" || name == "rare2" ||
+                   name == "rare4" || name == "rare8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* rare = pipeline->addStage<RAREStage>();
+            rare->setChunkSize(s.chunk_size);
+            rare->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
+            connect_next(rare);
+        } else if (name == "raze" || name == "raze1" || name == "raze2" ||
+                   name == "raze4" || name == "raze8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* raze = pipeline->addStage<RAZEStage>();
+            raze->setChunkSize(s.chunk_size);
+            raze->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
+            connect_next(raze);
+        } else if (name == "clog" || name == "clog1" || name == "clog2" ||
+                   name == "clog4" || name == "clog8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* clog = pipeline->addStage<CLOGStage>();
+            clog->setChunkSize(s.chunk_size);
+            clog->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
+            connect_next(clog);
+        } else if (name == "hclog" || name == "hclog1" || name == "hclog2" ||
+                   name == "hclog4" || name == "hclog8") {
+            // Optional trailing digit selects the LC word granularity (default 1).
+            auto* hclog = pipeline->addStage<HCLOGStage>();
+            hclog->setChunkSize(s.chunk_size);
+            hclog->setWordSize(name.size() > 5 ? static_cast<size_t>(name[5] - '0') : 1);
+            connect_next(hclog);
+        } else if (name == "tupl" || name.rfind("tupl", 0) == 0) {
+            // "tupl" (dim=2, word_size=1 default) or "tupl<dim>_<word>", e.g.
+            // "tupl6_4" -- mirrors LC's TUPLk_w naming; dim can be multi-digit
+            // (LC uses up to TUPL12), so this isn't a single trailing-digit
+            // suffix like rze[1|2|4|8].
+            size_t dim = 2, word = 1;
+            if (name.size() > 4) {
+                const std::string rest = name.substr(4);
+                const auto us = rest.find('_');
+                if (us == std::string::npos)
+                    throw std::runtime_error(
+                        "Unknown stage '" + name + "' in --stages. "
+                        "Expected 'tupl' or 'tupl<dim>_<word_size>', e.g. tupl6_4");
+                dim = static_cast<size_t>(std::stoi(rest.substr(0, us)));
+                word = static_cast<size_t>(std::stoi(rest.substr(us + 1)));
+            }
+            auto* tupl = pipeline->addStage<TUPLStage>();
+            tupl->setBlockSize(s.chunk_size);
+            tupl->setDim(dim);
+            tupl->setWordSize(word);
+            connect_next(tupl);
         } else if (name == "diff" || name == "difference") {
             auto* diff = pipeline->addStage<DifferenceStage<uint16_t>>();
             diff->setChunkSize(s.chunk_size);
@@ -551,7 +600,10 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         } else {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
-                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm");
+                "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], "
+                "rare[1|2|4|8], raze[1|2|4|8], clog[1|2|4|8], hclog[1|2|4|8], "
+                "tupl[<dim>_<word_size>], diff, "
+                "rle[1|2|4|8], huffman, ans, adm");
         }
     }
 
@@ -594,7 +646,9 @@ static void print_root_usage(const char* argv0) {
         << "  --stages \"<s1->s2->...>\"          Ordered pipeline stages (default: \"lorenzo->bitshuffle->rze\")\n"
         << "                                    NOTE: Wrap in quotes to prevent shell redirection ('->')\n"
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
-        << "                                                      rze[1|2|4|8], rre[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm\n"
+        << "                                                      rze[1|2|4|8], rre[1|2|4|8], rare[1|2|4|8], raze[1|2|4|8],\n"
+        << "                                                      clog[1|2|4|8], hclog[1|2|4|8], tupl[<dim>_<word_size>],\n"
+        << "                                                      diff, rle[1|2|4|8], huffman, ans, adm\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

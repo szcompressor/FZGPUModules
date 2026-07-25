@@ -16,6 +16,11 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
 #include "coders/rre/rre_stage.h"
+#include "coders/rare/rare_stage.h"
+#include "coders/raze/raze_stage.h"
+#include "coders/clog/clog_stage.h"
+#include "coders/hclog/hclog_stage.h"
+#include "shufflers/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
@@ -268,6 +273,41 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
 
         case StageType::RRE: {
             auto* s = new RREStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::RARE: {
+            auto* s = new RAREStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::RAZE: {
+            auto* s = new RAZEStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::CLOG: {
+            auto* s = new CLOGStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::HCLOG: {
+            auto* s = new HCLOGStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::TUPL: {
+            auto* s = new TUPLStage();
             s->deserializeHeader(config, config_size);
             stage = s;
             break;

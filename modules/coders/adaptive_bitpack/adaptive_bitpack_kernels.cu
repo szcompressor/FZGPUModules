@@ -7,6 +7,7 @@
 #include "cuda_check.h"
 
 #include <type_traits>
+#include <cstdlib>
 
 namespace fz {
 namespace adaptive_bitpack {
@@ -29,6 +30,30 @@ __device__ __forceinline__ T applySign(uint32_t mag, bool neg) {
     using U = typename std::make_unsigned<T>::type;
     U m = static_cast<U>(mag);
     return neg ? static_cast<T>(static_cast<U>(0) - m) : static_cast<T>(m);
+}
+
+// 32x32 in-warp bit-matrix transpose. Lane l holds row_l on input (bit b =
+// M[l][b]); on output lane l holds col_l (bit b = M[b][l]). Butterfly: at step i
+// it swaps lane-coordinate bit i with value-position bit i, so the whole warp
+// transposes in 5 shuffles regardless of matrix density. Verified bit-exact
+// against a CPU transpose over pseudo-random matrices before use.
+__device__ __forceinline__ uint32_t warpBitTranspose32(uint32_t v, unsigned lane) {
+    #pragma unroll
+    for (int i = 0; i < 5; ++i) {
+        const unsigned s = 1u << i;
+        uint32_t m;
+        switch (i) {
+            case 0:  m = 0xAAAAAAAAu; break;
+            case 1:  m = 0xCCCCCCCCu; break;
+            case 2:  m = 0xF0F0F0F0u; break;
+            case 3:  m = 0xFF00FF00u; break;
+            default: m = 0xFFFF0000u; break;
+        }
+        const uint32_t t = __shfl_xor_sync(0xFFFFFFFFu, v, s);
+        v = (lane & s) ? ((v & m) | ((t & m) >> s))
+                       : ((v & ~m) | ((t & ~m) << s));
+    }
+    return v;
 }
 
 // ── Encode pass A: rate byte + payload cost per block ───────────────────────
@@ -282,6 +307,87 @@ __global__ void decode_unpack_kernel_warp(
         for (int p = 0; p < r; ++p)
             av |= ((static_cast<uint32_t>(base[word_bytes * (1u + p) + k]) >> j) & 1u) << p;
         out[start + idx] = applySign<T>(av, ((sgn >> j) & 1u) != 0);
+    }
+}
+
+// Transpose-based plain decode. Same archive format and output as
+// decode_unpack_kernel_warp, but reconstructs magnitudes with a single 32x32
+// warp bit-transpose per 32-element half instead of the O(rate) per-element
+// bit-plane gather. ncu showed the gather kernel is ALU-bound (85% ALU pipe) at
+// ~8*rate ops/lane; on high-rate data (e.g. NYX temperature, rate~21) the
+// transpose's fixed 5-shuffle cost is far cheaper. For low rate the O(rate) path
+// still wins, so we keep both and branch per block on the (warp-uniform) rate —
+// no warp divergence. Row l of the transpose is plane l's 32-bit half-word (0 for
+// l>=rate, i.e. planes that aren't in the payload); after transpose lane l holds
+// exactly the rate-bit magnitude of its element.
+template<typename T, int ElemsPerLane>
+__global__ void decode_unpack_kernel_warp_tr(
+    const uint8_t* __restrict__ rate, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload,
+    size_t num_elements, uint32_t word_bytes, size_t num_blocks,
+    uint32_t rate_threshold, T* __restrict__ out)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    const int r = rate[b];
+
+    if (r == 0) {
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx < count) out[start + idx] = static_cast<T>(0);
+        }
+        return;
+    }
+
+    const uint8_t* base = payload + offset[b];
+
+    // Low-rate blocks: fall back to the O(rate) gather (cheaper than a fixed
+    // transpose when rate is small). Warp-uniform branch, so no divergence.
+    if (static_cast<uint32_t>(r) < rate_threshold) {
+        const uint32_t q = lane >> 3;
+        const uint32_t j = lane & 7u;
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx >= count) continue;
+            const uint32_t k = 4u * m + q;
+            const uint8_t sgn = base[k];
+            uint32_t av = 0;
+            for (int p = 0; p < r; ++p)
+                av |= ((static_cast<uint32_t>(base[word_bytes * (1u + p) + k]) >> j) & 1u) << p;
+            out[start + idx] = applySign<T>(av, ((sgn >> j) & 1u) != 0);
+        }
+        return;
+    }
+
+    // Assemble an unaligned little-endian 32-bit word from base[off..off+3].
+    auto load32 = [&](size_t off) -> uint32_t {
+        return static_cast<uint32_t>(base[off])
+             | (static_cast<uint32_t>(base[off + 1]) << 8)
+             | (static_cast<uint32_t>(base[off + 2]) << 16)
+             | (static_cast<uint32_t>(base[off + 3]) << 24);
+    };
+
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        // Row = this lane's plane half-word (plane index == lane); 0 past the rate.
+        const uint32_t row = (static_cast<int>(lane) < r)
+                             ? load32(static_cast<size_t>(word_bytes) * (1u + lane) + 4u * m)
+                             : 0u;
+        const uint32_t mag = warpBitTranspose32(row, lane);   // lane l -> magnitude[l]
+
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx >= count) continue;
+        const uint32_t sgnword = load32(4u * m);               // sign half-word
+        out[start + idx] = applySign<T>(mag, ((sgnword >> lane) & 1u) != 0);
     }
 }
 
@@ -697,6 +803,87 @@ __global__ void decode_unpack_outlier_kernel_warp(
     }
 }
 
+// Transpose-based outlier-mode decode — the outlier-mode counterpart of
+// decode_unpack_kernel_warp_tr. Same warp bit-transpose for the bit-plane region;
+// same archive format and output as decode_unpack_outlier_kernel_warp. Plain and
+// outlier blocks unify under a single `sign_off` (0 for plain, ob_bytes for
+// outlier): sign region at base+sign_off, plane p at base+sign_off+word_bytes*(1+p).
+// For an outlier block element 0 lives in the ob_bytes prefix (its plane bits are
+// 0, so its transposed magnitude is 0) and is written by lane 0 from those bytes.
+// Per-block rate branch is warp-uniform (rate + is_out are per block) — no
+// divergence; the transpose runs on all 32 lanes regardless of `count`.
+template<typename T, int ElemsPerLane>
+__global__ void decode_unpack_outlier_kernel_warp_tr(
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload,
+    size_t num_elements, uint32_t word_bytes, size_t num_blocks,
+    uint32_t rate_threshold, T* __restrict__ out)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    const int     r   = meta[2 * b];
+    const uint8_t sel = meta[2 * b + 1];
+    const bool is_out = (sel & 1u) != 0;
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    const uint8_t* base = payload + offset[b];
+
+    if (!is_out && r == 0) {                 // plain empty block
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx < count) out[start + idx] = static_cast<T>(0);
+        }
+        return;
+    }
+
+    const uint32_t sign_off = is_out ? (((sel >> 1) & 3u) + 1u) : 0u;
+    const bool use_tr = (static_cast<uint32_t>(r) >= rate_threshold);
+
+    auto load32 = [&](size_t off) -> uint32_t {
+        return static_cast<uint32_t>(base[off])
+             | (static_cast<uint32_t>(base[off + 1]) << 8)
+             | (static_cast<uint32_t>(base[off + 2]) << 16)
+             | (static_cast<uint32_t>(base[off + 3]) << 24);
+    };
+
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        uint32_t mag;
+        if (use_tr) {
+            const uint32_t row = (static_cast<int>(lane) < r)
+                ? load32(static_cast<size_t>(sign_off) + static_cast<size_t>(word_bytes) * (1u + lane) + 4u * m)
+                : 0u;
+            mag = warpBitTranspose32(row, lane);   // all 32 lanes must participate
+        } else {
+            const uint32_t q = lane >> 3, j = lane & 7u;
+            const uint32_t k = 4u * m + q;
+            mag = 0;
+            for (int p = 0; p < r; ++p)
+                mag |= ((static_cast<uint32_t>(base[sign_off + word_bytes * (1u + p) + k]) >> j) & 1u) << p;
+        }
+
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx >= count) continue;
+
+        if (is_out && idx == 0) {              // element 0 from the outlier bytes
+            const uint32_t ob_bytes = sign_off;   // == ob_bytes for outlier blocks
+            uint32_t mag0 = 0;
+            for (uint32_t k = 0; k < ob_bytes; ++k)
+                mag0 |= static_cast<uint32_t>(base[k]) << (8u * k);
+            out[start] = applySign<T>(mag0, (base[sign_off] & 1u) != 0);  // sign[0] bit 0
+        } else {
+            const uint32_t sgnword = load32(static_cast<size_t>(sign_off) + 4u * m);
+            out[start + idx] = applySign<T>(mag, ((sgnword >> lane) & 1u) != 0);
+        }
+    }
+}
+
 // ── Launchers ───────────────────────────────────────────────────────────────
 static constexpr int kBlk = 256;
 static constexpr int kWarpsPerCta = 8;
@@ -754,11 +941,36 @@ void launchDecodeCost(const uint8_t* d_rate, const Config& c,
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
+// Transpose-based plain decode is the default (measured 1.1-2.5x faster and
+// bit-exact vs the O(rate) gather on NYX/HACC/CESM). Its per-block rate threshold
+// (blocks with rate below it fall back to the gather, which is cheaper at trivial
+// rate) defaults to 6. FZ_DECODE_TR overrides it; FZ_DECODE_TR=0 disables the
+// transpose entirely (pure gather) for debugging/A-B. Read once.
+static uint32_t decodeTransposeThreshold() {
+    static const uint32_t thr = [] {
+        const char* e = std::getenv("FZ_DECODE_TR");
+        return e ? static_cast<uint32_t>(std::atoi(e)) : 6u;
+    }();
+    return thr;
+}
+
 template<typename T>
 void launchDecodeUnpack(const uint8_t* d_rate, const uint32_t* d_offset,
                         const uint8_t* d_payload, const Config& c,
                         T* d_out, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    const uint32_t tr = decodeTransposeThreshold();
+    if (tr && (c.block_size == 32u || c.block_size == 64u)) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        if (c.block_size == 32u)
+            decode_unpack_kernel_warp_tr<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_rate, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, tr, d_out);
+        else
+            decode_unpack_kernel_warp_tr<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_rate, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, tr, d_out);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (c.block_size == 32u) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
         decode_unpack_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
@@ -833,6 +1045,18 @@ void launchDecodeUnpackOutlier(const uint8_t* d_meta, const uint32_t* d_offset,
                                const uint8_t* d_payload, const Config& c,
                                T* d_out, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    const uint32_t tr = decodeTransposeThreshold();
+    if (tr && (c.block_size == 32u || c.block_size == 64u)) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        if (c.block_size == 32u)
+            decode_unpack_outlier_kernel_warp_tr<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_meta, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, tr, d_out);
+        else
+            decode_unpack_outlier_kernel_warp_tr<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_meta, d_offset, d_payload, c.num_elements, c.word_bytes, c.num_blocks, tr, d_out);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (c.block_size == 32u) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
         decode_unpack_outlier_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(

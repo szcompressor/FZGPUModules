@@ -151,6 +151,67 @@ __global__ void tiled_lorenzo_scan_kernel_phased(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Inverse (per-row, fully parallel). One thread owns one x-row = one (tile,ly,lz).
+// The phased one-block-per-tile kernel was barrier-bound (ncu: sm__throughput 51%
+// at 91% resident warps) because it left most of its 64 threads idle across two
+// __syncthreads — even the busiest phase used only ty*tz of tile_elems threads.
+// This kernel removes barriers and idle lanes entirely: every thread is
+// self-contained. Exploiting the separable structure, a row thread re-derives its
+// own seed by walking the tile's tiny x=0 "spine" — the z-column prefix
+// (delta(0,0,0..lz)) then the y-column prefix (delta(0,1..ly,lz)) — then runs its
+// own tx-length x-chain, writing each in-range element. The spine walks are a
+// handful of adds over L1-resident bytes (re-read across the tile's rows, but
+// tile_elems is tiny); the dominant traffic is the coalesced read of each row's
+// contiguous tx deltas plus the inherent tile->natural scatter store. Correctness
+// matches the phased math exactly: reconstructed(lx,ly,lz) =
+// Σ_{k≤lz} d(0,0,k) + Σ_{1≤k≤ly} d(0,k,lz) + Σ_{1≤k≤lx} d(k,ly,lz); padding deltas
+// are 0, sit past the in-range extent, and are never stored.
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T>
+__global__ void tiled_lorenzo_scan_kernel_rows(
+    const T* __restrict__ in, T* __restrict__ out,
+    TiledGeom g, size_t num_rows)
+{
+    const size_t r = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (r >= num_rows) return;
+
+    const uint32_t tx = g.tx, ty = g.ty, tz = g.tz;
+    const uint32_t rows_per_tile = ty * tz;
+
+    const size_t   t   = r / rows_per_tile;          // tile index
+    const uint32_t rr  = static_cast<uint32_t>(r % rows_per_tile);
+    const uint32_t ly  = rr % ty;
+    const uint32_t lz  = rr / ty;
+
+    const size_t base = t * g.tile_elems;
+
+    // Seed = reconstructed value at (lx=0, ly, lz): z-column prefix up to lz, then
+    // y-column prefix (1..ly) at this lz. Both walk the tile's x=0 spine deltas.
+    T seed = 0;
+    for (uint32_t k = 0; k <= lz; ++k)
+        seed = static_cast<T>(seed + in[base + (static_cast<size_t>(k) * ty) * tx]); // d(0,0,k)
+    for (uint32_t k = 1; k <= ly; ++k)
+        seed = static_cast<T>(seed + in[base + (static_cast<size_t>(lz) * ty + k) * tx]); // d(0,k,lz)
+
+    // X-chain: reconstruct (lx,ly,lz) = seed + prefix of row deltas, write natural.
+    const uint32_t tix = static_cast<uint32_t>(t % g.ntx);
+    const uint32_t tiy = static_cast<uint32_t>((t / g.ntx) % g.nty);
+    const uint32_t tiz = static_cast<uint32_t>(t / (static_cast<size_t>(g.ntx) * g.nty));
+    const uint32_t gy = tiy * ty + ly;
+    const uint32_t gz = tiz * tz + lz;
+    if (gy >= g.dy || gz >= g.dz) return;   // whole row is padding — nothing to store
+
+    const size_t rowbase = base + (static_cast<size_t>(lz) * ty + ly) * tx;
+    const size_t out_row = (static_cast<size_t>(gz) * g.dy + gy) * g.dx + tix * tx;
+    T cur = seed;
+    const uint32_t gx0 = tix * tx;
+    for (uint32_t lx = 0; lx < tx; ++lx) {
+        if (lx > 0) cur = static_cast<T>(cur + in[rowbase + lx]);   // d(lx,ly,lz)
+        if (gx0 + lx < g.dx) out[out_row + lx] = cur;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Launchers
 // ─────────────────────────────────────────────────────────────────────────────
 template<typename T>
@@ -170,10 +231,14 @@ static void launchScan(const T* in, T* out, const TiledGeom& g,
                        size_t num_tiles, cudaStream_t stream)
 {
     if (num_tiles == 0) return;
-    const size_t smem_bytes = static_cast<size_t>(g.tz + g.ty * g.tz) * sizeof(T);
-    tiled_lorenzo_scan_kernel_phased<T>
-        <<<static_cast<unsigned>(num_tiles), g.tile_elems, smem_bytes, stream>>>(
-            in, out, g, num_tiles);
+
+    // Fully-parallel per-row inverse: one thread per x-row (= one (tile,ly,lz)).
+    // Correct for any tile shape; no barriers, no idle lanes. See kernel comment.
+    const size_t num_rows = num_tiles * g.ty * g.tz;
+    const unsigned kBlock = 256;
+    const size_t grid = (num_rows + kBlock - 1) / kBlock;
+    tiled_lorenzo_scan_kernel_rows<T>
+        <<<static_cast<unsigned>(grid), kBlock, 0, stream>>>(in, out, g, num_rows);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
