@@ -55,6 +55,18 @@
     },
 
     {
+      "name": "cuda-h200",
+      "inherits": "base",
+      "displayName": "CUDA (H200 / Hopper, sm_90)",
+      "description": "Release build against the CUDA backend for compute capability 9.0 (H100/H200). The project default (86, A100) does not cover Hopper, so this preset overrides CMAKE_CUDA_ARCHITECTURES explicitly.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE":          "Release",
+        "FZGMOD_BACKEND":            "CUDA",
+        "CMAKE_CUDA_ARCHITECTURES":  "90"
+      }
+    },
+
+    {
       "name": "compute-san",
       "inherits": "base",
       "displayName": "Compute Sanitizer",
@@ -87,6 +99,11 @@
       "name": "hip",
       "configurePreset": "hip",
       "displayName": "Build HIP (AMD ROCm)"
+    },
+    {
+      "name": "cuda-h200",
+      "configurePreset": "cuda-h200",
+      "displayName": "Build CUDA (H200 / Hopper)"
     },
     {
       "name": "compute-san",
@@ -127,6 +144,14 @@
       "configurePreset": "hip",
       "displayName": "All tests (HIP)",
       "description": "Run the full test suite against the HIP build. ANSStage is excluded on HIP (see Stage::isSupportedOnBackend).",
+      "output": { "outputOnFailure": true }
+    },
+
+    {
+      "name": "cuda-h200",
+      "configurePreset": "cuda-h200",
+      "displayName": "All tests (CUDA H200)",
+      "description": "Run the full test suite against the CUDA sm_90 (H200/Hopper) build.",
       "output": { "outputOnFailure": true }
     },
 
