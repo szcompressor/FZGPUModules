@@ -1,18 +1,23 @@
 #pragma once
 
 /**
- * @file rze_stage.h
- * @brief Zero-Elimination Encoding stage — lossless byte-stream compressor.
+ * @file raze_stage.h
+ * @brief Zero-Adaptive Reduction Encoding stage — lossless byte-stream compressor.
  *
- * Standalone port of the LC framework `RZE` component.  Operates on a raw byte
- * stream treated as `word_size`-byte words (1, 2, 4, or 8 → LC RZE_1/2/4/8; the
- * `_N` suffix is the word size).  Each chunk is processed independently:
- *  - Level 1 (ZE): compact non-zero words; emit a 1-bit-per-word bitmap.
- *  - The bitmap is then recursively RE-compressed (hierarchical 2048/256/32/4
- *    byte levels), exactly as in the LC `d_RZE<T>` device function.
+ * Standalone port of the LC framework `RAZE` component. `RAZE` is the
+ * auto-k generalization of `RZE` (see `RZEStage`): rather than a binary
+ * "word is zero, or it's kept in full" test, it histograms how many top bits
+ * of each word are zero across the whole chunk, picks one global cut `keep`
+ * (0 <= keep < word_size*8) that maximizes total bit savings, then bit-packs
+ * the bottom `keep` bits of every word whose top bits are all zero (words
+ * with nonzero top bits are stored in full, same as RZE). The 4-level
+ * recursive bitmap compression is identical to RZE.
  *
- * RZE is the zero-eliminating sibling of RREStage (which eliminates repeated
- * values).  Output stream layout (identical container to RREStage):
+ * Output stream layout and serialized header are identical to RZEStage —
+ * the per-chunk `keep` value lives inside the chunk's own compressed bytes
+ * (accounted for in its `csize`), not in the container/host format, so the
+ * two stages share the same host-side orchestration byte-for-byte.
+ *
  * @code
  *   [uint32_t: original byte count]
  *   [uint32_t: num_chunks]
@@ -27,7 +32,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include "backend/types.h"
+#include <cuda_runtime.h>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -38,23 +43,25 @@
 namespace fz {
 
 /**
- * Zero-Elimination Encoding stage.
+ * Zero-Adaptive Reduction Encoding stage.
  *
- * `setChunkSize(bytes)` — chunk size (default 16384; only 16384 is supported).
- * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1 = LC RZE_1).
+ * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
+ * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1).
  *
- * @note **Prior work:** GPU kernels are a faithful port of `d_RZE.h`,
- *       `d_zero_elimination.h`, and `d_repetition_elimination.h` from the LC
- *       framework (Burtscher et al., BSD-3-Clause), shared with RREStage via
- *       `modules/coders/lc_common/lc_chunk_components.cuh`.  See `THIRD_PARTY.md`.
+ * @note **Prior work:** GPU kernels are a faithful port of `d_RAZE.h` from
+ *       the LC framework (Burtscher et al., BSD-3-Clause), sharing the
+ *       histogram/reduction/bit-pack device code with `RAREStage` via
+ *       `d_PRencode`/`d_PRdecode<T, PartialReduceMode>` in
+ *       `modules/coders/lc_common/lc_chunk_components.cuh`. See
+ *       `THIRD_PARTY.md`.
  *
- * @note CUDA Graph capture is supported for compression only. The inverse path
- *       reads the stream header with blocking D2H copies before it can launch
- *       the decode kernel (same constraint as RZEStage).
+ * @note CUDA Graph capture is supported for compression only. The inverse
+ *       path reads the stream header with blocking D2H copies before it can
+ *       launch the decode kernel (same constraint as RREStage/RZEStage/RAREStage).
  */
-class RZEStage : public Stage {
+class RAZEStage : public Stage {
 public:
-    RZEStage()
+    RAZEStage()
         : is_inverse_(false)
         , chunk_size_(16384)
         , word_size_(1)
@@ -67,15 +74,15 @@ public:
         , scratch_capacity_(0)
     {}
 
-    ~RZEStage() override;
+    ~RAZEStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
     /// Forward (compress) is graph-capturable; inverse reads the stream header
-    /// with blocking D2H copies and therefore is not.  See RZEStage for the
-    /// rationale (decompress-only graph capture has no practical use case).
+    /// with blocking D2H copies and therefore is not. See RREStage for the
+    /// rationale.
     bool isGraphCompatible() const override { return !is_inverse_; }
 
     void setChunkSize(size_t bytes) { chunk_size_ = static_cast<uint32_t>(bytes); }
@@ -88,16 +95,16 @@ public:
 
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
-        fz::stream_t stream,
+        cudaStream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
-    void postStreamSync(fz::stream_t stream) override;
+    void postStreamSync(cudaStream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
-    std::string getName() const override { return "RZE"; }
+    std::string getName() const override { return "RAZE"; }
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
@@ -145,7 +152,7 @@ public:
     }
 
     uint16_t getStageTypeId() const override {
-        return static_cast<uint16_t>(StageType::RZE);
+        return static_cast<uint16_t>(StageType::RAZE);
     }
 
     uint8_t getOutputDataType(size_t) const override {
@@ -200,7 +207,7 @@ private:
     uint32_t* d_clean_dev_;
     uint32_t* d_dst_off_dev_;
     mutable bool         tail_readback_pending_ = false;
-    mutable fz::stream_t tail_readback_stream_ = nullptr;
+    mutable cudaStream_t tail_readback_stream_ = nullptr;
     mutable uint32_t     tail_last_index_ = 0;
     mutable uint8_t*     tail_output_ptr_ = nullptr;
     size_t    scratch_capacity_;

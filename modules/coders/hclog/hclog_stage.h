@@ -1,18 +1,23 @@
 #pragma once
 
 /**
- * @file rze_stage.h
- * @brief Zero-Elimination Encoding stage — lossless byte-stream compressor.
+ * @file hclog_stage.h
+ * @brief Compressed-Logarithm coding with a per-subchunk TCMS fallback — lossless byte-stream compressor.
  *
- * Standalone port of the LC framework `RZE` component.  Operates on a raw byte
- * stream treated as `word_size`-byte words (1, 2, 4, or 8 → LC RZE_1/2/4/8; the
- * `_N` suffix is the word size).  Each chunk is processed independently:
- *  - Level 1 (ZE): compact non-zero words; emit a 1-bit-per-word bitmap.
- *  - The bitmap is then recursively RE-compressed (hierarchical 2048/256/32/4
- *    byte levels), exactly as in the LC `d_RZE<T>` device function.
+ * Standalone port of the LC framework `HCLOG` component — the `CLOG`
+ * algorithm (see `CLOGStage`) plus one extra step per subchunk: HCLOG also
+ * tries reinterpreting every value in the subchunk via TCMS (the same
+ * two's-complement -> sign-magnitude / zigzag transform `ZigzagStage` uses)
+ * and picks whichever of the raw or TCMS'd values needs fewer bits,
+ * recording the choice as one flag bit per subchunk (32 bits total). This
+ * does better than plain CLOG on bipolar-looking data (e.g.
+ * already-negabinary/zigzag-shaped residuals) that would otherwise bit-pack
+ * poorly as raw unsigned magnitudes. Like CLOG, `T` must be unsigned
+ * (`uint8/16/32/64` only) and there is no auxiliary bitmap or per-element
+ * full/dropped decision — every element in a subchunk is packed at the same
+ * fixed width (after the shared TCMS-or-not choice for that subchunk).
  *
- * RZE is the zero-eliminating sibling of RREStage (which eliminates repeated
- * values).  Output stream layout (identical container to RREStage):
+ * Output stream layout (identical container to RREStage/RZEStage):
  * @code
  *   [uint32_t: original byte count]
  *   [uint32_t: num_chunks]
@@ -27,7 +32,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include "backend/types.h"
+#include <cuda_runtime.h>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -38,23 +43,26 @@
 namespace fz {
 
 /**
- * Zero-Elimination Encoding stage.
+ * Compressed-Logarithm adaptive bit-width coding stage with a per-subchunk
+ * TCMS fallback (the auto-selecting sibling of `CLOGStage`).
  *
- * `setChunkSize(bytes)` — chunk size (default 16384; only 16384 is supported).
- * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1 = LC RZE_1).
+ * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
+ * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1), unsigned only.
  *
- * @note **Prior work:** GPU kernels are a faithful port of `d_RZE.h`,
- *       `d_zero_elimination.h`, and `d_repetition_elimination.h` from the LC
- *       framework (Burtscher et al., BSD-3-Clause), shared with RREStage via
- *       `modules/coders/lc_common/lc_chunk_components.cuh`.  See `THIRD_PARTY.md`.
+ * @note **Prior work:** GPU kernels are a faithful port of `d_HCLOG.h` from
+ *       the LC framework (Burtscher et al., BSD-3-Clause), sharing the
+ *       encode/decode device code with `CLOGStage` via
+ *       `d_CLOGencode`/`d_CLOGdecode<T, CLogMode>` in
+ *       `modules/coders/lc_common/lc_clog_components.cuh`. See
+ *       `THIRD_PARTY.md`.
  *
- * @note CUDA Graph capture is supported for compression only. The inverse path
- *       reads the stream header with blocking D2H copies before it can launch
- *       the decode kernel (same constraint as RZEStage).
+ * @note CUDA Graph capture is supported for compression only. The inverse
+ *       path reads the stream header with blocking D2H copies before it can
+ *       launch the decode kernel (same constraint as RREStage/RZEStage).
  */
-class RZEStage : public Stage {
+class HCLOGStage : public Stage {
 public:
-    RZEStage()
+    HCLOGStage()
         : is_inverse_(false)
         , chunk_size_(16384)
         , word_size_(1)
@@ -67,15 +75,15 @@ public:
         , scratch_capacity_(0)
     {}
 
-    ~RZEStage() override;
+    ~HCLOGStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
     /// Forward (compress) is graph-capturable; inverse reads the stream header
-    /// with blocking D2H copies and therefore is not.  See RZEStage for the
-    /// rationale (decompress-only graph capture has no practical use case).
+    /// with blocking D2H copies and therefore is not. See RREStage for the
+    /// rationale.
     bool isGraphCompatible() const override { return !is_inverse_; }
 
     void setChunkSize(size_t bytes) { chunk_size_ = static_cast<uint32_t>(bytes); }
@@ -88,16 +96,16 @@ public:
 
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
-        fz::stream_t stream,
+        cudaStream_t stream,
         MemoryPool* pool,
         const std::vector<void*>& inputs,
         const std::vector<void*>& outputs,
         const std::vector<size_t>& sizes
     ) override;
-    void postStreamSync(fz::stream_t stream) override;
+    void postStreamSync(cudaStream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
-    std::string getName() const override { return "RZE"; }
+    std::string getName() const override { return "HCLOG"; }
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
@@ -145,7 +153,7 @@ public:
     }
 
     uint16_t getStageTypeId() const override {
-        return static_cast<uint16_t>(StageType::RZE);
+        return static_cast<uint16_t>(StageType::HCLOG);
     }
 
     uint8_t getOutputDataType(size_t) const override {
@@ -200,7 +208,7 @@ private:
     uint32_t* d_clean_dev_;
     uint32_t* d_dst_off_dev_;
     mutable bool         tail_readback_pending_ = false;
-    mutable fz::stream_t tail_readback_stream_ = nullptr;
+    mutable cudaStream_t tail_readback_stream_ = nullptr;
     mutable uint32_t     tail_last_index_ = 0;
     mutable uint8_t*     tail_output_ptr_ = nullptr;
     size_t    scratch_capacity_;

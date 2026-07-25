@@ -10,8 +10,9 @@ verbatim to satisfy BSD-3-Clause condition 2 (binary redistribution).
 
 ## LC Framework
 
-**Used by:** `RZEStage`, `RREStage`, `BitshuffleStage` (4- and 8-byte butterfly
-kernels), `DifferenceStage`, `QuantizerStage`
+**Used by:** `RZEStage`, `RREStage`, `RAREStage`, `RAZEStage`, `CLOGStage`,
+`HCLOGStage`, `BitshuffleStage` (4- and 8-byte butterfly kernels), `TUPLStage`,
+`DifferenceStage`, `QuantizerStage`
 
 **Relationship:**
 - `RREStage` + `RZEStage` (`modules/coders/{rre,rze}/`) — GPU kernels are a
@@ -20,10 +21,30 @@ kernels), `DifferenceStage`, `QuantizerStage`
   `RZE` lossless components used by cuSZ-Hi's LC pipelines), vendored together in
   `modules/coders/lc_common/lc_chunk_components.cuh`.  Both support LC word sizes
   1/2/4/8 (`RRE_N` / `RZE_N`).
+- `RAREStage` + `RAZEStage` (`modules/coders/{rare,raze}/`) — GPU kernels are a
+  faithful port of `d_RARE.h` and `d_RAZE.h` from the LC framework (the auto-k
+  generalizations of `RRE`/`RZE`), sharing a single merged
+  `d_PRencode`/`d_PRdecode<T, PartialReduceMode>` template in
+  `modules/coders/lc_common/lc_chunk_components.cuh` — the two upstream files are
+  textually identical apart from their match predicate (repetition vs.
+  leading-zero-count). Both support LC word sizes 1/2/4/8 (`RARE_N` / `RAZE_N`).
+- `CLOGStage` + `HCLOGStage` (`modules/coders/{clog,hclog}/`) — GPU kernels are a
+  faithful port of `d_CLOG.h` and `d_HCLOG.h` from the LC framework (fixed
+  32-subchunk adaptive bit-width truncation, `T` unsigned only; HCLOG adds a
+  per-subchunk TCMS/zigzag fallback), sharing a single merged
+  `d_CLOGencode`/`d_CLOGdecode<T, CLogMode>` template in
+  `modules/coders/lc_common/lc_clog_components.cuh`. Both support LC word sizes
+  1/2/4/8 (`CLOG_N` / `HCLOG_N`).
 - `BitshuffleStage` (`modules/shufflers/bitshuffle/`) — the 4- and 8-byte
   butterfly shuffle kernels are adapted directly from `d_BIT_4` / `d_BIT_8`
   in the LC framework; the 1- and 2-byte paths use a standard `__ballot_sync`
   approach and are not LC-derived.
+- `TUPLStage` (`modules/shufflers/tupl/`) — GPU kernels are a faithful port of
+  `d_TUPL` / `d_iTUPL` from the LC framework (the `TUPLk` tuple deinterleave /
+  AoS-to-SoA transpose component). Upstream generates one fixed
+  `(dim, word_size)` instantiation per component over a hardcoded 16 KB chunk
+  (`TUPL2_1`, `TUPL6_8`, `TUPL12_1`, ...); here `dim`, `word_size`, and
+  `block_size` are independent runtime parameters instead.
 - `DifferenceStage` (`modules/predictors/diff/`) — independently written CUDA
   kernel following the `d_DIFFNB` algorithm described in the LC/PFPL framework.
 - `QuantizerStage` (`modules/quantizers/quantizer/`) — independently written

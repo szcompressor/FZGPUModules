@@ -10,7 +10,7 @@ predictors, quantizers, shufflers, transforms, fused stages, and external stages
 connected and executed entirely on the GPU with stream-ordered memory management.
 
 **Key properties:**
-- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, RRE, Bitshuffle, Huffman, ANS, …)
+- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, RRE, Bitshuffle, TUPL, Huffman, ANS, …)
 - **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **File format** — FZM format with CRC32 checksums and full stage config serialization
@@ -96,8 +96,13 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_diff "DifferenceStage<T, TOut>"         | `modules/predictors/diff/diff.h`                   | First-order difference / cumulative-sum coding |
 | \ref stage_adm "ADMStage"                         | `modules/transforms/adm/adm_stage.h`               | Adaptive data mapping — uint16/32 → 8-bit symbol domain (MANS port) |
 | \ref stage_bitshuffle "BitshuffleStage"                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
+| \ref stage_tupl "TUPLStage"                       | `modules/shufflers/tupl/tupl_stage.h`              | Tuple deinterleave / AoS-to-SoA transpose (LC component) |
 | \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Recursive zero-byte elimination                |
 | \ref stage_rre "RREStage"                         | `modules/coders/rre/rre_stage.h`                   | Repetition-reduction encoding (LC component)   |
+| \ref stage_rare "RAREStage"                       | `modules/coders/rare/rare_stage.h`                 | Repetition-adaptive reduction encoding (LC component, auto-k RRE) |
+| \ref stage_raze "RAZEStage"                       | `modules/coders/raze/raze_stage.h`                 | Zero-adaptive reduction encoding (LC component, auto-k RZE) |
+| \ref stage_clog "CLOGStage"                       | `modules/coders/clog/clog_stage.h`                 | Compressed-Logarithm adaptive bit-width coding (LC component) |
+| \ref stage_hclog "HCLOGStage"                     | `modules/coders/hclog/hclog_stage.h`               | Compressed-Logarithm coding with per-subchunk TCMS fallback (LC component) |
 | \ref stage_zigzag "ZigzagStage<TIn, TOut>"           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | \ref stage_negabinary "NegabinaryStage<TIn, TOut>"       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |

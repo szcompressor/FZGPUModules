@@ -2,21 +2,31 @@
 
 /**
  * @file modules/coders/lc_common/lc_chunk_components.cuh
- * @brief Vendored LC-framework single-chunk device codecs (shared by RRE + RZE).
+ * @brief Vendored LC-framework single-chunk device codecs (shared by RRE, RZE,
+ *        RARE, RAZE).
  *
- * Faithful port of the GPU device functions for the LC framework's `RRE` and
- * `RZE` lossless components (Burtscher et al., BSD-3-Clause).  It bundles:
+ * Faithful port of the GPU device functions for the LC framework's `RRE`,
+ * `RZE`, `RARE`, and `RAZE` lossless components (Burtscher et al.,
+ * BSD-3-Clause).  It bundles:
  *   - `block_prefix_sum`            (from `lc/prefix_sum.h`)
  *   - `d_REencode*` / `d_REdecode*`  (from `lc/components/include/d_repetition_elimination.h`)
  *   - `d_ZEencode*` / `d_ZEdecode*`  (from `lc/components/include/d_zero_elimination.h`)
  *   - `d_RRE<T>` / `d_iRRE<T>`        (from `lc/components/include/d_RRE.h`)
  *   - `d_RZE<T>` / `d_iRZE<T>`        (from `lc/components/include/d_RZE.h`)
+ *   - `d_RARE<T>` / `d_iRARE<T>`      (from `lc/components/include/d_RARE.h`)
+ *   - `d_RAZE<T>` / `d_iRAZE<T>`      (from `lc/components/include/d_RAZE.h`)
  *
  * The functions operate on a single CS-byte chunk held in shared memory and are
- * invoked, one block per chunk, by `rre_stage.cu` and `rze_stage.cu`.  They are
- * wrapped in `fz::lc_detail` and declared `static __device__` (internal linkage).
- * The `_N` word-size variants (T = uint8/16/32/64) reproduce LC's RRE_1/2/4/8 and
- * RZE_1/2/4/8 — the `_N` suffix is the word size, not a recursion-level count.
+ * invoked, one block per chunk, by `rre_stage.cu`, `rze_stage.cu`,
+ * `rare_stage.cu`, and `raze_stage.cu`.  They are wrapped in `fz::lc_detail`
+ * and declared `static __device__` (internal linkage). The `_N` word-size
+ * variants (T = uint8/16/32/64) reproduce LC's RRE_1/2/4/8, RZE_1/2/4/8,
+ * RARE_1/2/4/8, and RAZE_1/2/4/8 — the `_N` suffix is the word size, not a
+ * recursion-level count. RARE/RAZE are implemented as one shared
+ * `d_PRencode`/`d_PRdecode<T, PartialReduceMode>` template (the auto-k
+ * generalization of RRE/RZE — see the comment above that section) with
+ * `d_RARE`/`d_RAZE` as thin named aliases, mirroring how RRE/RZE already
+ * share `d_REencode`/`d_REdecode` for their bitmap recursion.
  *
  * Upstream: https://github.com/burtscher/LC-framework — see THIRD_PARTY.md.
  *
@@ -26,6 +36,7 @@
  */
 
 #include "backend/api.h"
+#include "backend/atomics.h"
 #include "backend/warp.h"
 #include <cstdint>
 #include <cassert>
@@ -1804,6 +1815,533 @@ static __device__ inline void d_iRZE(int& csize, byte in [ChunkBytes], byte out 
     // copy non-zero values based on bitmap
     if (size > 0) d_ZEdecode<T, ChunkBytes>(size, (T*)in, (T*)bitmap, (T*)out, temp_w);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// d_RARE.h / d_RAZE.h — single-chunk partial-bit-reduction encode/decode.
+//
+// RARE (Mode::REPEAT) generalizes d_RRE: instead of a binary "matches prev
+// in full, or is dropped entirely" test, it histograms how many top bits of
+// `val ^ prev` are zero across the whole chunk, picks one global cut `keep`
+// (0 <= keep < bits) that maximizes total bit savings via a warp-shuffle
+// max-reduction, then every element whose top `bits-keep` bits match prev
+// stores only its bottom `keep` bits — bit-packed, not byte-aligned, via
+// shift/mask accumulation across word boundaries (`d_PRencode`'s "encode
+// values and generate bitmap" loop below) plus a block-scoped atomic OR for
+// each thread's own trailing partial word. RAZE (Mode::ZERO) is the same
+// algorithm with the per-element predicate replaced by the value's own
+// leading-zero count instead of a match against the previous element — the
+// two are otherwise textually identical, exactly like the RRE/RZE split
+// above (d_repetition_elimination.h vs d_zero_elimination.h).
+//
+// The 4-level recursive bitmap compression (L1/L2/L3/L4 hierarchy) is
+// byte-for-byte identical to d_RRE/d_RZE and reuses d_REencode/d_REdecode
+// unchanged — no new code there. What's new is everything about picking
+// `keep` and the partial-bit-pack encode/decode, neither of which has any
+// precedent in d_RRE/d_RZE (which only ever emit whole words).
+//
+// Backend note: the warp reduction below reuses the same facade functions
+// (`fz::backend::shflUp/shflXor`, `ballotSync32`) that block_prefix_sum and
+// d_REencode already use, so no new warp.h work was needed. The histogram
+// accumulation and trailing partial-word write use block-scoped atomics
+// (`fz::backend::atomicAddBlock/atomicOrBlock`, include/backend/atomics.h)
+// that are new to this codebase and — unlike shuffle/ballot — have not yet
+// been verified on HIP hardware; see that header's doc comment.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum class PartialReduceMode { REPEAT, ZERO };
+
+template <typename T, PartialReduceMode Mode, int ChunkBytes = CS>
+static __device__ inline bool d_PRencode(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
+{
+  static_assert((ChunkBytes & (ChunkBytes - 1)) == 0 && ChunkBytes >= 4096,
+                "ChunkBytes must be a power of two >= 4096");
+  constexpr int L1 = ChunkBytes / 8;
+  constexpr int L2 = ChunkBytes / 64;
+  constexpr int L3 = ChunkBytes / 512;
+  constexpr int L4 = ChunkBytes / 4096;
+
+  const int tid = threadIdx.x;
+  const int size = csize / sizeof(T);  // words in chunk (rounded down)
+  const int extra = csize % sizeof(T);
+  const int bits = 8 * sizeof(T);
+  T* const in_t = (T*)in;
+  T* const out_t = (T*)out;
+
+  // histogram how many top bits repeat (REPEAT) / are zero (ZERO)
+  int* const count = (int*)temp;  // 66 ints reserved regardless of `bits`,
+                                   // so the bitmap pointer below (&count[66])
+                                   // sits at a fixed offset for every T
+  if (tid < bits) count[tid] = 0;
+  __syncthreads();
+
+  bool allmatch = true;
+  for (int i = tid; i < size; i += TPB) {
+    T predicate;
+    if constexpr (Mode == PartialReduceMode::REPEAT) {
+      const T prev = (i > 0) ? in_t[i - 1] : 0;
+      predicate = in_t[i] ^ prev;
+    } else {
+      predicate = in_t[i];
+    }
+    if (predicate != 0) allmatch = false;
+    int keep;
+    if constexpr (sizeof(T) == 8) {
+      keep = (predicate == 0) ? 0 : (64 - __builtin_clzll((unsigned long long)predicate));
+    } else {
+      keep = (predicate == 0) ? 0 : (32 - __builtin_clz((unsigned int)predicate));
+    }
+    fz::backend::atomicAddBlock(&count[keep], 1);
+  }
+  allmatch = __syncthreads_and(allmatch);
+
+  // special case: every element matches in full (all-repeat / all-zero)
+  if (allmatch) {
+    if constexpr (sizeof(T) > 1) {
+      if (tid < extra) out[tid] = in[csize - extra + tid];
+    }
+    if (tid == WS) {
+      out[extra] = bits + 1;  // special "keep" value
+      out[extra + 1] = csize;
+      out[extra + 2] = csize >> 8;
+    }
+    csize = extra + 3;
+    return true;
+  }
+
+  // prefix sum counts and find the keep value with maximum savings
+  if constexpr (bits <= WS) {
+    if (tid < WS) {  // first warp only
+      const int lane = tid;
+      int pfs = count[lane];
+      int tmp = fz::backend::shflUp(pfs, 1, 32);
+      if (lane >= 1) pfs += tmp;
+      tmp = fz::backend::shflUp(pfs, 2, 32);
+      if (lane >= 2) pfs += tmp;
+      tmp = fz::backend::shflUp(pfs, 4, 32);
+      if (lane >= 4) pfs += tmp;
+      if constexpr (bits > 8) {
+        tmp = fz::backend::shflUp(pfs, 8, 32);
+        if (lane >= 8) pfs += tmp;
+        if constexpr (bits > 16) {
+          tmp = fz::backend::shflUp(pfs, 16, 32);
+          if (lane >= 16) pfs += tmp;
+        }
+      }
+      count[lane] = pfs;
+
+      // determine maximum savings
+      const int sav = (bits <= lane) ? -1 : ((bits - lane) * pfs);
+      int val = sav;
+      val = max(val, fz::backend::shflXor(val, 1, 32));
+      val = max(val, fz::backend::shflXor(val, 2, 32));
+      val = max(val, fz::backend::shflXor(val, 4, 32));
+      val = max(val, fz::backend::shflXor(val, 8, 32));
+      val = max(val, fz::backend::shflXor(val, 16, 32));
+      const uint32_t bal = fz::backend::ballotSync32(val == sav);
+      const int who = __ffs((int)bal) - 1;
+      if (lane == 0) count[64] = val;  // saved
+      if (lane == 0) count[65] = who;  // keep
+    }
+  } else {
+    static_assert(bits == WS * 2, "unsupported word size for partial-reduce keep selection");
+    if (tid < WS) {  // first warp only
+      const int l0 = tid * 2;
+      const int l1 = l0 + 1;
+      const int lane = tid;
+      const int c1 = count[l1];
+      int pfs = count[l0] + c1;
+      int tmp = fz::backend::shflUp(pfs, 1, 32);
+      if (lane >= 1) pfs += tmp;
+      tmp = fz::backend::shflUp(pfs, 2, 32);
+      if (lane >= 2) pfs += tmp;
+      tmp = fz::backend::shflUp(pfs, 4, 32);
+      if (lane >= 4) pfs += tmp;
+      tmp = fz::backend::shflUp(pfs, 8, 32);
+      if (lane >= 8) pfs += tmp;
+      tmp = fz::backend::shflUp(pfs, 16, 32);
+      if (lane >= 16) pfs += tmp;
+      count[l1] = pfs;
+      count[l0] = pfs - c1;
+
+      // determine maximum savings
+      const int sav1 = (bits - l1) * pfs;
+      const int sav0 = (bits - l0) * (pfs - c1);
+      int val = max(sav0, sav1);
+      val = max(val, fz::backend::shflXor(val, 1, 32));
+      val = max(val, fz::backend::shflXor(val, 2, 32));
+      val = max(val, fz::backend::shflXor(val, 4, 32));
+      val = max(val, fz::backend::shflXor(val, 8, 32));
+      val = max(val, fz::backend::shflXor(val, 16, 32));
+      const uint32_t bal = fz::backend::ballotSync32((val == sav0) || (val == sav1));
+      const int who = __ffs((int)bal) - 1;
+      if (lane == who) {
+        count[64] = val;  // saved
+        count[65] = (val == sav0) ? l0 : l1;  // keep
+      }
+    }
+  }
+  __syncthreads();
+
+  const int saved = count[64];
+  const int keep = count[65];
+  const int countk = count[keep];
+
+  // special case: no savings possible, keep every bit of every word
+  if (saved == 0) {
+    if (csize + 3 >= ChunkBytes) return false;
+    for (int i = tid; i < size; i += TPB) {
+      out_t[i] = in_t[i];
+    }
+    if constexpr (sizeof(T) > 1) {
+      if (tid < extra) out[csize - extra + tid] = in[csize - extra + tid];
+    }
+    if (tid == 0) {
+      out[csize] = bits;  // special "keep" value
+      out[csize + 1] = csize;
+      out[csize + 2] = csize >> 8;
+    }
+    csize += 3;
+    return true;
+  }
+
+  // keep some bits from each matching value (0 <= keep < bits)
+
+  // zero out for atomic OR (trailing partial words get OR'd into this below)
+  for (int i = tid + size - countk; i < size - countk + ((countk * keep + bits - 1) / bits); i += TPB) {
+    out_t[i] = 0;
+  }
+  __syncthreads();
+
+  byte* const bitmap = (byte*)&count[66];
+
+  const T tmask = ~(T)0 << keep;  // 111...00
+  const T bmask = ~tmask;  // 000...11
+
+  // determine wpos1 (exclusive prefix sum of per-thread full-value counts)
+  const int ept = (((size + TPB - 1) / TPB + 7) / 8) * 8;  // elements per thread (multiple of 8)
+  int cnt = 0;
+  T prevMask = 0;
+  if constexpr (Mode == PartialReduceMode::REPEAT) {
+    prevMask = ((tid * ept == 0) || (tid * ept >= size)) ? 0 : (in_t[tid * ept - 1] & tmask);
+    for (int i = tid * ept; i < min((tid + 1) * ept, size); i++) {
+      const T val = in_t[i];
+      if (prevMask != (val & tmask)) {
+        prevMask = val & tmask;
+        cnt++;
+      }
+    }
+  } else {
+    for (int i = tid * ept; i < min((tid + 1) * ept, size); i++) {
+      if (0 != (in_t[i] & tmask)) cnt++;
+    }
+  }
+  int wpos1 = block_prefix_sum(cnt, temp) - cnt;
+  int wloc2 = bits * (size - countk) + (tid * ept - wpos1) * keep;
+  int wpos2 = wloc2 / bits;
+
+  // encode values and generate bitmap
+  T oval = 0;
+  byte bmp = 0;
+  if constexpr (Mode == PartialReduceMode::REPEAT) {
+    prevMask = ((tid * ept == 0) || (tid * ept >= size)) ? 0 : (in_t[tid * ept - 1] & tmask);
+  }
+  for (int i = tid * ept; i < min((tid + 1) * ept, size); i++) {
+    const T val = in_t[i];
+    bool full;
+    if constexpr (Mode == PartialReduceMode::REPEAT) {
+      full = (prevMask != (val & tmask));
+      if (full) prevMask = val & tmask;
+    } else {
+      full = (0 != (val & tmask));
+    }
+    if (full) {
+      bmp |= 1 << (i % 8);
+      out_t[wpos1++] = val;  // output all bits
+    } else {
+      if (keep != 0) {
+        // output bottom bits only
+        const T bval = val & bmask;
+        const int shift = wloc2 % bits;
+        const int bms = bits - shift;
+        oval |= bval << shift;
+        if (bms <= keep) {
+          out_t[wpos2++] = oval;
+          oval = bval >> bms;
+        }
+        wloc2 += keep;
+      }
+    }
+    if ((i % 8) == 7) {
+      bitmap[i / 8] = bmp;
+      bmp = 0;
+    }
+  }
+  if ((tid * ept < size) && ((tid + 1) * ept > size)) {
+    bitmap[size / 8] = bmp;
+  }
+
+  // zero out rest of bitmap
+  for (int i = tid + (size + 7) / 8; i < ChunkBytes / bits; i += TPB) {
+    bitmap[i] = 0;
+  }
+  __syncthreads();
+
+  // output last partial word. Guarded by `tid * ept < size` — threads whose
+  // entire ept-range lies past `size` ("empty" threads, unavoidable whenever
+  // ept*TPB overshoots size, e.g. size=2048/ept=8/TPB=512 leaves 256 empty
+  // trailing threads) never entered the loop above, so wloc2 still holds its
+  // pre-loop seed value `bits*(size-countk) + (tid*ept - wpos1)*keep`. Every
+  // active thread's wpos1 collapses to the same block-wide total (size-countk)
+  // once all real contributions are in, so for an empty thread this reduces
+  // to `bits*(size-countk) + (tid*ept - (size-countk))*keep` — spuriously
+  // nonzero whenever keep > 0, growing without bound as tid increases past
+  // the last active thread. Without this guard that garbage wpos2 drives an
+  // out-of-bounds atomicOrBlock (silent corruption for small `bits`, a
+  // shared-memory fault for bits=64 where the overshoot is largest). The
+  // upstream LC source has this exact same gap — reproduced independently
+  // during RARE/RAZE bring-up via WordSize8RoundTrip (compute-sanitizer:
+  // invalid __shared__ access from atomicOrBlock) and ConstantRunRoundTrip
+  // (silent wrong output, the in-bounds-but-wrong-address case for bits=8).
+  if ((tid * ept < size) && (wloc2 % bits) != 0) {
+    if constexpr (bits == 8) {
+      fz::backend::atomicOrBlock((int*)&out_t[wpos2 & ~3], (int)oval << (8 * (wpos2 & 3)));
+    } else if constexpr (bits == 16) {
+      fz::backend::atomicOrBlock((int*)&out_t[wpos2 & ~1], (int)oval << (16 * (wpos2 & 1)));
+    } else if constexpr (bits == 32) {
+      fz::backend::atomicOrBlock((int*)&out_t[wpos2], (int)oval);
+    } else {
+      fz::backend::atomicOrBlock((unsigned long long*)&out_t[wpos2], (unsigned long long)oval);
+    }
+  }
+
+  // iteratively compress bitmaps (identical to d_RRE/d_RZE)
+  const int avail = ChunkBytes - 3 - extra;
+  int wpos = (bits * (size - countk) + keep * countk + 7) / 8;
+  int base = 0;
+  int range = L1 / sizeof(T);
+  cnt = avail - wpos;
+  if (!d_REencode<byte, L1 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], (int*)temp)) return false;
+  wpos += cnt;
+  __syncthreads();
+
+  base = L1 / sizeof(T);
+  range = L2 / sizeof(T);
+  cnt = avail - wpos;
+  if (!d_REencode<byte, L2 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], (int*)temp)) return false;
+  wpos += cnt;
+  __syncthreads();
+
+  base = (L1 + L2) / sizeof(T);
+  range = L3 / sizeof(T);
+  if constexpr (sizeof(T) < 8) {
+    cnt = avail - wpos;
+    if (!d_REencode<byte, L3 / sizeof(T), true>(&bitmap[base], range, &out[wpos], cnt, &bitmap[base + range], (int*)temp)) return false;
+    wpos += cnt;
+
+    base = (L1 + L2 + L3) / sizeof(T);
+    range = L4 / sizeof(T);
+  }
+
+  if (wpos >= avail - range) return false;
+  if (tid < range) {
+    out[wpos + tid] = bitmap[base + tid];
+  }
+  wpos += range;
+
+  // copy leftover bytes
+  if constexpr (sizeof(T) > 1) {
+    if (tid < extra) out[wpos + tid] = in[csize - extra + tid];
+  }
+
+  // output old csize and update csize
+  const int new_size = wpos + 3 + extra;
+  if (tid == 0) {
+    out[new_size - 3] = keep;  // "keep" value
+    out[new_size - 2] = csize;
+    out[new_size - 1] = csize >> 8;
+  }
+  csize = new_size;
+  return true;
+}
+
+
+template <typename T, PartialReduceMode Mode, int ChunkBytes = CS>
+static __device__ inline void d_PRdecode(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
+{
+  static_assert((ChunkBytes & (ChunkBytes - 1)) == 0 && ChunkBytes >= 4096,
+                "ChunkBytes must be a power of two >= 4096");
+  constexpr int L1 = ChunkBytes / 8;
+  constexpr int L2 = ChunkBytes / 64;
+  constexpr int L3 = ChunkBytes / 512;
+  constexpr int L4 = ChunkBytes / 4096;
+
+  // read in original csize and keep
+  const int oldsize = in[csize - 2] + ((int)in[csize - 1] << 8);
+  const int keep = in[csize - 3];
+
+  const int tid = threadIdx.x;
+  const int bits = 8 * sizeof(T);
+  const int size = oldsize / sizeof(T);
+  const int extra = oldsize % sizeof(T);
+  T* const in_t = (T*)in;
+  T* const out_t = (T*)out;
+  assert(TPB >= 256);
+
+  if (keep == bits + 1) {
+    // special case: all values (other than extra) are zero — an all-repeat
+    // chunk (Mode::REPEAT) with an implicit-0 predecessor is exactly an
+    // all-zero chunk, same reconstruction as Mode::ZERO
+    for (int i = tid; i < size; i += TPB) {
+      out_t[i] = 0;
+    }
+  } else if (keep == bits) {  // keep all bits
+    for (int i = tid; i < size; i += TPB) {
+      out_t[i] = in_t[i];
+    }
+  } else {  // keep some bits from each value (0 <= keep < bits)
+    int rpos = csize - 3 - extra;
+    int* const temp_w = (int*)temp;
+    byte* const bitmap = (byte*)&temp_w[WS];
+
+    // iteratively decompress bitmaps (identical to d_RRE/d_RZE)
+    int base, range;
+    if constexpr (sizeof(T) == 8) {
+      base = (L1 + L2) / sizeof(T);
+      range = L3 / sizeof(T);
+      rpos -= range;
+      if (tid < range) bitmap[base + tid] = in[rpos + tid];
+    } else {
+      base = (L1 + L2 + L3) / sizeof(T);
+      range = L4 / sizeof(T);
+      rpos -= range;
+      if (tid < range) bitmap[base + tid] = in[rpos + tid];
+
+      rpos -= __syncthreads_count((tid < range * 8) && ((in[rpos + tid / 8] >> (tid % 8)) & 1));
+      base = (L1 + L2) / sizeof(T);
+      range = L3 / sizeof(T);
+      d_REdecode<byte, L3 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    }
+    __syncthreads();
+
+    rpos -= __syncthreads_count((tid < range * 8) && ((bitmap[base + tid / 8] >> (tid % 8)) & 1));
+    base = L1 / sizeof(T);
+    range = L2 / sizeof(T);
+    d_REdecode<byte, L2 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    __syncthreads();
+
+    if constexpr (sizeof(T) >= 4) {
+      rpos -= __syncthreads_count((tid < range * 8) && ((bitmap[base + tid / 8] >> (tid % 8)) & 1));
+    }
+    if constexpr (sizeof(T) == 2) {
+      int sum = __syncthreads_count((tid < range * 8) && ((bitmap[base + tid / 8] >> (tid % 8)) & 1));
+      sum += __syncthreads_count((tid + TPB < range * 8) && ((bitmap[base + (tid + TPB) / 8] >> (tid % 8)) & 1));
+      rpos -= sum;
+    }
+    if constexpr (sizeof(T) == 1) {
+      int sum = 0;
+      for (int i = 0; i < TPB * 4; i += TPB) {
+        sum += __syncthreads_count((tid + i < range * 8) && ((bitmap[base + (tid + i) / 8] >> (tid % 8)) & 1));
+      }
+      rpos -= sum;
+    }
+    base = 0;
+    range = L1 / sizeof(T);
+    d_REdecode<byte, L1 / sizeof(T)>(range, &in[rpos], &bitmap[base + range], &bitmap[base], temp_w);
+    __syncthreads();
+
+    // determine rpos1 etc.
+    const int ept = (((size + TPB - 1) / TPB + 7) / 8) * 8;
+    int cnt = 0;
+    for (int i = tid * ept; i < min((tid + 1) * ept, size); i += 8) {
+      cnt += __builtin_popcount((int)bitmap[i / 8]);
+    }
+    int rpos1 = block_prefix_sum(cnt, temp_w) - cnt;
+    const int count = temp_w[TPB / WS - 1];
+    int rloc2 = bits * count + (tid * ept - rpos1) * keep;
+    int rpos2 = rloc2 / bits;
+
+    // decode values
+    const T tmask = ~(T)0 << keep;
+    const T bmask = ~tmask;
+    T ival = in_t[rpos2++];
+    byte bmp;
+    T prev = 0;
+    if constexpr (Mode == PartialReduceMode::REPEAT) {
+      const T seed = (rpos1 > 0) ? in_t[rpos1 - 1] : 0;
+      prev = seed & tmask;
+    }
+    for (int i = tid * ept; i < min((tid + 1) * ept, size); i++) {
+      if ((i % 8) == 0) bmp = bitmap[i / 8];
+      T val = 0;
+      if ((bmp >> (i % 8)) & 1) {
+        val = in_t[rpos1++];  // read all bits
+        if constexpr (Mode == PartialReduceMode::REPEAT) prev = val & tmask;
+      } else {
+        // Baseline for a "matched" element: REPEAT reconstructs to `prev`
+        // (matters when keep==0, where bmask==0 so there are no bottom bits
+        // to OR in at all — the original LC decode gets this for free by
+        // declaring `val` outside the loop so it persists from the previous
+        // iteration; here it's made explicit instead of relying on that).
+        // ZERO's baseline is 0, matching a value whose top bits are all zero
+        // and keep==0 leaves no bottom bits either.
+        if constexpr (Mode == PartialReduceMode::REPEAT) val = prev;
+        if (keep != 0) {
+          // read only bottom bits
+          const int shift = rloc2 % bits;
+          const int bms = bits - shift;
+          T res = ival >> shift;
+          if (bms <= keep) {
+            ival = in_t[rpos2++];
+            res |= ival << bms;
+          }
+          rloc2 += keep;
+          const T bot = res & bmask;
+          if constexpr (Mode == PartialReduceMode::REPEAT) {
+            val = prev | bot;
+          } else {
+            val = bot;
+          }
+        }
+      }
+      out_t[i] = val;
+    }
+  }
+
+  // copy leftover bytes
+  if constexpr (sizeof(T) > 1) {
+    if (tid < extra) {
+      out[oldsize - extra + tid] = in[csize - 3 - extra + tid];
+    }
+  }
+
+  csize = oldsize;
+}
+
+
+// Named aliases matching the d_RRE/d_RZE call-site convention.
+template <typename T, int ChunkBytes = CS>
+static __device__ inline bool d_RARE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
+{
+  return d_PRencode<T, PartialReduceMode::REPEAT, ChunkBytes>(csize, in, out, temp);
+}
+
+template <typename T, int ChunkBytes = CS>
+static __device__ inline void d_iRARE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
+{
+  d_PRdecode<T, PartialReduceMode::REPEAT, ChunkBytes>(csize, in, out, temp);
+}
+
+template <typename T, int ChunkBytes = CS>
+static __device__ inline bool d_RAZE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
+{
+  return d_PRencode<T, PartialReduceMode::ZERO, ChunkBytes>(csize, in, out, temp);
+}
+
+template <typename T, int ChunkBytes = CS>
+static __device__ inline void d_iRAZE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])
+{
+  d_PRdecode<T, PartialReduceMode::ZERO, ChunkBytes>(csize, in, out, temp);
 }
 
 }  // namespace lc_detail
