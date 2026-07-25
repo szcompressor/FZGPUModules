@@ -49,7 +49,12 @@ __device__ __forceinline__ uint32_t warpBitTranspose32(uint32_t v, unsigned lane
             case 3:  m = 0xFF00FF00u; break;
             default: m = 0xFFFF0000u; break;
         }
-        const uint32_t t = __shfl_xor_sync(0xFFFFFFFFu, v, s);
+        // Width pinned to 32: this butterfly is a 32-lane algorithm, and that is
+        // what CUDA's implicit `width = warpSize` already meant. Under HIP the same
+        // default is 64, which would pull lanes 32-63 into each exchange and corrupt
+        // the transpose — see backend/warp.h failure mode 2. The wrapper also
+        // supplies a 64-bit-wide mask, which HIP's __shfl_xor_sync static_asserts on.
+        const uint32_t t = fz::backend::shflXor(v, static_cast<int>(s), 32);
         v = (lane & s) ? ((v & m) | ((t & m) >> s))
                        : ((v & ~m) | ((t & ~m) << s));
     }

@@ -33,7 +33,7 @@
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
