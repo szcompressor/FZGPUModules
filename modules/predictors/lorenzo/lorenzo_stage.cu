@@ -2,6 +2,7 @@
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "backend/api.h"
+#include "backend/warp.h"
 #include <stdexcept>
 #include <string>
 
@@ -59,6 +60,30 @@ __global__ void lorenzo_scan_1d_kernel(
     if (gid < n) out[gid] = s[tid];
 }
 
+// Inverse for the block_size==32 case (cuSZp2/cuszp2): each 32-element reset
+// segment is exactly one warp, so the prefix sum is a barrier-free warp scan via
+// __shfl_up — no shared memory and none of the Hillis-Steele kernel's 10
+// __syncthreads. Segments stay independent because the shuffle width is 32 and
+// each warp covers one 32-aligned segment; this lets us launch wide CUDA blocks
+// (many segments each) for full occupancy instead of one 32-thread block per
+// segment (which caps at ~50% occupancy on the blocks-per-SM limit). ncu on the
+// Hillis-Steele kernel flagged it as barrier-bound; this is the same class of fix
+// as the TiledLorenzo per-row rewrite.
+template<typename T>
+__global__ void lorenzo_scan_1d_warp32_kernel(
+    const T* __restrict__ in, T* __restrict__ out, size_t n)
+{
+    const size_t   gid  = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const unsigned lane = threadIdx.x & 31u;
+    T v = (gid < n) ? in[gid] : static_cast<T>(0);
+    #pragma unroll
+    for (int off = 1; off < 32; off <<= 1) {
+        const T y = fz::backend::shflUp(v, static_cast<unsigned>(off), 32);
+        if (lane >= static_cast<unsigned>(off)) v = static_cast<T>(v + y);
+    }
+    if (gid < n) out[gid] = v;
+}
+
 // `block_threads` is both the launch block size and the prediction-reset period:
 // the delta/scan kernels reset per CUDA block, so launching with blockDim == n
 // makes every n-element segment an independent chain (cuSZp uses n = 32). The
@@ -81,6 +106,15 @@ void launchLorenzoPrefixSumKernel1D(
     unsigned block_threads)
 {
     if (n == 0) return;
+    // Fast path: 32-element reset segments == one warp → barrier-free warp scan,
+    // launched with wide blocks (8 segments each) for occupancy.
+    if (block_threads == 32u) {
+        const int kBlock = 256;   // 8 warps = 8 independent 32-element segments
+        const int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+        lorenzo_scan_1d_warp32_kernel<T><<<grid, kBlock, 0, stream>>>(d_input, d_output, n);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     const int kBlock = static_cast<int>(block_threads);
     const int grid = static_cast<int>((n + kBlock - 1) / kBlock);
     lorenzo_scan_1d_kernel<T>
