@@ -148,6 +148,9 @@ position within the payload.
 | 26 | `RRE`          | `RREStage` — repetition-reduction encoding (LC component) |
 | 27 | `RARE`         | `RAREStage` — repetition-adaptive reduction encoding (LC component, auto-k RRE) |
 | 28 | `RAZE`         | `RAZEStage` — zero-adaptive reduction encoding (LC component, auto-k RZE) |
+| 29 | `CLOG`         | `CLOGStage` — Compressed-Logarithm adaptive bit-width coding (LC component) |
+| 30 | `HCLOG`        | `HCLOGStage` — Compressed-Logarithm coding with per-subchunk TCMS fallback (LC component) |
+| 31 | `TUPL`         | `TUPLStage` — tuple deinterleave / AoS-to-SoA transpose (LC component) |
 
 **Rule:** never reuse or renumber an existing value — stage type IDs are baked into
 `.fzm` files on disk.  New stages always take the next unused integer.
@@ -184,7 +187,7 @@ STAGE_TYPES = {
     4: "PassThrough", 5: "RLE", 6: "Huffman", 7: "BitPack",
     10: "Split", 11: "Merge", 12: "Lorenzo", 14: "Quantizer",
     15: "Zigzag", 16: "Negabinary", 17: "Bitshuffle", 18: "RZE",
-    26: "RRE", 27: "RARE", 28: "RAZE",
+    26: "RRE", 27: "RARE", 28: "RAZE", 29: "CLOG", 30: "HCLOG", 31: "TUPL",
 }
 DATA_TYPES = {
     0: "uint8", 1: "uint16", 2: "uint32", 3: "uint64",

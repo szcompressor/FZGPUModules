@@ -120,7 +120,14 @@ public:
         const size_t n_bytes  = input_sizes.empty() ? 0 : input_sizes[0];
         const size_t n_chunks = (n_bytes + chunk_size_ - 1) / chunk_size_;
         const size_t hdr      = 4 + 4 + 4 * n_chunks;
-        return {n_bytes + hdr};
+        // postStreamSync()/getActualOutputSizesByName() always round the final
+        // size up to a 4-byte boundary and zero-fill the pad, even when the
+        // real total isn't already aligned (e.g. a partial final chunk stored
+        // raw at a byte count that isn't a multiple of 4) -- reserve that pad
+        // here too, or the caller's allocation is up to 3 bytes short and the
+        // memset in postStreamSync writes out of bounds.
+        const size_t worst    = n_bytes + hdr;
+        return {(worst + 3) & ~size_t(3)};
     }
 
     std::unordered_map<std::string, size_t>

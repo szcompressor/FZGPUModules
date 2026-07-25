@@ -1,24 +1,23 @@
 #pragma once
 
 /**
- * @file rare_stage.h
- * @brief Repetition-Adaptive Reduction Encoding stage — lossless byte-stream compressor.
+ * @file hclog_stage.h
+ * @brief Compressed-Logarithm coding with a per-subchunk TCMS fallback — lossless byte-stream compressor.
  *
- * Standalone port of the LC framework `RARE` component. `RARE` is the
- * auto-k generalization of `RRE` (see `RREStage`): rather than a binary
- * "word repeats its predecessor in full, or is dropped entirely" test, it
- * histograms how many top bits of `word ^ predecessor` are zero across the
- * whole chunk, picks one global cut `keep` (0 <= keep < word_size*8) that
- * maximizes total bit savings, then bit-packs the bottom `keep` bits of every
- * word whose top bits match its predecessor (words that don't match are
- * stored in full, same as RRE). The 4-level recursive bitmap compression is
- * identical to RRE.
+ * Standalone port of the LC framework `HCLOG` component — the `CLOG`
+ * algorithm (see `CLOGStage`) plus one extra step per subchunk: HCLOG also
+ * tries reinterpreting every value in the subchunk via TCMS (the same
+ * two's-complement -> sign-magnitude / zigzag transform `ZigzagStage` uses)
+ * and picks whichever of the raw or TCMS'd values needs fewer bits,
+ * recording the choice as one flag bit per subchunk (32 bits total). This
+ * does better than plain CLOG on bipolar-looking data (e.g.
+ * already-negabinary/zigzag-shaped residuals) that would otherwise bit-pack
+ * poorly as raw unsigned magnitudes. Like CLOG, `T` must be unsigned
+ * (`uint8/16/32/64` only) and there is no auxiliary bitmap or per-element
+ * full/dropped decision — every element in a subchunk is packed at the same
+ * fixed width (after the shared TCMS-or-not choice for that subchunk).
  *
- * Output stream layout and serialized header are identical to RREStage —
- * the per-chunk `keep` value lives inside the chunk's own compressed bytes
- * (accounted for in its `csize`), not in the container/host format, so the
- * two stages share the same host-side orchestration byte-for-byte.
- *
+ * Output stream layout (identical container to RREStage/RZEStage):
  * @code
  *   [uint32_t: original byte count]
  *   [uint32_t: num_chunks]
@@ -44,25 +43,26 @@
 namespace fz {
 
 /**
- * Repetition-Adaptive Reduction Encoding stage.
+ * Compressed-Logarithm adaptive bit-width coding stage with a per-subchunk
+ * TCMS fallback (the auto-selecting sibling of `CLOGStage`).
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
- * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1).
+ * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1), unsigned only.
  *
- * @note **Prior work:** GPU kernels are a faithful port of `d_RARE.h` from
+ * @note **Prior work:** GPU kernels are a faithful port of `d_HCLOG.h` from
  *       the LC framework (Burtscher et al., BSD-3-Clause), sharing the
- *       histogram/reduction/bit-pack device code with `RAZEStage` via
- *       `d_PRencode`/`d_PRdecode<T, PartialReduceMode>` in
- *       `modules/coders/lc_common/lc_chunk_components.cuh`. See
+ *       encode/decode device code with `CLOGStage` via
+ *       `d_CLOGencode`/`d_CLOGdecode<T, CLogMode>` in
+ *       `modules/coders/lc_common/lc_clog_components.cuh`. See
  *       `THIRD_PARTY.md`.
  *
  * @note CUDA Graph capture is supported for compression only. The inverse
  *       path reads the stream header with blocking D2H copies before it can
  *       launch the decode kernel (same constraint as RREStage/RZEStage).
  */
-class RAREStage : public Stage {
+class HCLOGStage : public Stage {
 public:
-    RAREStage()
+    HCLOGStage()
         : is_inverse_(false)
         , chunk_size_(16384)
         , word_size_(1)
@@ -75,7 +75,7 @@ public:
         , scratch_capacity_(0)
     {}
 
-    ~RAREStage() override;
+    ~HCLOGStage() override;
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
@@ -105,7 +105,7 @@ public:
     void postStreamSync(cudaStream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
-    std::string getName() const override { return "RARE"; }
+    std::string getName() const override { return "HCLOG"; }
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
@@ -153,7 +153,7 @@ public:
     }
 
     uint16_t getStageTypeId() const override {
-        return static_cast<uint16_t>(StageType::RARE);
+        return static_cast<uint16_t>(StageType::HCLOG);
     }
 
     uint8_t getOutputDataType(size_t) const override {

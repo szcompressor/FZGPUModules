@@ -40,6 +40,9 @@
 #include "coders/rre/rre_stage.h"
 #include "coders/rare/rare_stage.h"
 #include "coders/raze/raze_stage.h"
+#include "coders/clog/clog_stage.h"
+#include "coders/hclog/hclog_stage.h"
+#include "shufflers/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
@@ -397,6 +400,28 @@ static Stage* addRAZEStage(Pipeline& p, const toml::table& t) {
     return raze;
 }
 
+static Stage* addCLOGStage(Pipeline& p, const toml::table& t) {
+    auto* clog = p.addStage<CLOGStage>();
+    clog->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
+    clog->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
+    return clog;
+}
+
+static Stage* addHCLOGStage(Pipeline& p, const toml::table& t) {
+    auto* hclog = p.addStage<HCLOGStage>();
+    hclog->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
+    hclog->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
+    return hclog;
+}
+
+static Stage* addTUPLStage(Pipeline& p, const toml::table& t) {
+    auto* tupl = p.addStage<TUPLStage>();
+    tupl->setBlockSize(static_cast<size_t>(optInt(t, "block_size", 16384)));
+    tupl->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
+    tupl->setDim(static_cast<size_t>(optInt(t, "dim", 2)));
+    return tupl;
+}
+
 static Stage* addMergeStage(Pipeline& p, const toml::table& t) {
     auto* mg = p.addStage<MergeStage>();
     std::vector<std::string> names;
@@ -608,6 +633,25 @@ static void saveRAZEStage(Stage* s, std::ostringstream& out) {
     out << "word_size = "  << static_cast<int64_t>(raze->getWordSize())  << "\n";
 }
 
+static void saveCLOGStage(Stage* s, std::ostringstream& out) {
+    auto* clog = static_cast<CLOGStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(clog->getChunkSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(clog->getWordSize())  << "\n";
+}
+
+static void saveHCLOGStage(Stage* s, std::ostringstream& out) {
+    auto* hclog = static_cast<HCLOGStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(hclog->getChunkSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(hclog->getWordSize())  << "\n";
+}
+
+static void saveTUPLStage(Stage* s, std::ostringstream& out) {
+    auto* tupl = static_cast<TUPLStage*>(s);
+    out << "block_size = " << static_cast<int64_t>(tupl->getBlockSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(tupl->getWordSize())  << "\n";
+    out << "dim = "        << static_cast<int64_t>(tupl->getDim())       << "\n";
+}
+
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
     auto* mg = static_cast<MergeStage*>(s);
     const auto& names = mg->getSegmentNames();
@@ -817,6 +861,9 @@ static const StageEntry kStageRegistry[] = {
     { "RRE",          StageType::RRE,          addRREStage,          saveRREStage          },
     { "RARE",         StageType::RARE,         addRAREStage,         saveRAREStage         },
     { "RAZE",         StageType::RAZE,         addRAZEStage,         saveRAZEStage         },
+    { "CLOG",         StageType::CLOG,         addCLOGStage,         saveCLOGStage         },
+    { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage        },
+    { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage         },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage        },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage          },
     { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage   },

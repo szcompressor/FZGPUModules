@@ -108,6 +108,30 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── CLOGStage GPU round-trip ────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_clog_stage
+    SOURCES test_clog_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── HCLOGStage GPU round-trip ───────────────────────────────────────────────
+fz_add_test(
+    NAME    test_hclog_stage
+    SOURCES test_hclog_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── TUPLStage GPU round-trip ────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_tupl_stage
+    SOURCES test_tupl_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── MergeStage (structural concat/split) ────────────────────────────────────
 fz_add_test(
     NAME    test_merge_stage

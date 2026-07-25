@@ -99,6 +99,9 @@ enum class StageType : uint16_t {
     RRE        = 26,   ///< Repetition-Reduction Encoding (LC framework lossless component)
     RARE       = 27,   ///< Repetition-Adaptive Reduction Encoding (LC framework, auto-k generalization of RRE)
     RAZE       = 28,   ///< Zero-Adaptive Reduction Encoding (LC framework, auto-k generalization of RZE)
+    CLOG       = 29,   ///< Compressed-Logarithm adaptive bit-width coding (LC framework lossless component)
+    HCLOG      = 30,   ///< Compressed-Logarithm coding with per-subchunk TCMS fallback (LC framework lossless component)
+    TUPL       = 31,   ///< Tuple deinterleave (AoS -> SoA) transpose (LC framework lossless component)
 };
 
 /**
@@ -322,6 +325,9 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::RRE:         return "RRE";
         case StageType::RARE:        return "RARE";
         case StageType::RAZE:        return "RAZE";
+        case StageType::CLOG:        return "CLOG";
+        case StageType::HCLOG:       return "HCLOG";
+        case StageType::TUPL:        return "TUPL";
         case StageType::LORENZO:     return "Lorenzo";
         case StageType::ANS:  return "ANS";
         case StageType::ADM:  return "ADM";
