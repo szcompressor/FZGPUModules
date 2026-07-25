@@ -111,6 +111,13 @@ jobs:
             module purge
             module load nvhpc/23.11/nvhpc-hpcx-cuda12
           fi
+          # This runs on a self-hosted runner whose workspace persists across
+          # jobs, so a stale build/asan/CMakeCache.txt from a prior run can
+          # pin CMAKE_CUDA_ARCHITECTURES to a value baked in before it existed
+          # in CMakeLists.txt (e.g. an autodetected sm_52, which predates the
+          # block-scoped atomics RARE/RAZE/CLOG/HCLOG need) — wipe it so every
+          # run reconfigures clean.
+          rm -rf build/asan
           # nvc++ does not support -fsanitize; use GCC for the sanitizer build
           CC=gcc CXX=g++ cmake --preset asan
 

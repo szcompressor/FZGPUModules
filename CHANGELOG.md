@@ -10,7 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Fixed
-- **Docker image build (`.github` GHCR publish workflow) failed to compile `RAREStage`/`RAZEStage`** (`atomicAdd_block`/`atomicOr_block` undefined) because `CMakeLists.txt` called `enable_language(CUDA)` before setting the project's default `CMAKE_CUDA_ARCHITECTURES` (86), so on the GPU-less Docker builder CMake's own architecture autodetection ran first and fell back to `52` — a compute capability below 6.0, which is required for block-scoped atomics. Fixed by setting the default before `enable_language(CUDA)`.
+- **Docker image build (`.github` GHCR publish workflow) failed to compile `RAREStage`/`RAZEStage`** (`atomicAdd_block`/`atomicOr_block` undefined) because CUDA is actually enabled by `project(... LANGUAGES CUDA CXX)`, and `CMakeLists.txt` set its default `CMAKE_CUDA_ARCHITECTURES` (86) in a later `enable_language(CUDA)`-guarded block that runs after `project()` — so on the GPU-less Docker builder, CMake's own architecture autodetection during `project()` ran first and fell back to `52`, a compute capability below the 6.0 minimum for block-scoped atomics. Fixed by setting the default before `project()` instead.
 
 ### Added
 - **`cuda-h200` CMake preset** (configure/build/test): CUDA backend, `CMAKE_CUDA_ARCHITECTURES=90` — the project default (86, A100) doesn't cover Hopper. Verified via `ctest --preset cuda-h200` on a gpuH200x8 node (NCSA Delta): 40/40 tests pass.
