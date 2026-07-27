@@ -30,6 +30,7 @@
 #include "coders/raze/raze_stage.h"
 #include "coders/clog/clog_stage.h"
 #include "coders/hclog/hclog_stage.h"
+#include "coders/gpulz/gpulz_stage.h"
 #include "shufflers/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"

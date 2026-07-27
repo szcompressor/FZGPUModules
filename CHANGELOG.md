@@ -9,6 +9,10 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — 2.0.0
 
+### Added
+- **`GPULZStage`** (`modules/coders/gpulz/`) — GPU LZSS (LZ77 + a literal/match flag bitmap) lossless coder, the first LZ77-family stage in FZGPUModules. Direct port of the `compressKernelI`/`decompressKernel` kernels from the **GPULZ** reference implementation (Zhang et al., ICS '23): each fixed-size chunk (1024/2048/4096 bytes) is compressed by one CUDA block via a per-element 32-word sliding-window match search, a serial literal/match flag-bitmap build, and a Blelloch prefix sum over per-item byte sizes. Container format (raw-fallback flag, CUB exclusive scan for packing offsets, deferred tail-size readback via `postStreamSync()`) follows the same pattern as `RREStage`/`RZEStage`, storing each chunk's flag bytes and compressed data contiguously rather than upstream's separate global flag/data arrays. `StageType::GPULZ` (32), TOML `GPULZ` stage, CLI `gpulz[1|2|4|8]`. Enables `GPULZ -> Huffman`/`GPULZ -> ANS` pipelines reproducing the LZ77 + entropy-coding structure of DEFLATE/Zstandard. Upstream repository does not declare an explicit license — see `THIRD_PARTY.md`.
+- Test coverage: `test_gpulz.cpp` (22 tests — word sizes, chunk sizes, partial-chunk padding, constant-run/repeated-pattern compression, header round-trip, save/restore state, graph-compat, unsupported-config throws, pipeline integration).
+
 ### Fixed
 - **Docker image build (`.github` GHCR publish workflow) failed to compile `RAREStage`/`RAZEStage`** (`atomicAdd_block`/`atomicOr_block` undefined) because CUDA is actually enabled by `project(... LANGUAGES CUDA CXX)`, and `CMakeLists.txt` set its default `CMAKE_CUDA_ARCHITECTURES` (86) in a later `enable_language(CUDA)`-guarded block that runs after `project()` — so on the GPU-less Docker builder, CMake's own architecture autodetection during `project()` ran first and fell back to `52`, a compute capability below the 6.0 minimum for block-scoped atomics. Fixed by setting the default before `project()` instead.
 

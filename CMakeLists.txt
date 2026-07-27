@@ -428,6 +428,7 @@ add_library(fzgmod_modules
   # BitplaneRZE (FZ-GPU fused bitplane transpose + zero-group RZE)
   modules/fused/bitplane_rze/bitplane_rze_kernels.cu
   modules/fused/bitplane_rze/bitplane_rze_stage.cu
+  modules/coders/gpulz/gpulz_stage.cu
 )
 
 target_link_libraries(fzgmod_modules

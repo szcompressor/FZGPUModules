@@ -16,6 +16,7 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
 #include "coders/rre/rre_stage.h"
+#include "coders/gpulz/gpulz_stage.h"
 #include "coders/rare/rare_stage.h"
 #include "coders/raze/raze_stage.h"
 #include "coders/clog/clog_stage.h"
@@ -273,6 +274,13 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
 
         case StageType::RRE: {
             auto* s = new RREStage();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::GPULZ: {
+            auto* s = new GPULZStage();
             s->deserializeHeader(config, config_size);
             stage = s;
             break;

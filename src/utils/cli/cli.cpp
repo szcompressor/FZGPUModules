@@ -508,6 +508,14 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             rre->setChunkSize(s.chunk_size);
             rre->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
             connect_next(rre);
+        } else if (name == "gpulz" || name == "gpulz1" || name == "gpulz2" ||
+                   name == "gpulz4" || name == "gpulz8") {
+            // GPULZ only supports chunk sizes 1024/2048/4096; fall back to its
+            // own default (2048) unless the user explicitly overrode --chunk-size.
+            auto* gpulz = pipeline->addStage<GPULZStage>();
+            gpulz->setChunkSize(s.chunk_size == kDefaultChunkSize ? 2048 : s.chunk_size);
+            gpulz->setWordSize(name.size() > 5 ? static_cast<size_t>(name[5] - '0') : 4);
+            connect_next(gpulz);
         } else if (name == "rare" || name == "rare1" || name == "rare2" ||
                    name == "rare4" || name == "rare8") {
             // Optional trailing digit selects the LC word granularity (default 1).

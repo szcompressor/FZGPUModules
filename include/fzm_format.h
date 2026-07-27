@@ -102,6 +102,7 @@ enum class StageType : uint16_t {
     CLOG       = 29,   ///< Compressed-Logarithm adaptive bit-width coding (LC framework lossless component)
     HCLOG      = 30,   ///< Compressed-Logarithm coding with per-subchunk TCMS fallback (LC framework lossless component)
     TUPL       = 31,   ///< Tuple deinterleave (AoS -> SoA) transpose (LC framework lossless component)
+    GPULZ      = 32,   ///< TODO: describe this stage
 };
 
 /**
@@ -335,6 +336,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::BITPLANE_RZE: return "BitplaneRZE";
         case StageType::ADAPTIVE_BITPACK: return "AdaptiveBitpack";
         case StageType::TILED_LORENZO: return "TiledLorenzo";
+        case StageType::GPULZ:  return "GPULZ";
         default:                     return "Unknown";
     }
 }

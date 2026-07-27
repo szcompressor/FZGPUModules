@@ -38,6 +38,7 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
 #include "coders/rre/rre_stage.h"
+#include "coders/gpulz/gpulz_stage.h"
 #include "coders/rare/rare_stage.h"
 #include "coders/raze/raze_stage.h"
 #include "coders/clog/clog_stage.h"
@@ -386,6 +387,13 @@ static Stage* addRREStage(Pipeline& p, const toml::table& t) {
     return rre;
 }
 
+static Stage* addGPULZStage(Pipeline& p, const toml::table& t) {
+    auto* gpulz = p.addStage<GPULZStage>();
+    gpulz->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 2048)));
+    gpulz->setWordSize(static_cast<size_t>(optInt(t, "word_size", 4)));
+    return gpulz;
+}
+
 static Stage* addRAREStage(Pipeline& p, const toml::table& t) {
     auto* rare = p.addStage<RAREStage>();
     rare->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
@@ -619,6 +627,12 @@ static void saveRREStage(Stage* s, std::ostringstream& out) {
     auto* rre = static_cast<RREStage*>(s);
     out << "chunk_size = " << static_cast<int64_t>(rre->getChunkSize()) << "\n";
     out << "word_size = "  << static_cast<int64_t>(rre->getWordSize())  << "\n";
+}
+
+static void saveGPULZStage(Stage* s, std::ostringstream& out) {
+    auto* gpulz = static_cast<GPULZStage*>(s);
+    out << "chunk_size = " << static_cast<int64_t>(gpulz->getChunkSize()) << "\n";
+    out << "word_size = "  << static_cast<int64_t>(gpulz->getWordSize())  << "\n";
 }
 
 static void saveRAREStage(Stage* s, std::ostringstream& out) {
@@ -859,6 +873,7 @@ static const StageEntry kStageRegistry[] = {
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage   },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage          },
     { "RRE",          StageType::RRE,          addRREStage,          saveRREStage          },
+    { "GPULZ",        StageType::GPULZ,        addGPULZStage,        saveGPULZStage        },
     { "RARE",         StageType::RARE,         addRAREStage,         saveRAREStage         },
     { "RAZE",         StageType::RAZE,         addRAZEStage,         saveRAZEStage         },
     { "CLOG",         StageType::CLOG,         addCLOGStage,         saveCLOGStage         },

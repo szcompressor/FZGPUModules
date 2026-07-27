@@ -8,6 +8,40 @@ verbatim to satisfy BSD-3-Clause condition 2 (binary redistribution).
 
 ---
 
+## GPULZ
+
+**Repository:** https://github.com/hpdps-group/ICS23-GPULZ
+
+**Used by:** `GPULZStage` (`modules/coders/gpulz/`)
+
+**Relationship:** `GPULZStage`'s encode/decode kernels are a direct port of
+`compressKernelI` / `decompressKernel` from the upstream `gpulz.cu` reference
+implementation: the per-chunk sliding-window match search (shared-memory
+lookahead buffer + window, Blelloch prefix sum over per-item byte sizes,
+literal/match flag-bitmap construction) is preserved verbatim, retargeted from
+a fixed `BLOCK_SIZE`/`WINDOW_SIZE`/`INPUT_TYPE` macro configuration to
+compile-time template parameters (`T`, `CS`) dispatched at runtime. The
+per-chunk container format (raw-fallback flag, CUB exclusive-scan packing
+offsets, deferred tail-size readback via `postStreamSync()`) is FZGM's own,
+following the same pattern as `RREStage`/`RZEStage`; `compressKernelIII`
+(upstream's separate flag/data pack-out step) is folded into FZGM's own
+`gpulzPackKernel`.
+
+Original authors: Boyuan Zhang, Jiannan Tian, Sheng Di, Xiaodong Yu, Martin
+Swany, Dingwen Tao, Franck Cappello.
+Paper: "GPULZ: Optimizing LZSS Lossless Compression for Multi-byte Data on
+Modern GPUs", ICS '23.
+
+**License:** the upstream repository does not include a `LICENSE` file or
+declare a license (GitHub reports `license: null` as of this writing). No
+license terms are reproduced here because none are published upstream — this
+differs from every other entry in this document, which vendor code under an
+explicit permissive license. Anyone redistributing FZGPUModules (including
+`GPULZStage`) should contact the GPULZ authors to confirm terms before
+relying on this component outside of research/internal use.
+
+---
+
 ## LC Framework
 
 **Used by:** `RZEStage`, `RREStage`, `RAREStage`, `RAZEStage`, `CLOGStage`,

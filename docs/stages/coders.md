@@ -4,6 +4,7 @@
 |---|---|
 | \subpage stage_huffman | GPU Huffman entropy coding (PHF coarse-grained) |
 | \subpage stage_ans | GPU rANS entropy coding (dietGPU, byte-level) |
+| \subpage stage_gpulz | GPU LZSS (LZ77 + flag-bitmap) lossless compression (GPULZ) |
 | \subpage stage_rle | Run-length encoding |
 | \subpage stage_rze | Recursive zero-byte elimination |
 | \subpage stage_rre | Repetition-reduction encoding (LC framework lossless component) |

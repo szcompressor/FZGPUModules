@@ -261,3 +261,11 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+# ─── GPULZ stage ────────────────────────────────────────────────────────────
+fz_add_test(
+    NAME    test_gpulz
+    SOURCES test_gpulz.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
