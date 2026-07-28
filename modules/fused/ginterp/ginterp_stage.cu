@@ -1049,6 +1049,7 @@ void GInterpStage<TInput, TCode>::execute(
             static_cast<TInput*>(outputs[2]),
             static_cast<uint32_t*>(outputs[3]),
             d_outlier_count_scratch_,
+            static_cast<uint32_t>(getMaxOutlierCount(num_elements_)),
             eb_r_d, ebx2_d, static_cast<int>(config_.quant_radius),
             intp_param,
             stream);
@@ -1060,6 +1061,7 @@ void GInterpStage<TInput, TCode>::execute(
             static_cast<TInput*>(outputs[2]),
             static_cast<uint32_t*>(outputs[3]),
             d_outlier_count_scratch_,
+            static_cast<uint32_t>(getMaxOutlierCount(num_elements_)),
             eb_r_d, ebx2_d, static_cast<int>(config_.quant_radius),
             intp_param,
             stream);

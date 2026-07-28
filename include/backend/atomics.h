@@ -56,6 +56,13 @@ __device__ inline T atomicOrBlock(T* addr, T val) {
                                  __HIP_MEMORY_SCOPE_WORKGROUP);
 }
 
+/** Block-scoped atomic max. `T` must be an integral type (int, unsigned, unsigned long long). */
+template <typename T>
+__device__ inline T atomicMaxBlock(T* addr, T val) {
+    return __hip_atomic_fetch_max(addr, val, __ATOMIC_RELAXED,
+                                  __HIP_MEMORY_SCOPE_WORKGROUP);
+}
+
 #else // CUDA
 
 /** Block-scoped atomic add. `T` must be one of the types CUDA's `atomicAdd_block` overloads on (int, unsigned, unsigned long long, float, double). */
@@ -68,6 +75,12 @@ __device__ inline T atomicAddBlock(T* addr, T val) {
 template <typename T>
 __device__ inline T atomicOrBlock(T* addr, T val) {
     return atomicOr_block(addr, val);
+}
+
+/** Block-scoped atomic max. `T` must be one of the types CUDA's `atomicMax_block` overloads on (int, unsigned, unsigned long long). */
+template <typename T>
+__device__ inline T atomicMaxBlock(T* addr, T val) {
+    return atomicMax_block(addr, val);
 }
 
 #endif

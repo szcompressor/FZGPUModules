@@ -64,6 +64,7 @@ void launchGInterpForward3D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
+    uint32_t d_outlier_capacity,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     fz::stream_t stream);
@@ -106,6 +107,7 @@ void launchGInterpForward2D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
+    uint32_t d_outlier_capacity,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     fz::stream_t stream);

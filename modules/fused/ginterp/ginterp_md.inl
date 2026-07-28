@@ -130,6 +130,7 @@ __global__ void c_spline_infprecis_data(
     CompactVal cval,
     CompactIdx cidx,
     CompactNum cn,
+    uint32_t   compact_cap,
     FP      eb_r,
     FP      ebx2,
     int     radius,
@@ -680,7 +681,7 @@ int LINEAR_BLOCK_SIZE = DEFAULT_LINEAR_BLOCK_SIZE>
 __device__ void
 shmem2global_data_with_compaction(volatile T1 s_buf[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
 [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
-[AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)], T2* dram_buf, DIM3 buf_size, STRIDE3 buf_leap, int radius,volatile size_t grid_leaps[LEVEL + 1][2], volatile size_t prefix_nums[LEVEL + 1], T1* dram_compactval = nullptr, uint32_t* dram_compactidx = nullptr, uint32_t* dram_compactnum = nullptr)
+[AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)], T2* dram_buf, DIM3 buf_size, STRIDE3 buf_leap, int radius,volatile size_t grid_leaps[LEVEL + 1][2], volatile size_t prefix_nums[LEVEL + 1], T1* dram_compactval = nullptr, uint32_t* dram_compactidx = nullptr, uint32_t* dram_compactnum = nullptr, uint32_t dram_compactcap = 0u)
 {
     auto x_size = AnchorBlockSizeX * numAnchorBlockX + (BIX == GDX - 1) * (SPLINE_DIM >= 1);
     auto y_size = AnchorBlockSizeY * numAnchorBlockY + (BIY == GDY - 1) * (SPLINE_DIM >= 2);
@@ -703,8 +704,20 @@ shmem2global_data_with_compaction(volatile T1 s_buf[AnchorBlockSizeZ * numAnchor
             if (not quantizable) {
                 auto data_gid = gx + gy * buf_leap.y + gz * buf_leap.z;
                 auto cur_idx = atomicAdd(dram_compactnum, 1);
-                dram_compactidx[cur_idx] = data_gid;
-                dram_compactval[cur_idx] = candidate;
+                // The counter is ALWAYS advanced, even past capacity, because
+                // postStreamSync reads it to detect and report overflow — clamping it
+                // here would hide the overflow instead of reporting it. Only the writes
+                // are guarded. Without this guard an outlier count above capacity walks
+                // straight off the end of both buffers: an illegal memory access that
+                // surfaces later at whatever stage first synchronizes (observed as an
+                // IMA reported against rre_stage.cu on CESMATM-3D/CLDICE, which is
+                // merely the next sync point, not the culprit). postStreamSync's
+                // existing warning already says overflowing outliers "were DROPPED" —
+                // that was only true once this check existed.
+                if (cur_idx < dram_compactcap) {
+                    dram_compactidx[cur_idx] = data_gid;
+                    dram_compactval[cur_idx] = candidate;
+                }
             }
             int level = 0;
             //todo: pre-compute the leaps and their halves
@@ -1889,6 +1902,7 @@ __global__ void fz::ginterp::c_spline_infprecis_data(
     CompactVal compact_val,
     CompactIdx compact_idx,
     CompactNum compact_num,
+    uint32_t   compact_cap,
     FP      eb_r,
     FP      ebx2,
     int     radius,
@@ -1925,7 +1939,7 @@ __global__ void fz::ginterp::c_spline_infprecis_data(
         fz::ginterp::device_api::spline_layout_interpolate<T, T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_COMPR, false>(
             shmem_data, shmem_ectrl, data_size, eb_r, ebx2, radius, intp_param);
 
-        shmem2global_data_with_compaction<T, E, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY,  numAnchorBlockZ, LINEAR_BLOCK_SIZE>(shmem_ectrl, ectrl, ectrl_size, ectrl_leap, radius, shmem_grid_leaps,shmem_prefix_nums, compact_val, compact_idx, compact_num);
+        shmem2global_data_with_compaction<T, E, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY,  numAnchorBlockZ, LINEAR_BLOCK_SIZE>(shmem_ectrl, ectrl, ectrl_size, ectrl_leap, radius, shmem_grid_leaps,shmem_prefix_nums, compact_val, compact_idx, compact_num, compact_cap);
     }
 }
 

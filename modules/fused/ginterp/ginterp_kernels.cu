@@ -203,6 +203,7 @@ void launchGInterpForward3D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
+    uint32_t d_outlier_capacity,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream)
@@ -237,6 +238,7 @@ void launchGInterpForward3D(
             d_ectrl, ectrl_len3, ectrl_st3,
             d_anchor, anchor_st3,
             d_outlier_vals, d_outlier_idxs, d_outlier_count_scratch,
+            d_outlier_capacity,
             static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
             intp_param);
 }
@@ -444,6 +446,7 @@ void launchGInterpForward2D(
     TInput* d_anchor, dim3 anchor_len3,
     TInput* d_outlier_vals, uint32_t* d_outlier_idxs,
     uint32_t* d_outlier_count_scratch,
+    uint32_t d_outlier_capacity,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
     cudaStream_t stream)
@@ -480,6 +483,7 @@ void launchGInterpForward2D(
             d_ectrl, ectrl_len3, ectrl_st3,
             d_anchor, anchor_st3,
             d_outlier_vals, d_outlier_idxs, d_outlier_count_scratch,
+            d_outlier_capacity,
             static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
             intp_param);
 }
@@ -535,11 +539,11 @@ void launchGInterpInverse2D(
 #define FZ_GINTERP_INSTANTIATE_FORWARD(TIN, TCODE)                       \
     template void launchGInterpForward3D<TIN, TCODE>(                     \
         const TIN*, dim3, TCODE*, TIN*, dim3,                            \
-        TIN*, uint32_t*, uint32_t*, double, double, int,                 \
+        TIN*, uint32_t*, uint32_t*, uint32_t, double, double, int,       \
         const INTERPOLATION_PARAMS&, cudaStream_t);                      \
     template void launchGInterpForward2D<TIN, TCODE>(                     \
         const TIN*, dim3, TCODE*, TIN*, dim3,                            \
-        TIN*, uint32_t*, uint32_t*, double, double, int,                 \
+        TIN*, uint32_t*, uint32_t*, uint32_t, double, double, int,       \
         const INTERPOLATION_PARAMS&, cudaStream_t);
 
 #define FZ_GINTERP_INSTANTIATE_INVERSE(TIN, TCODE)                       \

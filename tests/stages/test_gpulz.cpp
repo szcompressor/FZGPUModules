@@ -60,7 +60,7 @@ static std::vector<uint8_t> pad_to_chunk(std::vector<uint8_t> data, size_t chunk
 
 // Compress then decompress; verify byte-exact round-trip.
 static void round_trip(const std::vector<uint8_t>& original, int word_size = 4,
-                        size_t chunk_size = 2048) {
+                        size_t chunk_size = 2048, int match_level = 1) {
     CudaStream cs;
     const auto padded = pad_to_chunk(original, chunk_size);
     auto pool = make_test_pool(padded.size() + 65536);
@@ -68,6 +68,7 @@ static void round_trip(const std::vector<uint8_t>& original, int word_size = 4,
     GPULZStage enc;
     enc.setChunkSize(chunk_size);
     enc.setWordSize(word_size);
+    enc.setMatchLevel(match_level);
     const size_t enc_cap = enc.estimateOutputSizes({padded.size()})[0];
     const auto compressed = run_gpulz(enc, padded, enc_cap, cs.stream, *pool);
 
@@ -79,7 +80,113 @@ static void round_trip(const std::vector<uint8_t>& original, int word_size = 4,
 
     ASSERT_EQ(restored.size(), padded.size());
     EXPECT_EQ(restored, padded) << "GPULZ round-trip mismatch (word_size=" << word_size
-                                 << ", chunk_size=" << chunk_size << ")";
+                                 << ", chunk_size=" << chunk_size
+                                 << ", match_level=" << match_level << ")";
+}
+
+// Compressed size for `original` at a given match level.
+static size_t compressed_size(const std::vector<uint8_t>& original, int match_level,
+                              int word_size = 4, size_t chunk_size = 2048) {
+    CudaStream cs;
+    const auto padded = pad_to_chunk(original, chunk_size);
+    auto pool = make_test_pool(padded.size() + 65536);
+
+    GPULZStage enc;
+    enc.setChunkSize(chunk_size);
+    enc.setWordSize(word_size);
+    enc.setMatchLevel(match_level);
+    const size_t enc_cap = enc.estimateOutputSizes({padded.size()})[0];
+    return run_gpulz(enc, padded, enc_cap, cs.stream, *pool).size();
+}
+
+// A stream with structure repeating at a stride well outside the 32-element
+// near window, so only the hashed long-range matcher (match_level 1) can find
+// it. word_size 4, so the stride below is 40 elements back.
+static std::vector<uint8_t> long_range_pattern() {
+    std::vector<uint8_t> data(8 * 2048);
+    auto* w = reinterpret_cast<uint32_t*>(data.data());
+    const size_t n = data.size() / 4;
+    std::mt19937 rng(9001);
+    std::vector<uint32_t> motif(40);
+    for (auto& m : motif) m = rng() & 0xFFFF;
+    for (size_t i = 0; i < n; i++) w[i] = motif[i % motif.size()];
+    return data;
+}
+
+TEST(GPULZStage, MatchLevel0RoundTrip) {
+    std::mt19937 rng(2024);
+    std::uniform_int_distribution<int> dist(0, 6);
+    std::vector<uint8_t> data(4 * 2048);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    for (int ws : {1, 2, 4, 8}) round_trip(data, ws, 2048, /*match_level=*/0);
+}
+
+TEST(GPULZStage, MatchLevel1RoundTrip) {
+    std::mt19937 rng(2025);
+    std::uniform_int_distribution<int> dist(0, 6);
+    std::vector<uint8_t> data(4 * 2048);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    for (int ws : {1, 2, 4, 8}) round_trip(data, ws, 2048, /*match_level=*/1);
+}
+
+TEST(GPULZStage, MatchLevel1RoundTripAllChunkSizes) {
+    const auto data = long_range_pattern();
+    for (size_t cs : {size_t(1024), size_t(2048), size_t(4096)})
+        round_trip(data, 4, cs, /*match_level=*/1);
+}
+
+// The hashed matcher exists to reach matches the 32-element near window cannot,
+// so on a stream whose only redundancy is at stride 40 it must do strictly
+// better than level 0.
+TEST(GPULZStage, MatchLevel1BeatsLevel0OnLongRangeStructure) {
+    const auto data = long_range_pattern();
+    const size_t l0 = compressed_size(data, 0);
+    const size_t l1 = compressed_size(data, 1);
+    EXPECT_LT(l1, l0) << "match_level 1 (" << l1 << " bytes) should beat level 0 ("
+                      << l0 << " bytes) on stride-40 structure";
+}
+
+// The match level is an encode-side search-effort knob only: it is not part of
+// the stream format, so a level-1 stream must decode with a stage that was
+// never told about the level (and vice versa).
+// The hash table is filled with atomicMax rather than a plain store precisely
+// so that the bucket winner -- and therefore the compressed bytes -- does not
+// depend on thread scheduling.
+TEST(GPULZStage, MatchLevel1OutputIsDeterministic) {
+    const auto data = long_range_pattern();
+    const auto padded = pad_to_chunk(data, 2048);
+    CudaStream cs;
+    auto pool = make_test_pool(padded.size() + 65536);
+
+    std::vector<uint8_t> first;
+    for (int rep = 0; rep < 4; rep++) {
+        GPULZStage enc;
+        enc.setMatchLevel(1);
+        const size_t cap = enc.estimateOutputSizes({padded.size()})[0];
+        auto out = run_gpulz(enc, padded, cap, cs.stream, *pool);
+        if (rep == 0) first = std::move(out);
+        else EXPECT_EQ(out, first) << "compressed bytes differed on repetition " << rep;
+    }
+}
+
+TEST(GPULZStage, MatchLevelIsNotPartOfTheStreamFormat) {
+    const auto data = long_range_pattern();
+    const auto padded = pad_to_chunk(data, 2048);
+    CudaStream cs;
+    auto pool = make_test_pool(padded.size() + 65536);
+
+    for (int level : {0, 1}) {
+        GPULZStage enc;
+        enc.setMatchLevel(level);
+        const size_t cap = enc.estimateOutputSizes({padded.size()})[0];
+        const auto compressed = run_gpulz(enc, padded, cap, cs.stream, *pool);
+
+        GPULZStage dec;              // default-constructed: never told the level
+        dec.setInverse(true);
+        const auto restored = run_gpulz(dec, compressed, padded.size() + 4096, cs.stream, *pool);
+        ASSERT_EQ(restored.size(), padded.size());
+        EXPECT_EQ(restored, padded) << "level-" << level << " stream failed to decode";
+    }
 }
 
 TEST(GPULZStage, RandomBytesRoundTrip) {
