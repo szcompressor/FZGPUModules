@@ -656,7 +656,7 @@ static void print_root_usage(const char* argv0) {
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
         << "                                                      rze[1|2|4|8], rre[1|2|4|8], rare[1|2|4|8], raze[1|2|4|8],\n"
         << "                                                      clog[1|2|4|8], hclog[1|2|4|8], tupl[<dim>_<word_size>],\n"
-        << "                                                      diff, rle[1|2|4|8], huffman, ans, adm\n"
+        << "                                                      gpulz[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

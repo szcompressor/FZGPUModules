@@ -106,6 +106,35 @@ TEST(GPULZStage, RepeatedPatternRoundTrip) {
     round_trip(data);
 }
 
+TEST(GPULZStage, MixedEmptyAndNonEmptyChunksRoundTrip) {
+    // Alternating all-zero chunks (exercises the encode fast-path + decode
+    // zero-fill) and random-content chunks (normal LZSS path), at chunk_size=2048.
+    std::mt19937 rng(77);
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::vector<uint8_t> data;
+    for (int c = 0; c < 6; c++) {
+        if (c % 2 == 0) {
+            data.insert(data.end(), 2048, 0);
+        } else {
+            for (int i = 0; i < 2048; i++) data.push_back((uint8_t)dist(rng));
+        }
+    }
+    round_trip(data);
+}
+
+TEST(GPULZStage, AllEmptyChunksCompressToHeaderOnly) {
+    CudaStream cs;
+    std::vector<uint8_t> data(4 * 2048, 0);
+    auto pool = make_test_pool(data.size() + 65536);
+    GPULZStage enc;
+    enc.setChunkSize(2048);
+    enc.setWordSize(4);
+    const size_t enc_cap = enc.estimateOutputSizes({data.size()})[0];
+    const auto compressed = run_gpulz(enc, data, enc_cap, cs.stream, *pool);
+    // header = 8 + 8*4 = 40 bytes; every chunk contributes 0 payload bytes.
+    EXPECT_EQ(compressed.size(), (size_t)40);
+}
+
 TEST(GPULZStage, MultiChunkRoundTrip) {
     std::mt19937 rng(99);
     std::uniform_int_distribution<int> dist(0, 3);  // low entropy -> repetitions

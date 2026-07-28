@@ -47,12 +47,15 @@ namespace fz {
  *
  * @note **Prior work:** GPU kernels are a direct port of the compression and
  *       decompression kernels in `gpulz.cu` from **GPULZ**
- *       (Zhang, Tian, Di, Yu, Swany, Tao, Cappello — ICS '23; BSD-3-Clause-style
- *       license, see repository). Upstream:
- *       https://github.com/hpdps-group/ICS23-GPULZ — see `THIRD_PARTY.md`.
+ *       (Zhang, Tian, Di, Yu, Swany, Tao, Cappello — ICS '23; upstream
+ *       repository declares no explicit license, see `THIRD_PARTY.md`).
+ *       Upstream: https://github.com/hpdps-group/ICS23-GPULZ.
  *       The per-chunk container/offset-scan plumbing (raw-fallback flag,
  *       CUB exclusive scan for packing offsets, deferred tail-size readback)
  *       is FZGM's own, following the same pattern as `RREStage`/`RZEStage`.
+ *       The all-zero-chunk fast path (skip encode entirely for chunks that
+ *       are entirely zero) is adapted from the "sparse" GPULZ variant in
+ *       `boyuanzhang62/AIZ_VLDB26` (`test/gpulz.cuh`'s `notEmptyFlagArr`).
  *
  * @note CUDA Graph capture is supported for compression only (the final
  *       output-size readback is deferred to `postStreamSync()`). The inverse

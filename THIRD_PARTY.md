@@ -42,6 +42,33 @@ relying on this component outside of research/internal use.
 
 ---
 
+## AIZ_VLDB26
+
+**Repository:** https://github.com/boyuanzhang62/AIZ_VLDB26
+
+**Used by:** `GPULZStage` (`modules/coders/gpulz/`)
+
+**Relationship:** `GPULZStage`'s all-zero-chunk fast path (skip the match
+search and flag/data encode entirely for chunks that are entirely zero,
+gated on a warp-vote `fz::backend::anySync32` check) is adapted from the
+`notEmptyFlagArr` optimization in the "sparse" GPULZ variant at
+`test/gpulz.cuh` in this repository — a research artifact for a GPU-based AI
+lossless compression pipeline that pipes quantized neural-compressor latents
+through a modified GPULZ. The optimization idea (and the `notEmptyFlag`
+warp-vote pattern) is reused; FZGM's implementation is retargeted to the
+compile-time-templated kernel structure of `GPULZStage` and its own
+container format (empty chunks are marked via a `(flag_size=0, data_size=0)`
+sentinel, distinct from the raw-fallback sentinel, with the corresponding
+output span zero-filled on decode).
+
+Original author: Boyuan Zhang.
+
+**License:** the upstream repository does not include a `LICENSE` file or
+declare a license (GitHub reports `license: null` as of this writing) — same
+situation as the GPULZ entry above.
+
+---
+
 ## LC Framework
 
 **Used by:** `RZEStage`, `RREStage`, `RAREStage`, `RAZEStage`, `CLOGStage`,

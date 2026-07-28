@@ -4,6 +4,12 @@
 // The per-chunk container format, raw-fallback flag, CUB exclusive scan for
 // packing offsets, and deferred tail-size readback are FZGM's own, mirroring
 // RREStage/RZEStage.
+//
+// The all-zero-chunk fast path in gpulzEncodeKernel (the `notEmptyFlag`
+// warp-vote skip) is adapted from the "sparse" GPULZ variant in
+// boyuanzhang62/AIZ_VLDB26 (test/gpulz.cuh), which applies the same GPULZ
+// kernels to the sparse quantized latents produced by a neural compressor.
+// Upstream: https://github.com/boyuanzhang62/AIZ_VLDB26 — see THIRD_PARTY.md.
 
 #include "coders/gpulz/gpulz_stage.h"
 #include "backend/algorithms.h"
@@ -12,6 +18,7 @@
 
 #include "backend/api.h"
 #include "backend/cub.h"
+#include "backend/warp.h"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -50,12 +57,34 @@ gpulzEncodeKernel(
     __shared__ uint8_t  offsetBuffer[blockSize];
     __shared__ uint32_t prefixBuffer[blockSize + 1];
     __shared__ uint8_t  byteFlagArr[flagBytes];
+    __shared__ int      notEmptyFlag;
 
     const T* chunkIn = d_in + (size_t)blockIdx.x * blockSize;
 
-    for (int i = 0; i < blockSize / threadSize; i++)
-        buffer[threadIdx.x + threadSize * i] = chunkIn[threadIdx.x + threadSize * i];
+    if (threadIdx.x == 0) notEmptyFlag = 0;
     __syncthreads();
+
+    bool localNonzero = false;
+    for (int i = 0; i < blockSize / threadSize; i++) {
+        T v = chunkIn[threadIdx.x + threadSize * i];
+        buffer[threadIdx.x + threadSize * i] = v;
+        localNonzero = localNonzero || (v != T(0));
+    }
+    // All-zero-chunk fast path (mirrors GPULZ's own "sparse" variant): skip
+    // the match search and flag/data encode entirely for chunks that are
+    // entirely zero (common in sparse quantized latents) -- flag_size=0 with
+    // data_size=0 (no raw-fallback high bit) is the sentinel; the host side
+    // memsets the corresponding output span to zero on decode.
+    if (fz::backend::anySync32((int)localNonzero) && (threadIdx.x % 32) == 0)
+        notEmptyFlag = 1;
+    __syncthreads();
+    if (notEmptyFlag == 0) {
+        if (threadIdx.x == 0) {
+            d_flag_size[blockIdx.x] = 0;
+            d_data_size[blockIdx.x] = 0;
+        }
+        return;
+    }
 
     // find longest match for every element
     for (int iteration = 0; iteration < blockSize / threadSize; iteration++) {
@@ -288,6 +317,38 @@ static __global__ void gpulzInterleaveHeaderKernel(
     if (i >= n_chunks) return;
     d_hdr_entries[2 * i]     = d_flag_size[i];
     d_hdr_entries[2 * i + 1] = d_data_size[i];
+}
+
+// Handles the two decode-side passthrough cases (raw-fallback copy, and
+// all-zero-chunk fill) for every chunk in one launch, keyed on a per-chunk
+// mode byte (0=normal chunk, handled separately by the decode kernel;
+// 1=raw, copy chunk_bytes verbatim from the input offset; 2=empty, zero-fill
+// chunk_bytes). Batching this into a single kernel (instead of a host loop
+// issuing one cudaMemcpyAsync/cudaMemsetAsync per matching chunk) matters
+// because empty chunks are the common case for sparse inputs -- a host loop
+// over thousands of chunks turns into thousands of tiny async launches and
+// dominates decode time (observed: >10x decode slowdown on Lorenzo-residual
+// data, where whole chunks are frequently exactly zero).
+static __global__ void gpulzDecodePassthroughKernel(
+    const uint8_t*  __restrict__ d_in,
+    uint8_t*        __restrict__ d_out,
+    const uint32_t* __restrict__ d_in_offsets,
+    const uint8_t*  __restrict__ d_mode,
+    uint32_t chunk_bytes)
+{
+    const uint32_t cid  = blockIdx.x;
+    const uint8_t  mode = d_mode[cid];
+    if (mode == 0) return;
+
+    uint8_t* out = d_out + (size_t)cid * chunk_bytes;
+    if (mode == 1) {
+        const uint8_t* in = d_in + d_in_offsets[cid];
+        for (uint32_t i = threadIdx.x; i < chunk_bytes; i += blockDim.x)
+            out[i] = in[i];
+    } else { // mode == 2: all-zero chunk
+        for (uint32_t i = threadIdx.x; i < chunk_bytes; i += blockDim.x)
+            out[i] = 0;
+    }
 }
 
 // Packs each chunk's [flag bytes][data bytes] (or raw chunk bytes, if
@@ -626,26 +687,35 @@ void GPULZStage::execute(
         uint32_t* d_in_off_  = alloc_u32("gpulz_inv_in_off");
         uint32_t* d_flag_sz_ = alloc_u32("gpulz_inv_flag_sz");
         uint32_t* d_data_sz_ = alloc_u32("gpulz_inv_data_sz");
+        uint8_t*  d_mode_    = pool ? (uint8_t*)pool->allocate(num_chunks, stream, "gpulz_inv_mode")
+                                     : [&]{ uint8_t* p = nullptr; FZ_CUDA_CHECK(cudaMalloc(&p, num_chunks)); return p; }();
 
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_in_off_,  h_in_off.data(),  num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
 
-        // Raw-flagged chunks decode to flag_size=0/data_size=0 (skip the
-        // flag-bitmap loop entirely); the host copies them through directly.
+        // Raw-flagged and all-zero (empty) chunks both decode to
+        // flag_size=0/data_size=0 (skip the flag-bitmap loop in the decode
+        // kernel entirely); a single passthrough kernel below handles the
+        // raw copy / zero-fill for every such chunk in one launch (a host
+        // loop issuing one async call per chunk is a severe anti-pattern
+        // here -- empty chunks are the *common* case for sparse inputs, so a
+        // per-chunk host loop turns into thousands of tiny launches that
+        // dominate decode time).
         std::vector<uint32_t> h_flag_sz_clean(num_chunks), h_data_sz_clean(num_chunks);
+        std::vector<uint8_t>  h_mode(num_chunks);
         for (uint32_t i = 0; i < num_chunks; i++) {
             h_flag_sz_clean[i] = h_is_raw[i] ? 0u : h_flag_sz[i];
             h_data_sz_clean[i] = h_is_raw[i] ? 0u : h_data_sz[i];
+            h_mode[i] = h_is_raw[i] ? 1u
+                      : (h_flag_sz[i] == 0 && h_data_sz[i] == 0) ? 2u
+                      : 0u;
         }
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_flag_sz_, h_flag_sz_clean.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_data_sz_, h_data_sz_clean.data(), num_chunks * sizeof(uint32_t), cudaMemcpyHostToDevice, stream));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_mode_, h_mode.data(), num_chunks, cudaMemcpyHostToDevice, stream));
 
-        for (uint32_t i = 0; i < num_chunks; i++) {
-            if (h_is_raw[i]) {
-                FZ_CUDA_CHECK(cudaMemcpyAsync(d_out + (size_t)i * chunk_size_,
-                                              d_in + h_in_off[i], h_data_sz[i],
-                                              cudaMemcpyDeviceToDevice, stream));
-            }
-        }
+        gpulzDecodePassthroughKernel<<<(int)num_chunks, 256, 0, stream>>>(
+            d_in, d_out, d_in_off_, d_mode_, chunk_size_);
+        FZ_CUDA_CHECK(cudaGetLastError());
 
         launchDecode(word_size_, chunk_size_, (int)num_chunks, stream,
                      d_out, d_in, d_in_off_, d_flag_sz_, d_data_sz_);
@@ -653,9 +723,11 @@ void GPULZStage::execute(
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         if (pool) {
-            pool->free(d_in_off_, stream); pool->free(d_flag_sz_, stream); pool->free(d_data_sz_, stream);
+            pool->free(d_in_off_, stream); pool->free(d_flag_sz_, stream);
+            pool->free(d_data_sz_, stream); pool->free(d_mode_, stream);
         } else {
-            cudaFree(d_in_off_); cudaFree(d_flag_sz_); cudaFree(d_data_sz_);
+            cudaFree(d_in_off_); cudaFree(d_flag_sz_);
+            cudaFree(d_data_sz_); cudaFree(d_mode_);
         }
 
         actual_output_size_ = (size_t)orig_total;

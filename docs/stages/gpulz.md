@@ -73,6 +73,21 @@ high bit on its header entry marks this). This bounds worst-case output to
 
 ---
 
+## All-zero-chunk fast path
+
+Before running the match search, the encode kernel does a warp-vote check
+(`fz::backend::anySync32`) for whether the whole chunk is zero. If so, the
+match search and flag/data encode are skipped entirely — the chunk
+contributes 0 bytes to the compressed payload (a `(flag_size=0, data_size=0)`
+sentinel, distinct from the raw-fallback sentinel above). On decode, the
+corresponding output span is zero-filled directly rather than walking a flag
+bitmap. This matters for sparse inputs (e.g. quantized neural-compressor
+latents, which are often mostly zero) where whole 1-4 KB chunks are
+frequently all-zero — those chunks cost nothing beyond the 8-byte header
+entry, on both the encode and decode side.
+
+---
+
 ## Graph capture
 
 Forward (compress) is CUDA-graph capturable — the final output-size readback
@@ -104,5 +119,9 @@ The GPU kernels in `GPULZStage` are a direct port of `compressKernelI` and
 > *GPULZ: Optimizing LZSS Lossless Compression for Multi-byte Data on Modern GPUs.*
 > ICS '23. https://github.com/hpdps-group/ICS23-GPULZ
 
-See `THIRD_PARTY.md` — the upstream repository does not declare an explicit
+The all-zero-chunk fast path is adapted from the "sparse" GPULZ variant in
+**AIZ_VLDB26** (Boyuan Zhang, `test/gpulz.cuh`'s `notEmptyFlagArr`):
+https://github.com/boyuanzhang62/AIZ_VLDB26
+
+See `THIRD_PARTY.md` — neither upstream repository declares an explicit
 license.
