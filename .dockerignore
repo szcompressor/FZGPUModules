@@ -11,8 +11,9 @@ third_party/googletest/
 docs/
 memory/
 
-# Scripts not needed for build
+# Scripts not needed for build (gen_stage_fingerprints.py is required by CMake)
 scripts/
+!scripts/gen_stage_fingerprints.py
 
 # Misc
 *.md
