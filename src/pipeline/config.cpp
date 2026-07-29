@@ -29,6 +29,9 @@
 #include <toml++/toml.hpp>
 
 #include "pipeline/compressor.h"
+#include "pipeline/config.h"
+// Generated at build time by scripts/gen_stage_fingerprints.py (see CMakeLists.txt).
+#include "fz_stage_fingerprints.h"
 
 // All stage types supported by loadConfig / saveConfig
 #include "fused/lorenzo_quant/lorenzo_quant.h"
@@ -856,7 +859,15 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
 // To add a new stage type:
 //   1. #include its header at the top of this file
 //   2. Add addXxxStage / saveXxxStage helpers above
-//   3. Append one entry to kStageRegistry below
+//   3. Append one entry to kStageRegistry below, INCLUDING its source_dir
+//
+// `source_dir` is the stage's module directory, relative to the repo root. It is
+// consumed by scripts/gen_stage_fingerprints.py, which hashes each stage's sources
+// plus their transitive local includes so downstream consumers can tell whether a
+// stage's code changed between two builds (see include/pipeline/config.h,
+// fz::stageFingerprints()). The generator FAILS the build if an entry names a
+// directory that does not exist, or if a stage is missing one — so this stays
+// honest without anyone having to remember it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct StageEntry {
@@ -864,35 +875,61 @@ struct StageEntry {
     StageType    enum_val;   // matches getStageTypeId() for the save direction
     Stage*       (*load_fn)(Pipeline&, const toml::table&);
     void         (*save_fn)(Stage*, std::ostringstream&);
+    const char*  source_dir; // module dir, repo-relative; see note above
 };
 
 static const StageEntry kStageRegistry[] = {
-    { "Lorenzo",      StageType::LORENZO,      addLorenzoStage,      saveLorenzoStage      },
-    { "LorenzoQuant", StageType::LORENZO_QUANT, addLorenzoQuantStage, saveLorenzoQuantStage },
-    { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage    },
-    { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage   },
-    { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage          },
-    { "RRE",          StageType::RRE,          addRREStage,          saveRREStage          },
-    { "GPULZ",        StageType::GPULZ,        addGPULZStage,        saveGPULZStage        },
-    { "RARE",         StageType::RARE,         addRAREStage,         saveRAREStage         },
-    { "RAZE",         StageType::RAZE,         addRAZEStage,         saveRAZEStage         },
-    { "CLOG",         StageType::CLOG,         addCLOGStage,         saveCLOGStage         },
-    { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage        },
-    { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage         },
-    { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage        },
-    { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage          },
-    { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage   },
-    { "Zigzag",       StageType::ZIGZAG,       addZigzagStage,       saveZigzagStage       },
-    { "Negabinary",   StageType::NEGABINARY,   addNegabinaryStage,   saveNegabinaryStage   },
-    { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage      },
-    { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage      },
-    { "ANS",          StageType::ANS,          addANSStage,          saveANSStage          },
-    { "ADM",          StageType::ADM,          addADMStage,          saveADMStage          },
-    { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage      },
-    { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage  },
-    { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage },
-    { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage },
+    { "Lorenzo",      StageType::LORENZO,      addLorenzoStage,      saveLorenzoStage,      "modules/predictors/lorenzo" },
+    { "LorenzoQuant", StageType::LORENZO_QUANT, addLorenzoQuantStage, saveLorenzoQuantStage, "modules/fused/lorenzo_quant" },
+    { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage,    "modules/quantizers/quantizer" },
+    { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage,   "modules/shufflers/bitshuffle" },
+    { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage,          "modules/coders/rze" },
+    { "RRE",          StageType::RRE,          addRREStage,          saveRREStage,          "modules/coders/rre" },
+    { "GPULZ",        StageType::GPULZ,        addGPULZStage,        saveGPULZStage,        "modules/coders/gpulz" },
+    { "RARE",         StageType::RARE,         addRAREStage,         saveRAREStage,         "modules/coders/rare" },
+    { "RAZE",         StageType::RAZE,         addRAZEStage,         saveRAZEStage,         "modules/coders/raze" },
+    { "CLOG",         StageType::CLOG,         addCLOGStage,         saveCLOGStage,         "modules/coders/clog" },
+    { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage,        "modules/coders/hclog" },
+    { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/shufflers/tupl" },
+    { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage,        "modules/structural/merge" },
+    { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage,          "modules/coders/rle" },
+    { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage,   "modules/predictors/diff" },
+    { "Zigzag",       StageType::ZIGZAG,       addZigzagStage,       saveZigzagStage,       "modules/transforms/zigzag" },
+    { "Negabinary",   StageType::NEGABINARY,   addNegabinaryStage,   saveNegabinaryStage,   "modules/transforms/negabinary" },
+    { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage,      "modules/coders/bitpack" },
+    { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage,      "modules/coders/huffman" },
+    { "ANS",          StageType::ANS,          addANSStage,          saveANSStage,          "modules/coders/ans" },
+    { "ADM",          StageType::ADM,          addADMStage,          saveADMStage,          "modules/transforms/adm" },
+    { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage,      "modules/fused/ginterp" },
+    { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage,  "modules/fused/bitplane_rze" },
+    { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage, "modules/coders/adaptive_bitpack" },
+    { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage, "modules/predictors/tiled_lorenzo" },
 };
+
+// Declared in include/pipeline/config.h.  Deliberately derived from the registry
+// above rather than maintained separately — see the header for why.
+std::vector<std::string> registeredStageTypes() {
+    std::vector<std::string> out;
+    out.reserve(sizeof(kStageRegistry) / sizeof(kStageRegistry[0]));
+    for (const auto& e : kStageRegistry) out.emplace_back(e.type_name);
+    return out;
+}
+
+std::vector<StageFingerprintInfo> stageFingerprints() {
+    std::vector<StageFingerprintInfo> out;
+    out.reserve(sizeof(kStageRegistry) / sizeof(kStageRegistry[0]));
+    for (const auto& e : kStageRegistry) {
+        StageFingerprintInfo info{e.type_name, ""};
+        // Linear scan over ~25 entries, once: not worth a map.  A stage with no
+        // generated entry reports an empty fingerprint rather than a fabricated
+        // one, so a consumer can tell "unchanged" from "unknown".
+        for (const auto& g : generated::kStageFingerprints) {
+            if (info.name == g.name) { info.fingerprint = g.fingerprint; break; }
+        }
+        out.push_back(std::move(info));
+    }
+    return out;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline::loadConfig()

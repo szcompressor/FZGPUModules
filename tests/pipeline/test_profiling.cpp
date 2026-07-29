@@ -415,3 +415,59 @@ TEST(Profiling, PrintDAGNoCrash) {
     EXPECT_NO_THROW(p2->getDAG()->printDAG())
         << "PR11: printDAG() must not throw on a multi-stage pipeline";
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR12: setMemoryStrategy() after enableProfiling() must not disable profiling
+//
+// Regression test.  setMemoryStrategy() replaces dag_ with a fresh
+// CompressionDAG, which used to drop the profiling flag that enableProfiling()
+// had set on the old one.  Pipeline::profiling_enabled_ stayed true, so
+// compress() still asked for timings, but CompressionDAG::collectTimings()
+// returned {} because the *new* DAG had profiling off -- and no per-stage
+// timings were created for any node.
+//
+// This was not a corner case: the CLI calls enableProfiling() before
+// loadConfig(), and every TOML preset carries a `memory_strategy` key, so
+// loadConfig() -> setMemoryStrategy() hit this on every config-driven run.  The
+// compress-phase per-stage breakdown vanished from both the stdout perf table
+// and `stages[]` in --report-json, while decompress kept working (its inverse
+// DAG is built later, at decompress() time).  A 9,816-cell external benchmark
+// sweep recorded 4,860 FZGM rows, every one decompress-only, before anyone
+// noticed -- absence of data is easy to miss, so it is pinned here.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(Profiling, SurvivesMemoryStrategyChange) {
+    constexpr size_t N = 1 << 12;
+    const size_t in_bytes = N * sizeof(float);
+
+    CudaStream stream;
+    auto h_in = make_smooth_data<float>(N);
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_in, stream);
+    stream.sync();
+
+    // Order matters and mirrors the CLI: profiling on, THEN the strategy change
+    // that loadConfig() performs.  Both must precede finalize().
+    auto p = std::make_unique<Pipeline>(in_bytes, MemoryStrategy::MINIMAL, 3.0f);
+    p->enableProfiling(true);
+    p->setMemoryStrategy(MemoryStrategy::PREALLOCATE);
+
+    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(1e-2f);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    p->setPoolManagedDecompOutput(false);
+    p->finalize();
+
+    void* d_comp = nullptr; size_t comp_sz = 0;
+    p->compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+
+    const auto& r = p->getLastPerfResult();
+    ASSERT_FALSE(r.stages.empty())
+        << "PR12: per-stage timings must survive setMemoryStrategy(); an empty "
+           "stages vector here is the regression this test exists for";
+    EXPECT_EQ(r.stages.size(), 1u)
+        << "PR12: single-stage pipeline must still report exactly 1 stage entry";
+    EXPECT_GT(r.stages[0].elapsed_ms, 0.0f)
+        << "PR12: stage timing must be a real measurement, not a zero placeholder";
+}

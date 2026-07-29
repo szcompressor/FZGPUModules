@@ -463,6 +463,25 @@ endif()
 
 add_library(FZGMOD::modules ALIAS fzgmod_modules)
 
+#### Generated per-stage source fingerprints
+#
+# Hashes each stage's sources plus their transitive local includes, so a consumer
+# can tell whether a stage's code changed between two builds (config.cpp's
+# kStageRegistry supplies the directories). Runs on every build rather than only at
+# configure time: the whole point is to track source edits, and a configure-time-only
+# hash would go stale the moment someone edits a kernel and rebuilds. The generator
+# rewrites the header only when a fingerprint actually changes, so this does not
+# retrigger compilation on every build.
+set(FZGMOD_STAGE_FP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/fz_stage_fingerprints.h")
+add_custom_target(fzgmod_stage_fingerprints ALL
+  COMMAND ${CMAKE_COMMAND} -E env python3
+          "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_stage_fingerprints.py"
+          --out "${FZGMOD_STAGE_FP_HEADER}"
+  BYPRODUCTS "${FZGMOD_STAGE_FP_HEADER}"
+  COMMENT "Generating per-stage source fingerprints"
+  VERBATIM
+)
+
 add_library(fzgmod_pipeline
   src/pipeline/compressor.cpp
   src/pipeline/compressor_exec.cpp
@@ -484,6 +503,8 @@ target_link_libraries(fzgmod_pipeline
   ${FZGMOD_GPU_RUNTIME}
 )
 fzgmod_set_gpu_source_language(fzgmod_pipeline)
+add_dependencies(fzgmod_pipeline fzgmod_stage_fingerprints)
+target_include_directories(fzgmod_pipeline PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
 
 #### Combined Library

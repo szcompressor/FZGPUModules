@@ -200,8 +200,24 @@ void write_report_json(const std::string& path, const ReportData& d) {
           << "\", \"device_ms\": " << num(s.device_ms) << " }";
     }
     o << (d.stages.empty() ? "]" : "\n  ]");
-    if (d.graph_requested) o << ",";
+    if (d.graph_requested || !d.stage_versions.empty()) o << ",";
     o << "\n";
+
+    // stage_versions: source fingerprint of each stage that ran.  Omitted entirely
+    // when empty (a build without generated fingerprints), so a consumer can tell
+    // "this build does not report versions" from "nothing changed".
+    if (!d.stage_versions.empty()) {
+        o << "  \"stage_versions\": {";
+        bool first = true;
+        for (const auto& kv : d.stage_versions) {
+            o << (first ? "" : ",") << "\n    \"" << esc(kv.first) << "\": \""
+              << esc(kv.second) << "\"";
+            first = false;
+        }
+        o << "\n  }";
+        if (d.graph_requested) o << ",";
+        o << "\n";
+    }
 
     // graph (benchmark only; emitted only when graph was requested)
     if (d.graph_requested) {

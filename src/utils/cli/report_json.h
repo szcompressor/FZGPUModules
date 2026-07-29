@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,11 @@ struct StageTimeJson {
     std::string phase;       ///< "compress" | "decompress"
     double      device_ms = 0.0;
 };
+
+/// Stage name -> source fingerprint for the stages this run executed, emitted as
+/// the `stage_versions` object.  Lets a consumer invalidate a cached result when
+/// the code behind one of its stages changes; see fz::stageFingerprints().
+using StageVersionsJson = std::map<std::string, std::string>;
 
 /// Per-rep timing arrays for one phase. `present` gates emission.
 struct PhaseTimingJson {
@@ -84,6 +90,7 @@ struct ReportData {
 
     // ── stages (only when profiling produced per-stage timings) ──
     std::vector<StageTimeJson> stages;
+    StageVersionsJson          stage_versions;
 
     // ── graph mode (benchmark only; omitted entirely when graph_requested is false) ──
     bool        graph_requested = false;

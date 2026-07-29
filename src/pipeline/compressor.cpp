@@ -65,6 +65,19 @@ void Pipeline::setMemoryStrategy(MemoryStrategy strategy) {
     }
     strategy_ = strategy;
     dag_ = std::make_unique<CompressionDAG>(mem_pool_.get(), strategy);
+    // Re-apply Pipeline-level DAG state to the replacement.  Constructing a fresh
+    // CompressionDAG discards everything previously configured on the old one, and
+    // profiling is the piece that matters: callers set it via enableProfiling()
+    // *before* loadConfig(), and every TOML preset carries a `memory_strategy` key,
+    // so loadConfig() lands here and silently brought the new DAG up with profiling
+    // off.  collectTimings() then returns {} and the whole compress-phase per-stage
+    // breakdown disappears -- from the stdout perf table and from `stages[]` in
+    // --report-json alike -- while decompress kept working, because its inverse DAG
+    // is built separately at decompress() time.  That asymmetry is exactly what the
+    // 2026-07-29 full-corpus sweep recorded: 4,860 FZGM rows, every one of them
+    // decompress-only.  Anything else added to CompressionDAG that is configured
+    // before finalize() must be re-applied here too.
+    dag_->enableProfiling(profiling_enabled_);
 }
 
 void Pipeline::setNumStreams(int num_streams) {

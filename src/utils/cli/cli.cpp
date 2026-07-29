@@ -227,6 +227,12 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
             continue;
         }
 
+        // --list-stages / --list-stages=json : optional-value option
+        if (key == "list-stages") {
+            opts[key] = has_value ? value : "text";
+            continue;
+        }
+
         const bool is_flag =
             (key == "z") ||
             (key == "x") ||
@@ -620,6 +626,32 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
     if (s.print_pipeline) pipeline->printPipeline();
 }
 
+// Print every stage `type` accepted in a TOML config, straight from the registry.
+//
+// The inventory is worth exposing separately from "what a given run executed":
+// a consumer that caches results per stage (e.g. to re-run only the cells a
+// changed stage affects) needs to know a stage exists even when no current
+// pipeline references it, and scraping names out of report JSON can only ever
+// show the stages that happened to run.
+static void print_stage_list(bool as_json) {
+    const std::vector<fz::StageFingerprintInfo> stages = fz::stageFingerprints();
+    if (as_json) {
+        std::cout << "{\n  \"schema_version\": \"1.1\",\n  \"stages\": [";
+        for (size_t i = 0; i < stages.size(); ++i) {
+            std::cout << (i ? "," : "") << "\n    { \"name\": \"" << stages[i].name
+                      << "\", \"fingerprint\": \"" << stages[i].fingerprint << "\" }";
+        }
+        std::cout << (stages.empty() ? "]" : "\n  ]") << "\n}\n";
+        return;
+    }
+    std::cout << "Stage types accepted by a TOML [[stage]] `type` key ("
+              << stages.size() << "), with this build's source fingerprint:\n";
+    for (const auto& s : stages) {
+        std::cout << "  " << std::left << std::setw(20) << s.name
+                  << (s.fingerprint.empty() ? "(none)" : s.fingerprint) << "\n";
+    }
+}
+
 static void print_root_usage(const char* argv0) {
     std::cout
         << "Name: FZModules GPU Compression Library\n\n"
@@ -643,7 +675,8 @@ static void print_root_usage(const char* argv0) {
         << "  --compare <original>              Compare decompressed output with original\n"
         << "  --profile                         Print per-stage GPU timing table\n"
         << "  --graph                           Use CUDA Graph mode for benchmark (silently falls back if pipeline is incompatible)\n"
-        << "  --print-pipeline                  Print pipeline stage graph after finalize\n\n"
+        << "  --print-pipeline                  Print pipeline stage graph after finalize\n"
+        << "  --list-stages[=json]              List every stage type a TOML config accepts, then exit\n\n"
         << "Diagnostic Options:\n"
         << "  -v                                Verbose: enable INFO-level library logging\n"
         << "  -vv                               Verbose: enable DEBUG-level library logging\n"
@@ -735,6 +768,25 @@ static void append_stages(std::vector<fz::cli::StageTimeJson>& out,
                           const fz::PipelinePerfResult& r, const char* phase) {
     for (const auto& st : r.stages) {
         out.push_back({st.name, phase, static_cast<double>(st.elapsed_ms)});
+    }
+}
+
+// Record the source fingerprint of every stage this run actually executed, so a
+// consumer can later tell whether the code behind a stored result has changed.
+// Scoped to the stages present in `stages` rather than dumping the whole registry:
+// the report describes one run, and a stage the pipeline never used is not part of
+// what produced these numbers.
+static void set_stage_versions(fz::cli::ReportData& d) {
+    if (d.stages.empty()) return;
+    const auto all = fz::stageFingerprints();
+    for (const auto& st : d.stages) {
+        if (d.stage_versions.count(st.name)) continue;
+        for (const auto& f : all) {
+            if (f.name == st.name && !f.fingerprint.empty()) {
+                d.stage_versions[st.name] = f.fingerprint;
+                break;
+            }
+        }
     }
 }
 
@@ -853,6 +905,7 @@ static int run_compress(CliSettings s) {
             d.compress.device_ms    = {static_cast<double>(perf.dag_elapsed_ms)};
             d.compress.host_wall_ms = {host_ms};
             append_stages(d.stages, perf, "compress");
+            set_stage_versions(d);
             try_write_report(s.report_json_path, d);
         }
     } catch (...) {
@@ -954,6 +1007,7 @@ static int run_decompress(CliSettings s) {
             d.decompress.host_wall_ms = {host_ms};
             append_stages(d.stages, decomp_perf, "decompress");
             if (has_m) set_quality(d, m);
+            set_stage_versions(d);
             try_write_report(s.report_json_path, d);
         }
     } catch (...) {
@@ -1181,6 +1235,7 @@ static int run_benchmark(CliSettings s) {
             d.graph_requested = s.use_graph;
             d.graph_active    = graph_active;
             d.graph_incompatible_reason = graph_reason;
+            set_stage_versions(d);
             try_write_report(s.report_json_path, d);
         }
 
@@ -1207,6 +1262,13 @@ int fzgmod_cli_main(int argc, char** argv) {
         OptionMap opts = parse_option_tokens(argc, argv, 1);
         if (contains(opts, "help")) {
             print_root_usage(argv[0]);
+            return 0;
+        }
+
+        // Inventory query: needs no input file, no GPU, and no operation mode, so
+        // it is handled before apply_common_options() (which requires all three).
+        if (contains(opts, "list-stages")) {
+            print_stage_list(opts.at("list-stages") == "json");
             return 0;
         }
 
