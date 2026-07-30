@@ -118,3 +118,9 @@ set_target_properties(lc_lossless_pipeline PROPERTIES
 add_executable(integer_transforms_intro integer_transforms_intro.cpp)
 set_target_properties(integer_transforms_intro PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── GPU Zstandard: GPULZ split ports -> Huffman/ANS -> Merge ─────────────────
+add_executable(gpu_zstd gpu_zstd.cpp)
+target_link_libraries(gpu_zstd PRIVATE fzgmod)
+set_target_properties(gpu_zstd PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

@@ -162,7 +162,14 @@ Pipeline::FZMFileHeader Pipeline::buildHeader() const {
             meta.producer->stage->serializeHeader(meta.output_index, entry.stage_config, FZM_STAGE_CONFIG_SIZE)
         );
 
-        byte_offset += meta.actual_size;
+        // Pad each buffer's slot to 16 bytes, exactly as the in-memory concat
+        // path does (ConcatLayout::slotSize). Without it a buffer whose size is
+        // not a multiple of 4 leaves the *next* buffer on an odd offset, and the
+        // Huffman and ANS decode kernels read their bitstreams as 32-bit words
+        // and fault on the misaligned load. Reading stays backward compatible:
+        // the reader locates every buffer through entry.byte_offset, so older
+        // unpadded files still open, and newer files simply carry the padding.
+        byte_offset += align16(meta.actual_size);
         fh.buffers.push_back(entry);
     }
 
@@ -196,6 +203,10 @@ void Pipeline::writeToFile(const std::string& filename, cudaStream_t stream) {
             std::to_string(total_data_size) + " bytes)");
     }
 
+    // Zero the whole blob first so the inter-slot alignment padding is
+    // deterministic (byte-identical files for identical input).
+    std::memset(h_data, 0, total_data_size);
+
     size_t offset = 0;
     for (const auto& meta : buffer_metadata_) {
         void* d_buffer = dag_->getBuffer(meta.buffer_id);
@@ -208,7 +219,7 @@ void Pipeline::writeToFile(const std::string& filename, cudaStream_t stream) {
             free(h_data);
             throw std::runtime_error("cudaMemcpyAsync failed: " + std::string(cudaGetErrorString(err)));
         }
-        offset += meta.actual_size;
+        offset += align16(meta.actual_size);   // must match buildHeader()
     }
 
     cudaError_t err = cudaStreamSynchronize(stream);

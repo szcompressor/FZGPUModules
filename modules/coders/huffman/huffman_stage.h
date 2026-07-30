@@ -98,7 +98,15 @@ public:
      * allocation.
      * Default: 256 for uint8_t, 1024 for uint16_t/uint32_t.
      */
-    void     setBklen(uint32_t bklen) { bklen_ = bklen; }
+    /**
+     * An **odd** bklen is rounded up to the next even value. The reverse
+     * codebook occupies `4*(2*32) + sizeof(SYM)*bklen` bytes, so with a 2-byte
+     * symbol an odd bklen makes it an odd number of 16-bit words; that shifts
+     * the bitstream section to a 2-mod-4 offset, and the decode kernel reads
+     * the bitstream as `uint32*` and faults on the misaligned load. Rounding up
+     * is always safe -- a larger codebook only adds unused symbol slots.
+     */
+    void     setBklen(uint32_t bklen) { bklen_ = bklen + (bklen & 1u); }
     uint32_t getBklen() const         { return bklen_; }
 
     /**

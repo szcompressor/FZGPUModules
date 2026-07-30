@@ -142,10 +142,99 @@ per chunk, ~24 KB of shared memory per block) and does not benefit.
 
 ---
 
+## Split mode (Zstandard-style literals/sequences separation) {#split-mode}
+
+```cpp
+gpulz->setSplitMode(true);   // default false
+```
+
+Emits four output ports instead of one interleaved stream:
+
+| port | contents | suggested coder |
+|---|---|---|
+| `literals` | literal words, back to back (raw-fallback chunks land here too) | `HuffmanStage<uint16_t>` |
+| `lengths`  | one match-length byte per match token | `ANSStage` |
+| `offsets`  | one match-offset byte per match token | `ANSStage` |
+| `meta`     | stream header + per-chunk size table + flag bitmaps | `ANSStage` |
+
+This is the split Zstandard makes for the same reason: the parts have very
+different symbol distributions, and interleaving them raises the entropy any
+one coder sees. Measured across six SDRB fields, coding the four ports
+separately beats the single-stream form by **23-43% compression ratio**.
+
+Roughly half that gain comes not from the split itself but from the
+`literals` port keeping the data's **natural word alphabet**. Lorenzo-quantized
+uint16 codes carry strong correlation between a code's high and low byte;
+coding them as bytes throws it away (4.14 bits/byte vs 3.43 when coded as
+uint16 symbols). Feed `literals` to a symbol-width-matched coder.
+
+### Everything must be coded, and everything must be merged
+
+The single-stream form entropy codes the whole payload by construction. A split
+leaks any byte left out of a port, so two categories are deliberately folded in
+rather than parked in an uncoded tail:
+
+- **raw-fallback chunks** go into `literals` (such a chunk is all literal by
+  definition). Leaving them out cost 28% CR on EXAALT, where nearly every chunk
+  is raw fallback.
+- **the per-chunk size table** goes into `meta`. It scales with chunk count and
+  is highly repetitive; left raw it cost 67% CR on AEROD_v, whose 50 KB size
+  table alone exceeded the entire single-stream archive.
+
+Any size gate in front of a coder should skip only the *launch* for a stream too
+small to pay for it, then keep `min(raw, coded)`. A gate that *forces* raw is a
+trap: an early 64 KB threshold made AEROD_v 4x worse, because all four of its
+streams sat under it.
+
+### GPU-specific divergences from the CPU format
+
+- Zstd interleaves the three sequence streams into one bitstream with three FSE
+  states, because on a CPU that keeps all three states in registers through a
+  single sequential decode loop. On a GPU that inverts: same-level DAG stages
+  run concurrently on separate streams, so separate ports let their coders
+  overlap.
+- Zstd encodes lengths/offsets as a small *code* plus raw *extra bits*, keeping
+  the FSE alphabet tiny while reaching values past 65536. Our length and offset
+  fields are one byte each, so the alphabet is already <=256 and the split buys
+  nothing. It becomes necessary only if the match window is widened past 255.
+
+### Decode path
+
+Split mode does **not** rebuild the packed single-stream form to decode. A
+dedicated kernel decodes straight out of the four ports: the flag bitmap fixes
+every item's input size, so one block scan recovers item offsets and two more
+give each item its slot in the literals and token streams, which are then read
+at those indices. Restriping first would run those same scans twice and move the
+whole uncompressed-size intermediate through global memory both ways — measured
+7.5x slower for the inverse stage (3.59 ms vs 0.476 ms on 61 MB).
+
+With that in place the pipeline's decompress cost is dominated by the literals
+**Huffman**, not by this stage.
+
+### Throughput notes
+
+`sublen` (elements per Huffman coarse-encode partition) is hardcoded to 768 in
+the vendored PHF code, and the coarse decode runs one thread per partition — so
+a 2.68 M-symbol literals stream decodes on only ~3500 threads. Dropping it to
+256 measured ~1.4x faster decompress for -2.3% CR on QCLOUD. It is a genuine
+CR/throughput lever but is not currently exposed as a stage setting, and
+changing the constant affects every `HuffmanStage` user.
+
+See `examples/gpu_zstd.cpp` for the full pipeline.
+
+---
+
 ## Alignment requirement
 
-Requires input to be a multiple of `chunk_size` bytes
-(`getRequiredInputAlignment()`); `Pipeline::finalize()` pads automatically.
+None. `getRequiredInputAlignment()` returns 1 and the stage zero-pads its own
+tail chunk.
+
+Requesting pipeline-level alignment does not work for a coder behind a
+width-changing stage: `Pipeline::finalize()` pads the *pipeline input* to the
+LCM of all stage alignments, but `LorenzoQuantStage` turns float32 into uint16
+codes, so a 2048-aligned input arrives here as half as many bytes and need not
+be aligned at all. Forcing the input up additionally grows the upstream stage's
+output past its own estimate and trips the buffer-overwrite check.
 
 ---
 

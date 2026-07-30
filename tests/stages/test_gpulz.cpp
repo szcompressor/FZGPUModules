@@ -84,6 +84,82 @@ static void round_trip(const std::vector<uint8_t>& original, int word_size = 4,
                                  << ", match_level=" << match_level << ")";
 }
 
+// ── split mode ────────────────────────────────────────────────────────────
+// Compress with the four-port Zstd-style split, then restripe + decode.
+// Returns {restored bytes, total split payload bytes}.
+static std::pair<std::vector<uint8_t>, size_t>
+split_round_trip(const std::vector<uint8_t>& original, int word_size = 4,
+                 size_t chunk_size = 2048) {
+    CudaStream cs;
+    const auto padded = pad_to_chunk(original, chunk_size);
+    auto pool = make_test_pool(padded.size() * 4 + (1 << 20));
+
+    GPULZStage enc;
+    enc.setChunkSize(chunk_size);
+    enc.setWordSize(word_size);
+    enc.setSplitMode(true);
+    EXPECT_EQ(enc.getNumOutputs(), 4u);
+
+    const auto caps = enc.estimateOutputSizes({padded.size()});
+    EXPECT_EQ(caps.size(), 4u);
+
+    CudaBuffer<uint8_t> d_in(padded.size());
+    d_in.upload(padded, cs.stream);
+    std::vector<std::unique_ptr<CudaBuffer<uint8_t>>> outs;
+    std::vector<void*> out_ptrs;
+    for (size_t i = 0; i < 4; i++) {
+        outs.emplace_back(new CudaBuffer<uint8_t>(caps[i] ? caps[i] : 4));
+        out_ptrs.push_back(outs.back()->void_ptr());
+    }
+    cudaStreamSynchronize(cs.stream);
+
+    std::vector<void*>  in_ptrs = {d_in.void_ptr()};
+    std::vector<size_t> in_sz   = {padded.size()};
+    enc.execute(cs.stream, pool.get(), in_ptrs, out_ptrs, in_sz);
+    enc.postStreamSync(cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    const auto named = enc.getActualOutputSizesByName();
+    const size_t n_lit  = named.at("literals");
+    const size_t n_len  = named.at("lengths");
+    const size_t n_off  = named.at("offsets");
+    const size_t n_meta = named.at("meta");
+    for (size_t i = 0; i < 4; i++)
+        EXPECT_LE(enc.getActualOutputSize((int)i), caps[i])
+            << "split port " << i << " overflowed its estimate";
+    const size_t total = n_lit + n_len + n_off + n_meta;
+
+    // decode: feed the four ports back in
+    GPULZStage dec;
+    dec.setChunkSize(chunk_size);
+    dec.setWordSize(word_size);
+    dec.setSplitMode(true);
+    dec.setInverse(true);
+    EXPECT_EQ(dec.getNumInputs(), 4u);
+
+    CudaBuffer<uint8_t> d_res(padded.size() + 4096);
+    std::vector<void*>  dec_in  = {out_ptrs[0], out_ptrs[1], out_ptrs[2], out_ptrs[3]};
+    std::vector<void*>  dec_out = {d_res.void_ptr()};
+    std::vector<size_t> dec_sz  = {n_lit, n_len, n_off, n_meta};
+    dec.execute(cs.stream, pool.get(), dec_in, dec_out, dec_sz);
+    dec.postStreamSync(cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    const size_t restored_bytes = dec.getActualOutputSizesByName().at("output");
+    std::vector<uint8_t> restored(restored_bytes);
+    cudaMemcpy(restored.data(), d_res.get(), restored_bytes, cudaMemcpyDeviceToHost);
+    return {restored, total};
+}
+
+static void expect_split_round_trip(const std::vector<uint8_t>& original,
+                                    int word_size = 4, size_t chunk_size = 2048) {
+    const auto padded = pad_to_chunk(original, chunk_size);
+    auto r = split_round_trip(original, word_size, chunk_size);
+    ASSERT_EQ(r.first.size(), padded.size());
+    EXPECT_EQ(r.first, padded) << "GPULZ split round-trip mismatch (word_size="
+                               << word_size << ", chunk_size=" << chunk_size << ")";
+}
+
 // Compressed size for `original` at a given match level.
 static size_t compressed_size(const std::vector<uint8_t>& original, int match_level,
                               int word_size = 4, size_t chunk_size = 2048) {
@@ -299,8 +375,8 @@ TEST(GPULZStage, HeaderSerialization) {
     GPULZStage s;
     s.setChunkSize(4096);
     s.setWordSize(2);
-    uint8_t buf[9] = {0};
-    ASSERT_EQ(s.serializeHeader(0, buf, sizeof(buf)), (size_t)9);
+    uint8_t buf[14] = {0};
+    ASSERT_EQ(s.serializeHeader(0, buf, sizeof(buf)), (size_t)14);
     GPULZStage s2;
     s2.deserializeHeader(buf, sizeof(buf));
     EXPECT_EQ(s2.getChunkSize(), (size_t)4096);
@@ -313,7 +389,7 @@ TEST(GPULZStage, SaveRestoreState) {
     s.setWordSize(4);
     s.saveState();
 
-    uint8_t other_buf[9] = {0};
+    uint8_t other_buf[14] = {0};
     GPULZStage tmp;
     tmp.setChunkSize(4096);
     tmp.setWordSize(8);
@@ -413,4 +489,115 @@ TEST(GPULZStage, ZeroInput) {
     std::vector<size_t> sizes   = {0};
     EXPECT_NO_THROW(stage.execute(cs.stream, pool.get(), inputs, outputs, sizes));
     EXPECT_EQ(stage.getActualOutputSize(0), 0u);
+}
+
+// ── split mode (Zstd-style literals/sequences separation) ─────────────────
+
+TEST(GPULZStage, SplitRandomBytesRoundTrip) {
+    std::mt19937 rng(4242);
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::vector<uint8_t> data(6 * 2048);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    expect_split_round_trip(data);
+}
+
+TEST(GPULZStage, SplitLowEntropyRoundTrip) {
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<int> dist(0, 3);
+    std::vector<uint8_t> data(8 * 2048);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    expect_split_round_trip(data);
+}
+
+TEST(GPULZStage, SplitConstantRunRoundTrip) {
+    expect_split_round_trip(std::vector<uint8_t>(4 * 2048, 0x5A));
+}
+
+// Exercises all three chunk special-cases in one stream: all-zero chunks
+// (encoder fast path), incompressible chunks (raw fallback, which must be
+// routed into the literals port), and ordinary LZ-coded chunks.
+TEST(GPULZStage, SplitMixedEmptyRawAndCodedChunksRoundTrip) {
+    std::mt19937 rng(31337);
+    std::uniform_int_distribution<int> hi(0, 255), lo(0, 2);
+    std::vector<uint8_t> data;
+    for (int c = 0; c < 9; c++) {
+        if (c % 3 == 0)      data.insert(data.end(), 2048, 0);              // empty
+        else if (c % 3 == 1) for (int i = 0; i < 2048; i++) data.push_back((uint8_t)hi(rng)); // raw
+        else                 for (int i = 0; i < 2048; i++) data.push_back((uint8_t)lo(rng)); // coded
+    }
+    expect_split_round_trip(data);
+}
+
+TEST(GPULZStage, SplitPartialChunkRoundTrip) {
+    std::mt19937 rng(11);
+    std::uniform_int_distribution<int> dist(0, 5);
+    std::vector<uint8_t> data(5000);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    expect_split_round_trip(data);
+}
+
+TEST(GPULZStage, SplitWordSizesRoundTrip) {
+    std::mt19937 rng(99);
+    std::uniform_int_distribution<int> dist(0, 7);
+    std::vector<uint8_t> data(6 * 2048);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+    for (int w : {1, 2, 4, 8}) expect_split_round_trip(data, w);
+}
+
+TEST(GPULZStage, SplitChunkSizesRoundTrip) {
+    std::mt19937 rng(123);
+    std::uniform_int_distribution<int> dist(0, 7);
+    for (size_t cs : {size_t(1024), size_t(2048), size_t(4096)}) {
+        std::vector<uint8_t> data(6 * cs);
+        for (auto& b : data) b = (uint8_t)dist(rng);
+        expect_split_round_trip(data, 4, cs);
+    }
+}
+
+// The split must not lose bytes: every byte of the single-stream form has to
+// reappear in exactly one of the four ports (modulo the 4-byte tail padding
+// the single-stream path adds). Regression guard for the class of bug where a
+// chunk category silently bypasses all four ports.
+TEST(GPULZStage, SplitConservesTotalBytes) {
+    std::mt19937 rng(555);
+    std::uniform_int_distribution<int> dist(0, 6);
+    std::vector<uint8_t> data(8 * 2048);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+
+    const size_t single = compressed_size(data, /*match_level=*/1);
+    const size_t split  = split_round_trip(data).second;
+    EXPECT_LE(split, single) << "split payload larger than the single stream";
+    EXPECT_GE(split + 8, single) << "split lost bytes relative to the single stream";
+}
+
+TEST(GPULZStage, SplitHeaderSerialization) {
+    GPULZStage s;
+    s.setChunkSize(4096);
+    s.setWordSize(2);
+    s.setSplitMode(true);
+    uint8_t buf[16] = {0};
+    ASSERT_EQ(s.serializeHeader(0, buf, sizeof(buf)), (size_t)14);
+    GPULZStage s2;
+    s2.deserializeHeader(buf, 14);
+    EXPECT_EQ(s2.getChunkSize(), (size_t)4096);
+    EXPECT_EQ(s2.getWordSize(), 2);
+    EXPECT_TRUE(s2.getSplitMode());
+}
+
+TEST(GPULZStage, SplitPortNamesAndArity) {
+    GPULZStage s;
+    EXPECT_EQ(s.getNumOutputs(), 1u);
+    EXPECT_EQ(s.getOutputNames().size(), 1u);
+    s.setSplitMode(true);
+    const auto names = s.getOutputNames();
+    ASSERT_EQ(names.size(), 4u);
+    EXPECT_EQ(names[0], "literals");
+    EXPECT_EQ(names[1], "lengths");
+    EXPECT_EQ(names[2], "offsets");
+    EXPECT_EQ(names[3], "meta");
+    EXPECT_EQ(s.getNumOutputs(), 4u);
+    EXPECT_EQ(s.getNumInputs(), 1u);
+    s.setInverse(true);
+    EXPECT_EQ(s.getNumInputs(), 4u);
+    EXPECT_EQ(s.getNumOutputs(), 1u);
 }

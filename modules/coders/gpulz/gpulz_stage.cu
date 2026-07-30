@@ -559,6 +559,421 @@ static __global__ void gpulzPackKernel(
     }
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Split mode (Zstd-style literals/sequences separation)
+//
+// The encode kernel is untouched: it still produces a per-chunk flag bitmap
+// plus one interleaved literal/match byte stream. Split mode replaces only the
+// final pack step, scattering those bytes into four independent streams so
+// each can be entropy coded against its own symbol distribution.
+//
+// Per-chunk destination offsets come from three exclusive scans over per-chunk
+// counts. The counts are derived without walking the item list: a chunk's
+// match count is exactly the popcount of its flag bitmap (bitmap padding bits
+// are zero, so they never inflate it), and its literal byte count then follows
+// from `data_size = n_literals*word_size + n_matches*2`.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// meta stream holds one flag bitmap per *encoded* chunk; raw and all-zero
+// chunks contribute none. Derivable from the size table alone, which is why it
+// is a separate pass from the popcount below (the popcount needs the bitmap,
+// whose location needs this scan).
+static __global__ void gpulzSplitMetaCountKernel(
+    const uint32_t* __restrict__ d_flag_size,
+    const uint32_t* __restrict__ d_data_size,
+    uint32_t*       __restrict__ d_meta_cnt,
+    uint32_t n_chunks)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_chunks) return;
+    const uint32_t fe = d_flag_size[i];
+    const bool raw = (fe & 0x80000000u) != 0;
+    d_meta_cnt[i] = (raw || (fe == 0 && d_data_size[i] == 0)) ? 0u : fe;
+}
+
+// Per-chunk literal-byte and match-token counts. `d_flag_at` gives each chunk's
+// bitmap position: null means the uniform forward scratch stride, non-null the
+// packed meta-stream offsets used on the inverse path.
+static __global__ void gpulzSplitCountKernel(
+    const uint8_t*  __restrict__ d_flags_base,
+    const uint32_t* __restrict__ d_flag_at,     // may be null
+    uint32_t flag_stride,
+    const uint32_t* __restrict__ d_flag_size,
+    const uint32_t* __restrict__ d_data_size,
+    uint32_t*       __restrict__ d_lit_cnt,
+    uint32_t*       __restrict__ d_tok_cnt,
+    uint32_t n_chunks, uint32_t chunk_bytes)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_chunks) return;
+
+    const uint32_t fe = d_flag_size[i];
+    const uint32_t ds = d_data_size[i];
+
+    if ((fe & 0x80000000u) != 0) {          // raw fallback: all literal
+        d_lit_cnt[i] = chunk_bytes;
+        d_tok_cnt[i] = 0;
+        return;
+    }
+    if (fe == 0 && ds == 0) {               // all-zero chunk: contributes nothing
+        d_lit_cnt[i] = 0;
+        d_tok_cnt[i] = 0;
+        return;
+    }
+
+    const uint8_t* flags = d_flags_base
+        + (d_flag_at ? d_flag_at[i] : (size_t)i * flag_stride);
+    uint32_t n_match = 0;
+    for (uint32_t b = 0; b < fe; b++) n_match += (uint32_t)__popc((unsigned)flags[b]);
+
+    d_tok_cnt[i] = n_match;
+    d_lit_cnt[i] = ds - 2u * n_match;
+}
+
+static __global__ void gpulzSplitTotalsKernel(
+    const uint32_t* __restrict__ lit_off, const uint32_t* __restrict__ lit_cnt,
+    const uint32_t* __restrict__ tok_off, const uint32_t* __restrict__ tok_cnt,
+    const uint32_t* __restrict__ meta_off, const uint32_t* __restrict__ meta_cnt,
+    uint32_t* __restrict__ totals, uint32_t last)
+{
+    if (blockIdx.x || threadIdx.x) return;
+    totals[0] = lit_off[last]  + lit_cnt[last];
+    totals[1] = tok_off[last]  + tok_cnt[last];
+    totals[2] = totals[1];
+    totals[3] = meta_off[last] + meta_cnt[last];
+}
+
+// Scatter one chunk's items into the four streams. Item input offsets come
+// from the same block scan the parallel decoder uses; two further scans give
+// each item its slot in the literals and token streams.
+template <typename T, int CS>
+static __global__ void __launch_bounds__(GPULZ_DECODE_TPB)
+gpulzDestripeKernel(
+    const uint8_t*  __restrict__ d_flag_scratch,
+    const uint8_t*  __restrict__ d_data_scratch,
+    const uint8_t*  __restrict__ d_in_raw,
+    const uint32_t* __restrict__ d_flag_size,
+    const uint32_t* __restrict__ d_data_size,
+    const uint32_t* __restrict__ d_lit_off,
+    const uint32_t* __restrict__ d_tok_off,
+    const uint32_t* __restrict__ d_meta_off,
+    uint8_t* __restrict__ d_lit, uint8_t* __restrict__ d_len,
+    uint8_t* __restrict__ d_off, uint8_t* __restrict__ d_meta,
+    uint32_t flag_stride, uint32_t n_chunks)
+{
+    constexpr int N   = CS / sizeof(T);
+    constexpr int TPB = GPULZ_DECODE_TPB;
+    constexpr int IPT = N / TPB;
+
+    const uint32_t cid = blockIdx.x;
+    if (cid >= n_chunks) return;
+
+    const uint32_t fe = d_flag_size[cid];
+    const uint32_t ds = d_data_size[cid];
+
+    if ((fe & 0x80000000u) != 0) {   // raw chunk -> literals stream verbatim
+        const uint8_t* src = d_in_raw + (size_t)cid * CS;
+        uint8_t*       dst = d_lit + d_lit_off[cid];
+        for (uint32_t i = threadIdx.x; i < (uint32_t)CS; i += TPB) dst[i] = src[i];
+        return;
+    }
+    if (fe == 0 && ds == 0) return;  // all-zero chunk
+
+    const uint8_t* flags = d_flag_scratch + (size_t)cid * flag_stride;
+    const uint8_t* data  = d_data_scratch + (size_t)cid * CS;
+
+    for (uint32_t i = threadIdx.x; i < fe; i += TPB)
+        d_meta[d_meta_off[cid] + i] = flags[i];
+
+    using BlockScan = cub::BlockScan<uint32_t, TPB>;
+    __shared__ typename BlockScan::TempStorage scan_tmp;
+
+    // Trailing bits of the last bitmap byte are zero padding; they look like
+    // literals but land at in_off >= data_size and are dropped below, which
+    // keeps this consistent with the popcount-derived counts.
+    const uint32_t n_items = (fe * 8u < (uint32_t)N) ? fe * 8u : (uint32_t)N;
+    uint32_t in_sz[IPT], in_off[IPT], litw[IPT], litpos[IPT], tok[IPT], tokpos[IPT];
+    bool is_match[IPT];
+
+    for (int t = 0; t < IPT; t++) {
+        const uint32_t j = threadIdx.x * IPT + t;
+        is_match[t] = (j < n_items) && ((flags[j >> 3] >> (j & 7)) & 1u);
+        in_sz[t]    = (j < n_items) ? (is_match[t] ? 2u : (uint32_t)sizeof(T)) : 0u;
+    }
+    BlockScan(scan_tmp).ExclusiveSum(in_sz, in_off);
+    __syncthreads();
+
+    for (int t = 0; t < IPT; t++) {
+        const bool valid = (in_sz[t] != 0) && (in_off[t] < ds);
+        litw[t] = (valid && !is_match[t]) ? (uint32_t)sizeof(T) : 0u;
+        tok[t]  = (valid &&  is_match[t]) ? 1u : 0u;
+    }
+    BlockScan(scan_tmp).ExclusiveSum(litw, litpos);
+    __syncthreads();
+    BlockScan(scan_tmp).ExclusiveSum(tok, tokpos);
+    __syncthreads();
+
+    uint8_t* lit = d_lit + d_lit_off[cid];
+    uint8_t* len = d_len + d_tok_off[cid];
+    uint8_t* off = d_off + d_tok_off[cid];
+
+    for (int t = 0; t < IPT; t++) {
+        if (in_sz[t] == 0 || in_off[t] >= ds) continue;
+        if (is_match[t]) {
+            len[tokpos[t]] = data[in_off[t]];
+            off[tokpos[t]] = data[in_off[t] + 1];
+        } else {
+            #pragma unroll
+            for (unsigned b = 0; b < sizeof(T); b++)
+                lit[litpos[t] + b] = data[in_off[t] + b];
+        }
+    }
+}
+
+// Inverse of the above: rebuild the packed single-stream form (per chunk:
+// flag bitmap followed by the interleaved literal/match bytes) so the existing
+// decode path can run unchanged.
+template <typename T, int CS>
+static __global__ void __launch_bounds__(GPULZ_DECODE_TPB)
+gpulzRestripeKernel(
+    const uint8_t*  __restrict__ d_lit, const uint8_t* __restrict__ d_len,
+    const uint8_t*  __restrict__ d_off, const uint8_t* __restrict__ d_meta,
+    const uint32_t* __restrict__ d_flag_size,
+    const uint32_t* __restrict__ d_data_size,
+    const uint32_t* __restrict__ d_lit_off,
+    const uint32_t* __restrict__ d_tok_off,
+    const uint32_t* __restrict__ d_meta_off,
+    const uint32_t* __restrict__ d_dst_off,
+    uint8_t* __restrict__ d_out, uint32_t n_chunks)
+{
+    constexpr int N   = CS / sizeof(T);
+    constexpr int TPB = GPULZ_DECODE_TPB;
+    constexpr int IPT = N / TPB;
+
+    const uint32_t cid = blockIdx.x;
+    if (cid >= n_chunks) return;
+
+    const uint32_t fe = d_flag_size[cid];
+    const uint32_t ds = d_data_size[cid];
+    uint8_t* dst = d_out + d_dst_off[cid];
+
+    if ((fe & 0x80000000u) != 0) {   // raw chunk: literals stream holds it
+        const uint8_t* src = d_lit + d_lit_off[cid];
+        for (uint32_t i = threadIdx.x; i < (uint32_t)CS; i += TPB) dst[i] = src[i];
+        return;
+    }
+    if (fe == 0 && ds == 0) return;
+
+    const uint8_t* flags = d_meta + d_meta_off[cid];
+    for (uint32_t i = threadIdx.x; i < fe; i += TPB) dst[i] = flags[i];
+
+    using BlockScan = cub::BlockScan<uint32_t, TPB>;
+    __shared__ typename BlockScan::TempStorage scan_tmp;
+
+    const uint32_t n_items = (fe * 8u < (uint32_t)N) ? fe * 8u : (uint32_t)N;
+    uint32_t in_sz[IPT], in_off[IPT], litw[IPT], litpos[IPT], tok[IPT], tokpos[IPT];
+    bool is_match[IPT];
+
+    for (int t = 0; t < IPT; t++) {
+        const uint32_t j = threadIdx.x * IPT + t;
+        is_match[t] = (j < n_items) && ((flags[j >> 3] >> (j & 7)) & 1u);
+        in_sz[t]    = (j < n_items) ? (is_match[t] ? 2u : (uint32_t)sizeof(T)) : 0u;
+    }
+    BlockScan(scan_tmp).ExclusiveSum(in_sz, in_off);
+    __syncthreads();
+
+    for (int t = 0; t < IPT; t++) {
+        const bool valid = (in_sz[t] != 0) && (in_off[t] < ds);
+        litw[t] = (valid && !is_match[t]) ? (uint32_t)sizeof(T) : 0u;
+        tok[t]  = (valid &&  is_match[t]) ? 1u : 0u;
+    }
+    BlockScan(scan_tmp).ExclusiveSum(litw, litpos);
+    __syncthreads();
+    BlockScan(scan_tmp).ExclusiveSum(tok, tokpos);
+    __syncthreads();
+
+    const uint8_t* lit = d_lit + d_lit_off[cid];
+    const uint8_t* len = d_len + d_tok_off[cid];
+    const uint8_t* off = d_off + d_tok_off[cid];
+    uint8_t* data = dst + fe;
+
+    for (int t = 0; t < IPT; t++) {
+        if (in_sz[t] == 0 || in_off[t] >= ds) continue;
+        if (is_match[t]) {
+            data[in_off[t]]     = len[tokpos[t]];
+            data[in_off[t] + 1] = off[tokpos[t]];
+        } else {
+            #pragma unroll
+            for (unsigned b = 0; b < sizeof(T); b++)
+                data[in_off[t] + b] = lit[litpos[t] + b];
+        }
+    }
+}
+
+// Packed-stream size of each chunk, for the inverse path. Unlike
+// gpulzFinalizeSizesKernel this only *reads* the raw-fallback flag (the
+// decision was already made and recorded at encode time).
+static __global__ void gpulzCleanSizesKernel(
+    const uint32_t* __restrict__ d_flag_size,
+    const uint32_t* __restrict__ d_data_size,
+    uint32_t*       __restrict__ d_clean,
+    uint32_t n_chunks, uint32_t chunk_bytes)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_chunks) return;
+    const uint32_t fe = d_flag_size[i];
+    if ((fe & 0x80000000u) != 0)          d_clean[i] = chunk_bytes;
+    else if (fe == 0 && d_data_size[i] == 0) d_clean[i] = 0;
+    else                                  d_clean[i] = fe + d_data_size[i];
+}
+
+// Fused split decode: decode straight out of the four ports, with no
+// intermediate packed stream.
+//
+// The restripe-then-decode pair it replaces did the same block scans twice --
+// once to rebuild the packed per-chunk byte stream, once to re-parse it -- and
+// moved the whole uncompressed-size intermediate through global memory both
+// ways. Reading the ports directly also removes the shared-memory staging of
+// that byte stream, since literals and tokens are now fetched from their own
+// arrays at scan-derived indices.
+template <typename T, int CS>
+static __global__ void __launch_bounds__(GPULZ_DECODE_TPB)
+gpulzSplitDecodeKernel(
+    const uint8_t*  __restrict__ d_lit, const uint8_t* __restrict__ d_len,
+    const uint8_t*  __restrict__ d_off, const uint8_t* __restrict__ d_meta,
+    const uint32_t* __restrict__ d_flag_size,
+    const uint32_t* __restrict__ d_data_size,
+    const uint32_t* __restrict__ d_lit_off,
+    const uint32_t* __restrict__ d_tok_off,
+    const uint32_t* __restrict__ d_meta_off,
+    T* __restrict__ d_out, uint32_t n_chunks)
+{
+    constexpr int N   = CS / sizeof(T);
+    constexpr int TPB = GPULZ_DECODE_TPB;
+    constexpr int IPT = N / TPB;
+
+    const uint32_t cid = blockIdx.x;
+    if (cid >= n_chunks) return;
+
+    const uint32_t fe = d_flag_size[cid];
+    const uint32_t ds = d_data_size[cid];
+    T* out = d_out + (size_t)cid * N;
+
+    if ((fe & 0x80000000u) != 0) {   // raw chunk: verbatim from the literals port
+        const uint8_t* src = d_lit + d_lit_off[cid];
+        uint8_t*       dst = (uint8_t*)out;
+        for (uint32_t i = threadIdx.x; i < (uint32_t)CS; i += TPB) dst[i] = src[i];
+        return;
+    }
+    if (fe == 0 && ds == 0) {        // all-zero chunk
+        for (int q = threadIdx.x; q < N; q += TPB) out[q] = T(0);
+        return;
+    }
+
+    const uint8_t* flags = d_meta + d_meta_off[cid];
+    const uint8_t* lit   = d_lit  + d_lit_off[cid];
+    const uint8_t* len   = d_len  + d_tok_off[cid];
+    const uint8_t* offs  = d_off  + d_tok_off[cid];
+
+    using BlockScan = cub::BlockScan<uint32_t, TPB>;
+    __shared__ typename BlockScan::TempStorage scan_tmp;
+    __shared__ T        litval[N];
+    __shared__ uint16_t srcA[N], srcB[N];
+    __shared__ int      s_moved;
+
+    for (int q = threadIdx.x; q < N; q += TPB) { srcA[q] = (uint16_t)q; litval[q] = T(0); }
+    __syncthreads();
+
+    const uint32_t n_items = (fe * 8u < (uint32_t)N) ? fe * 8u : (uint32_t)N;
+    uint32_t in_sz[IPT], in_off[IPT], litw[IPT], litpos[IPT];
+    uint32_t tok[IPT], tokpos[IPT], out_len[IPT], out_pos[IPT];
+    bool is_match[IPT];
+
+    for (int t = 0; t < IPT; t++) {
+        const uint32_t j = threadIdx.x * IPT + t;
+        is_match[t] = (j < n_items) && ((flags[j >> 3] >> (j & 7)) & 1u);
+        in_sz[t]    = (j < n_items) ? (is_match[t] ? 2u : (uint32_t)sizeof(T)) : 0u;
+    }
+    // in_off is still needed: it is what identifies the zero-padding bits in the
+    // bitmap's last byte, which look like literals but address past data_size.
+    BlockScan(scan_tmp).ExclusiveSum(in_sz, in_off);
+    __syncthreads();
+
+    for (int t = 0; t < IPT; t++) {
+        const bool valid = (in_sz[t] != 0) && (in_off[t] < ds);
+        litw[t] = (valid && !is_match[t]) ? (uint32_t)sizeof(T) : 0u;
+        tok[t]  = (valid &&  is_match[t]) ? 1u : 0u;
+    }
+    BlockScan(scan_tmp).ExclusiveSum(litw, litpos);
+    __syncthreads();
+    BlockScan(scan_tmp).ExclusiveSum(tok, tokpos);
+    __syncthreads();
+
+    for (int t = 0; t < IPT; t++) {
+        if (in_sz[t] == 0 || in_off[t] >= ds) { out_len[t] = 0; continue; }
+        out_len[t] = is_match[t] ? (uint32_t)len[tokpos[t]] : 1u;
+    }
+    BlockScan(scan_tmp).ExclusiveSum(out_len, out_pos);
+    __syncthreads();
+
+    for (int t = 0; t < IPT; t++) {
+        if (out_len[t] == 0 || out_pos[t] >= (uint32_t)N) continue;
+        const uint32_t p = out_pos[t];
+        if (is_match[t]) {
+            const uint32_t o = offs[tokpos[t]];
+            uint32_t l = out_len[t];
+            if (p + l > (uint32_t)N) l = (uint32_t)N - p;   // defensive clamp
+            for (uint32_t k = 0; k < l; k++) srcA[p + k] = (uint16_t)(p + k - o);
+        } else {
+            T v;
+            #pragma unroll
+            for (unsigned b = 0; b < sizeof(T); b++)
+                ((uint8_t*)&v)[b] = lit[litpos[t] + b];
+            litval[p] = v;
+            srcA[p]   = (uint16_t)p;
+        }
+    }
+    __syncthreads();
+
+    uint16_t* cur = srcA;
+    uint16_t* nxt = srcB;
+    for (int round = 0; round < 32; round++) {
+        if (threadIdx.x == 0) s_moved = 0;
+        __syncthreads();
+        int moved = 0;
+        for (int t = 0; t < IPT; t++) {
+            const int q = threadIdx.x * IPT + t;
+            const uint16_t sv  = cur[q];
+            const uint16_t sv2 = cur[sv];
+            nxt[q] = sv2;
+            moved |= (sv2 != sv);
+        }
+        if (fz::backend::anySync32(moved) && (threadIdx.x & 31) == 0) s_moved = 1;
+        __syncthreads();
+        uint16_t* tmp = cur; cur = nxt; nxt = tmp;
+        if (!s_moved) break;
+        __syncthreads();
+    }
+
+    for (int t = 0; t < IPT; t++) {
+        const int q = threadIdx.x * IPT + t;
+        out[q] = litval[cur[q]];
+    }
+}
+
+// Rebuilds the per-chunk size arrays from the meta stream's entry table.
+static __global__ void gpulzDeinterleaveHeaderKernel(
+    const uint32_t* __restrict__ d_hdr_entries,
+    uint32_t* __restrict__ d_flag_size,
+    uint32_t* __restrict__ d_data_size,
+    uint32_t n_chunks)
+{
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_chunks) return;
+    d_flag_size[i] = d_hdr_entries[2 * i];
+    d_data_size[i] = d_hdr_entries[2 * i + 1];
+}
+
 // ━━━━ word-size × chunk-size dispatch helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // chunk_size selects the compile-time CS template argument; word_size
 // selects T. Supported chunk sizes: 1024, 2048, 4096 (see GPULZStage::execute()).
@@ -619,6 +1034,111 @@ static void launchDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks, c
 #undef FZ_GPULZ_DECODE_CASE
 }
 
+struct GpulzSplitPtrs {
+    const uint8_t*  flag_scratch; const uint8_t* data_scratch; const uint8_t* in_raw;
+    const uint32_t* flag_size;    const uint32_t* data_size;
+    const uint32_t* lit_off;      const uint32_t* tok_off;     const uint32_t* meta_off;
+    uint8_t* lit; uint8_t* len; uint8_t* off; uint8_t* meta;
+    uint32_t flag_stride;
+};
+
+static void launchDestripe(uint8_t word_size, uint32_t chunk_size, int n_chunks,
+                           cudaStream_t stream, const GpulzSplitPtrs& p)
+{
+#define FZ_GPULZ_DESTRIPE_LAUNCH(T_VAL, CS_VAL)                                             \
+    gpulzDestripeKernel<T_VAL, CS_VAL><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(          \
+        p.flag_scratch, p.data_scratch, p.in_raw, p.flag_size, p.data_size,                 \
+        p.lit_off, p.tok_off, p.meta_off, p.lit, p.len, p.off, p.meta,                      \
+        p.flag_stride, (uint32_t)n_chunks)
+#define FZ_GPULZ_DESTRIPE_CASE(CS_VAL)                                                      \
+    case CS_VAL:                                                                            \
+        switch (word_size) {                                                                \
+            case 1: FZ_GPULZ_DESTRIPE_LAUNCH(uint8_t,  CS_VAL); break;                      \
+            case 2: FZ_GPULZ_DESTRIPE_LAUNCH(uint16_t, CS_VAL); break;                      \
+            case 4: FZ_GPULZ_DESTRIPE_LAUNCH(uint32_t, CS_VAL); break;                      \
+            case 8: FZ_GPULZ_DESTRIPE_LAUNCH(uint64_t, CS_VAL); break;                      \
+            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8"); \
+        }                                                                                    \
+        break;
+    switch (chunk_size) {
+        FZ_GPULZ_DESTRIPE_CASE(1024)
+        FZ_GPULZ_DESTRIPE_CASE(2048)
+        FZ_GPULZ_DESTRIPE_CASE(4096)
+        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
+    }
+#undef FZ_GPULZ_DESTRIPE_CASE
+#undef FZ_GPULZ_DESTRIPE_LAUNCH
+}
+
+struct GpulzSplitDecodePtrs {
+    const uint8_t*  lit; const uint8_t* len; const uint8_t* off; const uint8_t* meta;
+    const uint32_t* flag_size; const uint32_t* data_size;
+    const uint32_t* lit_off;   const uint32_t* tok_off; const uint32_t* meta_off;
+    uint8_t* out;
+};
+
+static void launchSplitDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks,
+                              cudaStream_t stream, const GpulzSplitDecodePtrs& p)
+{
+#define FZ_GPULZ_SPLITDEC_LAUNCH(T_VAL, CS_VAL)                                             \
+    gpulzSplitDecodeKernel<T_VAL, CS_VAL><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(       \
+        p.lit, p.len, p.off, p.meta, p.flag_size, p.data_size,                              \
+        p.lit_off, p.tok_off, p.meta_off, (T_VAL*)p.out, (uint32_t)n_chunks)
+#define FZ_GPULZ_SPLITDEC_CASE(CS_VAL)                                                      \
+    case CS_VAL:                                                                            \
+        switch (word_size) {                                                                \
+            case 1: FZ_GPULZ_SPLITDEC_LAUNCH(uint8_t,  CS_VAL); break;                      \
+            case 2: FZ_GPULZ_SPLITDEC_LAUNCH(uint16_t, CS_VAL); break;                      \
+            case 4: FZ_GPULZ_SPLITDEC_LAUNCH(uint32_t, CS_VAL); break;                      \
+            case 8: FZ_GPULZ_SPLITDEC_LAUNCH(uint64_t, CS_VAL); break;                      \
+            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8"); \
+        }                                                                                    \
+        break;
+    switch (chunk_size) {
+        FZ_GPULZ_SPLITDEC_CASE(1024)
+        FZ_GPULZ_SPLITDEC_CASE(2048)
+        FZ_GPULZ_SPLITDEC_CASE(4096)
+        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
+    }
+#undef FZ_GPULZ_SPLITDEC_CASE
+#undef FZ_GPULZ_SPLITDEC_LAUNCH
+}
+
+struct GpulzRestripePtrs {
+    const uint8_t*  lit; const uint8_t* len; const uint8_t* off; const uint8_t* meta;
+    const uint32_t* flag_size; const uint32_t* data_size;
+    const uint32_t* lit_off;   const uint32_t* tok_off;
+    const uint32_t* meta_off;  const uint32_t* dst_off;
+    uint8_t* out;
+};
+
+static void launchRestripe(uint8_t word_size, uint32_t chunk_size, int n_chunks,
+                           cudaStream_t stream, const GpulzRestripePtrs& p)
+{
+#define FZ_GPULZ_RESTRIPE_LAUNCH(T_VAL, CS_VAL)                                             \
+    gpulzRestripeKernel<T_VAL, CS_VAL><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(          \
+        p.lit, p.len, p.off, p.meta, p.flag_size, p.data_size,                              \
+        p.lit_off, p.tok_off, p.meta_off, p.dst_off, p.out, (uint32_t)n_chunks)
+#define FZ_GPULZ_RESTRIPE_CASE(CS_VAL)                                                      \
+    case CS_VAL:                                                                            \
+        switch (word_size) {                                                                \
+            case 1: FZ_GPULZ_RESTRIPE_LAUNCH(uint8_t,  CS_VAL); break;                      \
+            case 2: FZ_GPULZ_RESTRIPE_LAUNCH(uint16_t, CS_VAL); break;                      \
+            case 4: FZ_GPULZ_RESTRIPE_LAUNCH(uint32_t, CS_VAL); break;                      \
+            case 8: FZ_GPULZ_RESTRIPE_LAUNCH(uint64_t, CS_VAL); break;                      \
+            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8"); \
+        }                                                                                    \
+        break;
+    switch (chunk_size) {
+        FZ_GPULZ_RESTRIPE_CASE(1024)
+        FZ_GPULZ_RESTRIPE_CASE(2048)
+        FZ_GPULZ_RESTRIPE_CASE(4096)
+        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
+    }
+#undef FZ_GPULZ_RESTRIPE_CASE
+#undef FZ_GPULZ_RESTRIPE_LAUNCH
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 GPULZStage::~GPULZStage() {
     auto fwd_free = [&](void* p) {
@@ -632,9 +1152,47 @@ GPULZStage::~GPULZStage() {
     fwd_free(d_data_size_);
     fwd_free(d_clean_dev_);
     fwd_free(d_dst_off_dev_);
+    fwd_free(d_lit_off_dev_);
+    fwd_free(d_tok_off_dev_);
+    fwd_free(d_meta_off_dev_);
+    fwd_free(d_lit_cnt_dev_);
+    fwd_free(d_tok_cnt_dev_);
+    fwd_free(d_totals_dev_);
+}
+
+// Completes the deferred 4-entry totals readback for split mode.
+void GPULZStage::finishSplitReadback(cudaStream_t stream) const {
+    if (!split_readback_pending_) return;
+    uint32_t h[4] = {0, 0, 0, 0};
+    FZ_CUDA_CHECK(cudaMemcpyAsync(h, d_totals_dev_, sizeof(h),
+                                  cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    auto* self = const_cast<GPULZStage*>(this);
+
+    // Report each port rounded up to 4 bytes, zero-filling the pad. Downstream
+    // consumers and the archive layout rely on stage outputs being 4-byte
+    // aligned (same convention as RREStage): the Huffman and ANS decoders read
+    // their bitstreams as 32-bit words, so a port ending on an odd byte pushes
+    // the *next* archive buffer off alignment and faults their decode kernels.
+    for (int i = 0; i < 4; i++) {
+        const size_t exact  = h[i];
+        const size_t padded = (exact + 3) & ~size_t(3);
+        if (split_out_ptr_[i] && padded > exact)
+            FZ_CUDA_CHECK(cudaMemsetAsync(split_out_ptr_[i] + exact, 0,
+                                          padded - exact, stream));
+        self->actual_split_sizes_[i] = padded;
+    }
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    self->actual_output_size_ = self->actual_split_sizes_[0];
+    for (int i = 0; i < 4; i++) self->split_out_ptr_[i] = nullptr;
+    split_readback_pending_ = false;
+    tail_readback_stream_   = nullptr;
+    FZ_LOG(DEBUG, "GPULZ split encode: literals %u B, lengths %u B, offsets %u B, meta %u B",
+           h[0], h[1], h[2], h[3]);
 }
 
 void GPULZStage::postStreamSync(cudaStream_t stream) {
+    if (split_readback_pending_) { finishSplitReadback(stream); return; }
     if (!tail_readback_pending_) return;
 
     uint32_t tail_off = 0, tail_sz = 0;
@@ -662,6 +1220,13 @@ void GPULZStage::postStreamSync(cudaStream_t stream) {
 
 std::unordered_map<std::string, size_t>
 GPULZStage::getActualOutputSizesByName() const {
+    if (split_mode_ && !is_inverse_) {
+        if (split_readback_pending_) finishSplitReadback(tail_readback_stream_);
+        return {{"literals", actual_split_sizes_[0]},
+                {"lengths",  actual_split_sizes_[1]},
+                {"offsets",  actual_split_sizes_[2]},
+                {"meta",     actual_split_sizes_[3]}};
+    }
     if (tail_readback_pending_) {
         uint32_t tail_off = 0, tail_sz = 0;
         FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_off, d_dst_off_dev_ + tail_last_index_,
@@ -684,6 +1249,11 @@ GPULZStage::getActualOutputSizesByName() const {
 }
 
 size_t GPULZStage::getActualOutputSize(int index) const {
+    if (split_mode_ && !is_inverse_) {
+        if (index < 0 || index > 3) return 0;
+        if (split_readback_pending_) finishSplitReadback(tail_readback_stream_);
+        return actual_split_sizes_[index];
+    }
     if (index != 0) return 0;
     getActualOutputSizesByName();
     return actual_output_size_;
@@ -717,17 +1287,43 @@ void GPULZStage::execute(
             + std::to_string((int)word_size_));
     // ── Forward (compress) ─────────────────────────────────────────────
     if (!is_inverse_) {
-        if (in_bytes % chunk_size_ != 0)
-            throw std::runtime_error("GPULZStage: input size must be a multiple of chunk_size (see getRequiredInputAlignment())");
+        // getRequiredInputAlignment() makes Pipeline pad the *pipeline* input to
+        // a chunk multiple, but that guarantee does not survive an upstream
+        // stage that changes bytes per element: LorenzoQuant turns float32 into
+        // uint16 codes, so a padded 4 KB-aligned input reaches this stage as
+        // half as many bytes and need not be chunk-aligned any more. Rather
+        // than reject that (a very common wiring), zero-pad the tail chunk
+        // here. The padding decodes back as trailing zeros, which the
+        // consumer's own element count ignores.
+        const uint8_t* d_src = (const uint8_t*)inputs[0];
+        size_t         eff_bytes = in_bytes;
+        void*          pad_buf = nullptr;
+        if (in_bytes % chunk_size_ != 0) {
+            eff_bytes = ((in_bytes + chunk_size_ - 1) / chunk_size_) * chunk_size_;
+            pad_buf = pool ? pool->allocate(eff_bytes, stream, "gpulz_pad") : nullptr;
+            if (!pad_buf) FZ_CUDA_CHECK(cudaMalloc(&pad_buf, eff_bytes));
+            FZ_CUDA_CHECK(cudaMemcpyAsync(pad_buf, d_src, in_bytes,
+                                          cudaMemcpyDeviceToDevice, stream));
+            FZ_CUDA_CHECK(cudaMemsetAsync((uint8_t*)pad_buf + in_bytes, 0,
+                                          eff_bytes - in_bytes, stream));
+            d_src = (const uint8_t*)pad_buf;
+            FZ_LOG(DEBUG, "GPULZ: padded %zu -> %zu bytes for chunk alignment",
+                   in_bytes, eff_bytes);
+        }
+        struct PadGuard {
+            MemoryPool* pool; void* p; cudaStream_t s;
+            ~PadGuard() { if (!p) return; if (pool) pool->free(p, s); else cudaFree(p); }
+        } pad_guard{pool, pad_buf, stream};
 
-        const size_t   n_chunks     = in_bytes / chunk_size_;
+        const size_t   n_chunks     = eff_bytes / chunk_size_;
         const uint32_t n_chunks_u   = (uint32_t)n_chunks;
-        const uint32_t in_bytes_u   = (uint32_t)in_bytes;
+        const uint32_t in_bytes_u   = (uint32_t)eff_bytes;
         const uint32_t grid256      = (n_chunks_u + 255u) / 256u;
         const uint32_t block_elems  = chunk_size_ / word_size_;
         const uint32_t flag_stride  = (block_elems + 7) / 8;
 
-        cached_orig_bytes_ = in_bytes_u;
+        cached_orig_bytes_   = in_bytes_u;         // padded extent
+        orig_unpadded_bytes_ = (uint32_t)in_bytes; // what the inverse reports
 
         if (n_chunks > scratch_capacity_) {
             auto fwd_free = [&](void* p) {
@@ -742,6 +1338,12 @@ void GPULZStage::execute(
             fwd_free(d_data_size_);    d_data_size_    = nullptr;
             fwd_free(d_clean_dev_);    d_clean_dev_    = nullptr;
             fwd_free(d_dst_off_dev_);  d_dst_off_dev_  = nullptr;
+            fwd_free(d_lit_off_dev_);  d_lit_off_dev_  = nullptr;
+            fwd_free(d_tok_off_dev_);  d_tok_off_dev_  = nullptr;
+            fwd_free(d_meta_off_dev_); d_meta_off_dev_ = nullptr;
+            fwd_free(d_lit_cnt_dev_);  d_lit_cnt_dev_  = nullptr;
+            fwd_free(d_tok_cnt_dev_);  d_tok_cnt_dev_  = nullptr;
+            fwd_free(d_totals_dev_);   d_totals_dev_   = nullptr;
 
             if (pool) {
                 d_data_scratch_ = (uint8_t*) pool->allocate(n_chunks * (size_t)chunk_size_, stream, "gpulz_data_scratch", true);
@@ -750,6 +1352,17 @@ void GPULZStage::execute(
                 d_data_size_    = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),     stream, "gpulz_data_size",    true);
                 d_clean_dev_    = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),     stream, "gpulz_clean",        true);
                 d_dst_off_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),     stream, "gpulz_offsets",      true);
+                if (split_mode_) {
+                    d_lit_off_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t), stream, "gpulz_lit_off",  true);
+                    d_tok_off_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t), stream, "gpulz_tok_off",  true);
+                    d_meta_off_dev_ = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t), stream, "gpulz_meta_off", true);
+                    d_lit_cnt_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t), stream, "gpulz_lit_cnt",  true);
+                    d_tok_cnt_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t), stream, "gpulz_tok_cnt",  true);
+                    d_totals_dev_   = (uint32_t*)pool->allocate(4 * sizeof(uint32_t),        stream, "gpulz_totals",   true);
+                    if (!d_lit_off_dev_ || !d_tok_off_dev_ || !d_meta_off_dev_
+                        || !d_lit_cnt_dev_ || !d_tok_cnt_dev_ || !d_totals_dev_)
+                        throw std::runtime_error("GPULZStage: failed to allocate split scratch from MemoryPool");
+                }
                 if (!d_data_scratch_ || !d_flag_scratch_ || !d_flag_size_ || !d_data_size_ || !d_clean_dev_ || !d_dst_off_dev_)
                     throw std::runtime_error("GPULZStage: failed to allocate persistent forward scratch from MemoryPool");
                 scratch_pool_owner_ = pool;
@@ -761,6 +1374,14 @@ void GPULZStage::execute(
                 FZ_CUDA_CHECK(cudaMalloc(&d_data_size_,    n_chunks * sizeof(uint32_t)));
                 FZ_CUDA_CHECK(cudaMalloc(&d_clean_dev_,    n_chunks * sizeof(uint32_t)));
                 FZ_CUDA_CHECK(cudaMalloc(&d_dst_off_dev_,  n_chunks * sizeof(uint32_t)));
+                if (split_mode_) {
+                    FZ_CUDA_CHECK(cudaMalloc(&d_lit_off_dev_,  n_chunks * sizeof(uint32_t)));
+                    FZ_CUDA_CHECK(cudaMalloc(&d_tok_off_dev_,  n_chunks * sizeof(uint32_t)));
+                    FZ_CUDA_CHECK(cudaMalloc(&d_meta_off_dev_, n_chunks * sizeof(uint32_t)));
+                    FZ_CUDA_CHECK(cudaMalloc(&d_lit_cnt_dev_,  n_chunks * sizeof(uint32_t)));
+                    FZ_CUDA_CHECK(cudaMalloc(&d_tok_cnt_dev_,  n_chunks * sizeof(uint32_t)));
+                    FZ_CUDA_CHECK(cudaMalloc(&d_totals_dev_,   4 * sizeof(uint32_t)));
+                }
                 scratch_pool_owner_ = nullptr;
                 scratch_from_pool_  = false;
             }
@@ -768,13 +1389,13 @@ void GPULZStage::execute(
         }
 
         FZ_LOG(TRACE, "GPULZ encode: %.1f KB in, %u chunks, word_size %d",
-               in_bytes / 1024.0, n_chunks_u, (int)word_size_);
+               eff_bytes / 1024.0, n_chunks_u, (int)word_size_);
 
         const size_t header_size = 4 + 4 + 8 * n_chunks;
 
         // (1) Encode each chunk into uniform scratch, recording flag/data sizes.
         launchEncode(word_size_, chunk_size_, (int)n_chunks, stream,
-                     (const uint8_t*)inputs[0], d_flag_scratch_, d_data_scratch_,
+                     d_src, d_flag_scratch_, d_data_scratch_,
                      d_flag_size_, d_data_size_, match_level_);
         FZ_CUDA_CHECK(cudaGetLastError());
 
@@ -807,6 +1428,83 @@ void GPULZStage::execute(
         // (5) Convert to absolute output offsets (add header size).
         gpulzAddOffsetKernel<<<grid256, 256, 0, stream>>>(d_dst_off_dev_, n_chunks_u, (uint32_t)header_size);
 
+        // ── Split mode: scatter into four independently codable streams ───
+        if (split_mode_) {
+            if (outputs.size() < 4)
+                throw std::runtime_error("GPULZStage: split mode needs 4 output buffers");
+
+            uint8_t* d_lit  = (uint8_t*)outputs[0];
+            uint8_t* d_len  = (uint8_t*)outputs[1];
+            uint8_t* d_offs = (uint8_t*)outputs[2];
+            uint8_t* d_meta = (uint8_t*)outputs[3];
+
+            // meta carries the stream header + entry table ahead of the bitmaps.
+            FZ_CUDA_CHECK(cudaMemcpyAsync(d_meta, h_hdr, 8, cudaMemcpyHostToDevice, stream));
+            gpulzInterleaveHeaderKernel<<<grid256, 256, 0, stream>>>(
+                d_flag_size_, d_data_size_, (uint32_t*)(d_meta + 8), n_chunks_u);
+            FZ_CUDA_CHECK(cudaGetLastError());
+
+            // meta bitmap offsets: scan of per-chunk flag sizes, then shifted
+            // past the header. Must precede the popcount pass, which reads the
+            // bitmaps through these offsets on the inverse path.
+            gpulzSplitMetaCountKernel<<<grid256, 256, 0, stream>>>(
+                d_flag_size_, d_data_size_, d_lit_cnt_dev_, n_chunks_u);
+            {
+                auto tmp = fz::backend::withTempStorage(pool, stream, "gpulz_split_scan_meta",
+                    [&](void* t, size_t& b) {
+                        cub::DeviceScan::ExclusiveSum(t, b, d_lit_cnt_dev_,
+                                                      d_meta_off_dev_, (int)n_chunks, stream);
+                    });
+                fz::backend::freeTempStorage(pool, tmp, stream);
+            }
+            // totals[3] is read from meta_off + meta_cnt, so shift both alike.
+            gpulzAddOffsetKernel<<<grid256, 256, 0, stream>>>(
+                d_meta_off_dev_, n_chunks_u, (uint32_t)header_size);
+            // d_lit_cnt_dev_ still holds meta counts here; stash for the totals
+            // kernel before it is overwritten by the literal counts below.
+            FZ_CUDA_CHECK(cudaMemcpyAsync(d_tok_cnt_dev_, d_lit_cnt_dev_,
+                                          n_chunks * sizeof(uint32_t),
+                                          cudaMemcpyDeviceToDevice, stream));
+
+            gpulzSplitCountKernel<<<grid256, 256, 0, stream>>>(
+                d_flag_scratch_, /*d_flag_at=*/nullptr, flag_stride,
+                d_flag_size_, d_data_size_, d_lit_cnt_dev_, d_clean_dev_,
+                n_chunks_u, chunk_size_);
+            FZ_CUDA_CHECK(cudaGetLastError());
+            {
+                auto t1 = fz::backend::withTempStorage(pool, stream, "gpulz_split_scan_lit",
+                    [&](void* t, size_t& b) {
+                        cub::DeviceScan::ExclusiveSum(t, b, d_lit_cnt_dev_,
+                                                      d_lit_off_dev_, (int)n_chunks, stream);
+                    });
+                fz::backend::freeTempStorage(pool, t1, stream);
+                auto t2 = fz::backend::withTempStorage(pool, stream, "gpulz_split_scan_tok",
+                    [&](void* t, size_t& b) {
+                        cub::DeviceScan::ExclusiveSum(t, b, d_clean_dev_,
+                                                      d_tok_off_dev_, (int)n_chunks, stream);
+                    });
+                fz::backend::freeTempStorage(pool, t2, stream);
+            }
+
+            gpulzSplitTotalsKernel<<<1, 1, 0, stream>>>(
+                d_lit_off_dev_, d_lit_cnt_dev_, d_tok_off_dev_, d_clean_dev_,
+                d_meta_off_dev_, d_tok_cnt_dev_, d_totals_dev_, n_chunks_u - 1);
+            FZ_CUDA_CHECK(cudaGetLastError());
+
+            GpulzSplitPtrs sp{d_flag_scratch_, d_data_scratch_, d_src,
+                              d_flag_size_, d_data_size_,
+                              d_lit_off_dev_, d_tok_off_dev_, d_meta_off_dev_,
+                              d_lit, d_len, d_offs, d_meta, flag_stride};
+            launchDestripe(word_size_, chunk_size_, (int)n_chunks, stream, sp);
+            FZ_CUDA_CHECK(cudaGetLastError());
+
+            split_out_ptr_[0] = d_lit;  split_out_ptr_[1] = d_len;
+            split_out_ptr_[2] = d_offs; split_out_ptr_[3] = d_meta;
+            split_readback_pending_ = true;
+            tail_readback_stream_   = stream;
+            return;
+        }
+
         // (6) Defer final output-size readback to postStreamSync.
         tail_last_index_       = n_chunks_u - 1;
         tail_output_ptr_       = (uint8_t*)outputs[0];
@@ -816,7 +1514,7 @@ void GPULZStage::execute(
         // (7) Pack compressed chunks from uniform scratch (or raw input, on
         // fallback) into the final packed output.
         gpulzPackKernel<<<(int)n_chunks, 256, 0, stream>>>(
-            d_flag_scratch_, d_data_scratch_, (const uint8_t*)inputs[0], d_out,
+            d_flag_scratch_, d_data_scratch_, d_src, d_out,
             d_dst_off_dev_, d_flag_size_, d_data_size_, flag_stride, chunk_size_);
         FZ_CUDA_CHECK(cudaGetLastError());
 
@@ -824,6 +1522,89 @@ void GPULZStage::execute(
     } else {
         const uint8_t* d_in  = (const uint8_t*)inputs[0];
         uint8_t*       d_out = (uint8_t*)outputs[0];
+
+        // Split inverse: rebuild the packed single-stream form from the four
+        // ports, then fall through to the ordinary decode path unchanged. The
+        // restripe is the exact inverse of the destripe, so everything below
+        // this block stays oblivious to split mode.
+        std::vector<void*> split_tmp;
+        auto split_free = [&]() {
+            for (void* p : split_tmp) { if (pool) pool->free(p, stream); else cudaFree(p); }
+            split_tmp.clear();
+        };
+        if (split_mode_) {
+            if (inputs.size() < 4)
+                throw std::runtime_error("GPULZStage: split inverse needs 4 input buffers");
+            const uint8_t* d_lit  = (const uint8_t*)inputs[0];
+            const uint8_t* d_len  = (const uint8_t*)inputs[1];
+            const uint8_t* d_offs = (const uint8_t*)inputs[2];
+            const uint8_t* d_meta = (const uint8_t*)inputs[3];
+
+            uint8_t h_meta_hdr[8];
+            FZ_CUDA_CHECK(cudaMemcpyAsync(h_meta_hdr, d_meta, 8, cudaMemcpyDeviceToHost, stream));
+            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+            uint32_t s_orig = 0, s_nchunks = 0;
+            std::memcpy(&s_orig,    h_meta_hdr + 0, sizeof(uint32_t));
+            std::memcpy(&s_nchunks, h_meta_hdr + 4, sizeof(uint32_t));
+            cached_orig_bytes_ = s_orig;
+            if (s_nchunks == 0 || s_orig == 0) { actual_output_size_ = 0; return; }
+
+            const size_t s_hdr_bytes  = 8 + 8ull * s_nchunks;
+            const size_t s_blk_elems  = chunk_size_ / word_size_;
+            const size_t s_flag_strd  = (s_blk_elems + 7) / 8;
+            const uint32_t s_grid256  = ((uint32_t)s_nchunks + 255u) / 256u;
+
+            auto alloc = [&](size_t bytes, const char* tag) -> void* {
+                void* p = pool ? pool->allocate(bytes, stream, tag) : nullptr;
+                if (!p) FZ_CUDA_CHECK(cudaMalloc(&p, bytes));
+                split_tmp.push_back(p);
+                return p;
+            };
+            uint32_t* s_fsz    = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_fsz");
+            uint32_t* s_dsz    = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_dsz");
+            uint32_t* s_mcnt   = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_mcnt");
+            uint32_t* s_moff   = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_moff");
+            uint32_t* s_lcnt   = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_lcnt");
+            uint32_t* s_loff   = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_loff");
+            uint32_t* s_tcnt   = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_tcnt");
+            uint32_t* s_toff   = (uint32_t*)alloc(s_nchunks * 4, "gpulz_s_toff");
+
+            gpulzDeinterleaveHeaderKernel<<<s_grid256, 256, 0, stream>>>(
+                (const uint32_t*)(d_meta + 8), s_fsz, s_dsz, (uint32_t)s_nchunks);
+
+            auto scan = [&](const uint32_t* in, uint32_t* out, const char* tag) {
+                auto t = fz::backend::withTempStorage(pool, stream, tag,
+                    [&](void* p, size_t& b) {
+                        cub::DeviceScan::ExclusiveSum(p, b, in, out, (int)s_nchunks, stream);
+                    });
+                fz::backend::freeTempStorage(pool, t, stream);
+            };
+            gpulzSplitMetaCountKernel<<<s_grid256, 256, 0, stream>>>(
+                s_fsz, s_dsz, s_mcnt, (uint32_t)s_nchunks);
+            scan(s_mcnt, s_moff, "gpulz_inv_scan_meta");
+            gpulzAddOffsetKernel<<<s_grid256, 256, 0, stream>>>(
+                s_moff, (uint32_t)s_nchunks, (uint32_t)s_hdr_bytes);
+
+            gpulzSplitCountKernel<<<s_grid256, 256, 0, stream>>>(
+                d_meta, s_moff, (uint32_t)s_flag_strd, s_fsz, s_dsz,
+                s_lcnt, s_tcnt, (uint32_t)s_nchunks, chunk_size_);
+            scan(s_lcnt, s_loff, "gpulz_inv_scan_lit");
+            scan(s_tcnt, s_toff, "gpulz_inv_scan_tok");
+
+            GpulzSplitDecodePtrs dp{d_lit, d_len, d_offs, d_meta, s_fsz, s_dsz,
+                                    s_loff, s_toff, s_moff, d_out};
+            launchSplitDecode(word_size_, chunk_size_, (int)s_nchunks, stream, dp);
+            FZ_CUDA_CHECK(cudaGetLastError());
+            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+            split_free();
+
+            actual_output_size_ = (orig_unpadded_bytes_ > 0 &&
+                                   orig_unpadded_bytes_ <= s_orig)
+                                ? (size_t)orig_unpadded_bytes_ : (size_t)s_orig;
+            FZ_LOG(DEBUG, "GPULZ split decode done -> %.1f KB",
+                   actual_output_size_ / 1024.0);
+            return;
+        }
 
         uint8_t h_hdr_raw[8];
         FZ_CUDA_CHECK(cudaMemcpyAsync(h_hdr_raw, d_in, 8, cudaMemcpyDeviceToHost, stream));
@@ -903,6 +1684,8 @@ void GPULZStage::execute(
         FZ_CUDA_CHECK(cudaGetLastError());
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
+        split_free();  // restripe scratch, if split mode allocated any
+
         if (pool) {
             pool->free(d_in_off_, stream); pool->free(d_flag_sz_, stream);
             pool->free(d_data_sz_, stream); pool->free(d_mode_, stream);
@@ -911,7 +1694,12 @@ void GPULZStage::execute(
             cudaFree(d_data_sz_); cudaFree(d_mode_);
         }
 
-        actual_output_size_ = (size_t)orig_total;
+        // Decode wrote `orig_total` bytes (the padded extent), but report the
+        // pre-padding size so a downstream stage deriving an element count from
+        // it does not overrun its own output buffer.
+        actual_output_size_ = (orig_unpadded_bytes_ > 0 &&
+                               orig_unpadded_bytes_ <= (uint32_t)orig_total)
+                            ? (size_t)orig_unpadded_bytes_ : (size_t)orig_total;
         FZ_LOG(DEBUG, "GPULZ decode done: %.1f KB -> %.1f KB",
                in_bytes / 1024.0, actual_output_size_ / 1024.0);
     }

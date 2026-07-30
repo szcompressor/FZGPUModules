@@ -394,6 +394,8 @@ static Stage* addGPULZStage(Pipeline& p, const toml::table& t) {
     auto* gpulz = p.addStage<GPULZStage>();
     gpulz->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 2048)));
     gpulz->setWordSize(static_cast<size_t>(optInt(t, "word_size", 4)));
+    gpulz->setMatchLevel(static_cast<int>(optInt(t, "match_level", 1)));
+    gpulz->setSplitMode(optBool(t, "split_mode", false));
     return gpulz;
 }
 
@@ -636,6 +638,8 @@ static void saveGPULZStage(Stage* s, std::ostringstream& out) {
     auto* gpulz = static_cast<GPULZStage*>(s);
     out << "chunk_size = " << static_cast<int64_t>(gpulz->getChunkSize()) << "\n";
     out << "word_size = "  << static_cast<int64_t>(gpulz->getWordSize())  << "\n";
+    out << "match_level = " << static_cast<int64_t>(gpulz->getMatchLevel()) << "\n";
+    out << "split_mode = " << (gpulz->getSplitMode() ? "true" : "false") << "\n";
 }
 
 static void saveRAREStage(Stage* s, std::ostringstream& out) {

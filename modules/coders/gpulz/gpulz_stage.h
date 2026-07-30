@@ -99,8 +99,51 @@ public:
     void setMatchLevel(int level) { match_level_ = static_cast<uint8_t>(level); }
     int  getMatchLevel() const    { return static_cast<int>(match_level_); }
 
+    /**
+     * Split mode (default off) — emit the compressed stream as four separate
+     * output ports instead of one interleaved stream:
+     *
+     *   `literals`  the literal words, back to back (raw-fallback chunks land
+     *               here too, since such a chunk is by definition all literal)
+     *   `lengths`   one match-length byte per match token
+     *   `offsets`   one match-offset byte per match token
+     *   `meta`      stream header + per-chunk size table + the flag bitmaps
+     *
+     * This is the Zstandard split (literals separate from sequences), for the
+     * same reason: the parts have very different symbol distributions, and
+     * interleaving them into one byte stream raises the entropy a downstream
+     * coder sees. Measured across six SDRB fields, coding the four ports
+     * separately beats the single-stream form by 23-43% compression ratio.
+     *
+     * The `literals` port keeps the data's natural word alphabet, so it should
+     * be fed to a symbol-width-matched coder (`HuffmanStage<uint16_t>` for
+     * uint16 quant codes) rather than a byte coder -- that alphabet effect is
+     * the larger half of the gain.
+     *
+     * Every port must be entropy coded and all four re-merged: unlike the
+     * single-stream form, which codes the whole payload by construction, a
+     * split leaks any byte left out. Both the raw-fallback chunks and the
+     * per-chunk size table are folded into ports above for exactly that
+     * reason (leaving them out cost 28% and 67% respectively in testing).
+     */
+    void setSplitMode(bool on) { split_mode_ = on; }
+    bool getSplitMode() const  { return split_mode_; }
+
     size_t getChunkSize()              const { return chunk_size_; }
-    size_t getRequiredInputAlignment() const override { return chunk_size_; }
+
+    /**
+     * Deliberately 1, not `chunk_size`: this stage zero-pads its own tail chunk.
+     *
+     * Requesting pipeline-level alignment does not actually work for a coder
+     * sitting behind a width-changing stage. `Pipeline::finalize()` pads the
+     * *pipeline input* to the LCM of every stage's alignment, but LorenzoQuant
+     * turns float32 into uint16 codes, so a 2048-aligned input arrives here as
+     * half as many bytes and need not be aligned at all. Worse, forcing the
+     * pipeline input up to a chunk multiple grows the upstream stage's output
+     * past its own estimate and trips the buffer-overwrite check. Padding
+     * internally is both simpler and correct for any upstream wiring.
+     */
+    size_t getRequiredInputAlignment() const override { return 1; }
     int    getWordSize()               const { return static_cast<int>(word_size_); }
     uint32_t getCachedOrigBytes()      const { return cached_orig_bytes_; }
 
@@ -116,26 +159,49 @@ public:
 
     // ── Metadata ──────────────────────────────────────────────────────────
     std::string getName() const override { return "GPULZ"; }
-    size_t getNumInputs()  const override { return 1; }
-    size_t getNumOutputs() const override { return 1; }
+    size_t getNumInputs()  const override {
+        return (is_inverse_ && split_mode_) ? 4 : 1;
+    }
+    size_t getNumOutputs() const override {
+        return (!is_inverse_ && split_mode_) ? 4 : 1;
+    }
+
+    std::vector<std::string> getOutputNames() const override {
+        if (!is_inverse_ && split_mode_)
+            return {"literals", "lengths", "offsets", "meta"};
+        return {"output"};
+    }
 
     std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const override {
         if (is_inverse_) {
+            // Capacity must cover the padded extent the decode kernel writes,
+            // even though execute() reports the unpadded size afterwards.
             if (cached_orig_bytes_ > 0)
                 return {static_cast<size_t>(cached_orig_bytes_)};
             return {input_sizes.empty() ? 0 : input_sizes[0]};
         }
-        // Forward: worst case = original data (every chunk falls back to raw
-        // storage) + stream header (two uint32_t per chunk).
         const size_t n_bytes  = input_sizes.empty() ? 0 : input_sizes[0];
         const size_t n_chunks = (n_bytes + chunk_size_ - 1) / chunk_size_;
         const size_t hdr      = 4 + 4 + 8 * n_chunks;
-        const size_t worst    = n_bytes + hdr;
+
+        if (split_mode_) {
+            const size_t block_elems = chunk_size_ / word_size_;
+            const size_t flag_stride = (block_elems + 7) / 8;
+            // literals: every element a literal (or every chunk raw) -> n_bytes.
+            // lengths/offsets: one byte per match, at most one match per element.
+            // meta: header + every chunk's full-width bitmap.
+            return {align4(n_bytes),
+                    align4(n_chunks * block_elems),
+                    align4(n_chunks * block_elems),
+                    align4(hdr + n_chunks * flag_stride)};
+        }
+        // Forward: worst case = original data (every chunk falls back to raw
+        // storage) + stream header (two uint32_t per chunk).
         // postStreamSync() rounds the final size up to a 4-byte boundary and
         // zero-fills the pad; reserve that pad here too (see RREStage).
-        return {(worst + 3) & ~size_t(3)};
+        return {align4(n_bytes + hdr)};
     }
 
     std::unordered_map<std::string, size_t>
@@ -155,12 +221,22 @@ public:
     size_t estimateScratchBytes(
         const std::vector<size_t>& input_sizes
     ) const override {
-        if (is_inverse_ || input_sizes.empty()) return 0;
+        if (input_sizes.empty()) return 0;
         const size_t in_bytes       = input_sizes[0];
         const size_t n_chunks       = (in_bytes + chunk_size_ - 1) / chunk_size_;
         const size_t block_elems    = chunk_size_ / word_size_;
         const size_t flag_bytes_max = (block_elems + 7) / 8;
-        return n_chunks * (static_cast<size_t>(chunk_size_) + flag_bytes_max + 4 * sizeof(uint32_t));
+        if (is_inverse_) {
+            // Split inverse restripes the four ports back into the packed
+            // single-stream form before running the normal decode path.
+            return split_mode_ ? (in_bytes + n_chunks * flag_bytes_max
+                                  + 4 * n_chunks * sizeof(uint32_t))
+                               : 0;
+        }
+        size_t bytes = n_chunks * (static_cast<size_t>(chunk_size_)
+                                   + flag_bytes_max + 4 * sizeof(uint32_t));
+        if (split_mode_) bytes += n_chunks * 5 * sizeof(uint32_t) + 16;
+        return bytes;
     }
 
     uint16_t getStageTypeId() const override {
@@ -179,43 +255,66 @@ public:
         size_t output_index, uint8_t* buf, size_t max_size
     ) const override {
         (void)output_index;
-        if (max_size < 9) return 0;
-        std::memcpy(buf,     &chunk_size_,        sizeof(uint32_t));
+        if (max_size < 14) return 0;
+        std::memcpy(buf,      &chunk_size_,          sizeof(uint32_t));
         buf[4] = word_size_;
-        std::memcpy(buf + 5, &cached_orig_bytes_, sizeof(uint32_t));
-        return 9;
+        std::memcpy(buf + 5,  &cached_orig_bytes_,   sizeof(uint32_t));
+        buf[9] = split_mode_ ? 1u : 0u;
+        std::memcpy(buf + 10, &orig_unpadded_bytes_, sizeof(uint32_t));
+        return 14;
     }
 
     void deserializeHeader(const uint8_t* buf, size_t size) override {
-        if (size >= 4) std::memcpy(&chunk_size_,        buf,     sizeof(uint32_t));
-        if (size >= 5) word_size_ = buf[4];
-        if (size >= 9) std::memcpy(&cached_orig_bytes_, buf + 5, sizeof(uint32_t));
+        if (size >= 4)  std::memcpy(&chunk_size_,        buf,     sizeof(uint32_t));
+        if (size >= 5)  word_size_ = buf[4];
+        if (size >= 9)  std::memcpy(&cached_orig_bytes_, buf + 5, sizeof(uint32_t));
+        if (size >= 10) split_mode_ = (buf[9] != 0);
+        if (size >= 14) std::memcpy(&orig_unpadded_bytes_, buf + 10, sizeof(uint32_t));
     }
 
-    size_t getMaxHeaderSize(size_t) const override { return 9; }
+    size_t getMaxHeaderSize(size_t) const override { return 14; }
 
     void saveState() override {
         saved_chunk_size_        = chunk_size_;
         saved_word_size_         = word_size_;
         saved_cached_orig_bytes_ = cached_orig_bytes_;
+        saved_split_mode_        = split_mode_;
+        saved_orig_unpadded_bytes_ = orig_unpadded_bytes_;
     }
 
     void restoreState() override {
         chunk_size_        = saved_chunk_size_;
         word_size_         = saved_word_size_;
         cached_orig_bytes_ = saved_cached_orig_bytes_;
+        split_mode_        = saved_split_mode_;
+        orig_unpadded_bytes_ = saved_orig_unpadded_bytes_;
     }
 
 private:
+    static constexpr size_t align4(size_t n) { return (n + 3) & ~size_t(3); }
+
+    /// Completes the deferred 4-entry per-port size readback used by split mode.
+    void finishSplitReadback(fz::stream_t stream) const;
+
     bool     is_inverse_;
     uint32_t chunk_size_;
     uint32_t saved_chunk_size_ = 0;
     uint8_t  word_size_;
     uint8_t  saved_word_size_ = 0;
     uint8_t  match_level_ = 1;
+    bool     split_mode_ = false;
+    bool     saved_split_mode_ = false;
     size_t   actual_output_size_;
-    uint32_t cached_orig_bytes_ = 0;
+    // Split mode: per-port actual sizes, in getOutputNames() order.
+    size_t   actual_split_sizes_[4] = {0, 0, 0, 0};
+    uint32_t cached_orig_bytes_ = 0;          // chunk-padded extent the codec works on
     uint32_t saved_cached_orig_bytes_ = 0;
+    // True input size before tail-chunk padding. The inverse decodes the full
+    // padded extent but must *report* this, or a downstream stage that derives
+    // an element count from its input size (LorenzoQuantStage's inverse does
+    // exactly that) inflates its own output past the allocated buffer.
+    uint32_t orig_unpadded_bytes_ = 0;
+    uint32_t saved_orig_unpadded_bytes_ = 0;
 
     // ── Persistent forward scratch buffers ─────────────────────────────────
     uint8_t*  d_data_scratch_ = nullptr;
@@ -224,6 +323,16 @@ private:
     uint32_t* d_data_size_    = nullptr;
     uint32_t* d_clean_dev_    = nullptr;
     uint32_t* d_dst_off_dev_  = nullptr;
+    // Split mode: per-chunk destination offsets into the literals / token
+    // streams, plus a 4-entry device totals array read back in postStreamSync.
+    uint32_t* d_lit_off_dev_  = nullptr;
+    uint32_t* d_tok_off_dev_  = nullptr;
+    uint32_t* d_meta_off_dev_ = nullptr;
+    uint32_t* d_lit_cnt_dev_  = nullptr;
+    uint32_t* d_tok_cnt_dev_  = nullptr;
+    uint32_t* d_totals_dev_   = nullptr;
+    mutable uint8_t*     split_out_ptr_[4] = {nullptr, nullptr, nullptr, nullptr};
+    mutable bool         split_readback_pending_ = false;
     mutable bool         tail_readback_pending_ = false;
     mutable fz::stream_t tail_readback_stream_  = nullptr;
     mutable uint32_t     tail_last_index_       = 0;

@@ -1,0 +1,104 @@
+[pipeline]
+# GPU Zstandard — LorenzoQuant → GPULZ (split) → {Huffman, ANS ×3}
+#
+# Reproduces Zstandard's block structure on the GPU. Zstd splits a compressed
+# block into a *literals* section (Huffman coded) and a *sequences* section
+# (FSE coded), because the two carry very different symbol distributions and
+# interleaving them raises the entropy any single coder sees. GPULZ's split
+# mode emits that separation directly as four ports, each coded on its own:
+#
+#     literals -> Huffman<uint16>   (Zstd: Huffman over literals)
+#     lengths  -> ANS               (Zstd: FSE over Match_Length codes)
+#     offsets  -> ANS               (Zstd: FSE over offset codes)
+#     meta     -> ANS               (header + per-chunk size table + flag bitmaps)
+#
+# Measured on QCLOUD (16 M floats, rel 1e-3, RTX 3080 Ti):
+#   lorenzo->bitshuffle->rze   16.57x
+#   lorenzo->gpulz->ans        16.78x   (single interleaved stream)
+#   this preset                21.15x   (+27.6% over the existing back-end)
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/gpu_zstd.toml \
+#              -i data/field.f32 -l 100x400x400 -b --report
+#
+# See examples/gpu_zstd.cpp for the same pipeline built programmatically, with
+# baselines and a per-stage timing breakdown (GPU_ZSTD_PROFILE=1).
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "lrz"
+type = "LorenzoQuant"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 1e-3
+error_bound_mode = "REL"
+# quant_radius is capped by the literals Huffman, not by the predictor:
+# HuffmanStage histograms into *shared* memory, so its 2*radius-entry codebook
+# has to fit there. 2048 -> 4096 entries -> 16 KB is fine; 32768 -> 64 K
+# entries -> 256 KB faults. HuffmanStage also narrows bklen to uint16_t, so
+# bklen must stay <= 65535, capping radius at 32767 regardless.
+quant_radius = 2048
+outlier_capacity = 0.2
+zigzag_codes = true                 # Huffman needs contiguous codes in [0, 2r-2]
+
+# ── LZ77 stage, emitting Zstd-style separated streams ────────────────────────
+[[stage]]
+name = "lz"
+type = "GPULZ"
+split_mode = true                   # 4 ports instead of one interleaved stream
+chunk_size = 2048
+word_size = 4                       # match granularity; 4 measured best on
+                                    # uint16 quant codes (see docs/stages/gpulz.md)
+match_level = 1                     # + hashed long-range candidates
+inputs = [{from = "lrz", port = "codes"}]
+
+# ── literals: keep the natural uint16 code alphabet ──────────────────────────
+# This is the larger half of the split's benefit. Lorenzo-quantized uint16 codes
+# carry strong correlation between a code's high and low byte; coding them as
+# *bytes* throws that away (4.14 bits/byte vs 3.43 as uint16 symbols). So the
+# literals port goes to a symbol-width-matched Huffman, not a byte coder.
+[[stage]]
+name = "huf_lit"
+type = "Huffman"
+input_type = "uint16"
+bklen = 4096                        # = 2*quant_radius; must be even, see below
+inputs = [{from = "lz", port = "literals"}]
+
+# ── sequences: ANS (rANS) stands in for Zstd's FSE (tANS) ────────────────────
+# Same coder family, and the right choice for these streams: small, heavily
+# skewed alphabets where Huffman's >=1-bit-per-symbol floor is costly.
+#
+# Unlike Zstd these are three *separate* streams rather than one interleaved
+# bitstream with three FSE states. Zstd interleaves because on a CPU that keeps
+# all three states in registers through one sequential decode loop; on a GPU
+# that inverts -- same-level DAG stages run concurrently on separate streams,
+# so separate ports let their coders overlap. Measured: the three ANS stages
+# cost ~0.13-0.25 ms each and are fully hidden behind the literals Huffman.
+[[stage]]
+name = "ans_len"
+type = "ANS"
+inputs = [{from = "lz", port = "lengths"}]
+
+[[stage]]
+name = "ans_off"
+type = "ANS"
+inputs = [{from = "lz", port = "offsets"}]
+
+[[stage]]
+name = "ans_meta"
+type = "ANS"
+inputs = [{from = "lz", port = "meta"}]
+
+# No Merge stage on purpose. Merge exists for the case where a *downstream*
+# stage must compress the concatenation of several ports; here nothing consumes
+# it, and the four coded streams are leaf outputs that Pipeline assembles into
+# the archive after all stages run. Merging early would also hand each coder's
+# inverse an interior pointer at an arbitrary byte offset, and both the Huffman
+# and ANS decoders read their bitstreams as 32-bit words -- Huffman's decode
+# kernel faults on the misaligned read.
+#
+# Note on bklen: it must be even. The reverse codebook is
+# 4*(2*32) + sizeof(SYM)*bklen bytes, so an odd bklen makes it an odd number of
+# 16-bit words, shifting the bitstream section to a 2-mod-4 offset and faulting
+# the same 32-bit read. setBklen() rounds odd values up, but prefer an even
+# value here so the config says what actually runs.
