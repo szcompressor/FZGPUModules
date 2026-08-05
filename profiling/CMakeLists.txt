@@ -138,3 +138,16 @@ set_target_properties(fzgmod-profile-speed PROPERTIES
 if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-speed PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
+
+# ── Huffman codebook drift harness ───────────────────────────────────────────
+# Pipeline: LorenzoQuant → Huffman, one pipeline instance, many successive
+# compress() calls on *different* data (files, or --slabs of one file).
+# Measures whether HuffmanBookSource::Adaptive's pinned codebook decays across a
+# run — the case a single-field measurement structurally cannot show.
+add_executable(fzgmod-profile-huffman-drift huffman_book_drift.cpp)
+target_link_libraries(fzgmod-profile-huffman-drift PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-huffman-drift PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-huffman-drift PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()

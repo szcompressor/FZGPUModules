@@ -10,6 +10,8 @@
  *   ZS4  ZigzagStage/ZeroMapsToZero         — encode(0)==0 on GPU for all elements
  *   ZS5  ZigzagStage/KnownValue_NegOne      — encode(-1 as int32) produces 1 on GPU
  *   ZS6  ZigzagStage/MatchesCPUReference_Int16 — GPU encode matches host Zigzag<T>::encode
+ *   ZS7  ZigzagStage/UnalignedByteLengthRoundTrip — byte length not a multiple of the word
+ *        size: trailing partial word is passed through, not left as stale buffer contents
  */
 
 #include <gtest/gtest.h>
@@ -193,5 +195,70 @@ TEST(ZigzagStage, MatchesCPUReference_Int16) {
     for (size_t i = 0; i < N; ++i) {
         uint16_t expected = Zigzag<int16_t>::encode(h_input[i]);
         EXPECT_EQ(h_gpu[i], expected) << "GPU/CPU mismatch at index " << i;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ZS7 — UnalignedByteLengthRoundTrip
+//
+// A byte-transparent Zigzag is routinely fed a compressed blob from an upstream
+// coder, whose length has no reason to be a multiple of the word size. The
+// kernels transform whole words only, so the trailing byte_size % sizeof(T)
+// bytes used to be left *unwritten* while actual_output_size_ still claimed the
+// full byte count — the stage silently emitted stale pool contents. Downstream
+// that showed up as a garbled coder stream decoded out of bounds, and whether it
+// crashed or merely corrupted depended on what the buffer previously held.
+//
+// Poison the output buffer first, so an unwritten tail cannot pass by accident.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(ZigzagStage, UnalignedByteLengthRoundTrip) {
+    constexpr uint8_t kPoison = 0xA5;
+
+    for (size_t extra = 1; extra < sizeof(int64_t); ++extra) {
+        const size_t byte_size = 16 * sizeof(int64_t) + extra;   // not a multiple of 8
+
+        std::vector<uint8_t> h_in(byte_size);
+        for (size_t i = 0; i < byte_size; ++i)
+            h_in[i] = static_cast<uint8_t>(0x11 * (i % 15) + 3);
+
+        CudaStream cs;
+        auto pool = make_test_pool(byte_size * 4);
+
+        CudaBuffer<uint8_t> d_in(byte_size), d_mid(byte_size), d_out(byte_size);
+        cudaMemcpy(d_in.get(), h_in.data(), byte_size, cudaMemcpyHostToDevice);
+        cudaMemset(d_mid.get(), kPoison, byte_size);
+        cudaMemset(d_out.get(), kPoison, byte_size);
+
+        ZigzagStage<int64_t, uint64_t> fwd;
+        std::vector<void*>  in_p  = {d_in.void_ptr()};
+        std::vector<void*>  mid_p = {d_mid.void_ptr()};
+        std::vector<size_t> sz    = {byte_size};
+        fwd.setInverse(false);
+        fwd.execute(cs.stream, pool.get(), in_p, mid_p, sz);
+        cudaStreamSynchronize(cs.stream);
+
+        EXPECT_EQ(fwd.getActualOutputSize(0), byte_size);
+
+        // The tail must be written, and written as a verbatim passthrough: a
+        // partial word cannot be zigzagged.
+        std::vector<uint8_t> h_mid(byte_size);
+        cudaMemcpy(h_mid.data(), d_mid.get(), byte_size, cudaMemcpyDeviceToHost);
+        const size_t n_whole = byte_size / sizeof(int64_t);
+        for (size_t i = n_whole * sizeof(int64_t); i < byte_size; ++i) {
+            EXPECT_NE(h_mid[i], kPoison) << "extra=" << extra << " tail byte " << i
+                                         << " was never written";
+            EXPECT_EQ(h_mid[i], h_in[i])  << "extra=" << extra << " tail byte " << i;
+        }
+
+        ZigzagStage<int64_t, uint64_t> inv;
+        std::vector<void*> out_p = {d_out.void_ptr()};
+        inv.setInverse(true);
+        inv.execute(cs.stream, pool.get(), mid_p, out_p, sz);
+        cudaStreamSynchronize(cs.stream);
+
+        std::vector<uint8_t> h_out(byte_size);
+        cudaMemcpy(h_out.data(), d_out.get(), byte_size, cudaMemcpyDeviceToHost);
+        for (size_t i = 0; i < byte_size; ++i)
+            ASSERT_EQ(h_out[i], h_in[i]) << "extra=" << extra << " byte " << i;
     }
 }

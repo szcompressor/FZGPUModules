@@ -6,6 +6,7 @@
 #include "transforms/zigzag/zigzag.h"
 #include "backend/api.h"
 #include <cstdint>
+#include <algorithm>
 #include <cstdio>
 #include <type_traits>
 #include "mem/mempool.h"
@@ -851,17 +852,31 @@ void LorenzoQuantStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
                    h_outlier_count,
                    100.0f * h_outlier_count / static_cast<float>(num_elements_));
         } else {
-            // Non-zero capacity but still overflowed — unexpected, warn loudly.
-            float actual_pct   = 100.0f * h_outlier_count
-                                 / static_cast<float>(num_elements_);
-            float capacity_pct = 100.0f * max_outliers
-                                 / static_cast<float>(num_elements_);
-            FZ_LOG(WARN,
-                   "Lorenzo outlier overflow! Detected %u (%.1f%%) outliers but "
-                   "only %.1f%% capacity allocated. Outliers beyond capacity were "
-                   "DROPPED — data will be corrupted for those elements. "
-                   "Increase outlier_capacity to at least %.1f%%.",
-                   h_outlier_count, actual_pct, capacity_pct, actual_pct * 1.1f);
+            // Non-zero capacity but still overflowed.  Dropping the excess breaks
+            // the error bound this stage exists to guarantee, and the result is
+            // indistinguishable from a correct one at the API — the caller gets a
+            // stream that decodes cleanly into wrong values.  This used to be an
+            // FZ_LOG(WARN), which is invisible at the default log level, so the
+            // corruption was silent in practice.  Fail instead: a compressor that
+            // cannot honour its bound must say so.
+            //
+            // outlier_capacity == 0 stays a warning-free drop above, because that
+            // is an explicit opt-in to the lossy trade-off.
+            const float actual_pct   = 100.0f * h_outlier_count
+                                       / static_cast<float>(num_elements_);
+            const float capacity_pct = 100.0f * max_outliers
+                                       / static_cast<float>(num_elements_);
+            char msg[512];
+            std::snprintf(msg, sizeof(msg),
+                   "LorenzoQuantStage: outlier overflow — %u of %zu elements (%.1f%%) "
+                   "fell outside the quantizer radius, but outlier_capacity reserves "
+                   "only %.1f%%. Dropping the excess would violate the error bound. "
+                   "Raise outlier_capacity to at least %.2f, widen quant_radius, or "
+                   "loosen the error bound. Set outlier_capacity = 0 to opt into "
+                   "dropping outliers deliberately.",
+                   h_outlier_count, num_elements_, actual_pct, capacity_pct,
+                   std::min(1.0f, actual_pct * 1.1f / 100.0f));
+            throw std::runtime_error(msg);
         }
         h_outlier_count = static_cast<uint32_t>(max_outliers);
     }

@@ -120,6 +120,24 @@ static HuffmanEncodeMode huffmanModeFromString(const std::string& s) {
     throw std::runtime_error("loadConfig: unknown Huffman encode_mode \"" + s + "\"");
 }
 
+static HuffmanBookModel huffmanBookModelFromString(const std::string& s) {
+    if (s == "Gaussian")          return HuffmanBookModel::Gaussian;
+    if (s == "Laplace")           return HuffmanBookModel::Laplace;
+    if (s == "GeneralizedNormal") return HuffmanBookModel::GeneralizedNormal;
+    if (s == "Uniform")           return HuffmanBookModel::Uniform;
+    throw std::runtime_error("loadConfig: unknown Huffman book_model \"" + s + "\"");
+}
+
+static const char* huffmanBookModelToString(HuffmanBookModel m) {
+    switch (m) {
+        case HuffmanBookModel::Laplace:           return "Laplace";
+        case HuffmanBookModel::GeneralizedNormal: return "GeneralizedNormal";
+        case HuffmanBookModel::Uniform:           return "Uniform";
+        case HuffmanBookModel::Gaussian:
+        default:                                  return "Gaussian";
+    }
+}
+
 static const char* huffmanModeToString(HuffmanEncodeMode m) {
     return m == HuffmanEncodeMode::Fine ? "Fine" : "Coarse";
 }
@@ -583,9 +601,30 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
     HuffmanEncodeMode mode = huffmanModeFromString(optStr(t, "encode_mode", "Coarse"));
 
+    // Pre-built codebook.  "Adaptive" needs no parameters beyond the floor shift;
+    // "Fixed" is expressible in TOML only in its model-derived form, since a raw
+    // frequency table has to be supplied through the C++ API.
+    const std::string book_src   = optStr(t, "book_source", "PerBlock");
+    const auto        floor_shift = static_cast<uint8_t>(optInt(t, "book_floor_shift", 24));
+    const auto        refit_thr   = static_cast<float>(optDbl(t, "book_refit_threshold", 1.2));
+    const auto        refit_ivl   = static_cast<uint32_t>(optInt(t, "book_refit_interval", 0));
+    HuffmanBookSpec spec;
+    spec.model  = huffmanBookModelFromString(optStr(t, "book_model", "Gaussian"));
+    spec.center = optDbl(t, "book_center", -1.0);
+    spec.scale  = optDbl(t, "book_scale",  32.0);
+    spec.shape  = optDbl(t, "book_shape",   2.0);
+
     auto configure = [&](auto* s) -> Stage* {
         s->setBklen(bklen);
         s->setEncodeMode(mode);
+        s->setAdaptiveFloorShift(floor_shift);
+        s->setRefitThreshold(refit_thr);
+        s->setRefitInterval(refit_ivl);
+        if      (book_src == "Fixed")    s->setFixedBookFromModel(spec);
+        else if (book_src == "Adaptive") s->setBookSource(HuffmanBookSource::Adaptive);
+        else if (book_src != "PerBlock")
+            throw std::runtime_error(
+                "loadConfig: unknown Huffman book_source \"" + book_src + "\"");
         return s;
     };
 
@@ -956,6 +995,34 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) mode = hs->getEncodeMode();
     if (mode != HuffmanEncodeMode::Coarse)
         out << "encode_mode = \"" << huffmanModeToString(mode) << "\"\n";
+
+    // Emit the pre-built codebook keys only for a model-derived fixed book — that is
+    // the only form TOML can round-trip.  A book set from a raw frequency table saves
+    // as PerBlock; the caller has to re-supply the table through the C++ API.
+    auto emitBook = [&out](auto* hs) {
+        if (hs->getBookSource() == HuffmanBookSource::Adaptive) {
+            out << "book_source = \"Adaptive\"\n";
+            if (hs->getAdaptiveFloorShift() != 24)
+                out << "book_floor_shift = "
+                    << static_cast<int>(hs->getAdaptiveFloorShift()) << "\n";
+            if (hs->getRefitThreshold() != 1.2f)
+                out << "book_refit_threshold = " << hs->getRefitThreshold() << "\n";
+            if (hs->getRefitInterval() != 0)
+                out << "book_refit_interval = " << hs->getRefitInterval() << "\n";
+            return;
+        }
+        if (hs->getBookSource() != HuffmanBookSource::Fixed || !hs->hasBookSpec()) return;
+        const HuffmanBookSpec& sp = hs->getBookSpec();
+        out << "book_source = \"Fixed\"\n";
+        out << "book_model = \""  << huffmanBookModelToString(sp.model) << "\"\n";
+        out << "book_center = "   << sp.center << "\n";
+        out << "book_scale = "    << sp.scale  << "\n";
+        if (sp.model == HuffmanBookModel::GeneralizedNormal)
+            out << "book_shape = " << sp.shape << "\n";
+    };
+    if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  emitBook(hs);
+    else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) emitBook(hs);
+    else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) emitBook(hs);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

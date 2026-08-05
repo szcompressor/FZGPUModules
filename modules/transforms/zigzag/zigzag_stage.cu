@@ -75,20 +75,45 @@ void ZigzagStage<TIn, TOut>::execute(
         return;
     }
 
+    static_assert(sizeof(TIn) == sizeof(TOut),
+                  "ZigzagStage: word size must match between TIn and TOut; the "
+                  "unaligned-tail passthrough below assumes one element width.");
+    constexpr size_t kWord = sizeof(TIn);
+
+    // A byte-transparent Zigzag is routinely fed a compressed blob from an
+    // upstream coder, whose length has no reason to be a multiple of kWord.
+    // The kernels transform whole words only, so the trailing
+    // `byte_size % kWord` bytes are outside their range.
+    const size_t n    = byte_size / kWord;
+    const size_t tail = byte_size - n * kWord;
+
     if (!is_inverse_) {
         // Forward: TIn[] → TOut[]
-        const size_t n = byte_size / sizeof(TIn);
         launchEncode<TIn, TOut>(
             static_cast<const TIn*>(inputs[0]),
             static_cast<TOut*>(outputs[0]),
             n, stream);
     } else {
         // Inverse: TOut[] → TIn[]
-        const size_t n = byte_size / sizeof(TOut);
         launchDecode<TIn, TOut>(
             static_cast<const TOut*>(inputs[0]),
             static_cast<TIn*>(outputs[0]),
             n, stream);
+    }
+
+    // Copy the partial trailing word through unchanged.  Zigzag is a per-word
+    // bijection, so a fragment of a word cannot be transformed — but it must
+    // still be *written*, on both paths symmetrically, or the stage silently
+    // emits whatever the pooled output buffer happened to contain while
+    // reporting actual_output_size_ == byte_size.  That produced corruption far
+    // downstream (a garbled coder stream, decoded out of bounds) whose
+    // appearance depended on stale pool contents, so it surfaced only for
+    // inputs whose compressed length was not a multiple of kWord.
+    if (tail != 0) {
+        FZ_CUDA_CHECK(cudaMemcpyAsync(
+            static_cast<uint8_t*>(outputs[0]) + n * kWord,
+            static_cast<const uint8_t*>(inputs[0]) + n * kWord,
+            tail, cudaMemcpyDeviceToDevice, stream));
     }
 
     cudaError_t err = cudaGetLastError();

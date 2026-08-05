@@ -6,9 +6,10 @@
 //   - Removed phf_allocate_reverse_book (internal allocation helper, not declared in hf.h).
 //   - Added definitions for capi_phf_encoded_bytes, capi_phf_coarse_tune_sublen,
 //     capi_phf_coarse_tune (declared in hf.h but absent from all reference files).
+//   - Removed the "larger than FIELD_CODE" stdout print in the >27-bit clamp path;
+//     HuffmanStage::findUnusableCode() detects the clamp marker and throws.
 
 #include <cstdint>
-#include <iostream>
 
 #include "hf.h"
 #include "hf_impl.hh"
@@ -110,9 +111,12 @@ void phf_CPU_build_canonized_codebook_v2(
         }
         else {
             if (pw8->bitcount > pw4->FIELD_CODE) {
+                // Marker only: prefix_code 0 with bitcount == OUTLIER_CUTOFF is not a
+                // usable code.  HuffmanStage::findUnusableCode() detects it and throws;
+                // the reference printed a line per symbol to stdout instead, which both
+                // let a corrupt book through and polluted the caller's stdout.
                 pw4->bitcount    = pw4->OUTLIER_CUTOFF;
                 pw4->prefix_code = 0;
-                std::cout << i << "\tlarger than FIELD_CODE" << std::endl;
             }
             else {
                 pw4->bitcount    = pw8->bitcount;

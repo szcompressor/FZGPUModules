@@ -14,7 +14,10 @@
  *     phase 3 (CUB ExclusiveSum + custom reduce kernel). No mid-encode CPU sync;
  *     preferred for latency-sensitive or graph-capture use cases.
  *
- * Note: the histogram D2H is still a CPU-sync operation in both modes.
+ * Note: the histogram D2H is a CPU-sync operation in both modes.  It disappears
+ * entirely under HuffmanBookSource::Fixed, which builds the codebook once up front
+ * instead of per call; see setBookSource().  The encoded stream is unchanged, so
+ * fixed-book output decodes with a stock decoder.
  *
  * Supported input types: `uint8_t`, `uint16_t`, `uint32_t`.
  *
@@ -48,6 +51,54 @@ namespace fz {
 enum class HuffmanEncodeMode {
     Coarse, ///< Multi-kernel coarse path; CPU prefix-sum sync in phase 3 (default).
     Fine,   ///< ReVISIT-lite single kernel; fully GPU-async phase 3, no mid-encode CPU sync.
+};
+
+/**
+ * Selects where the Huffman codebook comes from on the forward path.
+ *
+ * `PerBlock` is the classic path: histogram the input, copy the frequencies to the
+ * host, build a canonical tree, copy the codebook back.  `Fixed` builds one book up
+ * front and reuses it for every call, which removes the histogram kernel, the
+ * frequency D2H, the host stream sync, and the host tree build from every compress.
+ *
+ * Prior work: CEAZ (Xiong et al., ICS'22) generates canonical codewords offline from
+ * representative scientific data; Shah et al., *Lightweight Huffman Coding for
+ * Efficient GPU Compression* (ICS'23) precomputes a dictionary of codebooks fitted to
+ * cuSZ's quantization-code distribution and selects one at runtime.  The win grows as
+ * the per-call payload shrinks, so `Fixed` matters most for small-chunk workloads.
+ */
+enum class HuffmanBookSource {
+    PerBlock,  ///< Histogram + build a fresh codebook on every forward call (default).
+    Fixed,     ///< Build one codebook up front and reuse it for every forward call.
+    Adaptive,  ///< Histogram the *first* call only, then reuse that codebook forever.
+};
+
+/** Analytic symbol distribution used to synthesize a fixed codebook. */
+enum class HuffmanBookModel {
+    Gaussian,           ///< exp(-((i-center)/scale)^2 / 2)
+    Laplace,            ///< exp(-|i-center|/scale)
+    GeneralizedNormal,  ///< exp(-(|i-center|/scale)^shape)
+    Uniform,            ///< flat; every symbol equally likely
+};
+
+/**
+ * Parameters for a model-derived fixed codebook.
+ *
+ * The model is evaluated over symbols `[0, bklen)` and produces a strictly positive
+ * frequency for every symbol, so every symbol is guaranteed to be codable.  This is
+ * the important difference from a book trained on a sample of real data, where an
+ * unseen symbol gets no code at all.
+ */
+struct HuffmanBookSpec {
+    HuffmanBookModel model  = HuffmanBookModel::Gaussian;
+    /// Distribution center in symbol space.  Negative means "use bklen/2", which is
+    /// where an unsigned quantizer with radius = bklen/2 puts the zero-error code.
+    double           center = -1.0;
+    /// Distribution width in symbols (sigma for Gaussian, b for Laplace, alpha for
+    /// GeneralizedNormal).  Ignored by Uniform.
+    double           scale  = 32.0;
+    /// Exponent for GeneralizedNormal only (2.0 == Gaussian, 1.0 == Laplace).
+    double           shape  = 2.0;
 };
 
 /**
@@ -119,11 +170,142 @@ public:
     void             setEncodeMode(HuffmanEncodeMode mode) { encode_mode_ = mode; }
     HuffmanEncodeMode getEncodeMode() const                { return encode_mode_; }
 
+    // ── Pre-built codebooks ───────────────────────────────────────────────────
+
+    /**
+     * Select where the forward path gets its codebook.
+     *
+     * Switching to `Fixed` without first calling setFixedBookFromFreq() or
+     * setFixedBookFromModel() throws on the next forward execute(): there is no
+     * sensible default distribution to guess.
+     *
+     * The encoded bitstream still carries its reverse codebook in every mode, so a
+     * `Fixed`-mode stream decompresses with a stock decoder and no extra
+     * configuration.  Nothing about the file format changes.
+     */
+    void              setBookSource(HuffmanBookSource src) { book_source_ = src; }
+    HuffmanBookSource getBookSource() const                { return book_source_; }
+
+    /**
+     * Supply the frequency table that defines the fixed codebook and switch to
+     * `HuffmanBookSource::Fixed`.
+     *
+     * `n` becomes the codebook length (subject to the same odd-value rounding as
+     * setBklen(); the padding slot gets frequency 1).  Every entry must be non-zero
+     * — a zero-frequency symbol receives no code, and encoding it would corrupt the
+     * stream rather than fail loudly.
+     *
+     * The table is held in host memory only.  It is not written to the stage header
+     * (the per-stage config slot is 128 bytes; a reverse codebook is far larger), so
+     * a pipeline reconstructed from a saved config gets `PerBlock` back unless the
+     * caller re-supplies the table.  Decompression is unaffected — see
+     * setBookSource().
+     *
+     * @throws std::invalid_argument if `n` is 0 or any frequency is 0.
+     */
+    void setFixedBookFromFreq(const uint32_t* h_freq, uint32_t n);
+
+    /**
+     * Synthesize the fixed codebook from an analytic distribution and switch to
+     * `HuffmanBookSource::Fixed`.
+     *
+     * Call setBklen() first: the model is evaluated over `[0, bklen)`.  Every symbol
+     * gets a strictly positive frequency, so the resulting book can encode any
+     * in-range symbol.
+     */
+    void setFixedBookFromModel(const HuffmanBookSpec& spec);
+
+    /// Frequency table backing the fixed codebook; empty when none has been set.
+    const std::vector<uint32_t>& getFixedBookFreq() const { return fixed_freq_; }
+
+    /**
+     * Dynamic-range clamp used by `HuffmanBookSource::Adaptive`, as a right shift of
+     * the largest sampled frequency: every symbol's frequency is floored at
+     * `max(1, max_freq >> shift)`.
+     *
+     * The floor does two jobs.  It guarantees a code for every symbol in `[0, bklen)`,
+     * including ones absent from the sampled block — without it, a symbol that shows
+     * up only in a later block would have no code at all.  And it bounds the
+     * frequency dynamic range, which bounds Huffman depth: an unbounded range can
+     * demand codes wider than the 27 bits `HuffmanWord<4>` holds.
+     *
+     * A larger shift tracks the sampled distribution more closely (better ratio); a
+     * smaller one is flatter and safer.  The build halves the shift and retries when
+     * the resulting book does not fit, so this is a starting point, not a hard
+     * setting — shift 0 is a uniform book, which always fits.  Default 24.
+     */
+    void    setAdaptiveFloorShift(uint8_t shift) { adaptive_floor_shift_ = shift; }
+    uint8_t getAdaptiveFloorShift() const        { return adaptive_floor_shift_; }
+
+    /// Shift actually used by the last Adaptive build, after any retries.  Equals
+    /// getAdaptiveFloorShift() unless the book had to be flattened to fit.
+    uint8_t getAdaptiveFloorShiftUsed() const    { return adaptive_shift_used_; }
+
+    /**
+     * Refit trigger for `Adaptive`: rebuild the codebook once the encoded bit rate
+     * degrades past `ratio` times the rate the book achieved when it was fitted.
+     *
+     * A pinned book goes stale when the symbol distribution moves — measured at
+     * 4.7% mean ratio loss across 23 CESM levels, 8.3% across differing fields, and
+     * far worse if the book was fitted to an unrepresentative block.  Detecting
+     * that would normally cost the histogram this mode exists to avoid, but encode
+     * already reports `total_nbit`, so bits-per-symbol is free.  When it degrades,
+     * the *next* call histograms and re-pins; the current call is already encoded
+     * and is not retroactively improved.
+     *
+     * 1.2 (the default) refits after a 20% bit-rate regression.  Lower refits more
+     * eagerly, trading throughput for ratio; `PerBlock` is the limit of that trade.
+     * 0 disables refitting, pinning the first book forever.
+     */
+    void  setRefitThreshold(float ratio) { refit_threshold_ = ratio; }
+    float getRefitThreshold() const      { return refit_threshold_; }
+
+    /**
+     * Refit unconditionally every `n` compress calls (0 = never).
+     *
+     * The bit-rate trigger above only fires when the rate gets *worse*, so it
+     * catches a distribution drifting toward less compressible — but not a block
+     * that is more compressible than the fitted one while still being badly served
+     * by its codebook.  Measured: stepping through five different CESM-ATM
+     * variables, `LHFLX` lost 27.6% ratio to a codebook fitted on `CLDHGH`, yet its
+     * absolute bit rate *fell*, so the threshold never fired.  Deciding that case
+     * properly needs the fresh book's rate for comparison, which means the
+     * histogram this mode exists to avoid.
+     *
+     * A periodic refit sidesteps the question: it costs one histogram every `n`
+     * calls, bounding how long a stale book can persist regardless of which
+     * direction the rate moved.  `n = 1` is exactly `PerBlock`.
+     *
+     * Default 0.  Set it when successive calls carry genuinely different data
+     * (separate variables rather than successive slabs of one field); leave it off
+     * when they are slabs of one field, where the bit-rate trigger suffices.
+     */
+    void     setRefitInterval(uint32_t n) { refit_interval_ = n; }
+    uint32_t getRefitInterval() const     { return refit_interval_; }
+
+    /// Number of times `Adaptive` has re-fitted its codebook.  Diagnostic: a
+    /// steadily climbing count means the data is drifting faster than one book can
+    /// track, and `PerBlock` may be the better choice.
+    uint32_t getRefitCount() const { return refit_count_; }
+
+    /// Bits per symbol the resident Adaptive book achieved on the block it was
+    /// fitted to; 0 before the first fit.  This is the baseline the refit trigger
+    /// compares against.
+    double getFitBitsPerSymbol() const { return fit_bits_per_sym_; }
+
+    /// True when the fixed book came from setFixedBookFromModel(), i.e. when it is
+    /// described by a handful of numbers and so can be written to a TOML config.
+    /// A book set from a raw frequency table is not reproducible this way.
+    bool                   hasBookSpec() const { return has_book_spec_; }
+    const HuffmanBookSpec& getBookSpec() const { return book_spec_; }
+
     // ── Stage control ─────────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    // Histogram D2H makes this graph-incompatible regardless of encode mode.
+    // Not graph-compatible in any configuration.  HuffmanBookSource::Fixed removes
+    // the histogram D2H, but encode still returns total_nbit/total_ncell to the host
+    // to assemble phf_header before the H2D merge, in both encode modes.
     bool isGraphCompatible() const override { return false; }
 
     // ── Pool lifecycle ────────────────────────────────────────────────────────
@@ -229,6 +411,27 @@ private:
     bool              is_inverse_   = false;
     uint32_t          bklen_        = defaultBklen();
     HuffmanEncodeMode encode_mode_  = HuffmanEncodeMode::Coarse;
+    HuffmanBookSource book_source_  = HuffmanBookSource::PerBlock;
+
+    // Frequency table defining the fixed codebook (host-only; see setFixedBookFromFreq).
+    std::vector<uint32_t> fixed_freq_;
+    // Model that generated fixed_freq_, when it came from setFixedBookFromModel().
+    HuffmanBookSpec       book_spec_     {};
+    bool                  has_book_spec_ = false;
+    uint8_t               adaptive_floor_shift_ = 24;
+    uint8_t               adaptive_shift_used_  = 24;
+
+    // Refit bookkeeping (Adaptive only).
+    float    refit_threshold_  = 1.2f;
+    uint32_t refit_interval_   = 0;     // 0 = only the bit-rate trigger
+    uint32_t calls_since_fit_  = 0;
+    double   fit_bits_per_sym_ = 0.0;   // rate the resident book achieved when fitted
+    bool     just_fitted_      = false; // next encode establishes fit_bits_per_sym_
+    uint32_t refit_count_      = 0;
+    // True when buf_->d_bk4 / d_revbk4 currently hold the fixed book.  Cleared by
+    // initBuf(), which allocates fresh (uninitialized) codebook buffers.
+    bool                  fixed_book_resident_ = false;
+
     uint64_t original_len_       = 0;   // element count set by forward execute
     size_t   actual_output_size_ = 0;
     size_t            cap_inlen_        = 0;                          // allocated capacity (elements); grow-only
@@ -272,6 +475,17 @@ private:
     // a __global__ pointer.  If buf_ already exists, destroys it first (returning
     // its allocations to the pool) before creating the new one.
     void initBuf(size_t inlen, MemoryPool* pool);
+
+    // Builds the canonical codebook from fixed_freq_ into buf_ and H2Ds it.
+    // Requires buf_ to exist.  Must be in huffman_stage.cu (needs phf::Buf<T>).
+    void buildFixedBook(fz::stream_t stream);
+
+    // Builds a reusable codebook from a sampled histogram, flooring frequencies and
+    // retrying with a flatter floor until the book fits the 27-bit code field.
+    void buildAdaptiveBook(const uint32_t* h_hist, fz::stream_t stream);
+
+    // Index of the first symbol with freq > 0 whose built code is unusable, or -1.
+    int findUnusableCode(const uint32_t* freq) const;
 };
 
 extern template class HuffmanStage<uint8_t>;

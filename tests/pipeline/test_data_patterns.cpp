@@ -24,6 +24,8 @@
  *   DP10 DataPatterns/TightErrorBound             — EB=1e-5, smooth data in [-1,1]
  *   DP11 DataPatterns/LooseErrorBound             — EB=10, loose bound compresses no worse than tight
  *        DataPatterns/ZeroOutlierCapacityNoCrash  — capacity=0 drops outliers silently, must not crash
+ *        DataPatterns/OutlierOverflowThrows       — non-zero capacity too small to hold the outliers
+ *                                                   must throw, not silently break the error bound
  */
 
 #include <gtest/gtest.h>
@@ -266,4 +268,42 @@ TEST(DataPatterns, ZeroOutlierCapacityNoCrash) {
     // We do NOT check max_abs_error here because dropped outliers will violate
     // the error bound — that is the documented behaviour of capacity=0.
     cudaFree(d_dec);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DP-OF: OutlierOverflowThrows
+//
+// Non-zero outlier_capacity that is too small to hold the outliers actually
+// produced used to drop the excess and continue, reporting success. The stream
+// decoded cleanly into values that violated the error bound by orders of
+// magnitude, and the only signal was an FZ_LOG(WARN) that is invisible at the
+// default log level — so a compressor asked to honour a bound silently did not.
+//
+// It must now fail. capacity == 0 remains an explicit opt-in to dropping, and is
+// covered by ZeroOutlierCapacityNoCrash above.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(DataPatterns, OutlierOverflowThrows) {
+    constexpr size_t N  = 65536;
+    // Tight enough that noise overruns a radius-512 quantizer (|residual| must
+    // stay under 512 * 2 * EB = 0.1 to be codable), but still comfortably above
+    // float32's precision floor for values near 1.0.
+    constexpr float  EB = 1e-4f;
+
+    // White noise against a tight bound and a narrow radius: nearly every element
+    // lands outside the quantizer range.
+    std::vector<float> noise(N);
+    uint32_t seed = 12345u;
+    for (size_t i = 0; i < N; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        noise[i] = static_cast<float>((seed >> 16) & 0x7fff) / 32767.0f;
+    }
+
+    // 1% capacity cannot hold ~100% outliers.
+    EXPECT_THROW(run_pattern(noise, EB, /*quant_radius=*/512, /*outlier_capacity=*/0.01f),
+                 std::runtime_error);
+
+    // With enough capacity the same data round-trips inside the bound, which is
+    // what makes the throw a capacity problem rather than a data problem.
+    const float err = run_pattern(noise, EB, /*quant_radius=*/512, /*outlier_capacity=*/1.0f);
+    EXPECT_LE(err, EB * 1.01f) << "max error " << err << " exceeds bound " << EB;
 }
