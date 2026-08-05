@@ -166,7 +166,8 @@ __global__ void lorenzo_dequantize_1d_kernel(
     const size_t n,
     const TInput ebx2,
     const TCode quant_radius,
-    TInput* __restrict__ output
+    TInput* __restrict__ output,
+    const TInput* __restrict__ means
 ) {
     constexpr int NumThreads = TileDim / Seq;
     
@@ -211,7 +212,11 @@ __global__ void lorenzo_dequantize_1d_kernel(
             
             // Inject any scattered outlier prediction errors BEFORE prefix sum
             delta += output[global_id];
-            
+
+            // Undo centering by seeding the tile's chain with mu; the prefix sum
+            // carries it into every element, so this is one add per tile.
+            if (means != nullptr && local_id == 0) delta += means[blockIdx.x];
+
             scratch[local_id] = delta;
         } else if (local_id < TileDim) {
             scratch[local_id] = 0;
@@ -277,31 +282,58 @@ __global__ void lorenzo_quantize_1d_kernel(
     TInput* __restrict__ outlier_errors,
     uint32_t* __restrict__ outlier_indices,
     uint32_t* __restrict__ outlier_count,
-    const size_t max_outliers
+    const size_t max_outliers,
+    TInput* __restrict__ means
 ) {
     constexpr int NumThreads = TileDim / Seq;
-    
+
     // Shared memory for staging and better memory access patterns
     __shared__ TInput s_data[TileDim];
     __shared__ TCode s_codes[TileDim];
-    
+    __shared__ TInput s_red[NumThreads];
+    __shared__ TInput s_mu;
+
     // Private thread data: current Seq elements + 1 previous element
     TInput thp_data[Seq + 1];
-    
+
     const size_t block_offset = blockIdx.x * TileDim;
-    
+
     // ========== Stage 1: Load input data to shared memory with pre-quantization ==========
     // Coalesced loads: each thread loads Seq elements
+    TInput thread_sum = static_cast<TInput>(0);
     #pragma unroll
     for (int i = 0; i < Seq; i++) {
         size_t global_idx = block_offset + threadIdx.x + i * NumThreads;
         if (global_idx < n) {
             // Pre-quantize: multiply by 1/(2*eb) to normalize to quantization units
-            s_data[threadIdx.x + i * NumThreads] = round(input[global_idx] * ebx2_r);
+            TInput q = round(input[global_idx] * ebx2_r);
+            s_data[threadIdx.x + i * NumThreads] = q;
+            thread_sum += q;
         }
     }
     __syncthreads();
-    
+
+    // ========== Stage 1b: Per-tile mean (adaptive centering) ==========
+    // Accumulated in the load loop above rather than re-read from s_data: the
+    // tail of a partial tile is never written, so summing s_data would read
+    // uninitialized shared memory.
+    if (means != nullptr) {
+        s_red[threadIdx.x] = thread_sum;
+        __syncthreads();
+        for (unsigned stride = NumThreads >> 1; stride > 0u; stride >>= 1) {
+            if (threadIdx.x < stride) s_red[threadIdx.x] += s_red[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) {
+            const TInput count =
+                static_cast<TInput>(min(static_cast<size_t>(TileDim), n - block_offset));
+            // mu stays an exact integer in quantized units so the inverse is lossless.
+            s_mu = round(s_red[0] / count);
+            means[blockIdx.x] = s_mu;
+        }
+        __syncthreads();
+    }
+
     // ========== Stage 2: Load to private registers ==========
     // Each thread loads its Seq elements
     #pragma unroll
@@ -316,7 +348,10 @@ __global__ void lorenzo_quantize_1d_kernel(
     if (threadIdx.x > 0) {
         thp_data[0] = s_data[threadIdx.x * Seq - 1];
     } else {
-        thp_data[0] = static_cast<TInput>(0);
+        // Centering enters as the chain seed: predicting element 0 from mu
+        // instead of 0 makes its residual (q_0 - mu) rather than the raw q_0,
+        // and leaves every other residual — and the outlier path — untouched.
+        thp_data[0] = (means != nullptr) ? s_mu : static_cast<TInput>(0);
     }
     
     // ========== Stage 3: Lorenzo prediction + quantization ==========
@@ -387,7 +422,8 @@ void launchLorenzoKernel(
     size_t max_outliers,
     int grid_size,
     bool zigzag_codes,
-    cudaStream_t stream
+    cudaStream_t stream,
+    TInput* means
 ) {
     constexpr int TileDim = 1024;
     constexpr int Seq = 4;
@@ -398,14 +434,14 @@ void launchLorenzoKernel(
             <<<grid_size, NumThreads, 0, stream>>>(
                 input, n, ebx2_r, quant_radius,
                 quant_codes, outlier_errors, outlier_indices, outlier_count,
-                max_outliers
+                max_outliers, means
             );
     } else {
         lorenzo_quantize_1d_kernel<TInput, TCode, TileDim, Seq, false>
             <<<grid_size, NumThreads, 0, stream>>>(
                 input, n, ebx2_r, quant_radius,
                 quant_codes, outlier_errors, outlier_indices, outlier_count,
-                max_outliers
+                max_outliers, means
             );
     }
 }
@@ -422,7 +458,8 @@ void launchLorenzoInverseKernel(
     TInput* output,
     bool zigzag_codes,
     cudaStream_t stream,
-    MemoryPool* pool
+    MemoryPool* pool,
+    const TInput* means
 ) {
     constexpr int TileDim = 1024;
     constexpr int Seq = 4;
@@ -460,12 +497,12 @@ void launchLorenzoInverseKernel(
     if (zigzag_codes) {
         lorenzo_dequantize_1d_kernel<TInput, TCode, TileDim, Seq, true>
             <<<grid_size, NumThreads, 0, stream>>>(
-                quant_codes, n, ebx2, quant_radius, output
+                quant_codes, n, ebx2, quant_radius, output, means
             );
     } else {
         lorenzo_dequantize_1d_kernel<TInput, TCode, TileDim, Seq, false>
             <<<grid_size, NumThreads, 0, stream>>>(
-                quant_codes, n, ebx2, quant_radius, output
+                quant_codes, n, ebx2, quant_radius, output, means
             );
     }
 
@@ -485,7 +522,7 @@ LorenzoQuantStage<TInput, TCode>::LorenzoQuantStage(const Config& config)
     : config_(config),
       computed_abs_eb_(static_cast<TInput>(config.error_bound)),
       computed_value_base_(config.precomputed_value_base) {
-    actual_output_sizes_.resize(3, 0);
+    actual_output_sizes_.resize(config_.centering ? 4 : 3, 0);
 }
 
 template<typename TInput, typename TCode>
@@ -551,6 +588,12 @@ void LorenzoQuantStage<TInput, TCode>::execute(
 
         int eff_ndim = ndim();
 
+        if (config_.centering && eff_ndim != 1)
+            throw std::runtime_error(
+                "LorenzoQuantStage: centering is 1-D only — the 2-D/3-D Lorenzo "
+                "paths have no per-tile prediction chain to seed with a mean");
+
+
         if (eff_ndim == 3) {
             // -- 3-D inverse Lorenzo --
             size_t nx = (config_.dims[0] > 0) ? config_.dims[0]
@@ -597,7 +640,8 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<TInput*>(outputs[0]),
                 config_.zigzag_codes,
                 stream,
-                pool
+                pool,
+                config_.centering ? static_cast<const TInput*>(inputs[3]) : nullptr
             );
         }
 
@@ -639,7 +683,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
 
         if (num_elements == 0) {
             // Empty input
-            for (size_t i = 0; i < 3; i++) {
+            for (size_t i = 0; i < actual_output_sizes_.size(); i++) {
                 actual_output_sizes_[i] = 0;
             }
             actual_outlier_count_ = 0;
@@ -654,9 +698,13 @@ void LorenzoQuantStage<TInput, TCode>::execute(
 
         // ── Resolve absolute error bound ──────────────────────────────────────
         // For ABS mode: abs_eb = config_.error_bound (no scan needed).
-        // For NOA/REL modes: perform a stream-synchronising min/max scan first,
+        // For NOA/PREL modes: perform a stream-synchronising min/max scan first,
         //   then derive the absolute bound.  If the caller pre-computed
         //   value_base (> 0), skip the scan and use that value instead.
+        // A Config-struct-supplied REL never passed through setErrorBoundMode(),
+        // so catch it here too.
+        config_.eb_mode = resolveApproxRelMode(config_.eb_mode, "LorenzoQuantStage");
+
         if (config_.eb_mode == ErrorBoundMode::ABS) {
             computed_abs_eb_    = static_cast<TInput>(config_.error_bound);
             computed_value_base_ = 0.0f;
@@ -673,7 +721,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 FZ_LOG(WARN,
                     "LorenzoQuantStage: value_base is zero for %s mode "
                     "(constant or empty data?); falling back to ABS",
-                    config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL");
+                    config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "PREL");
                 computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
             } else {
                 computed_abs_eb_ = static_cast<TInput>(config_.error_bound)
@@ -681,7 +729,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
             }
             FZ_LOG(DEBUG,
                 "LorenzoQuantStage %s: user_eb=%.6g value_base=%.6g -> abs_eb=%.6g",
-                config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL",
+                config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "PREL",
                 static_cast<double>(config_.error_bound),
                 static_cast<double>(value_base),
                 static_cast<double>(computed_abs_eb_));
@@ -692,6 +740,12 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                         / (static_cast<TInput>(2) * computed_abs_eb_);
 
         int eff_ndim = ndim();
+
+        if (config_.centering && eff_ndim != 1)
+            throw std::runtime_error(
+                "LorenzoQuantStage: centering is 1-D only — the 2-D/3-D Lorenzo "
+                "paths have no per-tile prediction chain to seed with a mean");
+
 
         if (eff_ndim == 3) {
             // -- 3-D forward Lorenzo --
@@ -739,7 +793,8 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 max_outliers,
                 grid_size,
                 config_.zigzag_codes,
-                stream
+                stream,
+                config_.centering ? static_cast<TInput*>(outputs[3]) : nullptr
             );
         }
 
@@ -761,6 +816,14 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         actual_output_sizes_[0] = num_elements * sizeof(TCode);
         actual_output_sizes_[1] = max_outliers * sizeof(TInput);
         actual_output_sizes_[2] = max_outliers * sizeof(uint32_t);
+        if (config_.centering) {
+            // One mean per 1024-element tile; unlike the outlier ports this is
+            // a fixed size, so postStreamSync() never has to trim it.
+            constexpr size_t kTileDim = 1024;
+            actual_output_sizes_.resize(4);
+            actual_output_sizes_[3] =
+                ((num_elements + kTileDim - 1) / kTileDim) * sizeof(TInput);
+        }
     }
 }
 
@@ -813,15 +876,40 @@ template<typename TInput, typename TCode>
 std::vector<size_t> LorenzoQuantStage<TInput, TCode>::estimateOutputSizes(
     const std::vector<size_t>& input_sizes
 ) const {
+    if (input_sizes.empty())
+        return config_.centering ? std::vector<size_t>{0, 0, 0, 0}
+                                 : std::vector<size_t>{0, 0, 0};
+
+    if (is_inverse_) {
+        // Inverse: inputs are {codes, outlier_errors, outlier_indices} and the
+        // single output is the reconstructed field. Sizing this from
+        // sizeof(TInput) — as the forward branch does — under-allocates the
+        // output by sizeof(TInput)/sizeof(TCode) (2x for the usual
+        // float/uint16 pair) and the inverse kernel's first memset runs off the
+        // end of the buffer.
+        //
+        // This is latent whenever LorenzoQuant is the pipeline's *source*
+        // stage, because buildInverseDAG() then overrides its result buffer
+        // with the exact known uncompressed size. It only bites when something
+        // sits upstream of it — e.g. LogTransformStage.
+        const size_t num_elements = input_sizes[0] / sizeof(TCode);
+        return {num_elements * sizeof(TInput)};
+    }
+
     size_t input_size = input_sizes[0];
     size_t num_elements = input_size / sizeof(TInput);
     size_t max_outliers = getMaxOutlierCount(num_elements);
-    
-    return {
+
+    std::vector<size_t> sizes = {
         num_elements * sizeof(TCode),        // codes (fixed size)
         max_outliers * sizeof(TInput),       // outlier_errors (max capacity)
         max_outliers * sizeof(uint32_t),     // outlier_indices (max capacity)
     };
+    if (config_.centering) {
+        constexpr size_t kTileDim = 1024;    // matches launchLorenzoKernel
+        sizes.push_back(((num_elements + kTileDim - 1) / kTileDim) * sizeof(TInput));
+    }
+    return sizes;
 }
 
 // ========== Explicit Template Instantiations ==========
@@ -835,29 +923,29 @@ template class LorenzoQuantStage<double, uint32_t>;
 // Instantiate kernel launchers
 template void launchLorenzoKernel<float, uint16_t>(
     const float*, size_t, float, uint16_t,
-    uint16_t*, float*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t);
+    uint16_t*, float*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t, float*);
 template void launchLorenzoKernel<float, uint8_t>(
     const float*, size_t, float, uint8_t,
-    uint8_t*, float*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t);
+    uint8_t*, float*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t, float*);
 template void launchLorenzoKernel<double, uint16_t>(
     const double*, size_t, double, uint16_t,
-    uint16_t*, double*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t);
+    uint16_t*, double*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t, double*);
 template void launchLorenzoKernel<double, uint32_t>(
     const double*, size_t, double, uint32_t,
-    uint32_t*, double*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t);
+    uint32_t*, double*, uint32_t*, uint32_t*, size_t, int, bool, cudaStream_t, double*);
 
 template void launchLorenzoInverseKernel<float, uint16_t>(
     const uint16_t*, const float*, const uint32_t*, uint32_t,
-    size_t, float, uint16_t, float*, bool, cudaStream_t, MemoryPool*);
+    size_t, float, uint16_t, float*, bool, cudaStream_t, MemoryPool*, const float*);
 template void launchLorenzoInverseKernel<float, uint8_t>(
     const uint8_t*, const float*, const uint32_t*, uint32_t,
-    size_t, float, uint8_t, float*, bool, cudaStream_t, MemoryPool*);
+    size_t, float, uint8_t, float*, bool, cudaStream_t, MemoryPool*, const float*);
 template void launchLorenzoInverseKernel<double, uint16_t>(
     const uint16_t*, const double*, const uint32_t*, uint32_t,
-    size_t, double, uint16_t, double*, bool, cudaStream_t, MemoryPool*);
+    size_t, double, uint16_t, double*, bool, cudaStream_t, MemoryPool*, const double*);
 template void launchLorenzoInverseKernel<double, uint32_t>(
     const uint32_t*, const double*, const uint32_t*, uint32_t,
-    size_t, double, uint32_t, double*, bool, cudaStream_t, MemoryPool*);
+    size_t, double, uint32_t, double*, bool, cudaStream_t, MemoryPool*, const double*);
 
 } // namespace fz
 // (2-D and 3-D kernels + launchers are in lorenzo_quant_nd.cu)

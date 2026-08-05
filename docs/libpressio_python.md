@@ -153,7 +153,7 @@ decompressed = comp.decode(compressed, out)
 |--------|------|---------|-------------|
 | `pressio:abs` | double | 1e-3 | Absolute error bound |
 | `pressio:rel` | double | 1e-3 | Relative error bound (corresponds to noa to fzgpumodules) |
-| `fzgpumodules:error_bound_mode` | str | `"abs"` | `"abs"`, `"rel"`, or `"noa"` |
+| `fzgpumodules:error_bound_mode` | str | `"abs"` | `"abs"`, `"rel"`, `"noa"`, or `"prel"`. On predictor stages `"rel"` warns and maps to `"prel"`; only `QuantizerStage` honours exact `"rel"`. |
 | `fzgpumodules:stages` | list[str] | `["lorenzo:float:uint16", "diff:uint16"]` | Ordered stage tokens |
 | `fzgpumodules:connections` | list[str] | `["s1 <- s0:codes"]` | Stage wiring strings |
 | `fzgpumodules:dims` | list[int] | `[0, 1, 1]` | Spatial dims `[nx, ny, nz]`; `nx=0` infers 1-D |

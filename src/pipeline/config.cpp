@@ -47,6 +47,7 @@
 #include "coders/clog/clog_stage.h"
 #include "coders/hclog/hclog_stage.h"
 #include "shufflers/tupl/tupl_stage.h"
+#include "transforms/log_transform/log_transform_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
@@ -60,6 +61,7 @@
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -85,17 +87,20 @@ static std::string strategyToString(MemoryStrategy s) {
 }
 
 static ErrorBoundMode ebModeFromString(const std::string& s) {
-    if (s == "ABS") return ErrorBoundMode::ABS;
-    if (s == "REL") return ErrorBoundMode::REL;
-    if (s == "NOA") return ErrorBoundMode::NOA;
-    throw std::runtime_error("loadConfig: unknown error_bound_mode \"" + s + "\"");
+    if (s == "ABS")  return ErrorBoundMode::ABS;
+    if (s == "REL")  return ErrorBoundMode::REL;
+    if (s == "NOA")  return ErrorBoundMode::NOA;
+    if (s == "PREL") return ErrorBoundMode::PREL;
+    throw std::runtime_error("loadConfig: unknown error_bound_mode \"" + s +
+                             "\" (expected ABS|REL|NOA|PREL)");
 }
 
 static std::string ebModeToString(ErrorBoundMode m) {
     switch (m) {
-        case ErrorBoundMode::REL: return "REL";
-        case ErrorBoundMode::NOA: return "NOA";
-        default:                  return "ABS";
+        case ErrorBoundMode::REL:  return "REL";
+        case ErrorBoundMode::NOA:  return "NOA";
+        case ErrorBoundMode::PREL: return "PREL";
+        default:                   return "ABS";
     }
 }
 
@@ -161,21 +166,67 @@ static Stage* addLorenzoStage(Pipeline& p, const toml::table& t) {
     std::string dt_str = optStr(t, "data_type", "int32");
     DataType dt = dataTypeFromString(dt_str);
 
-    Stage* s = nullptr;
-    auto configure = [&](auto* lrz) {
-        lrz->setBlockSize(static_cast<uint32_t>(optInt(t, "block_size", 0)));
-        s = lrz;
-    };
+    // Both are constructor arguments, not post-add setters: centering adds a
+    // "means" port and addStage() captures the port count at add-time.
+    const auto bs   = static_cast<uint32_t>(optInt(t, "block_size", 0));
+    const bool cent = optBool(t, "centering", false);
+    const auto ord  = static_cast<uint8_t>(optInt(t, "order", 1));
+    if (cent && bs == 0)
+        throw std::runtime_error(
+            "Lorenzo stage: centering = true requires block_size > 0");
+    if (ord == 2 && bs == 0)
+        throw std::runtime_error(
+            "Lorenzo stage: order = 2 requires block_size > 0");
 
-    if      (dt == DataType::INT8)  configure(p.addStage<LorenzoStage<int8_t>>());
-    else if (dt == DataType::INT16) configure(p.addStage<LorenzoStage<int16_t>>());
-    else if (dt == DataType::INT32) configure(p.addStage<LorenzoStage<int32_t>>());
-    else if (dt == DataType::INT64) configure(p.addStage<LorenzoStage<int64_t>>());
+    Stage* s = nullptr;
+    auto configure = [&](auto* lrz) { s = lrz; };
+
+    if      (dt == DataType::INT8)  configure(p.addStage<LorenzoStage<int8_t>>(bs, cent, ord));
+    else if (dt == DataType::INT16) configure(p.addStage<LorenzoStage<int16_t>>(bs, cent, ord));
+    else if (dt == DataType::INT32) configure(p.addStage<LorenzoStage<int32_t>>(bs, cent, ord));
+    else if (dt == DataType::INT64) configure(p.addStage<LorenzoStage<int64_t>>(bs, cent, ord));
     else
         throw std::runtime_error(
             "loadConfig: unsupported Lorenzo data_type \"" + dt_str + "\"");
 
     return s;
+}
+
+// Add an AdaptiveLorenzo stage (per-tile adaptive multi-order + centering).
+static Stage* addAdaptiveLorenzoStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "int32"));
+
+    // All four knobs are constructor arguments: the stage's port count and tile
+    // geometry are both fixed at add-time.
+    auto make = [&](auto* tag) {
+        using StageT = std::remove_pointer_t<decltype(tag)>;
+        typename StageT::Config c;
+        c.coder_block_size = static_cast<uint32_t>(optInt(t, "coder_block_size", 32));
+        c.blocks_per_tile  = static_cast<uint32_t>(optInt(t, "blocks_per_tile", 8));
+        c.enable_order2    = optBool(t, "enable_order2", true);
+        c.enable_centering = optBool(t, "enable_centering", true);
+        return p.addStage<StageT>(c);
+    };
+
+    if (dt == DataType::INT16)
+        return make(static_cast<AdaptiveLorenzoStage<int16_t>*>(nullptr));
+    if (dt == DataType::INT32)
+        return make(static_cast<AdaptiveLorenzoStage<int32_t>*>(nullptr));
+    throw std::runtime_error(
+        "loadConfig: AdaptiveLorenzo supports data_type \"int16\" or \"int32\", got \""
+        + optStr(t, "data_type", "int32") + "\"");
+}
+
+static void saveAdaptiveLorenzoStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(AdaptiveLorenzoConfig)] = {};
+    if (s->serializeHeader(0, buf, sizeof(buf)) >= sizeof(AdaptiveLorenzoConfig)) {
+        AdaptiveLorenzoConfig c;
+        std::memcpy(&c, buf, sizeof(c));
+        out << "data_type = \"" << dataTypeToString(c.data_type) << "\"\n";
+        out << "blocks_per_tile = " << static_cast<int>(c.blocks_per_tile) << "\n";
+        out << "enable_order2 = " << (c.enable_order2 ? "true" : "false") << "\n";
+        out << "enable_centering = " << (c.enable_centering ? "true" : "false") << "\n";
+    }
 }
 
 // Add a LorenzoQuant stage (dispatches on input_type / code_type strings).
@@ -188,6 +239,17 @@ static Stage* addLorenzoQuantStage(Pipeline& p, const toml::table& t) {
 
     Stage* s = nullptr;
 
+    // Centering must be a *constructor* argument: it adds a "means" port and
+    // addStage() captures the port count at add-time. Every other key below is
+    // a plain setter because none of them change the port layout.
+    const bool cent = optBool(t, "centering", false);
+    auto add = [&](auto* tag) {
+        using StageT = std::remove_pointer_t<decltype(tag)>;
+        typename StageT::Config c;
+        c.centering = cent;
+        return p.addStage<StageT>(c);
+    };
+
     auto configure = [&](auto* lrz) {
         lrz->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
         lrz->setErrorBoundMode(ebModeFromString(optStr(t, "error_bound_mode", "ABS")));
@@ -198,13 +260,13 @@ static Stage* addLorenzoQuantStage(Pipeline& p, const toml::table& t) {
     };
 
     if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT16)
-        configure(p.addStage<LorenzoQuantStage<float, uint16_t>>());
+        configure(add(static_cast<LorenzoQuantStage<float, uint16_t>*>(nullptr)));
     else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT16)
-        configure(p.addStage<LorenzoQuantStage<double, uint16_t>>());
+        configure(add(static_cast<LorenzoQuantStage<double, uint16_t>*>(nullptr)));
     else if (in_dt == DataType::FLOAT32 && code_dt == DataType::UINT8)
-        configure(p.addStage<LorenzoQuantStage<float, uint8_t>>());
+        configure(add(static_cast<LorenzoQuantStage<float, uint8_t>*>(nullptr)));
     else if (in_dt == DataType::FLOAT64 && code_dt == DataType::UINT32)
-        configure(p.addStage<LorenzoQuantStage<double, uint32_t>>());
+        configure(add(static_cast<LorenzoQuantStage<double, uint32_t>*>(nullptr)));
     else
         throw std::runtime_error(
             "loadConfig: unsupported Lorenzo type combination input_type=\""
@@ -263,15 +325,18 @@ static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
 
 static Stage* addRLEStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "data_type", "uint16"));
+    // 0 (the default) keeps the whole-array path.
+    const size_t cs = static_cast<size_t>(optInt(t, "chunk_size", 0));
+    auto add = [&](auto* s) { s->setChunkSize(cs); return s; };
     switch (dt) {
-        case DataType::UINT8:  return p.addStage<RLEStage<uint8_t>>();
-        case DataType::UINT16: return p.addStage<RLEStage<uint16_t>>();
-        case DataType::UINT32: return p.addStage<RLEStage<uint32_t>>();
-        case DataType::UINT64: return p.addStage<RLEStage<uint64_t>>();
-        case DataType::INT8:   return p.addStage<RLEStage<int8_t>>();
-        case DataType::INT16:  return p.addStage<RLEStage<int16_t>>();
-        case DataType::INT32:  return p.addStage<RLEStage<int32_t>>();
-        case DataType::INT64:  return p.addStage<RLEStage<int64_t>>();
+        case DataType::UINT8:  return add(p.addStage<RLEStage<uint8_t>>());
+        case DataType::UINT16: return add(p.addStage<RLEStage<uint16_t>>());
+        case DataType::UINT32: return add(p.addStage<RLEStage<uint32_t>>());
+        case DataType::UINT64: return add(p.addStage<RLEStage<uint64_t>>());
+        case DataType::INT8:   return add(p.addStage<RLEStage<int8_t>>());
+        case DataType::INT16:  return add(p.addStage<RLEStage<int16_t>>());
+        case DataType::INT32:  return add(p.addStage<RLEStage<int32_t>>());
+        case DataType::INT64:  return add(p.addStage<RLEStage<int64_t>>());
         default:
             throw std::runtime_error("loadConfig: unsupported RLE data_type \""
                 + optStr(t, "data_type", "uint16") + "\"");
@@ -342,19 +407,27 @@ static Stage* addZigzagStage(Pipeline& p, const toml::table& t) {
 static Stage* addBitpackStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint8_t nbits = static_cast<uint8_t>(optInt(t, "nbits", 16));
-    if (dt == DataType::UINT8) {
-        auto* s = p.addStage<BitpackStage<uint8_t>>();
+    const bool auto_detect = optBool(t, "auto_detect", false);
+    const bool auto_base   = optBool(t, "auto_base",   false);
+    const bool auto_shift  = optBool(t, "auto_shift",  false);
+    const bool adaptive    = optBool(t, "adaptive",    false);
+    const int64_t base     = optInt(t, "base",  0);
+    const uint8_t shift    = static_cast<uint8_t>(optInt(t, "shift", 0));
+
+    auto configure = [&](auto* s) {
         s->setNBits(nbits);
+        s->setBase(static_cast<decltype(s->getBase())>(base));
+        s->setShift(shift);
+        if (adaptive) s->setAdaptive(true);
+        if (auto_detect) s->setAutoDetect(true);
+        if (auto_base)   s->setAutoBase(true);
+        if (auto_shift)  s->setAutoShift(true);
         return s;
-    } else if (dt == DataType::UINT16) {
-        auto* s = p.addStage<BitpackStage<uint16_t>>();
-        s->setNBits(nbits);
-        return s;
-    } else if (dt == DataType::UINT32) {
-        auto* s = p.addStage<BitpackStage<uint32_t>>();
-        s->setNBits(nbits);
-        return s;
-    }
+    };
+
+    if (dt == DataType::UINT8)  return configure(p.addStage<BitpackStage<uint8_t>>());
+    if (dt == DataType::UINT16) return configure(p.addStage<BitpackStage<uint16_t>>());
+    if (dt == DataType::UINT32) return configure(p.addStage<BitpackStage<uint32_t>>());
     throw std::runtime_error("loadConfig: unsupported Bitpack input_type");
 }
 
@@ -666,11 +739,26 @@ static void saveHCLOGStage(Stage* s, std::ostringstream& out) {
     out << "word_size = "  << static_cast<int64_t>(hclog->getWordSize())  << "\n";
 }
 
+static Stage* addLogTransformStage(Pipeline& p, const toml::table& t) {
+    auto* lg = p.addStage<LogTransformStage<float>>();
+    lg->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
+    lg->setThreshold(static_cast<float>(optDbl(t, "threshold", 0.0)));
+    lg->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.05)));
+    return lg;
+}
+
 static void saveTUPLStage(Stage* s, std::ostringstream& out) {
     auto* tupl = static_cast<TUPLStage*>(s);
     out << "block_size = " << static_cast<int64_t>(tupl->getBlockSize()) << "\n";
     out << "word_size = "  << static_cast<int64_t>(tupl->getWordSize())  << "\n";
     out << "dim = "        << static_cast<int64_t>(tupl->getDim())       << "\n";
+}
+
+static void saveLogTransformStage(Stage* s, std::ostringstream& out) {
+    auto* lg = static_cast<LogTransformStage<float>*>(s);
+    out << "error_bound = "      << lg->getErrorBound()      << "\n";
+    out << "threshold = "        << lg->getThreshold()       << "\n";
+    out << "outlier_capacity = " << lg->getOutlierCapacity() << "\n";
 }
 
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
@@ -712,6 +800,15 @@ static void saveTiledLorenzoStage(Stage* s, std::ostringstream& out) {
 static void saveRLEStage(Stage* s, std::ostringstream& out) {
     out << "data_type = \""
         << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+    // chunk_size lives in the serialized stage header (after DataType and the
+    // cached element count); RLEStage is a template, so it can't be down-cast
+    // here without knowing T.
+    uint8_t buf[16] = {};
+    if (s->serializeHeader(0, buf, sizeof(buf)) >= sizeof(DataType) + 8) {
+        uint32_t cs = 0;
+        std::memcpy(&cs, buf + sizeof(DataType) + sizeof(uint32_t), sizeof(uint32_t));
+        out << "chunk_size = " << static_cast<int64_t>(cs) << "\n";
+    }
 }
 
 static void saveDifferenceStage(Stage* s, std::ostringstream& out) {
@@ -750,12 +847,17 @@ static void saveNegabinaryStage(Stage* s, std::ostringstream& out) {
 }
 
 static void saveBitpackStage(Stage* s, std::ostringstream& out) {
-    uint8_t buf[10] = {};
+    uint8_t buf[15] = {};
     size_t sz = s->serializeHeader(0, buf, sizeof(buf));
     DataType dt   = (sz >= 1) ? static_cast<DataType>(buf[0]) : DataType::UINT16;
     uint8_t nbits = (sz >= 2) ? buf[1] : 16;
+    uint8_t shift = (sz >= 15) ? buf[10] : 0;
+    uint32_t base = 0;
+    if (sz >= 15) std::memcpy(&base, buf + 11, sizeof(uint32_t));
     out << "input_type = \"" << dataTypeToString(dt)       << "\"\n";
     out << "nbits = "        << static_cast<int64_t>(nbits) << "\n";
+    out << "shift = "        << static_cast<int64_t>(shift) << "\n";
+    out << "base = "         << static_cast<int64_t>(base)  << "\n";
 }
 
 static void saveANSStage(Stage* s, std::ostringstream& out) {
@@ -885,6 +987,7 @@ struct StageEntry {
 static const StageEntry kStageRegistry[] = {
     { "Lorenzo",      StageType::LORENZO,      addLorenzoStage,      saveLorenzoStage,      "modules/predictors/lorenzo" },
     { "LorenzoQuant", StageType::LORENZO_QUANT, addLorenzoQuantStage, saveLorenzoQuantStage, "modules/fused/lorenzo_quant" },
+    { "AdaptiveLorenzo", StageType::ADAPTIVE_LORENZO, addAdaptiveLorenzoStage, saveAdaptiveLorenzoStage, "modules/fused/adaptive_lorenzo" },
     { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage,    "modules/quantizers/quantizer" },
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage,   "modules/shufflers/bitshuffle" },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage,          "modules/coders/rze" },
@@ -895,6 +998,7 @@ static const StageEntry kStageRegistry[] = {
     { "CLOG",         StageType::CLOG,         addCLOGStage,         saveCLOGStage,         "modules/coders/clog" },
     { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage,        "modules/coders/hclog" },
     { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/shufflers/tupl" },
+    { "LogTransform", StageType::LOG_TRANSFORM, addLogTransformStage, saveLogTransformStage, "modules/transforms/log_transform" },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage,        "modules/structural/merge" },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage,          "modules/coders/rle" },
     { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage,   "modules/predictors/diff" },

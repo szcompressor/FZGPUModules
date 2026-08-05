@@ -41,6 +41,11 @@ Using any other type will result in a linker error. Most common: `BitpackStage<u
 |---|---|---|
 | `setNBits(nbits)` | Bits per element | Power of two, 1..`8 * sizeof(T)`; ignored when auto-detect is on |
 | `setAutoDetect(bool)` | GPU scan to pick `nbits` automatically | Disables CUDA Graph compatibility while active |
+| `setBase(base)` | Frame-of-reference offset subtracted before packing | Removes dead **high** bits; always lossless |
+| `setShift(shift)` | Right shift applied after the base subtraction | Removes dead **low** bits; **lossy** unless those bits are zero |
+| `setAutoBase(bool)` | GPU min-reduce to pick `base` automatically | Disables CUDA Graph compatibility while active |
+| `setAutoShift(bool)` | GPU OR-reduce to pick the largest lossless `shift` | Disables CUDA Graph compatibility while active |
+| `setAdaptive(bool)` | Convenience: auto base + auto shift + auto `nbits` | Fully adaptive lossless mode |
 
 ### Manual bit-width
 
@@ -88,6 +93,72 @@ sufficient space regardless of the detected `nbits`.
 
 ---
 
+## Shift: frame-of-reference base + low-bit right shift
+
+`nbits` alone only helps when the useful information already sits in the low
+bits of each word. The shift transform moves it there first:
+
+```
+forward:  packed = (v - base) >> shift      (low nbits bits kept)
+inverse:  v      = (packed << shift) + base
+```
+
+The two knobs attack opposite ends of the word and compose:
+
+| Knob | Removes | Lossless? |
+|---|---|---|
+| `base` | dead **high** bits — values clustered far from zero | always |
+| `shift` | dead **low** bits — values that are all multiples of `1 << shift` | only if those bits are zero |
+
+Both default to `0`, which is the identity: behaviour is unchanged unless you
+opt in.
+
+> **`setShift()` is lossy in general.** The inverse restores
+> `(packed << shift) + base`, so any low bits you drop are gone — values come
+> back rounded down to a multiple of `1 << shift`. Use `setAutoShift(true)` if
+> you want the largest shift that is *provably* lossless for your data.
+
+### Adaptive mode
+
+```cpp
+bpack->setAdaptive(true);   // = setAutoBase + setAutoShift + setAutoDetect
+```
+
+Forward execute then runs three GPU scans, in this order, and writes all three
+results into the compressed header:
+
+1. `base` ← `cub::DeviceReduce::Min` over the input.
+2. `shift` ← trailing-zero count of an OR-reduce of every `(v - base)`. This is
+   the largest shift that drops no information, so adaptive mode is **always
+   lossless**.
+3. `nbits` ← smallest power of two covering `(max - base) >> shift`.
+
+After `compress()`, `getBase()`, `getShift()`, and `getNBits()` reflect the
+detected values.
+
+Worked example — values of the form `1000 + k*16` for `k` in `[0, 15]`:
+
+| | value | bits needed |
+|---|---|---|
+| raw `uint16_t` | 1000 … 1240 | 16 |
+| after `base = 1000` | 0 … 240 | 8 |
+| after `shift = 4` | 0 … 15 | **4** |
+
+A 4× gain that neither knob delivers on its own. The individual setters are
+still available if you want only one half (e.g. `setAutoBase(true)` with a
+hand-set `nbits`, keeping the shift at 0).
+
+**CUDA Graph incompatibility:** each auto mode needs a device-to-host readback,
+so `isGraphCompatible()` returns `false` while *any* of `setAutoDetect`,
+`setAutoBase`, or `setAutoShift` is on. Hand-set `base`/`shift`/`nbits` stay
+graph-capturable.
+
+**File format:** the serialized header is 15 bytes — the previous 10 plus
+`shift` (1 byte) and `base` (4 bytes, zero-extended). Archives written before
+this option decode with `shift = base = 0`.
+
+---
+
 ## Typical pipeline
 
 ### Manual `nbits`
@@ -121,4 +192,22 @@ p.finalize();
 
 p.compress(d_in, n_bytes, stream);
 // bpack->getNBits() now holds the detected value (e.g. 4 for small deltas)
+```
+
+### Adaptive `base` + `shift` + `nbits`
+
+```cpp
+p.setDims(nx);
+auto* quant = p.addStage<QuantizerStage<float, uint16_t>>();
+auto* lrz   = p.addStage<LorenzoStage<int16_t>>();
+auto* bpack = p.addStage<BitpackStage<uint16_t>>();
+
+bpack->setAdaptive(true);   // auto base + auto shift + auto nbits, all lossless
+
+p.connect(lrz,   quant, "codes");
+p.connect(bpack, lrz);
+p.finalize();
+
+p.compress(d_in, n_bytes, stream);
+// bpack->getBase() / getShift() / getNBits() now hold the detected values
 ```

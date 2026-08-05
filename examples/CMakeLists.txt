@@ -96,6 +96,12 @@ target_link_libraries(compare_predictors PRIVATE fzgmod)
 set_target_properties(compare_predictors PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
+# ── Error-bound mode analysis: ABS / NOA / PREL vs exact REL ─────────────────
+add_executable(eb_mode_analysis eb_mode_analysis.cpp)
+target_link_libraries(eb_mode_analysis PRIVATE fzgmod)
+set_target_properties(eb_mode_analysis PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
 # ── Lossless back-end comparison: cuSZ Huffman vs FZ-GPU bitplane-RZE ─────────
 add_executable(cusz_huffman_vs_bitplane_rze cusz_huffman_vs_bitplane_rze.cpp)
 target_link_libraries(cusz_huffman_vs_bitplane_rze PRIVATE fzgmod)

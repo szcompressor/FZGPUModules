@@ -111,10 +111,10 @@ the launcher), unconditionally — this is **not** a double-only branch:
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
 | `setErrorBound(eb)` | `float` | `1e-3` | Target absolute bound (see "Error bound" below) |
-| `setErrorBoundMode(mode)` | `ErrorBoundMode` | `ABS` | `ABS`, `REL`, or `NOA` (same semantics as `QuantizerStage`) |
+| `setErrorBoundMode(mode)` | `ErrorBoundMode` | `ABS` | `ABS`, `NOA`, or `PREL`. `REL` warns and maps to `PREL` — like `LorenzoQuantStage`, this stage has no exact per-element relative bound |
 | `setQuantRadius(r)` | `int` | `0` (auto) | Quantization radius — see "Radius auto-tune" below |
 | `setOutlierCapacity(c)` | `float` | `0.10` | Fraction of `N` reserved for outliers (0.10 ⇒ 10%) |
-| `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (REL); set before graph capture |
+| `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (PREL); set before graph capture |
 | `setAutoTuning(mode)` | `uint8_t` | `0` | Enable `INTERPOLATION_PARAMS` auto-tuning — see "Auto-tuning" below |
 | `setManualAlphaBeta(α, β)` | `double, double` | `0, 0` | Mode 5 only. Either value `0` falls back to the cuSZ-Hi piecewise-linear α schedule / `β = 4.0` default. Both `> 0` is required for graph-safe mode 5. |
 
@@ -201,7 +201,7 @@ g->setManualAlphaBeta(1.5, 3.0);
 // alpha is always interpolated from rel_eb (see cuSZ-Hi spline3.cu:80-103)
 // in modes 1/3/4. For ABS mode, the stage scans the data range once to derive
 // rel_eb; REL/NOA reuses the user-supplied eb directly.
-g->setErrorBoundMode(ErrorBoundMode::REL);
+g->setErrorBoundMode(ErrorBoundMode::PREL);
 g->setErrorBound(1e-3f);
 g->setAutoTuning(3);
 ```
@@ -328,7 +328,7 @@ type         = "GInterp"
 input_type   = "float32"     # "float32" or "float64"
 code_type    = "uint16"
 error_bound  = 1e-2
-error_bound_mode = "ABS"    # "ABS", "REL", or "NOA"
+error_bound_mode = "ABS"    # "ABS", "NOA", or "PREL"
 quant_radius = 0            # 0 = auto-tune (default); positive = manual override
 outlier_capacity = 0.10
 auto_tuning  = 0            # 0=off, 1=cheap, 2=alt-cheap, 3=full, 4=full+a/b sweep, 5=manual

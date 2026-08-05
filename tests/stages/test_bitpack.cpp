@@ -28,6 +28,19 @@
  *   BP21  BitpackStage/AutoDetect_AllZeros_NBits1     — all-zero input → auto selects nbits=1
  *   BP22  BitpackStage/AutoDetect_MaxValue_FullWidth  — max=UINT16_MAX → auto selects nbits=16
  *   BP23  BitpackStage/AutoDetect_PipelineIntegration — pipeline round-trip with auto-detect on
+ *   BP24  BitpackStage/Shift_Base_RoundTrip           — manual frame-of-reference base, lossless
+ *   BP25  BitpackStage/Shift_Shift_RoundTrip_Lossless — manual shift on all-multiples-of-8 data
+ *   BP26  BitpackStage/Shift_Shift_IsLossyWhenLowBitsSet — hand-set shift truncates (documented)
+ *   BP27  BitpackStage/AutoBase_DetectsMinimum        — auto base picks the input minimum
+ *   BP28  BitpackStage/AutoShift_DetectsTrailingZeros — auto shift picks ctz of the OR-reduce
+ *   BP29  BitpackStage/AutoShift_AllEqual_ZeroShift   — OR == 0 → shift stays 0, not ctz(0)
+ *   BP30  BitpackStage/Adaptive_ShrinksNBits_RoundTrip — base+shift+nbits together, 16→4 bits
+ *   BP31  BitpackStage/Adaptive_GraphIncompatible     — any auto-* mode disables graph capture
+ *   BP32  BitpackStage/SerializeDeserialize_ShiftAndBase — shift/base survive the 15-byte header
+ *   BP33  BitpackStage/DeserializeLegacyHeader_DefaultsShiftAndBase — 10-byte headers still decode
+ *   BP34  BitpackStage/InvalidShift_Throws            — shift >= 8*sizeof(T) throws
+ *   BP35  BitpackStage/SaveRestoreState_ShiftAndBase  — save/deserialize/restore cycle
+ *   BP36  BitpackStage/Adaptive_PipelineIntegration   — pipeline round-trip with setAdaptive(true)
  */
 
 #include <gtest/gtest.h>
@@ -119,7 +132,7 @@ static void round_trip(uint8_t nbits, size_t n_elements) {
     const auto packed = pack<T>(enc, original, cs.stream, *pool);
 
     // Transfer state so the decoder knows num_elements and nbits.
-    uint8_t hdr[10] = {};
+    uint8_t hdr[15] = {};
     enc.serializeHeader(0, hdr, sizeof(hdr));
 
     BitpackStage<T> dec;
@@ -223,9 +236,9 @@ TEST(BitpackStage, SerializeDeserialize) {
     BitpackStage<uint32_t> a;
     a.setNBits(16);
 
-    uint8_t buf[10] = {};
+    uint8_t buf[15] = {};
     const size_t written = a.serializeHeader(0, buf, sizeof(buf));
-    EXPECT_EQ(written, 10u);
+    EXPECT_EQ(written, 15u);
 
     BitpackStage<uint32_t> b;
     b.deserializeHeader(buf, written);
@@ -244,7 +257,7 @@ TEST(BitpackStage, SaveRestoreState) {
 
     // Simulate what the pipeline does before decompression: call deserializeHeader
     // with a header that has a different nbits baked in.
-    uint8_t alien_hdr[10] = {};
+    uint8_t alien_hdr[15] = {};
     alien_hdr[0] = static_cast<uint8_t>(DataType::UINT16);
     alien_hdr[1] = 4;  // different nbits
     s.deserializeHeader(alien_hdr, sizeof(alien_hdr));
@@ -401,7 +414,7 @@ TEST(BitpackStage, AutoDetect_RoundTrip_U16_8bit) {
     const auto packed = pack<uint16_t>(enc, original, cs.stream, *pool);
     EXPECT_EQ(enc.getNBits(), 8u);
 
-    uint8_t hdr[10] = {};
+    uint8_t hdr[15] = {};
     enc.serializeHeader(0, hdr, sizeof(hdr));
 
     BitpackStage<uint16_t> dec;
@@ -431,7 +444,7 @@ TEST(BitpackStage, AutoDetect_RoundTrip_U32_16bit) {
     const auto packed = pack<uint32_t>(enc, original, cs.stream, *pool);
     EXPECT_EQ(enc.getNBits(), 16u);
 
-    uint8_t hdr[10] = {};
+    uint8_t hdr[15] = {};
     enc.serializeHeader(0, hdr, sizeof(hdr));
 
     BitpackStage<uint32_t> dec;
@@ -498,6 +511,275 @@ TEST(BitpackStage, AutoDetect_PipelineIntegration) {
     quant->setQuantRadius(32768);
     quant->setZigzagCodes(false);
     bitpack->setAutoDetect(true);
+    p.connect(bitpack, quant, "codes");
+    p.finalize();
+
+    CudaStream cs;
+    auto res = fz_test::pipeline_round_trip<float>(p, h_input, cs.stream);
+
+    EXPECT_LE(res.max_error, eb * 2.0)
+        << "Max error " << res.max_error << " exceeds bound " << eb;
+    EXPECT_LT(res.compressed_bytes, in_bytes)
+        << "Compressed size should be smaller than input";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BP24-BP36: shift support — frame-of-reference base + low-bit right shift
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Pack + unpack with the encoder's header handed to a fresh decoder, the way
+// the pipeline does it. Returns the reconstructed values.
+template<typename T>
+static std::vector<T> shift_round_trip(
+    BitpackStage<T>& enc, const std::vector<T>& original,
+    cudaStream_t stream, fz::MemoryPool& pool)
+{
+    const auto packed = pack<T>(enc, original, stream, pool);
+
+    uint8_t hdr[15] = {};
+    const size_t written = enc.serializeHeader(0, hdr, sizeof(hdr));
+    EXPECT_EQ(written, 15u);
+
+    BitpackStage<T> dec;
+    dec.setInverse(true);
+    dec.deserializeHeader(hdr, written);
+    return unpack<T>(dec, packed, original.size(), stream, pool);
+}
+
+TEST(BitpackStage, Shift_Base_RoundTrip) {
+    // Values clustered in [10000, 10255]: 8 bits of range, 14 bits of magnitude.
+    // base=10000 makes them fit in nbits=8 losslessly.
+    CudaStream cs;
+    auto pool = make_test_pool(256 * 1024);
+
+    std::mt19937 rng(11);
+    std::uniform_int_distribution<int> dist(0, 255);
+    std::vector<uint16_t> original(4096);
+    for (auto& v : original) v = static_cast<uint16_t>(10000 + dist(rng));
+
+    BitpackStage<uint16_t> enc;
+    enc.setBase(10000);
+    enc.setNBits(8);
+
+    const auto restored = shift_round_trip<uint16_t>(enc, original, cs.stream, *pool);
+    ASSERT_EQ(restored.size(), original.size());
+    for (size_t i = 0; i < original.size(); ++i)
+        EXPECT_EQ(restored[i], original[i]) << "at " << i;
+}
+
+TEST(BitpackStage, Shift_Shift_RoundTrip_Lossless) {
+    // Every value is a multiple of 8 → shift=3 drops only zero bits.
+    CudaStream cs;
+    auto pool = make_test_pool(256 * 1024);
+
+    std::mt19937 rng(12);
+    std::uniform_int_distribution<int> dist(0, 31);
+    std::vector<uint32_t> original(4096);
+    for (auto& v : original) v = static_cast<uint32_t>(dist(rng) * 8);
+
+    BitpackStage<uint32_t> enc;
+    enc.setShift(3);
+    enc.setNBits(8);   // 5 bits of payload after the shift
+
+    const auto restored = shift_round_trip<uint32_t>(enc, original, cs.stream, *pool);
+    for (size_t i = 0; i < original.size(); ++i)
+        EXPECT_EQ(restored[i], original[i]) << "at " << i;
+}
+
+TEST(BitpackStage, Shift_Shift_IsLossyWhenLowBitsSet) {
+    // Documented behaviour: a hand-set shift truncates. Values are restored to
+    // the nearest lower multiple of (1 << shift).
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    std::vector<uint16_t> original = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 100, 255};
+
+    BitpackStage<uint16_t> enc;
+    enc.setShift(2);
+    enc.setNBits(8);
+
+    const auto restored = shift_round_trip<uint16_t>(enc, original, cs.stream, *pool);
+    for (size_t i = 0; i < original.size(); ++i)
+        EXPECT_EQ(restored[i], static_cast<uint16_t>(original[i] & ~uint16_t(3)))
+            << "at " << i;
+}
+
+TEST(BitpackStage, AutoBase_DetectsMinimum) {
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    std::vector<uint32_t> data(1024, 5000);
+    data[300] = 4321;   // the minimum
+    data[900] = 5500;
+
+    BitpackStage<uint32_t> enc;
+    enc.setAutoBase(true);
+    enc.setNBits(16);
+
+    pack<uint32_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getBase(), 4321u);
+}
+
+TEST(BitpackStage, AutoShift_DetectsTrailingZeros) {
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    // All multiples of 16 → OR of the values has 4 trailing zeros.
+    std::vector<uint32_t> data(1024);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<uint32_t>((i % 64) * 16);
+
+    BitpackStage<uint32_t> enc;
+    enc.setAutoShift(true);
+    enc.setNBits(16);
+
+    pack<uint32_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getShift(), 4u);
+}
+
+TEST(BitpackStage, AutoShift_AllEqual_ZeroShift) {
+    // Every value equals base → the OR-reduce is 0; shift must stay 0 rather
+    // than taking ctz(0).
+    CudaStream cs;
+    auto pool = make_test_pool(64 * 1024);
+
+    std::vector<uint16_t> data(1024, 777);
+
+    BitpackStage<uint16_t> enc;
+    enc.setAutoBase(true);
+    enc.setAutoShift(true);
+    enc.setNBits(16);
+
+    pack<uint16_t>(enc, data, cs.stream, *pool);
+    EXPECT_EQ(enc.getBase(), 777u);
+    EXPECT_EQ(enc.getShift(), 0u);
+}
+
+TEST(BitpackStage, Adaptive_ShrinksNBits_RoundTrip) {
+    // Values are 1000 + k*16 for k in [0, 15]:
+    //   base  = 1000  (removes the high bits)
+    //   shift = 4     (removes the low bits)
+    //   nbits = 4     (the remaining 4-bit range)
+    // 16-bit input packed at 4 bits/element, losslessly.
+    CudaStream cs;
+    auto pool = make_test_pool(256 * 1024);
+
+    std::mt19937 rng(13);
+    std::uniform_int_distribution<int> dist(0, 15);
+    const size_t N = 4096;
+    std::vector<uint16_t> original(N);
+    for (auto& v : original) v = static_cast<uint16_t>(1000 + dist(rng) * 16);
+    original[0] = 1000;            // pin the minimum
+    original[1] = 1000 + 15 * 16;  // pin the maximum
+
+    BitpackStage<uint16_t> enc;
+    enc.setAdaptive(true);
+
+    const auto restored = shift_round_trip<uint16_t>(enc, original, cs.stream, *pool);
+
+    EXPECT_EQ(enc.getBase(), 1000u);
+    EXPECT_EQ(enc.getShift(), 4u);
+    EXPECT_EQ(enc.getNBits(), 4u);
+    for (size_t i = 0; i < original.size(); ++i)
+        EXPECT_EQ(restored[i], original[i]) << "at " << i;
+}
+
+TEST(BitpackStage, Adaptive_GraphIncompatible) {
+    BitpackStage<uint16_t> s;
+    EXPECT_TRUE(s.isGraphCompatible());
+    s.setAutoBase(true);
+    EXPECT_FALSE(s.isGraphCompatible());
+    s.setAutoBase(false);
+    s.setAutoShift(true);
+    EXPECT_FALSE(s.isGraphCompatible());
+    s.setAdaptive(false);
+    EXPECT_TRUE(s.isGraphCompatible());
+}
+
+TEST(BitpackStage, SerializeDeserialize_ShiftAndBase) {
+    BitpackStage<uint32_t> a;
+    a.setNBits(16);
+    a.setBase(123456u);
+    a.setShift(5);
+
+    uint8_t buf[15] = {};
+    const size_t written = a.serializeHeader(0, buf, sizeof(buf));
+    ASSERT_EQ(written, 15u);
+
+    BitpackStage<uint32_t> b;
+    b.deserializeHeader(buf, written);
+    EXPECT_EQ(b.getNBits(), 16u);
+    EXPECT_EQ(b.getBase(), 123456u);
+    EXPECT_EQ(b.getShift(), 5u);
+}
+
+TEST(BitpackStage, DeserializeLegacyHeader_DefaultsShiftAndBase) {
+    // Pre-shift archives carry a 10-byte header; shift/base must default to 0.
+    uint8_t legacy[10] = {};
+    legacy[0] = static_cast<uint8_t>(DataType::UINT16);
+    legacy[1] = 8;
+    const uint64_t n = 4096;
+    std::memcpy(legacy + 2, &n, sizeof(uint64_t));
+
+    BitpackStage<uint16_t> s;
+    s.setBase(999);
+    s.setShift(3);
+    s.deserializeHeader(legacy, sizeof(legacy));
+
+    EXPECT_EQ(s.getNBits(), 8u);
+    EXPECT_EQ(s.getBase(), 999u);   // untouched — short header leaves them alone
+    EXPECT_EQ(s.getShift(), 3u);
+}
+
+TEST(BitpackStage, InvalidShift_Throws) {
+    BitpackStage<uint16_t> s;
+    EXPECT_THROW(s.setShift(16), std::invalid_argument);
+    EXPECT_THROW(s.setShift(200), std::invalid_argument);
+    EXPECT_NO_THROW(s.setShift(15));
+    EXPECT_NO_THROW(s.setShift(0));
+
+    BitpackStage<uint8_t> s8;
+    EXPECT_THROW(s8.setShift(8), std::invalid_argument);
+    EXPECT_NO_THROW(s8.setShift(7));
+}
+
+TEST(BitpackStage, SaveRestoreState_ShiftAndBase) {
+    BitpackStage<uint16_t> s;
+    s.setNBits(8);
+    s.setBase(500);
+    s.setShift(2);
+    s.saveState();
+
+    uint8_t alien[15] = {};
+    alien[0] = static_cast<uint8_t>(DataType::UINT16);
+    alien[1] = 4;
+    alien[10] = 6;
+    const uint32_t alien_base = 77;
+    std::memcpy(alien + 11, &alien_base, sizeof(uint32_t));
+    s.deserializeHeader(alien, sizeof(alien));
+    EXPECT_EQ(s.getShift(), 6u);
+    EXPECT_EQ(s.getBase(), 77u);
+
+    s.restoreState();
+    EXPECT_EQ(s.getNBits(), 8u);
+    EXPECT_EQ(s.getBase(), 500u);
+    EXPECT_EQ(s.getShift(), 2u);
+}
+
+TEST(BitpackStage, Adaptive_PipelineIntegration) {
+    const size_t N = 4096;
+    const float eb = 0.01f;
+
+    auto h_input = make_smooth_data<float>(N);
+    const size_t in_bytes = N * sizeof(float);
+
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+    auto* quant   = p.addStage<QuantizerStage<float, uint16_t>>();
+    auto* bitpack = p.addStage<BitpackStage<uint16_t>>();
+    quant->setErrorBound(eb);
+    quant->setQuantRadius(32768);
+    quant->setZigzagCodes(false);
+    bitpack->setAdaptive(true);
     p.connect(bitpack, quant, "codes");
     p.finalize();
 

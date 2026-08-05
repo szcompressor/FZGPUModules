@@ -298,3 +298,137 @@ TYPED_TEST(RLEStageWordSizeTest, RoundTrip) {
     for (size_t i = 0; i < N; i++)
         EXPECT_EQ(h_decoded[i], h_input[i]) << "Mismatch at index " << i;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chunked mode (setChunkSize) — independent per-chunk encoding.
+//
+//   RL9   RLEStage/ChunkedRoundTrip        — exact round-trip, chunk-aligned N
+//   RL10  RLEStage/ChunkedPartialTailChunk — N not a multiple of the chunk size
+//   RL11  RLEStage/ChunkedHeaderFields     — num_chunks + offset table are correct
+//   RL12  RLEStageChunkedWordSizeTest      — every word size round-trips chunked
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Chunked inverse needs the element count and chunk size from the forward
+/// stage's serialized header, exactly as the pipeline supplies them.
+template <typename T>
+static void carry_header(const RLEStage<T>& fwd, RLEStage<T>& inv) {
+    uint8_t buf[64] = {};
+    size_t written = fwd.serializeHeader(0, buf, sizeof(buf));
+    ASSERT_GT(written, 0u);
+    inv.deserializeHeader(buf, written);
+}
+
+template <typename T>
+static void chunked_round_trip(size_t N, size_t chunk_bytes) {
+    CudaStream stream;
+    auto pool = make_test_pool(N * sizeof(T) * 8 + 4096);
+
+    std::vector<T> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = static_cast<T>((i / 11) % 7);
+
+    RLEStage<T> fwd;
+    fwd.setChunkSize(chunk_bytes);
+    ASSERT_TRUE(fwd.isChunked());
+    auto h_encoded = run_rle_forward(fwd, h_input, stream, *pool);
+
+    RLEStage<T> inv;
+    inv.setInverse(true);
+    carry_header(fwd, inv);
+    auto h_decoded = run_rle_inverse(inv, h_encoded, N, stream, *pool);
+
+    ASSERT_EQ(h_decoded.size(), N);
+    for (size_t i = 0; i < N; i++)
+        EXPECT_EQ(h_decoded[i], h_input[i]) << "Mismatch at index " << i;
+}
+
+TEST(RLEStage, ChunkedRoundTrip) {
+    chunked_round_trip<uint16_t>(/*N=*/8192, /*chunk_bytes=*/4096);   // 2048 elems/chunk
+}
+
+TEST(RLEStage, ChunkedPartialTailChunk) {
+    chunked_round_trip<uint16_t>(/*N=*/8192 + 37, /*chunk_bytes=*/4096);
+}
+
+TEST(RLEStage, ChunkedSingleElement) {
+    chunked_round_trip<uint32_t>(/*N=*/1, /*chunk_bytes=*/4096);
+}
+
+TEST(RLEStage, ChunkedAllSame) {
+    CudaStream stream;
+    auto pool = make_test_pool(1 << 20);
+
+    constexpr size_t N  = 8192;
+    constexpr size_t CS = 4096;                 // 2048 uint16 elements per chunk
+    constexpr size_t NC = N / (CS / sizeof(uint16_t));
+    std::vector<uint16_t> h_input(N, 5);
+
+    RLEStage<uint16_t> fwd;
+    fwd.setChunkSize(CS);
+    auto h_encoded = run_rle_forward(fwd, h_input, stream, *pool);
+
+    // One run per chunk — chunk independence forces a boundary at each head.
+    uint32_t num_chunks = 0;
+    std::memcpy(&num_chunks, h_encoded.data(), sizeof(uint32_t));
+    EXPECT_EQ(num_chunks, NC);
+
+    std::vector<uint32_t> offsets(NC + 1);
+    std::memcpy(offsets.data(), h_encoded.data() + 4, (NC + 1) * sizeof(uint32_t));
+    for (size_t c = 0; c <= NC; c++)
+        EXPECT_EQ(offsets[c], c) << "Expected exactly one run per chunk at " << c;
+    EXPECT_LT(h_encoded.size(), N * sizeof(uint16_t));
+
+    RLEStage<uint16_t> inv;
+    inv.setInverse(true);
+    carry_header(fwd, inv);
+    auto h_decoded = run_rle_inverse(inv, h_encoded, N, stream, *pool);
+    ASSERT_EQ(h_decoded.size(), N);
+    for (size_t i = 0; i < N; i++) EXPECT_EQ(h_decoded[i], 5);
+}
+
+TEST(RLEStage, ChunkedAlternating) {
+    // Worst case: every element is its own run, in every chunk.
+    CudaStream stream;
+    auto pool = make_test_pool(1 << 20);
+
+    constexpr size_t N = 4096;
+    std::vector<uint16_t> h_input(N);
+    for (size_t i = 0; i < N; i++) h_input[i] = static_cast<uint16_t>(i & 1);
+
+    RLEStage<uint16_t> fwd;
+    fwd.setChunkSize(2048);
+    auto h_encoded = run_rle_forward(fwd, h_input, stream, *pool);
+
+    RLEStage<uint16_t> inv;
+    inv.setInverse(true);
+    carry_header(fwd, inv);
+    auto h_decoded = run_rle_inverse(inv, h_encoded, N, stream, *pool);
+    ASSERT_EQ(h_decoded.size(), N);
+    for (size_t i = 0; i < N; i++) EXPECT_EQ(h_decoded[i], h_input[i]);
+}
+
+TEST(RLEStage, ChunkedHeaderCarriesChunkSize) {
+    RLEStage<uint16_t> stage;
+    stage.setChunkSize(8192);
+    EXPECT_EQ(stage.getChunkSize(), 8192u);
+    EXPECT_EQ(stage.getRequiredInputAlignment(), 8192u);
+
+    uint8_t buf[64] = {};
+    size_t written = stage.serializeHeader(0, buf, sizeof(buf));
+    RLEStage<uint16_t> restored;
+    restored.deserializeHeader(buf, written);
+    EXPECT_EQ(restored.getChunkSize(), 8192u);
+
+    // Default is the whole-array path, with no alignment requirement.
+    RLEStage<uint16_t> plain;
+    EXPECT_FALSE(plain.isChunked());
+    EXPECT_EQ(plain.getRequiredInputAlignment(), 1u);
+}
+
+template <typename T>
+class RLEStageChunkedWordSizeTest : public ::testing::Test {};
+TYPED_TEST_SUITE(RLEStageChunkedWordSizeTest, RLEWordSizeTypes);
+
+TYPED_TEST(RLEStageChunkedWordSizeTest, RoundTrip) {
+    chunked_round_trip<TypeParam>(/*N=*/5000, /*chunk_bytes=*/4096);
+}

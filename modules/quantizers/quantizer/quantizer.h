@@ -72,6 +72,11 @@ static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
  *         Scans the data once to find value_range, then falls through to ABS.
  *         Works with any TCode type.
  *
+ *   PREL — pseudo-relative: abs_eb = eb * max(|data|), then falls through to
+ *         ABS.  Supported here only so the mode is uniform across stages; on
+ *         this stage REL is strictly better (exact, same cost class), so PREL
+ *         is really for the predictor-fused stages that cannot do REL at all.
+ *
  *   REL — pointwise relative error bound (PFPL exact definition):
  *             |x - x_hat| / |x| <= eb
  *         Implemented via log2-space quantization (see PFPL paper):

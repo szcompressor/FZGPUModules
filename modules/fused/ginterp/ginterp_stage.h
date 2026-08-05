@@ -123,19 +123,20 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *     can't predict — these are stored exactly via the outlier triplet, but
  *     their neighbours still see compounded interpolation error).
  *
- * ### Error-bound modes (REL is NOT exact PFPL per-element)
+ * ### Error-bound modes (no exact PFPL per-element bound here — use PREL)
  *
- * `setErrorBoundMode()` accepts `ABS`, `REL`, and `NOA`, but — like
+ * `setErrorBoundMode()` accepts `ABS`, `NOA`, and `PREL`, because — like
  * `LorenzoQuantStage` and unlike `QuantizerStage` — this stage resolves
  * **all** modes to a single absolute bound before quantizing:
  *   - **ABS** — `abs_eb = eb` directly.
- *   - **REL** — *global-approximate* point-wise relative: `abs_eb = eb *
- *     max(|data|)` (one min/max scan, then treated as ABS). This is **not**
- *     the exact per-element PFPL relative bound `|error| / |x| <= eb`.
+ *   - **PREL** — *pseudo*-relative: `abs_eb = eb * max(|data|)` (one min/max
+ *     scan, then treated as ABS). This bounds `|error| / max(|x|)`, **not**
+ *     the per-element ratio `|error| / |x| <= eb`.
  *   - **NOA** — value-range relative: `abs_eb = eb * (max(data) - min(data))`.
  *
  * The interpolation tree predicts each element against a fixed absolute
  * tolerance, so a per-element varying bound cannot be threaded through it.
+ * `ErrorBoundMode::REL` is accepted as a deprecated alias for `PREL` and warns.
  * For an **exact** point-wise relative bound use `QuantizerStage` with
  * `ErrorBoundMode::REL` (log-space encoding); see `quantizer.h`.
  *
@@ -318,10 +319,13 @@ public:
     void setErrorBound(float eb)              { config_.error_bound = eb; }
     void setQuantRadius(int radius)           { config_.quant_radius = radius; }
     void setOutlierCapacity(float cap)        { config_.outlier_capacity = cap; }
-    /// REL here is *global-approximate* (`abs_eb = eb * max(|data|)`), NOT the
-    /// exact per-element PFPL bound — use `QuantizerStage` REL for that. See the
-    /// "Error-bound modes" section in the class doc.
-    void setErrorBoundMode(ErrorBoundMode m)  { config_.eb_mode = m; }
+    /// Accepts `ABS`, `NOA`, `PREL`. `REL` is a deprecated alias for `PREL` and
+    /// warns: `PREL` is the global approximation `abs_eb = eb * max(|data|)`,
+    /// not the exact per-element PFPL bound — use `QuantizerStage` REL for that.
+    /// See the "Error-bound modes" section in the class doc.
+    void setErrorBoundMode(ErrorBoundMode m)  {
+        config_.eb_mode = resolveApproxRelMode(m, "GInterpStage");
+    }
     void setValueBase(float v)                { config_.precomputed_value_base = v; }
     /// Enable cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning. See
     /// `Config::auto_tuning_mode` for mode semantics. Default is 0 (off).

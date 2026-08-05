@@ -103,6 +103,8 @@ enum class StageType : uint16_t {
     HCLOG      = 30,   ///< Compressed-Logarithm coding with per-subchunk TCMS fallback (LC framework lossless component)
     TUPL       = 31,   ///< Tuple deinterleave (AoS -> SoA) transpose (LC framework lossless component)
     GPULZ      = 32,   ///< TODO: describe this stage
+    LOG_TRANSFORM = 33, ///< Log-space transform for point-wise relative bounds (Liang et al., CLUSTER'18)
+    ADAPTIVE_LORENZO = 34, ///< Per-tile adaptive multi-order Lorenzo + centering (FSZ prediction stage)
 };
 
 /**
@@ -337,6 +339,8 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::ADAPTIVE_BITPACK: return "AdaptiveBitpack";
         case StageType::TILED_LORENZO: return "TiledLorenzo";
         case StageType::GPULZ:  return "GPULZ";
+        case StageType::LOG_TRANSFORM: return "LogTransform";
+        case StageType::ADAPTIVE_LORENZO: return "AdaptiveLorenzo";
         default:                     return "Unknown";
     }
 }

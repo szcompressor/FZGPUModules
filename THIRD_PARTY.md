@@ -347,6 +347,45 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 ---
 
+## FSZ
+
+**Used by:** `AdaptiveLorenzoStage` (`modules/fused/adaptive_lorenzo/`),
+`LorenzoStage::setCentering()` / `setOrder(2)`
+(`modules/predictors/lorenzo/`), `LorenzoQuantStage::Config::centering`
+(`modules/fused/lorenzo_quant/`)
+
+**Relationship: algorithmic attribution only — no code was used.** FSZ has no
+published source release; these stages were written from the paper's
+description. The ideas taken are:
+
+- **Cross-block prediction state** — running the prediction chain across the
+  encoding blocks within a tile rather than restarting at every block, so a
+  tile has one raw seed instead of one per block.
+- **Per-tile adaptive multi-order prediction and centering** — selecting per
+  tile among first/second-order Lorenzo with and without subtracting the tile
+  mean, by exact encoded size.
+- **Single-pass four-way evaluation** — costing all four variants from one data
+  read, using the fact that a constant offset cancels exactly in k-th order
+  finite differences (`delta^k(q - mu) == delta^k(q)`) for every element with
+  `k` predecessors, so centering perturbs only a tile's first one or two
+  residuals.
+
+The reference fuses prediction, quantization and encoding into one CUDA kernel
+with a decoupled-lookback prefix sum; FZGPUModules implements the prediction
+step alone as a DAG stage composing with `QuantizerStage` and
+`AdaptiveBitpackStage`. Kernel structure, the cost model's coupling to
+`AdaptiveBitpackStage`'s rate formula, port layout, serialization, and all
+host-side plumbing are FZGPUModules code.
+
+**Citation:**
+```
+Jiajun Huang. "FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy
+Compression." SC'26. arXiv:2607.15413.
+University of South Florida, Tampa, FL, USA.
+```
+
+---
+
 ## cuSZ-Hi
 
 **Used by:** `GInterpStage` (`modules/fused/ginterp/`)

@@ -8,7 +8,7 @@
  * Contents:
  *  - minmax_partial_kernel   : two-level device min/max reduction
  *  - computeValueBase        : host-side launcher → returns value_range (NOA)
- *                              or max(|data|) (REL)
+ *                              or max(|data|) (PREL)
  *  - scatter_add_kernel      : scatter (outlier_value += existing) for Lorenzo
  *  - scatter_assign_kernel   : scatter (outlier_value = original) for Quantizer
  */
@@ -62,11 +62,11 @@ __global__ void minmax_partial_kernel(
 }
 
 /**
- * Compute the scaling denominator for NOA or REL error bound conversion.
+ * Compute the scaling denominator for NOA or PREL error bound conversion.
  *
- *   NOA:  returns  max(data) - min(data)
- *   REL:  returns  max(|data|)          (only approximates per-element REL for
- *                                        Lorenzo; QuantizerStage REL is exact)
+ *   NOA:   returns  max(data) - min(data)
+ *   other: returns  max(|data|)         (PREL — the pseudo-relative scale used
+ *                                        by the predictor-fused stages)
  *
  * Synchronises the stream and performs a small D2H copy.  Latency is
  * proportional to min(n, 1024) blocks, typically a few µs.

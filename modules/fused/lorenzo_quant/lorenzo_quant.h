@@ -7,6 +7,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "backend/types.h"
+#include "log.h"
 #include <array>
 #include <cstdint>
 #include <cmath>
@@ -19,19 +20,53 @@ namespace fz {
  * Interpretation of the user-specified error bound.
  *
  * - **ABS** — `|x_orig - x_recon| <= eb` (default).
- * - **REL** — point-wise relative (PFPL): `|error| / |x_orig| <= eb`.
- *   For Lorenzo this is a *global* approximation: `abs_eb = eb × max(|data|)`.
- *   Values much smaller than max(|data|) may exceed the per-element ratio.
- *   For an exact per-element REL bound use `QuantizerStage` with REL mode.
+ * - **REL** — *guaranteed* point-wise relative (PFPL): `|error| / |x_orig| <= eb`
+ *   **for every element**.  Requires per-element log-space quantization and is
+ *   therefore implemented **only** by `QuantizerStage`.  Predictor-fused stages
+ *   (`LorenzoQuantStage`, `GInterpStage`) cannot honour it — they accept it as a
+ *   deprecated alias for `PREL` and emit a warning.
+ * - **PREL** — *pseudo*-relative: `abs_eb = eb × max(|data|)`, then treated as
+ *   ABS.  This is the cheap global approximation of REL used by predictor-fused
+ *   stages.  It bounds `|error| / max(|x|)`, **not** `|error| / |x|`: any element
+ *   with `|x| < max(|data|)` sees a proportionally looser effective relative
+ *   error, and elements near zero are effectively unbounded in relative terms.
+ *   Named PREL (not REL) precisely so that this is impossible to use by accident.
  * - **NOA** — norm-of-absolute / value-range relative (PFPL):
  *   `abs_eb = eb × (max(data) - min(data))`.  Equivalent to what most other
- *   compressors call "relative".
+ *   compressors call "relative".  Differs from PREL only in the scan statistic
+ *   (range vs. max magnitude); for data that straddles zero the two are within 2×.
  */
 enum class ErrorBoundMode : uint8_t {
-    ABS = 0, ///< Absolute error bound.
-    REL = 1, ///< Global-approximate point-wise relative bound.
-    NOA = 2, ///< Value-range relative bound (norm-of-absolute).
+    ABS  = 0, ///< Absolute error bound.
+    REL  = 1, ///< Exact per-element point-wise relative bound (QuantizerStage only).
+    NOA  = 2, ///< Value-range relative bound (norm-of-absolute).
+    PREL = 3, ///< Pseudo-relative: `eb × max(|data|)`, applied as a single ABS bound.
 };
+
+/**
+ * Resolve an error-bound mode for a stage that has no exact point-wise REL path.
+ *
+ * `LorenzoQuantStage` and `GInterpStage` quantize prediction *residuals* against
+ * one global tolerance, so a per-element relative bound cannot be threaded
+ * through them.  Historically both accepted `REL` and silently applied the
+ * `eb × max(|data|)` approximation; that mode is now spelled `PREL`.  `REL` is
+ * still accepted here as a deprecated alias so existing configs keep running,
+ * but it warns — if you need the real guarantee, use `QuantizerStage`.
+ *
+ * @param mode        Requested mode.
+ * @param stage_name  Stage name, for the warning message.
+ * @return `PREL` when `mode == REL`, otherwise `mode` unchanged.
+ */
+inline ErrorBoundMode resolveApproxRelMode(ErrorBoundMode mode, const char* stage_name) {
+    if (mode != ErrorBoundMode::REL) return mode;
+    FZ_LOG(WARN,
+        "%s: ErrorBoundMode::REL is deprecated for this stage and has been "
+        "mapped to PREL (abs_eb = eb * max(|data|)). This does NOT guarantee a "
+        "per-element relative bound. Use PREL explicitly to silence this, or "
+        "QuantizerStage with REL for an exact point-wise bound.",
+        stage_name);
+    return ErrorBoundMode::PREL;
+}
 
 /**
  * Serialized Lorenzo predictor configuration stored in FZMBufferEntry.stage_config.
@@ -55,7 +90,8 @@ struct LorenzoQuantConfig {
     float    user_eb;       ///< Original user-specified error bound value.
     float    value_base;    ///< value_range (NOA) or max(|data|) (REL) used in conversion.
     uint8_t  zigzag_codes;  ///< 1 if codes are zigzag-encoded, else 0.
-    uint8_t  reserved[3];   ///< Must be zero.
+    uint8_t  centering;     ///< 1 if per-tile mean centering is enabled, else 0.
+    uint8_t  reserved[2];   ///< Must be zero.
 
     // Total: 44 bytes (fits easily in 128B stage_config)
 
@@ -63,7 +99,8 @@ struct LorenzoQuantConfig {
         : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           ndim(1), eb_mode(0), dim_x(0), dim_y(1), dim_z(1),
-          user_eb(0.0f), value_base(0.0f), zigzag_codes(0), reserved{0, 0, 0} {}
+          user_eb(0.0f), value_base(0.0f), zigzag_codes(0), centering(0),
+          reserved{0, 0} {}
 };
 static_assert(sizeof(LorenzoQuantConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoQuantConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
@@ -104,13 +141,25 @@ public:
         /// `dims[0]==0` → infer x from num_elements at runtime (valid for 1-D).
         /// `dims[1]==dims[2]==1` → 1-D; `dims[2]==1` → 2-D; otherwise 3-D.
         std::array<size_t, 3> dims = {0, 1, 1};
+        /// `ABS`, `NOA`, or `PREL`. `REL` is accepted as a deprecated alias for
+        /// `PREL` (resolved with a warning at execute time) — this stage cannot
+        /// honour an exact per-element relative bound.
         ErrorBoundMode eb_mode = ErrorBoundMode::ABS;
-        /// Pre-computed value_range (NOA) or max(|data|) (REL) to skip the
+        /// Pre-computed value_range (NOA) or max(|data|) (PREL) to skip the
         /// device scan in execute(). Leave at 0 to auto-compute.
         float precomputed_value_base = 0.0f;
         /// Zigzag-encode codes before storage to improve compressibility
         /// when codes cluster near zero (`−2→3, −1→1, 0→0, 1→2, …`).
         bool zigzag_codes = false;
+        /// Per-tile mean centering (FSZ adaptive centering): predict each
+        /// 1024-element tile's first element from the tile mean `mu` instead of
+        /// from 0, so its residual is `q_0 - mu` rather than the raw `q_0`.
+        /// Since `delta(q - mu) == delta(q)`, no other residual changes.
+        /// Pays off on fields with a large constant offset (temperature in
+        /// Kelvin, pressure in hPa) where that raw seed dominates the tile.
+        /// **1-D only** — the 2-D/3-D paths have no per-tile chain to seed and
+        /// `execute()` rejects the combination. Adds a `"means"` port.
+        bool centering = false;
         Config() = default;
         Config(TInput eb, TCode radius = 32768, float outlier_cap = 0.2f,
                std::array<size_t, 3> d = {0, 1, 1})
@@ -147,10 +196,16 @@ public:
     }
 
     std::string getName() const override { return "LorenzoQuant"; }
-    size_t getNumInputs()  const override { return is_inverse_ ? 3 : 1; }
-    size_t getNumOutputs() const override { return is_inverse_ ? 1 : 3; }
+    size_t getNumInputs()  const override {
+        return is_inverse_ ? (config_.centering ? 4 : 3) : 1;
+    }
+    size_t getNumOutputs() const override {
+        return is_inverse_ ? 1 : (config_.centering ? 4 : 3);
+    }
 
     std::vector<std::string> getOutputNames() const override {
+        if (config_.centering)
+            return {"codes", "outlier_errors", "outlier_indices", "means"};
         return {"codes", "outlier_errors", "outlier_indices"};
     }
     
@@ -183,14 +238,22 @@ public:
     void setQuantRadius(TCode radius) { config_.quant_radius = radius; }
     void setOutlierCapacity(float capacity) { config_.outlier_capacity = capacity; }
     void setDims(const std::array<size_t, 3>& dims) override { config_.dims = dims; }
-    /// REL here is *global-approximate* (`abs_eb = eb * max(|data|)`), NOT the
-    /// exact per-element PFPL bound — use `QuantizerStage` REL for that. See the
-    /// error-bound mode notes in the file-level doc.
-    void setErrorBoundMode(ErrorBoundMode mode) { config_.eb_mode = mode; }
-    // Provide a pre-computed value_range (NOA) or max(|data|) (REL) to skip
+    /// Accepts `ABS`, `NOA`, `PREL`. `REL` is a deprecated alias for `PREL` and
+    /// warns: this stage has no exact per-element PFPL bound — `PREL` is the
+    /// global approximation `abs_eb = eb * max(|data|)`. For a real point-wise
+    /// relative guarantee use `QuantizerStage` with `REL`.
+    void setErrorBoundMode(ErrorBoundMode mode) {
+        config_.eb_mode = resolveApproxRelMode(mode, "LorenzoQuantStage");
+    }
+    // Provide a pre-computed value_range (NOA) or max(|data|) (PREL) to skip
     // the internal data scan during execute().  Pass 0 to re-enable auto-scan.
     void setValueBase(float value_base) { config_.precomputed_value_base = value_base; }
     void setZigzagCodes(bool enable) { config_.zigzag_codes = enable; }
+    /// Enable per-tile mean centering (see `Config::centering`). 1-D only.
+    /// @warning Must be set before `Pipeline::addStage()` — centering adds a
+    ///          `"means"` port and addStage captures the port count at add-time.
+    ///          Prefer passing it via the constructor `Config`.
+    void setCentering(bool enable) { config_.centering = enable; }
     void setDims(size_t x, size_t y = 1, size_t z = 1) { config_.dims = {x, y, z}; }
 
     TInput getErrorBound() const { return config_.error_bound; }
@@ -198,8 +261,14 @@ public:
     float  getOutlierCapacity() const { return config_.outlier_capacity; }
     std::array<size_t, 3> getDims() const { return config_.dims; }
     ErrorBoundMode getErrorBoundMode() const { return config_.eb_mode; }
+    /// The absolute bound the stage actually quantized against, after NOA/PREL
+    /// mode conversion. Valid only after a `compress()` (or a header
+    /// deserialize); 0 before that. Useful for confirming what a relative mode
+    /// resolved to on your data — see `examples/eb_mode_analysis.cpp`.
+    TInput getComputedAbsErrorBound() const { return computed_abs_eb_; }
     float getValueBase() const { return config_.precomputed_value_base; }
     bool  getZigzagCodes() const { return config_.zigzag_codes; }
+    bool  getCentering() const { return config_.centering; }
 
     /// Returns the effective spatial dimensionality (1, 2, or 3).
     int ndim() const {
@@ -252,6 +321,7 @@ public:
         config.user_eb       = static_cast<float>(config_.error_bound);  // original user-specified value
         config.value_base    = computed_value_base_;
         config.zigzag_codes  = config_.zigzag_codes ? uint8_t{1} : uint8_t{0};
+        config.centering     = config_.centering ? uint8_t{1} : uint8_t{0};
         config.reserved[0]   = 0; config.reserved[1] = 0; config.reserved[2] = 0;
 
         std::memcpy(header_buffer, &config, sizeof(LorenzoQuantConfig));
@@ -282,7 +352,12 @@ public:
         // New fields: present only in headers written by v1+ (≥40B, added user_eb/value_base/eb_mode).
         constexpr size_t kV1Size = 40;
         if (size >= kV1Size) {
-            config_.eb_mode                = static_cast<ErrorBoundMode>(config.eb_mode);
+            // Files written before the PREL split stored eb_mode==REL for what
+            // was always the approximate mode. Map it silently (no warning —
+            // decode uses the stored absolute error_bound regardless of mode).
+            auto stored = static_cast<ErrorBoundMode>(config.eb_mode);
+            config_.eb_mode                = (stored == ErrorBoundMode::REL)
+                                             ? ErrorBoundMode::PREL : stored;
             config_.precomputed_value_base = config.value_base;
             computed_value_base_           = config.value_base;
         } else {
@@ -293,8 +368,12 @@ public:
         // zigzag_codes field added in v2 (≥44B).
         if (size >= sizeof(LorenzoQuantConfig)) {
             config_.zigzag_codes = (config.zigzag_codes != 0);
+            // `centering` reuses a byte older writers zeroed as `reserved`, so
+            // pre-centering archives decode as centering-off.
+            config_.centering    = (config.centering != 0);
         } else {
             config_.zigzag_codes = false;
+            config_.centering    = false;
         }
 
         // Restore spatial dimensions; handle old (pre-dims) files gracefully
@@ -382,7 +461,10 @@ void launchLorenzoKernel(
     uint32_t* d_outlier_indices, uint32_t* d_outlier_count,
     size_t max_outliers, int grid_size,
     bool zigzag_codes,
-    fz::stream_t stream
+    fz::stream_t stream,
+    /// Per-tile means output (one per 1024-element tile), or nullptr to disable
+    /// adaptive centering.
+    TInput* d_means = nullptr
 );
 
 template<typename TInput, typename TCode>
@@ -394,7 +476,9 @@ void launchLorenzoInverseKernel(
     TInput ebx2, TCode quant_radius,
     TInput* d_output,
     bool zigzag_codes,
-    fz::stream_t stream, MemoryPool* pool
+    fz::stream_t stream, MemoryPool* pool,
+    /// Per-tile means from the forward pass, or nullptr if centering is off.
+    const TInput* d_means = nullptr
 );
 
 /// 2-D forward Lorenzo kernel launcher. `nx` is the fast (x) dimension.

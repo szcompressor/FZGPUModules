@@ -9,6 +9,7 @@
 #include "fzm_format.h"
 #include "predictors/diff/diff.h"
 #include "coders/rle/rle.h"
+#include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
@@ -32,6 +33,7 @@
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 #include "quantizers/quantizer/quantizer.h"
+#include "transforms/log_transform/log_transform_stage.h"
 
 #include <memory>
 #include <stdexcept>
@@ -318,6 +320,29 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             auto* s = new TUPLStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+            break;
+        }
+
+        case StageType::LOG_TRANSFORM: {
+            auto* s = new LogTransformStage<float>();
+            s->deserializeHeader(config, config_size);
+            stage = s;
+            break;
+        }
+
+        case StageType::ADAPTIVE_LORENZO: {
+            // Element type is stored in the config's first byte.
+            DataType dt = (config_size > 0) ? static_cast<DataType>(config[0])
+                                            : DataType::INT32;
+            if (dt == DataType::INT16) {
+                auto* s = new AdaptiveLorenzoStage<int16_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            } else {
+                auto* s = new AdaptiveLorenzoStage<int32_t>();
+                s->deserializeHeader(config, config_size);
+                stage = s;
+            }
             break;
         }
 

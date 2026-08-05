@@ -124,7 +124,7 @@ Result run(const char* name, Pipeline& p, const float* d_input,
 void configureLorenzo(LorenzoQuantStage<float, uint16_t>* lq,
                       int nx, int ny, int nz, float eb, int radius) {
     lq->setErrorBound(eb);
-    lq->setErrorBoundMode(ErrorBoundMode::REL);
+    lq->setErrorBoundMode(ErrorBoundMode::PREL);
     lq->setQuantRadius(radius);
     lq->setZigzagCodes(true);
     (void)nx; (void)ny; (void)nz;

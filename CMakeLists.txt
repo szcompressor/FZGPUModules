@@ -391,6 +391,7 @@ add_library(fzgmod_modules
   modules/predictors/lorenzo/lorenzo_stage.cu
   modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
   modules/transforms/zigzag/zigzag_stage.cu
+  modules/transforms/log_transform/log_transform_stage.cu
   modules/transforms/negabinary/negabinary_stage.cu
   modules/quantizers/quantizer/quantizer.cu
   modules/coders/rle/rle.cu
@@ -406,7 +407,8 @@ add_library(fzgmod_modules
   modules/coders/adaptive_bitpack/adaptive_bitpack_stage.cu
   modules/shufflers/bitshuffle/bitshuffle_stage.cu
   modules/shufflers/tupl/tupl_stage.cu
-  modules/fused/lorenzo_quant/lorenzo_quant.cu
+  modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.cu
+    modules/fused/lorenzo_quant/lorenzo_quant.cu
   modules/fused/lorenzo_quant/lorenzo_quant_nd.cu
   # Huffman (PHF CPU layer + GPU kernels + stage wrapper)
   modules/coders/huffman/phf/hf_buf.cc

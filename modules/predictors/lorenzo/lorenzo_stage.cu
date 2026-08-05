@@ -122,6 +122,344 @@ void launchLorenzoPrefixSumKernel1D(
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
+
+// Barrier-based fallback for reset periods that are not a multiple of 32.
+template<typename T>
+__global__ void lorenzo_scan_any_kernel(
+    const T* __restrict__ in,
+    const T* __restrict__ means,
+    T*       __restrict__ out,
+    size_t n,
+    int passes)
+{
+    extern __shared__ char smem[];
+    T* s = reinterpret_cast<T*>(smem);
+
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int    tid = static_cast<int>(threadIdx.x);
+
+    s[tid] = (gid < n) ? in[gid] : static_cast<T>(0);
+    __syncthreads();
+
+    for (int pass = 0; pass < passes; ++pass) {
+        for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
+            T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
+            __syncthreads();
+            s[tid] += val;
+            __syncthreads();
+        }
+    }
+
+    T q = s[tid];
+    if (means != nullptr) q = static_cast<T>(q + means[blockIdx.x]);
+    if (gid < n) out[gid] = q;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Segmented inverse scan — one CTA per reset segment, Seq elements per thread
+//
+// The original block-mode inverse launched `blockDim == block_size`, which ties
+// the CTA width to the reset period: a 1024-element segment meant 1024-thread
+// blocks and ~2*log2(1024) barriers of Hillis-Steele, and ncu flagged it as
+// barrier-bound (measured 102 -> 69 GB/s going from block_size 512 to 1024).
+// Here each thread owns `Seq` consecutive elements and the scan is
+// serial-in-registers -> warp shuffle -> one pass over the warp totals, which is
+// 2 barriers per scan pass regardless of segment length.
+//
+// Handles both prediction orders and centering in one kernel: `passes` scans
+// invert `passes` differences, and centering is undone by a uniform `+ mu`
+// (for a single scan, seeding with mu and adding it at the end are equivalent;
+// for two scans only the trailing add is correct, since a seeded mu would be
+// summed i+1 times by the second scan).
+// ─────────────────────────────────────────────────────────────────────────────
+template<typename T, int Seq>
+__global__ void lorenzo_segmented_scan_kernel(
+    const T* __restrict__ in,
+    const T* __restrict__ means,   // nullptr = centering off
+    T*       __restrict__ out,
+    size_t n,
+    int passes)
+{
+    __shared__ T warp_totals[32];
+
+    const unsigned seg_len = blockDim.x * Seq;
+    const size_t   base    = static_cast<size_t>(blockIdx.x) * seg_len;
+    const unsigned tid     = threadIdx.x;
+    const unsigned lane    = tid & 31u;
+    const unsigned warp    = tid >> 5;
+
+    T v[Seq];
+    #pragma unroll
+    for (int i = 0; i < Seq; ++i) {
+        const size_t g = base + static_cast<size_t>(tid) * Seq + i;
+        v[i] = (g < n) ? in[g] : static_cast<T>(0);
+    }
+
+    for (int pass = 0; pass < passes; ++pass) {
+        // 1. Serial inclusive scan over this thread's own elements.
+        #pragma unroll
+        for (int i = 1; i < Seq; ++i) v[i] = static_cast<T>(v[i] + v[i - 1]);
+
+        // 2. Inclusive scan of thread totals across the warp.
+        T tsum = v[Seq - 1];
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            const T y = fz::backend::shflUp(tsum, static_cast<unsigned>(off), 32);
+            if (lane >= static_cast<unsigned>(off)) tsum = static_cast<T>(tsum + y);
+        }
+        const T warp_excl = static_cast<T>(tsum - v[Seq - 1]);
+
+        // 3. Exclusive scan across warps, through shared memory.
+        if (lane == 31u) warp_totals[warp] = tsum;
+        __syncthreads();
+        T block_excl = static_cast<T>(0);
+        for (unsigned w = 0; w < warp; ++w) block_excl = static_cast<T>(block_excl + warp_totals[w]);
+
+        const T add = static_cast<T>(warp_excl + block_excl);
+        #pragma unroll
+        for (int i = 0; i < Seq; ++i) v[i] = static_cast<T>(v[i] + add);
+
+        // Guard warp_totals against the next pass overwriting it mid-read.
+        __syncthreads();
+    }
+
+    const T mu = (means != nullptr) ? means[blockIdx.x] : static_cast<T>(0);
+    #pragma unroll
+    for (int i = 0; i < Seq; ++i) {
+        const size_t g = base + static_cast<size_t>(tid) * Seq + i;
+        if (g < n) out[g] = static_cast<T>(v[i] + mu);
+    }
+}
+
+// Pick (threads, Seq) for a reset period: keep the CTA at or below 256 threads
+// where possible so occupancy does not track segment length. Requires
+// `block_size % 32 == 0`; callers fall back to the generic path otherwise.
+inline void segmentedScanShape(unsigned block_size, unsigned& threads, int& seq) {
+    if (block_size <= 256u)                        { threads = block_size;      seq = 1; }
+    else if ((block_size / 4u) % 32u == 0u)        { threads = block_size / 4u; seq = 4; }
+    else if ((block_size / 2u) % 32u == 0u)        { threads = block_size / 2u; seq = 2; }
+    else                                           { threads = block_size;      seq = 1; }
+}
+
+// Unified block-mode inverse: any order, with or without centering.
+template<typename T>
+void launchLorenzoSegmentedScan(
+    const T* d_input, const T* d_means, T* d_output, size_t n, cudaStream_t stream,
+    unsigned block_threads, int passes)
+{
+    if (n == 0) return;
+    const int grid = static_cast<int>((n + block_threads - 1) / block_threads);
+
+    if (block_threads % 32u != 0u) {
+        // Non-warp-multiple reset period (e.g. 100): the warp-shuffle scan does
+        // not apply, so use the barrier-based scan, which handles any width.
+        lorenzo_scan_any_kernel<T><<<grid, block_threads,
+                                     block_threads * sizeof(T), stream>>>(
+            d_input, d_means, d_output, n, passes);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+
+    unsigned threads; int seq;
+    segmentedScanShape(block_threads, threads, seq);
+    switch (seq) {
+        case 4: lorenzo_segmented_scan_kernel<T, 4><<<grid, threads, 0, stream>>>(
+                    d_input, d_means, d_output, n, passes); break;
+        case 2: lorenzo_segmented_scan_kernel<T, 2><<<grid, threads, 0, stream>>>(
+                    d_input, d_means, d_output, n, passes); break;
+        default: lorenzo_segmented_scan_kernel<T, 1><<<grid, threads, 0, stream>>>(
+                    d_input, d_means, d_output, n, passes); break;
+    }
+    FZ_CUDA_CHECK(cudaGetLastError());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1-D block mode with per-block mean centering (FSZ adaptive centering)
+//
+// Only the *first* residual of each block changes. For k-th order differences
+// delta^k(q - mu) == delta^k(q) for every element that has a predecessor, so
+// subtracting a per-block constant can only affect the chain seed — the one
+// element that would otherwise be emitted as a raw value. One CUDA block owns
+// one reset segment, so the mean is a block-wide reduction in shared memory.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Forward: out[0] = in[0] - mu, out[i] = in[i] - in[i-1] (i > 0), means[b] = mu.
+template<typename T>
+__global__ void lorenzo_delta_1d_centered_kernel(
+    const T* __restrict__ in,
+    T*       __restrict__ out,
+    T*       __restrict__ means,
+    size_t n)
+{
+    extern __shared__ char smem[];
+    // Accumulate in 64 bits: up to 1024 elements of T summed without overflow
+    // for every T narrower than int64_t.
+    long long* s = reinterpret_cast<long long*>(smem);
+
+    const size_t   base = static_cast<size_t>(blockIdx.x) * blockDim.x;
+    const size_t   gid  = base + threadIdx.x;
+    const unsigned tid  = threadIdx.x;
+    const bool     live = (gid < n);
+
+    const T v = live ? in[gid] : static_cast<T>(0);
+    s[tid] = live ? static_cast<long long>(v) : 0LL;
+    __syncthreads();
+
+    // Reduction over a possibly non-power-of-two blockDim: start the stride at
+    // the next power of two and guard the upper partner index.
+    unsigned p = 1u;
+    while (p < blockDim.x) p <<= 1;
+    for (unsigned stride = p >> 1; stride > 0u; stride >>= 1) {
+        if (tid < stride && tid + stride < blockDim.x) s[tid] += s[tid + stride];
+        __syncthreads();
+    }
+
+    // Trailing partial block: only the live elements are in the sum, so divide
+    // by the live count, not by blockDim.
+    const long long count = static_cast<long long>(min(static_cast<size_t>(blockDim.x), n - base));
+    const long long tot   = s[0];
+    // Round half away from zero, matching round() on the equivalent float mean.
+    const T mu = static_cast<T>((tot >= 0) ? (tot + count / 2) / count
+                                           : (tot - count / 2) / count);
+    if (tid == 0) means[blockIdx.x] = mu;
+
+    if (!live) return;
+    out[gid] = (tid > 0u) ? static_cast<T>(v - in[gid - 1])
+                          : static_cast<T>(v - mu);
+}
+
+template<typename T>
+void launchLorenzoDeltaCentered1D(
+    const T* d_input, T* d_output, T* d_means, size_t n, cudaStream_t stream,
+    unsigned block_threads)
+{
+    if (n == 0) return;
+    const int kBlock = static_cast<int>(block_threads);
+    const int grid   = static_cast<int>((n + kBlock - 1) / kBlock);
+    lorenzo_delta_1d_centered_kernel<T>
+        <<<grid, kBlock, kBlock * sizeof(long long), stream>>>(d_input, d_output, d_means, n);
+    FZ_CUDA_CHECK(cudaGetLastError());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1-D block mode, second-order (LZ2)
+//
+// Block-local LZ2 is the LZ1 delta applied twice under the same zero-padding
+// convention: with d = delta(q) (d_0 = q_0) and e = delta(d),
+//   e_0 = q_0,  e_1 = q_1 - 2*q_0,  e_i = q_i - 2*q_{i-1} + q_{i-2} (i >= 2)
+// which is FSZ's LZ2 with the two missing predecessors read as zero. Doing both
+// passes in shared memory keeps it to a single trip through global memory and
+// needs no scratch buffer, unlike chaining two delta kernels.
+//
+// LZ2 annihilates a linear ramp, so it wins where the field has a smooth
+// gradient and LZ1 leaves a constant non-zero residual. It costs one extra
+// element of raw seed per block (e_0 and e_1 both lack full predecessors),
+// which is why it pairs with long blocks and with centering.
+//
+// Centering here subtracts mu from the *whole* segment rather than just the
+// seed. Since mu cancels out of every second difference from i >= 2 on, only
+// e_0 and e_1 change, and the inverse is a uniform "+ mu" after the two scans.
+// ─────────────────────────────────────────────────────────────────────────────
+
+template<typename T>
+__global__ void lorenzo2_delta_1d_kernel(
+    const T* __restrict__ in,
+    T*       __restrict__ out,
+    T*       __restrict__ means,   // nullptr = centering off
+    size_t n)
+{
+    // Two shared regions: the data staging area (T) and a 64-bit accumulator
+    // for the mean reduction, which must not overflow on a 1024-element sum.
+    extern __shared__ char smem[];
+    T*         s   = reinterpret_cast<T*>(smem);
+    long long* red = reinterpret_cast<long long*>(smem + blockDim.x * sizeof(T));
+
+    const size_t   base = static_cast<size_t>(blockIdx.x) * blockDim.x;
+    const size_t   gid  = base + threadIdx.x;
+    const unsigned tid  = threadIdx.x;
+    const bool     live = (gid < n);
+
+    T v = live ? in[gid] : static_cast<T>(0);
+
+    if (means != nullptr) {
+        red[tid] = live ? static_cast<long long>(v) : 0LL;
+        __syncthreads();
+        unsigned p = 1u;
+        while (p < blockDim.x) p <<= 1;
+        for (unsigned stride = p >> 1; stride > 0u; stride >>= 1) {
+            if (tid < stride && tid + stride < blockDim.x) red[tid] += red[tid + stride];
+            __syncthreads();
+        }
+        const long long count =
+            static_cast<long long>(min(static_cast<size_t>(blockDim.x), n - base));
+        const long long tot = red[0];
+        const T mu = static_cast<T>((tot >= 0) ? (tot + count / 2) / count
+                                               : (tot - count / 2) / count);
+        if (tid == 0) means[blockIdx.x] = mu;
+        v = static_cast<T>(v - mu);
+        __syncthreads();
+    }
+
+    // Pass 1: first difference.
+    s[tid] = v;
+    __syncthreads();
+    const T d = static_cast<T>(s[tid] - ((tid > 0u) ? s[tid - 1] : static_cast<T>(0)));
+    __syncthreads();
+
+    // Pass 2: difference of the differences.
+    s[tid] = d;
+    __syncthreads();
+    const T e = static_cast<T>(s[tid] - ((tid > 0u) ? s[tid - 1] : static_cast<T>(0)));
+
+    if (live) out[gid] = e;
+}
+
+template<typename T>
+__global__ void lorenzo2_scan_1d_kernel(
+    const T* __restrict__ in,
+    const T* __restrict__ means,   // nullptr = centering off
+    T*       __restrict__ out,
+    size_t n)
+{
+    extern __shared__ char smem[];
+    T* s = reinterpret_cast<T*>(smem);
+
+    const size_t gid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const int    tid = static_cast<int>(threadIdx.x);
+
+    s[tid] = (gid < n) ? in[gid] : static_cast<T>(0);
+    __syncthreads();
+
+    // Two inclusive scans invert the two differences, in the same order.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
+            T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
+            __syncthreads();
+            s[tid] += val;
+            __syncthreads();
+        }
+    }
+
+    T q = s[tid];
+    // Centering subtracted mu from every element, so restore it on every element.
+    if (means != nullptr) q = static_cast<T>(q + means[blockIdx.x]);
+    if (gid < n) out[gid] = q;
+}
+
+template<typename T>
+void launchLorenzo2Delta1D(
+    const T* d_input, T* d_output, T* d_means, size_t n, cudaStream_t stream,
+    unsigned block_threads)
+{
+    if (n == 0) return;
+    const int kBlock = static_cast<int>(block_threads);
+    const int grid   = static_cast<int>((n + kBlock - 1) / kBlock);
+    const size_t shmem = kBlock * (sizeof(T) + sizeof(long long));
+    lorenzo2_delta_1d_kernel<T>
+        <<<grid, kBlock, shmem, stream>>>(d_input, d_output, d_means, n);
+    FZ_CUDA_CHECK(cudaGetLastError());
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 2-D kernels
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,66 +483,77 @@ __global__ void lorenzo_delta_2d_kernel(
     out[idx] = v - vx - vy + vxy;
 }
 
-// Inverse 2-D: row-first inclusive scan per row, then column-first inclusive
-// scan per column.  Two sequential kernel passes suffice and avoid the complex
-// 2-D blocked-scan dependency.
+// ─────────────────────────────────────────────────────────────────────────────
+// Inverse (prefix-sum) scan, 2-D and 3-D
+//
+// The multi-dimensional inverse is a sequence of independent 1-D inclusive
+// scans, one axis at a time: 2-D is a row pass then a column pass; 3-D is an
+// x, then y, then z pass. Every one of those is the same operation — "scan
+// `len` elements spaced `elem_stride` apart, once per line" — so they all share
+// `lorenzo_scan_line_kernel` below and differ only in launch parameters.
+//
+// One block owns one whole line and walks it in tiles of `blockDim.x`, carrying
+// a running total between tiles. That keeps the line length independent of the
+// maximum block dimension and of shared-memory capacity: shared memory is sized
+// by the block, not by the extent. The earlier per-axis kernels launched
+// `blockDim = extent` and so failed with `invalid configuration argument` for
+// any dimension above 1024 (e.g. a 3600x1800 field).
+//
+// `in` and `out` may alias: each thread reads and writes only its own index,
+// and tiles touch disjoint ranges.
+//
+// The line's base offset is `(line / inner) * outer_mult + (line % inner) * inner_mult`,
+// which expresses all five axis passes — see the launchers for the mapping.
+// ─────────────────────────────────────────────────────────────────────────────
+
 template<typename T>
-__global__ void lorenzo_scan_row_kernel(
+__global__ void lorenzo_scan_line_kernel(
     const T* __restrict__ in,
     T*       __restrict__ out,
-    size_t nx, size_t ny)
+    size_t len,          // elements along the scanned axis
+    size_t elem_stride,  // distance between consecutive elements of a line
+    size_t n_lines,      // number of independent lines (one per block)
+    size_t inner,        // see base-offset formula above
+    size_t outer_mult,
+    size_t inner_mult)
 {
-    const size_t y = blockIdx.x;  // one block per row
-    if (y >= ny) return;
+    const size_t line = blockIdx.x;
+    if (line >= n_lines) return;
+
+    const size_t base = (line / inner) * outer_mult + (line % inner) * inner_mult;
 
     extern __shared__ char smem[];
     T* s = reinterpret_cast<T*>(smem);
 
     const int tid = static_cast<int>(threadIdx.x);
-    if (static_cast<size_t>(tid) < nx)
-        s[tid] = in[y * nx + tid];
-    else
-        s[tid] = static_cast<T>(0);
-    __syncthreads();
+    T carry = static_cast<T>(0);
 
-    for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
-        T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
+    for (size_t tile = 0; tile < len; tile += blockDim.x) {
+        const size_t i = tile + static_cast<size_t>(tid);
+
+        s[tid] = (i < len) ? in[base + i * elem_stride] : static_cast<T>(0);
         __syncthreads();
-        s[tid] += val;
+
+        for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
+            T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
+            __syncthreads();
+            s[tid] += val;
+            __syncthreads();
+        }
+
+        if (i < len) out[base + i * elem_stride] = s[tid] + carry;
+
+        // Tile total: the padded tail is zero, so the last slot is the true sum.
+        // Read it before the next iteration overwrites shared memory.
+        const T tile_total = s[blockDim.x - 1];
         __syncthreads();
+        carry += tile_total;
     }
-
-    if (static_cast<size_t>(tid) < nx) out[y * nx + tid] = s[tid];
 }
 
-template<typename T>
-__global__ void lorenzo_scan_col_kernel(
-    const T* __restrict__ in,
-    T*       __restrict__ out,
-    size_t nx, size_t ny)
-{
-    const size_t x = blockIdx.x;  // one block per column
-    if (x >= nx) return;
-
-    extern __shared__ char smem[];
-    T* s = reinterpret_cast<T*>(smem);
-
-    const int tid = static_cast<int>(threadIdx.x);
-    if (static_cast<size_t>(tid) < ny)
-        s[tid] = in[tid * nx + x];
-    else
-        s[tid] = static_cast<T>(0);
-    __syncthreads();
-
-    for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
-        T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
-        __syncthreads();
-        s[tid] += val;
-        __syncthreads();
-    }
-
-    if (static_cast<size_t>(tid) < ny) out[tid * nx + x] = s[tid];
-}
+/// Threads per block for the line scan. Shared memory is `kScanBlock * sizeof(T)`,
+/// independent of the field dimensions.
+static constexpr int kScanBlock = 256;
 
 template<typename T>
 void launchLorenzoDeltaKernel2D(
@@ -223,21 +572,22 @@ void launchLorenzoPrefixSumKernel2D(
     const T* d_input, T* d_output, size_t nx, size_t ny, cudaStream_t stream)
 {
     if (nx == 0 || ny == 0) return;
-    // nx and ny must each be <= 1024 for single-pass shared-memory scan.
-    // For larger dims the block covers the full extent; shared mem may be large.
-    const int bx = static_cast<int>(nx);
-    const int by = static_cast<int>(ny);
+    const size_t smem = kScanBlock * sizeof(T);
 
-    // Row scan
-    lorenzo_scan_row_kernel<T>
-        <<<static_cast<unsigned>(ny), bx, bx * sizeof(T), stream>>>(
-            d_input, d_output, nx, ny);
+    // Row scan: line y covers [y*nx, y*nx + nx), contiguous.
+    //   base = y * nx  →  inner = n_lines (so line/inner == 0), inner_mult = nx
+    lorenzo_scan_line_kernel<T>
+        <<<static_cast<unsigned>(ny), kScanBlock, smem, stream>>>(
+            d_input, d_output, /*len=*/nx, /*elem_stride=*/1,
+            /*n_lines=*/ny, /*inner=*/ny, /*outer_mult=*/0, /*inner_mult=*/nx);
     FZ_CUDA_CHECK(cudaGetLastError());
 
-    // Column scan on row-scan output
-    lorenzo_scan_col_kernel<T>
-        <<<static_cast<unsigned>(nx), by, by * sizeof(T), stream>>>(
-            d_output, d_output, nx, ny);
+    // Column scan on the row-scan output: line x covers x, x+nx, x+2nx, ...
+    //   base = x  →  inner = n_lines, inner_mult = 1
+    lorenzo_scan_line_kernel<T>
+        <<<static_cast<unsigned>(nx), kScanBlock, smem, stream>>>(
+            d_output, d_output, /*len=*/ny, /*elem_stride=*/nx,
+            /*n_lines=*/nx, /*inner=*/nx, /*outer_mult=*/0, /*inner_mult=*/1);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -272,93 +622,6 @@ __global__ void lorenzo_delta_3d_kernel(
               - get(-1,-1,-1);
 }
 
-// Inverse 3-D: three sequential 1-D prefix sum passes (x → y → z).
-template<typename T>
-__global__ void lorenzo_scan_x_kernel(
-    const T* __restrict__ in, T* __restrict__ out,
-    size_t nx, size_t ny, size_t nz)
-{
-    // one block per (y, z) row
-    const size_t y = blockIdx.x % ny;
-    const size_t z = blockIdx.x / ny;
-    if (y >= ny || z >= nz) return;
-
-    extern __shared__ char smem[];
-    T* s = reinterpret_cast<T*>(smem);
-
-    const int tid = static_cast<int>(threadIdx.x);
-    const size_t base = z * ny * nx + y * nx;
-    if (static_cast<size_t>(tid) < nx) s[tid] = in[base + tid];
-    else                               s[tid] = static_cast<T>(0);
-    __syncthreads();
-
-    for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
-        T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
-        __syncthreads();
-        s[tid] += val;
-        __syncthreads();
-    }
-    if (static_cast<size_t>(tid) < nx) out[base + tid] = s[tid];
-}
-
-template<typename T>
-__global__ void lorenzo_scan_y_kernel(
-    const T* __restrict__ in, T* __restrict__ out,
-    size_t nx, size_t ny, size_t nz)
-{
-    const size_t x = blockIdx.x % nx;
-    const size_t z = blockIdx.x / nx;
-    if (x >= nx || z >= nz) return;
-
-    extern __shared__ char smem[];
-    T* s = reinterpret_cast<T*>(smem);
-
-    const int tid = static_cast<int>(threadIdx.x);
-    if (static_cast<size_t>(tid) < ny)
-        s[tid] = in[z * ny * nx + tid * nx + x];
-    else
-        s[tid] = static_cast<T>(0);
-    __syncthreads();
-
-    for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
-        T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
-        __syncthreads();
-        s[tid] += val;
-        __syncthreads();
-    }
-    if (static_cast<size_t>(tid) < ny)
-        out[z * ny * nx + tid * nx + x] = s[tid];
-}
-
-template<typename T>
-__global__ void lorenzo_scan_z_kernel(
-    const T* __restrict__ in, T* __restrict__ out,
-    size_t nx, size_t ny, size_t nz)
-{
-    const size_t x = blockIdx.x % nx;
-    const size_t y = blockIdx.x / nx;
-    if (x >= nx || y >= ny) return;
-
-    extern __shared__ char smem[];
-    T* s = reinterpret_cast<T*>(smem);
-
-    const int tid = static_cast<int>(threadIdx.x);
-    if (static_cast<size_t>(tid) < nz)
-        s[tid] = in[tid * ny * nx + y * nx + x];
-    else
-        s[tid] = static_cast<T>(0);
-    __syncthreads();
-
-    for (int stride = 1; stride < static_cast<int>(blockDim.x); stride <<= 1) {
-        T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
-        __syncthreads();
-        s[tid] += val;
-        __syncthreads();
-    }
-    if (static_cast<size_t>(tid) < nz)
-        out[tid * ny * nx + y * nx + x] = s[tid];
-}
-
 template<typename T>
 void launchLorenzoDeltaKernel3D(
     const T* d_input, T* d_output, size_t nx, size_t ny, size_t nz,
@@ -379,20 +642,35 @@ void launchLorenzoPrefixSumKernel3D(
     cudaStream_t stream)
 {
     if (nx == 0 || ny == 0 || nz == 0) return;
-    // X-pass: ny*nz blocks, each of nx threads
-    lorenzo_scan_x_kernel<T>
-        <<<static_cast<unsigned>(ny * nz), static_cast<unsigned>(nx),
-           nx * sizeof(T), stream>>>(d_input, d_output, nx, ny, nz);
+    const size_t smem = kScanBlock * sizeof(T);
+
+    // Inverse 3-D is three sequential 1-D prefix-sum passes (x → y → z).
+
+    // X-pass: one line per (y, z), contiguous. For line i = y + z*ny,
+    //   base = z*ny*nx + y*nx = i*nx  →  inner = n_lines, inner_mult = nx
+    lorenzo_scan_line_kernel<T>
+        <<<static_cast<unsigned>(ny * nz), kScanBlock, smem, stream>>>(
+            d_input, d_output, /*len=*/nx, /*elem_stride=*/1,
+            /*n_lines=*/ny * nz, /*inner=*/ny * nz,
+            /*outer_mult=*/0, /*inner_mult=*/nx);
     FZ_CUDA_CHECK(cudaGetLastError());
-    // Y-pass on output of X
-    lorenzo_scan_y_kernel<T>
-        <<<static_cast<unsigned>(nx * nz), static_cast<unsigned>(ny),
-           ny * sizeof(T), stream>>>(d_output, d_output, nx, ny, nz);
+
+    // Y-pass on the X output: one line per (x, z). For line i = x + z*nx,
+    //   base = z*ny*nx + x  →  inner = nx, outer_mult = ny*nx, inner_mult = 1
+    lorenzo_scan_line_kernel<T>
+        <<<static_cast<unsigned>(nx * nz), kScanBlock, smem, stream>>>(
+            d_output, d_output, /*len=*/ny, /*elem_stride=*/nx,
+            /*n_lines=*/nx * nz, /*inner=*/nx,
+            /*outer_mult=*/ny * nx, /*inner_mult=*/1);
     FZ_CUDA_CHECK(cudaGetLastError());
-    // Z-pass on output of Y
-    lorenzo_scan_z_kernel<T>
-        <<<static_cast<unsigned>(nx * ny), static_cast<unsigned>(nz),
-           nz * sizeof(T), stream>>>(d_output, d_output, nx, ny, nz);
+
+    // Z-pass on the Y output: one line per (x, y). For line i = x + y*nx,
+    //   base = y*nx + x = i  →  inner = n_lines, inner_mult = 1
+    lorenzo_scan_line_kernel<T>
+        <<<static_cast<unsigned>(nx * ny), kScanBlock, smem, stream>>>(
+            d_output, d_output, /*len=*/nz, /*elem_stride=*/ny * nx,
+            /*n_lines=*/nx * ny, /*inner=*/nx * ny,
+            /*outer_mult=*/0, /*inner_mult=*/1);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -430,11 +708,53 @@ void LorenzoStage<T>::execute(
     // array, resetting the prediction chain every block_size_ elements.
     if (block_size_ > 0) {
         const unsigned bt = block_size_;
-        if (!is_inverse_) launchLorenzoDeltaKernel1D<T>(in, out, n, stream, bt);
-        else              launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream, bt);
+        const size_t nblocks = (n + bt - 1) / bt;
+
+        // The means port is optional plumbing shared by both orders; resolve it
+        // once here so the order dispatch below only picks a kernel.
+        T*       means_out = nullptr;
+        const T* means_in  = nullptr;
+        if (centering_) {
+            if (!is_inverse_) {
+                if (outputs.size() < 2 || outputs[1] == nullptr)
+                    throw std::runtime_error(
+                        "LorenzoStage: centering enabled but the 'means' output port "
+                        "is not connected");
+                means_out = static_cast<T*>(outputs[1]);
+                actual_means_size_ = nblocks * sizeof(T);
+            } else {
+                if (inputs.size() < 2 || inputs[1] == nullptr)
+                    throw std::runtime_error(
+                        "LorenzoStage: centering enabled but the 'means' input port "
+                        "is not connected");
+                means_in = static_cast<const T*>(inputs[1]);
+            }
+        }
+
+        if (!is_inverse_) {
+            if      (order_ == 2) launchLorenzo2Delta1D<T>(in, out, means_out, n, stream, bt);
+            else if (centering_)  launchLorenzoDeltaCentered1D<T>(in, out, means_out, n, stream, bt);
+            else                  launchLorenzoDeltaKernel1D<T>(in, out, n, stream, bt);
+        } else if (order_ == 1 && !centering_ && bt == 32u) {
+            // 32-element segments are exactly one warp: the barrier-free warp
+            // scan with wide CTAs still beats the segmented kernel here.
+            launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream, bt);
+        } else {
+            launchLorenzoSegmentedScan<T>(in, means_in, out, n, stream, bt,
+                                          (order_ == 2) ? 2 : 1);
+        }
         actual_output_size_ = byte_size;
         return;
     }
+
+    if (centering_)
+        throw std::runtime_error(
+            "LorenzoStage: setCentering(true) requires block mode — call "
+            "setBlockSize(n) with n > 0 (there is no per-block mean without blocks)");
+    if (order_ == 2)
+        throw std::runtime_error(
+            "LorenzoStage: setOrder(2) requires block mode — call setBlockSize(n) "
+            "with n > 0 (the N-D path has no second-order form)");
 
     int eff_ndim = ndim();
 
@@ -469,6 +789,23 @@ template void launchLorenzoPrefixSumKernel1D<int8_t> (const int8_t*,  int8_t*,  
 template void launchLorenzoPrefixSumKernel1D<int16_t>(const int16_t*, int16_t*, size_t, cudaStream_t, unsigned);
 template void launchLorenzoPrefixSumKernel1D<int32_t>(const int32_t*, int32_t*, size_t, cudaStream_t, unsigned);
 template void launchLorenzoPrefixSumKernel1D<int64_t>(const int64_t*, int64_t*, size_t, cudaStream_t, unsigned);
+
+template void launchLorenzoDeltaCentered1D<int8_t> (const int8_t*,  int8_t*,  int8_t*,  size_t, cudaStream_t, unsigned);
+template void launchLorenzoDeltaCentered1D<int16_t>(const int16_t*, int16_t*, int16_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzoDeltaCentered1D<int32_t>(const int32_t*, int32_t*, int32_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzoDeltaCentered1D<int64_t>(const int64_t*, int64_t*, int64_t*, size_t, cudaStream_t, unsigned);
+
+
+template void launchLorenzoSegmentedScan<int8_t> (const int8_t*,  const int8_t*,  int8_t*,  size_t, cudaStream_t, unsigned, int);
+template void launchLorenzoSegmentedScan<int16_t>(const int16_t*, const int16_t*, int16_t*, size_t, cudaStream_t, unsigned, int);
+template void launchLorenzoSegmentedScan<int32_t>(const int32_t*, const int32_t*, int32_t*, size_t, cudaStream_t, unsigned, int);
+template void launchLorenzoSegmentedScan<int64_t>(const int64_t*, const int64_t*, int64_t*, size_t, cudaStream_t, unsigned, int);
+
+template void launchLorenzo2Delta1D<int8_t> (const int8_t*,  int8_t*,  int8_t*,  size_t, cudaStream_t, unsigned);
+template void launchLorenzo2Delta1D<int16_t>(const int16_t*, int16_t*, int16_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzo2Delta1D<int32_t>(const int32_t*, int32_t*, int32_t*, size_t, cudaStream_t, unsigned);
+template void launchLorenzo2Delta1D<int64_t>(const int64_t*, int64_t*, int64_t*, size_t, cudaStream_t, unsigned);
+
 
 template void launchLorenzoDeltaKernel2D<int8_t> (const int8_t*,  int8_t*,  size_t, size_t, cudaStream_t);
 template void launchLorenzoDeltaKernel2D<int16_t>(const int16_t*, int16_t*, size_t, size_t, cudaStream_t);

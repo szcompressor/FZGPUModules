@@ -1,0 +1,49 @@
+[pipeline]
+# FSZ — Quantizer(linear) → AdaptiveLorenzo → AdaptiveBitpack
+#
+#   Quantizer        linear_mode: q = round(x/2eb), signed codes, no outliers
+#   AdaptiveLorenzo  256-element tiles (8 x 32); per tile, picks the cheapest of
+#                    LZ1 / LZ2 / LZ1+centering / LZ2+centering by exact encoded
+#                    byte cost. The chain runs the whole tile rather than
+#                    restarting every 32 elements, so only the tile's first one
+#                    or two residuals are raw (FSZ's cross-block prediction
+#                    state) instead of one per coder block.
+#   AdaptiveBitpack  block_size=32: per-block rate byte + sign bitmap + planes
+#
+# blocks_per_tile is the main lever: longer tiles mean a longer prediction chain
+# and less per-tile metadata, but coarser adaptation. 8 (=256 elements) is FSZ's
+# default; 16 (=512) generally compresses better at some throughput cost.
+#
+# Prior work: FSZ, Jiajun Huang, SC'26 (arXiv:2607.15413). This is a modular
+# reimplementation of FSZ's prediction stage — the reference fuses prediction,
+# quantization and encoding into a single kernel.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/fsz.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "NOA"
+linear_mode = true
+
+[[stage]]
+name = "alrz"
+type = "AdaptiveLorenzo"
+data_type = "int32"
+blocks_per_tile = 8
+enable_order2 = true
+enable_centering = true
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "ab"
+type = "AdaptiveBitpack"
+input_type = "int32"
+block_size = 32
+inputs = [{from = "alrz"}]

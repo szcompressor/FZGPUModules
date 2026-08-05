@@ -613,6 +613,17 @@ std::vector<size_t> GInterpStage<TInput, TCode>::estimateOutputSizes(
     const std::vector<size_t>& input_sizes) const
 {
     if (input_sizes.empty()) return {0, 0, 0, 0};
+
+    if (is_inverse_) {
+        // Inverse: inputs are {codes, anchor, outlier_vals, outlier_idxs} and
+        // the single output is the reconstructed field. Deriving N from
+        // sizeof(TInput) here would under-allocate it by
+        // sizeof(TInput)/sizeof(TCode). Same latent-until-not-a-source issue as
+        // LorenzoQuantStage — see the note there.
+        const size_t N_inv = input_sizes[0] / sizeof(TCode);
+        return {N_inv * sizeof(TInput)};
+    }
+
     size_t input_bytes = input_sizes[0];
     size_t N           = input_bytes / sizeof(TInput);
     size_t max_outliers = getMaxOutlierCount(N);
@@ -773,8 +784,11 @@ void GInterpStage<TInput, TCode>::execute(
     FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
                                    sizeof(uint32_t), stream));
 
-    // Resolve absolute error bound (ABS direct; REL/NOA via scan unless caller
+    // Resolve absolute error bound (ABS direct; PREL/NOA via scan unless caller
     // pre-computed value_base for graph-safe operation).
+    // A Config-struct-supplied REL never passed through setErrorBoundMode().
+    config_.eb_mode = resolveApproxRelMode(config_.eb_mode, "GInterpStage");
+
     if (config_.eb_mode == ErrorBoundMode::ABS) {
         computed_abs_eb_     = static_cast<TInput>(config_.error_bound);
         computed_value_base_ = 0.0f;
@@ -790,7 +804,7 @@ void GInterpStage<TInput, TCode>::execute(
             FZ_LOG(WARN,
                 "GInterpStage: value_base is zero for %s mode "
                 "(constant or empty data?); falling back to ABS",
-                config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "REL");
+                config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "PREL");
             computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
         } else {
             computed_abs_eb_ = static_cast<TInput>(config_.error_bound)
@@ -817,11 +831,11 @@ void GInterpStage<TInput, TCode>::execute(
         if (config_.eb_mode == ErrorBoundMode::NOA && computed_value_base_ > 0.0f) {
             // NOA's value_base is already (max - min); reuse it.
             data_range = computed_value_base_;
-        } else if (config_.eb_mode == ErrorBoundMode::REL && computed_value_base_ > 0.0f) {
-            // REL's value_base is max(|data|); the full range is at most 2x.
+        } else if (config_.eb_mode == ErrorBoundMode::PREL && computed_value_base_ > 0.0f) {
+            // PREL's value_base is max(|data|); the full range is at most 2x.
             data_range = 2.0f * computed_value_base_;
         } else {
-            // ABS, or NOA/REL without pre-computed value_base: do the scan.
+            // ABS, or NOA/PREL without pre-computed value_base: do the scan.
             // We always invoke NOA mode here because we want the actual data
             // range (max - min), not a magnitude.
             data_range = computeValueBase<TInput>(
@@ -1210,7 +1224,14 @@ void GInterpStage<TInput, TCode>::deserializeHeader(
     computed_abs_eb_       = static_cast<TInput>(c.error_bound);
     config_.error_bound    = c.user_eb;
     config_.quant_radius   = static_cast<int>(c.quant_radius);
-    config_.eb_mode        = static_cast<ErrorBoundMode>(c.eb_mode);
+    // Files written before the PREL split stored eb_mode==REL for what was
+    // always the approximate mode. Map it silently (no warning — decode uses
+    // the stored absolute error_bound regardless of mode).
+    {
+        auto stored = static_cast<ErrorBoundMode>(c.eb_mode);
+        config_.eb_mode = (stored == ErrorBoundMode::REL) ? ErrorBoundMode::PREL
+                                                          : stored;
+    }
     config_.precomputed_value_base = c.value_base;
     computed_value_base_   = c.value_base;
     num_elements_          = c.num_elements;

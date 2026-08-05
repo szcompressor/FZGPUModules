@@ -154,6 +154,207 @@ __global__ void rle_pack_kernel(
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Chunked path
+//
+// One thread block owns one chunk end to end, so the device-wide scan and the
+// four-kernel dependency chain of the global path both disappear: encode is a
+// single kernel plus a scan over num_chunks (not n) plus a compaction pass.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Threads per chunk-owning block.  256 keeps the BlockScan cheap while still
+/// covering a 16 KB / 2-byte chunk in 32 tile iterations.
+static constexpr int RLE_CHUNK_BLOCK = 256;
+
+/**
+ * Encode every chunk independently.
+ *
+ * Block `c` walks its chunk in `RLE_CHUNK_BLOCK`-wide tiles, marking run
+ * boundaries and compacting them with a block-local exclusive scan.  Runs are
+ * written into the chunk's *worst-case* scratch slot (`c * elems_per_chunk`),
+ * so no inter-block coordination is needed; a later pass compacts them.
+ *
+ * Run lengths need the *next* boundary, which may live in a later tile, so the
+ * boundary positions are staged in `starts_scratch` and differenced once the
+ * whole chunk has been scanned.
+ */
+template<typename T>
+__global__ void rle_chunk_encode_kernel(
+    const T* __restrict__ input,
+    const size_t n,
+    const uint32_t elems_per_chunk,
+    T* __restrict__ values_scratch,
+    uint32_t* __restrict__ lengths_scratch,
+    uint32_t* __restrict__ starts_scratch,
+    uint32_t* __restrict__ runs_per_chunk
+) {
+    using BlockScanT = cub::BlockScan<uint32_t, RLE_CHUNK_BLOCK>;
+    __shared__ typename BlockScanT::TempStorage scan_tmp;
+    __shared__ uint32_t s_run_base;
+
+    const uint32_t c     = blockIdx.x;
+    const size_t   start = static_cast<size_t>(c) * elems_per_chunk;
+    if (start >= n) return;
+    const size_t   avail = n - start;
+    const uint32_t len   = (avail < static_cast<size_t>(elems_per_chunk))
+                               ? static_cast<uint32_t>(avail) : elems_per_chunk;
+
+    if (threadIdx.x == 0) s_run_base = 0;
+    __syncthreads();
+
+    for (uint32_t tile = 0; tile < len; tile += RLE_CHUNK_BLOCK) {
+        const uint32_t i = tile + threadIdx.x;
+        uint32_t flag = 0;
+        T        v    = T();
+        if (i < len) {
+            v    = input[start + i];
+            // i == 0 forces a boundary at the chunk head: that is exactly what
+            // makes chunks independently decodable, and the CR cost of it.
+            flag = (i == 0 || v != input[start + i - 1]) ? 1u : 0u;
+        }
+
+        uint32_t pos = 0, tile_runs = 0;
+        BlockScanT(scan_tmp).ExclusiveSum(flag, pos, tile_runs);
+
+        if (flag) {
+            const uint32_t r = s_run_base + pos;
+            values_scratch[start + r] = v;
+            starts_scratch[start + r] = i;
+        }
+        __syncthreads();                        // scan_tmp reuse + s_run_base RAW
+        if (threadIdx.x == 0) s_run_base += tile_runs;
+        __syncthreads();
+    }
+
+    const uint32_t runs = s_run_base;
+    if (threadIdx.x == 0) runs_per_chunk[c] = runs;
+    for (uint32_t r = threadIdx.x; r < runs; r += RLE_CHUNK_BLOCK) {
+        const uint32_t end = (r + 1 < runs) ? starts_scratch[start + r + 1] : len;
+        lengths_scratch[start + r] = end - starts_scratch[start + r];
+    }
+}
+
+/**
+ * Finish the chunk-offset table in the output header: write `num_chunks` and
+ * the total run count that terminates the exclusive-scan offsets.
+ */
+__global__ void rle_chunk_finalize_offsets_kernel(
+    uint8_t* __restrict__ output_base,
+    const uint32_t* __restrict__ runs_per_chunk,
+    const uint32_t num_chunks
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    uint32_t* hdr = reinterpret_cast<uint32_t*>(output_base);
+    hdr[0] = num_chunks;
+    // hdr[1 .. num_chunks] hold the exclusive scan written by CUB.
+    hdr[1 + num_chunks] = hdr[num_chunks] + runs_per_chunk[num_chunks - 1];
+}
+
+/**
+ * Compact each chunk's runs out of its worst-case scratch slot into the packed
+ * output, and zero the alignment padding.
+ *
+ * `total_runs` is read from the on-device offset table, so the layout
+ * arithmetic never round-trips through the host — the whole forward chunked
+ * path stays CUDA Graph-capturable.
+ */
+template<typename T>
+__global__ void rle_chunk_compact_kernel(
+    const T* __restrict__ values_scratch,
+    const uint32_t* __restrict__ lengths_scratch,
+    uint8_t* __restrict__ output_base,
+    const uint32_t elems_per_chunk,
+    const uint32_t num_chunks,
+    const uint32_t values_offset
+) {
+    const uint32_t* offsets    = reinterpret_cast<const uint32_t*>(output_base) + 1;
+    const uint32_t  total_runs = offsets[num_chunks];
+    const uint32_t  values_bytes   = total_runs * static_cast<uint32_t>(sizeof(T));
+    const uint32_t  values_aligned = (values_bytes + 3u) & ~3u;
+
+    T*        out_values  = reinterpret_cast<T*>(output_base + values_offset);
+    uint32_t* out_lengths = reinterpret_cast<uint32_t*>(
+        output_base + values_offset + values_aligned);
+
+    const uint32_t c = blockIdx.x;
+    if (c >= num_chunks) return;
+
+    if (c == 0 && threadIdx.x == 0) {
+        // Neither the offset table nor the per-run writes cover these pads.
+        for (uint32_t b = (num_chunks + 2) * sizeof(uint32_t); b < values_offset; b++)
+            output_base[b] = 0;
+        uint8_t* pad = output_base + values_offset + values_bytes;
+        for (uint32_t b = 0; b < values_aligned - values_bytes; b++) pad[b] = 0;
+    }
+
+    const uint32_t dst  = offsets[c];
+    const uint32_t runs = offsets[c + 1] - dst;
+    const size_t   src  = static_cast<size_t>(c) * elems_per_chunk;
+    for (uint32_t r = threadIdx.x; r < runs; r += RLE_CHUNK_BLOCK) {
+        out_values[dst + r]  = values_scratch[src + r];
+        out_lengths[dst + r] = lengths_scratch[src + r];
+    }
+}
+
+/**
+ * Expand one chunk per block.  Within-chunk output positions come from a
+ * block-local scan of the run lengths, so no prefix sum over the whole stream
+ * (and no readback of the total element count) is needed.
+ */
+template<typename T>
+__global__ void rle_chunk_decode_kernel(
+    const uint8_t* __restrict__ input_base,
+    T* __restrict__ output,
+    const size_t n,
+    const uint32_t elems_per_chunk,
+    const uint32_t num_chunks,
+    const uint32_t values_offset
+) {
+    using BlockScanT = cub::BlockScan<uint32_t, RLE_CHUNK_BLOCK>;
+    __shared__ typename BlockScanT::TempStorage scan_tmp;
+    __shared__ uint32_t s_out_base;
+
+    const uint32_t* offsets    = reinterpret_cast<const uint32_t*>(input_base) + 1;
+    const uint32_t  total_runs = offsets[num_chunks];
+    const uint32_t  values_bytes   = total_runs * static_cast<uint32_t>(sizeof(T));
+    const uint32_t  values_aligned = (values_bytes + 3u) & ~3u;
+
+    const T* values = reinterpret_cast<const T*>(input_base + values_offset);
+    const uint32_t* lengths = reinterpret_cast<const uint32_t*>(
+        input_base + values_offset + values_aligned);
+
+    const uint32_t c = blockIdx.x;
+    if (c >= num_chunks) return;
+    const size_t   start = static_cast<size_t>(c) * elems_per_chunk;
+    const size_t   avail = n - start;
+    const uint32_t len   = (avail < static_cast<size_t>(elems_per_chunk))
+                               ? static_cast<uint32_t>(avail) : elems_per_chunk;
+
+    const uint32_t base = offsets[c];
+    const uint32_t runs = offsets[c + 1] - base;
+
+    if (threadIdx.x == 0) s_out_base = 0;
+    __syncthreads();
+
+    for (uint32_t tile = 0; tile < runs; tile += RLE_CHUNK_BLOCK) {
+        const uint32_t r = tile + threadIdx.x;
+        const uint32_t run_len = (r < runs) ? lengths[base + r] : 0u;
+
+        uint32_t pos = 0, tile_total = 0;
+        BlockScanT(scan_tmp).ExclusiveSum(run_len, pos, tile_total);
+
+        if (r < runs) {
+            const T v = values[base + r];
+            uint32_t o = s_out_base + pos;
+            for (uint32_t k = 0; k < run_len && o + k < len; k++)
+                output[start + o + k] = v;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) s_out_base += tile_total;
+        __syncthreads();
+    }
+}
+
 // ── Kernel launcher (inverse / decompression) ────────────────────────────────
 template<typename T>
 void launchRLEDecompressKernel(
@@ -200,7 +401,27 @@ void RLEStage<T>::execute(
         throw std::runtime_error("RLEStage: Invalid inputs/outputs");
     }
 
-    if (is_inverse_) {
+    if (is_inverse_ && isChunked()) {
+        // ── DECOMPRESSION, chunked ───────────────────────────────────────────
+        // The element count and chunk size both come from the serialized stage
+        // header, so nothing has to be read back from the stream.
+        const size_t n = cached_num_elements_;
+        if (n == 0) { actual_output_sizes_ = {0}; return; }
+
+        const uint32_t epc = elemsPerChunk();
+        const uint32_t nc  = static_cast<uint32_t>(numChunks(n * sizeof(T)));
+        const uint32_t values_offset =
+            static_cast<uint32_t>(rleChunkedValuesOffset<T>(nc));
+        FZ_LOG(TRACE, "RLE decode (chunked): %u chunks -> %zu elems", nc, n);
+
+        rle_chunk_decode_kernel<T><<<nc, RLE_CHUNK_BLOCK, 0, stream>>>(
+            static_cast<const uint8_t*>(inputs[0]), static_cast<T*>(outputs[0]),
+            n, epc, nc, values_offset);
+        FZ_CUDA_CHECK(cudaGetLastError());
+
+        actual_output_sizes_ = {n * sizeof(T)};
+
+    } else if (is_inverse_) {
         // ── DECOMPRESSION ────────────────────────────────────────────────────
         // Read num_runs from the first 4 bytes of the compressed stream.
         // This D2H sync is unavoidable with the current compact wire format;
@@ -325,6 +546,54 @@ void RLEStage<T>::execute(
 
         const T*    input      = static_cast<const T*>(inputs[0]);
         uint8_t*    out_base   = static_cast<uint8_t*>(outputs[0]);
+
+        if (isChunked()) {
+            // ── COMPRESSION, chunked (CUDA Graph-capturable) ─────────────────
+            const uint32_t epc = elemsPerChunk();
+            const uint32_t nc  = static_cast<uint32_t>(numChunks(byte_size));
+            const uint32_t values_offset =
+                static_cast<uint32_t>(rleChunkedValuesOffset<T>(nc));
+
+            // d_boundary_scan_ (n × u32, n ≥ nc) doubles as the per-chunk run
+            // counts; d_boundary_positions_ holds the per-chunk run starts.
+            uint32_t* d_runs_per_chunk = d_boundary_scan_;
+
+            rle_chunk_encode_kernel<T><<<nc, RLE_CHUNK_BLOCK, 0, stream>>>(
+                input, n, epc, d_values_scratch_, d_lengths_scratch_,
+                d_boundary_positions_, d_runs_per_chunk);
+            FZ_CUDA_CHECK(cudaGetLastError());
+
+            // Exclusive scan of the run counts, written straight into the
+            // output's offset table (entries [1 .. nc]).
+            uint32_t* d_offsets = reinterpret_cast<uint32_t*>(out_base) + 1;
+            {
+                auto d_tmp = fz::backend::withTempStorage(pool, stream, "rle_chunk_scan_tmp",
+                    [&](void* tmp, size_t& bytes) {
+                        cub::DeviceScan::ExclusiveSum(tmp, bytes,
+                                                      d_runs_per_chunk, d_offsets,
+                                                      static_cast<int>(nc), stream);
+                    });
+                fz::backend::freeTempStorage(pool, d_tmp, stream);
+            }
+
+            rle_chunk_finalize_offsets_kernel<<<1, 1, 0, stream>>>(
+                out_base, d_runs_per_chunk, nc);
+            FZ_CUDA_CHECK(cudaGetLastError());
+
+            rle_chunk_compact_kernel<T><<<nc, RLE_CHUNK_BLOCK, 0, stream>>>(
+                d_values_scratch_, d_lengths_scratch_, out_base,
+                epc, nc, values_offset);
+            FZ_CUDA_CHECK(cudaGetLastError());
+
+            // total_runs terminates the offset table; async D2H for the size.
+            FZ_CUDA_CHECK(cudaMemcpyAsync(h_num_runs_,
+                           reinterpret_cast<uint32_t*>(out_base) + 1 + nc,
+                           sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+            fwd_last_stream_  = stream;
+            fwd_sync_pending_ = true;
+            return;
+        }
+
         const int   block_size = 256;
         const int   grid_size  = static_cast<int>((n + block_size - 1) / block_size);
 

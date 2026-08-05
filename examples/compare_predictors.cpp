@@ -22,8 +22,8 @@
  *   - PSNR vs the input data range
  *
  * Shared settings:
- *   - ErrorBoundMode::REL (eb is relative to the data range — the standard
- *     comparison mode in the SZ family)
+ *   - ErrorBoundMode::PREL (abs_eb = eb x max(|data|); the predictor-fused
+ *     stages have no exact point-wise relative mode — see QuantizerStage REL)
  *   - quant_radius = 1024  (zigzag-compatible; fits Huffman bklen)
  *   - outlier_capacity = 10% of N
  *   - LorenzoQuant uses zigzag (cuSZ-style); G-Interp does not zigzag
@@ -103,7 +103,7 @@ static void build_lorenzo_pipeline(Pipeline& p, float eb, size_t dim_x, size_t d
 
     auto* lq = p.addStage<LorenzoQuantStage<float, uint16_t>>();
     lq->setErrorBound(eb);
-    lq->setErrorBoundMode(ErrorBoundMode::REL);
+    lq->setErrorBoundMode(ErrorBoundMode::PREL);
     lq->setQuantRadius(QUANT_RADIUS);
     lq->setOutlierCapacity(OUTLIER_CAP);
     lq->setZigzagCodes(true);   // [-radius, radius-1] → [0, 2*radius-2]
@@ -121,7 +121,7 @@ static void build_ginterp_pipeline(Pipeline& p, float eb, size_t dim_x, size_t d
 
     auto* gi = p.addStage<GInterpStage<float, uint16_t>>();
     gi->setErrorBound(eb);
-    gi->setErrorBoundMode(ErrorBoundMode::REL);
+    gi->setErrorBoundMode(ErrorBoundMode::PREL);
     gi->setQuantRadius(QUANT_RADIUS);
     gi->setOutlierCapacity(OUTLIER_CAP);
     gi->setAutoTuning(GINTERP_TUNE);

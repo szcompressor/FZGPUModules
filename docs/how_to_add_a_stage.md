@@ -113,7 +113,7 @@ Required overrides:
 #pragma once
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"   // NOT <cuda_runtime.h> — see Step 3b
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -274,7 +274,7 @@ transparently.
 #include "<category>/<name>/<name>_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"   // FZ_CUDA_CHECK macro (internal use only — do not use in examples)
-#include <cuda_runtime.h>
+#include "backend/api.h"  // NOT <cuda_runtime.h> — see Step 3b
 #include <stdexcept>
 
 namespace fz {
@@ -341,6 +341,61 @@ Two patterns that avoid atomics for packing:
 // Pattern B: atomicOr / atomicCAS.
 // More flexible, slower. Prefer Pattern A when the mapping is regular.
 ```
+
+---
+
+## Step 3b — Backend portability (HIP) *(required)*
+
+The library builds against CUDA **or** HIP (`-DFZGMOD_BACKEND=HIP`, targeting CDNA /
+MI100 `gfx908`). A new stage is expected to compile and run on both. This costs almost
+nothing if you follow one rule from the start, and is painful to retrofit:
+
+> **Never name a CUDA entity directly. Route everything through `include/backend/`.**
+
+The facade is deliberately spelled with CUDA names — `cudaMalloc`, `cudaStream_t`,
+`cub::BlockScan` all keep working — and `backend/api.h` re-points them at HIP. So your
+kernel still reads as ordinary CUDA; what changes is the **includes**, plus the handful
+of warp/atomic intrinsics whose CUDA and HIP semantics genuinely differ.
+
+### Substitutions
+
+| Instead of | Use | Why |
+|---|---|---|
+| `#include <cuda_runtime.h>` in `_stage.h` | `#include "backend/types.h"` | HIP has no such header |
+| `#include <cuda_runtime.h>` in `_stage.cu` | `#include "backend/api.h"` | as above, plus the API remap macros |
+| `#include <cub/cub.cuh>` | `#include "backend/cub.h"` | aliases `namespace cub = hipcub`. Also prevents a bare cub include silently resolving to NVIDIA's cub during a HIP build on machines with a CUDA toolkit on `CPATH` |
+| `thrust::cuda::par` | `fz::backend::detail::parOn(stream)` | rocThrust uses `thrust::hip::par` |
+| `__shfl_*_sync(0xffffffff, v, d)` | `fz::backend::shflUp/shflDown/shflXor/shfl(v, d, width)` | the 32-bit mask is a hard `static_assert` failure under HIP, and the implicit `width` defaults to `warpSize` — **64** on CDNA. `width` is a required argument here so this can't happen silently |
+| `__ballot_sync` / `__any_sync` | `fz::backend::ballotSync32` / `anySync32` | on a 64-wide wavefront the upper lanes' ballot bits land at `[32:63]`; these restrict to the caller's own 32-lane half and normalize back to `[0:31]` |
+| `atomicAdd_block` / `atomicOr_block` / `atomicMax_block` | `fz::backend::atomicAddBlock` / `atomicOrBlock` / `atomicMaxBlock` | the `_block` suffix family is CUDA-only spelling; ROCm declares none of it |
+| hand-rolled cub size-then-run scratch dance | `fz::backend::withTempStorage()` | already backend-neutral |
+| inline PTX / `asm volatile` / `__lanemask_*` | **nothing — rewrite it** | unportable; this is why the vendored dietgpu ANS tree is excluded from the HIP build entirely |
+
+Ordinary device intrinsics need no change and behave identically: `__ffs`, `__popc`,
+`__clz`, `__brev`, `__syncthreads`, `__ldg`, unscoped `atomicAdd`/`atomicMax`,
+`__launch_bounds__`, `<<<>>>` launches.
+
+### The part no wrapper can fix: 32-lane algorithms
+
+A facade can correct the mask and the default width, but it cannot know whether your
+*algorithm* is intrinsically 32-lane. If a kernel does a 32-lane butterfly, packs a ballot
+into a 32-bit wire format, or does lane math like `tid & 31` / `tid >> 5`, **pass a literal
+`32` as `width` and comment why** — do not let it inherit `warpSize`. Worked examples:
+`modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu` (bit-transpose butterfly) and
+`modules/coders/gpulz/gpulz_stage.cu` (the `anySync32(...) && (tid & 31) == 0 → shared flag`
+pattern, which is correct on 64-wide wavefronts because each half computes its own answer
+and OR-writes the same flag).
+
+### Also worth checking
+
+- **Static shared memory.** gfx908 has 64 KB LDS per workgroup vs. CUDA's 48 KB static
+  limit, so CUDA-sized kernels fit — but a kernel that used `cudaFuncSetAttribute(...,
+  MaxDynamicSharedMemorySize, ...)` to exceed 48 KB on NVIDIA may not fit on AMD.
+- Add the `.cu` to the **unconditional** source list in `CMakeLists.txt` (Step 6) — the
+  only per-backend exclusion today is dietgpu ANS, and it is a documented stopgap.
+
+The full audit recipe (grep commands, the `api.h` symbol cross-check, and the HIP build
+and test invocation) lives in `memory/hip_compliance.md`.
 
 ---
 
@@ -577,6 +632,7 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 
 - [ ] `<name>_stage.h` — all required overrides implemented
 - [ ] `<name>_stage.cu` — `execute()` enqueues on `stream`; if it calls `cudaStreamSynchronize(stream)`, `isGraphCompatible()` returns `false` and sync points are documented
+- [ ] HIP compliance (Step 3b): `backend/types.h` + `backend/api.h` instead of `<cuda_runtime.h>`; `backend/cub.h` instead of `<cub/...>`; warp intrinsics and `_block` atomics via `fz::backend::`; any 32-lane algorithm passes a literal `width = 32`; no inline PTX
 - [ ] `StageType` enum value added (unique integer, never reuse old values)
 - [ ] `stageTypeToString()` case added
 - [ ] `createStage()` factory case added

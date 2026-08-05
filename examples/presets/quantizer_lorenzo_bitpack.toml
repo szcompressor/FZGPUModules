@@ -30,9 +30,21 @@ type = "Lorenzo"
 data_type = "int32"
 inputs = [{from = "quant", port = "codes"}]
 
+# Lorenzo emits SIGNED residuals. Feeding them straight to Bitpack does not work:
+# reinterpreted as uint32 the negative ones sit near 2^32, so every value needs the
+# full 32 bits and the packing is a no-op. Zigzag maps them to small unsigned
+# magnitudes (-1 -> 1, 1 -> 2, -2 -> 3, ...) so they actually fit in nbits.
+[[stage]]
+name = "zz"
+type = "Zigzag"
+input_type = "int32"
+output_type = "uint32"
+inputs = [{from = "lrz", port = "output"}]
+
 [[stage]]
 name = "pack"
 type = "Bitpack"
 input_type = "uint32"
-nbits = 12
-inputs = [{from = "lrz", port = "output"}]
+# Must be a power of two (see docs/stages/bitpack.md).
+nbits = 16
+inputs = [{from = "zz"}]

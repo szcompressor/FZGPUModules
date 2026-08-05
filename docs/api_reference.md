@@ -35,13 +35,21 @@ Defined in `include/pipeline/dag.h`.
 | `PREALLOCATE` | Allocate all buffers during `finalize()`. Required for CUDA Graph capture. Enables buffer coloring for lower memory footprint. |
 
 ### fz::ErrorBoundMode
-Defined in `modules/fused/lorenzo_quant/lorenzo_quant.h`. Used by `LorenzoQuantStage` and `QuantizerStage`.
+Defined in `modules/fused/lorenzo_quant/lorenzo_quant.h`. Used by `LorenzoQuantStage`, `QuantizerStage`, and `GInterpStage`.
 
 | Value | Meaning | Notes |
 |-------|---------|-------|
 | `ABS` | Absolute error — `abs(x_orig - x_recon) ≤ eb` | Useful when data is homogenous in magnitude (preserve big picture) |
-| `REL` | Global approximate point-wise relative — `abs(error) / abs(x_orig) ≤ eb` (approximately) | High level detail close to zero, but higher error with larger values |
+| `REL` | **Guaranteed** point-wise relative — `abs(error) / abs(x_orig) ≤ eb` for **every** element | Implemented **only** by `QuantizerStage`, via log-space quantization. `LorenzoQuantStage` / `GInterpStage` accept it as a deprecated alias for `PREL` and warn. |
 | `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute) | Useful for single bounds over multiple datasets |
+| `PREL` | **Pseudo**-relative — `abs_eb = eb × max(abs(data))`, then applied as a plain `ABS` bound | Bounds `error / max(abs(x))`, **not** `error / abs(x)`. The cheap approximation used by the predictor-fused stages, which cannot vary the bound per element. |
+
+**`REL` vs `PREL` — the distinction that matters.** `PREL` is only as tight as
+`REL` for elements at the peak magnitude. An element at 1% of peak sees an
+effective relative error 100× looser than the `eb` you asked for, and elements
+near zero are unbounded in relative terms. If you need a per-element relative
+guarantee, `QuantizerStage` with `REL` is the only stage that provides it.
+`examples/eb_mode_analysis.cpp` measures this on your own data.
 
 ---
 

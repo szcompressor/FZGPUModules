@@ -1,25 +1,25 @@
 {
   "schemaVersion": "1.0",
-
   "id": "fzgm-bitpack",
   "stage": "BitpackStage",
   "name": "Fixed-Width Bit Packer",
-
   "zhubModule": "bit-packing",
   "isNewGeneralModule": false,
-
   "category": "coder",
   "algorithm": "bitpack",
-  "description": "GPU fixed-width bit-packing stage. Forward: packs each element using only the low nbits bits into a dense byte stream. Inverse: unpacks, zero-extending to full width. nbits must be a power of two (allowed: u8→{1,2,4,8}; u16→{1,2,4,8,16}; u32→{1,2,4,8,16,32}). Auto-detect mode (setAutoDetect) scans the input for its maximum value and selects the smallest valid nbits; incompatible with CUDA Graph capture.",
-
+  "description": "GPU fixed-width bit-packing stage. Forward: packs (v - base) >> shift using only the low nbits bits into a dense byte stream. Inverse: unpacks and restores (packed << shift) + base. nbits must be a power of two (allowed: u8→{1,2,4,8}; u16→{1,2,4,8,16}; u32→{1,2,4,8,16,32}). The optional shift transform combines a frame-of-reference base (removes dead high bits, always lossless) with a right shift (removes dead low bits; lossless only when every value has that many trailing zeros). Auto modes (autoDetect / autoBase / autoShift) derive nbits, base, and shift from a GPU scan of the input; any of them makes the stage incompatible with CUDA Graph capture. Default configuration (base=0, shift=0) is lossless.",
   "lossy": false,
   "hardware": "gpu",
-
   "io": {
-    "inputDtypes": ["u8", "u16", "u32"],
-    "outputDtypes": ["u8"]
+    "inputDtypes": [
+      "u8",
+      "u16",
+      "u32"
+    ],
+    "outputDtypes": [
+      "u8"
+    ]
   },
-
   "config": [
     {
       "name": "nbits",
@@ -33,14 +33,38 @@
       "type": "bool",
       "default": false,
       "description": "Scan input for max value and pick the smallest valid power-of-two nbits. Requires a D2H sync; incompatible with CUDA Graph capture."
+    },
+    {
+      "name": "base",
+      "type": "int",
+      "default": 0,
+      "description": "Frame-of-reference offset subtracted before packing and added back on unpack. Removes dead high bits when values cluster away from zero. Always lossless.",
+      "min": 0
+    },
+    {
+      "name": "shift",
+      "type": "int",
+      "default": 0,
+      "description": "Right shift applied after the base subtraction, removing dead low bits. LOSSY unless every (v - base) has this many trailing zeros; use autoShift for the provably lossless value. Must be in [0, 8*sizeof(T)-1].",
+      "min": 0
+    },
+    {
+      "name": "autoBase",
+      "type": "bool",
+      "default": false,
+      "description": "Min-reduce the input and use the minimum as base. Lossless. Requires a D2H sync; incompatible with CUDA Graph capture."
+    },
+    {
+      "name": "autoShift",
+      "type": "bool",
+      "default": false,
+      "description": "OR-reduce every (v - base) and use the trailing-zero count as shift, i.e. the largest shift that drops no information. Always lossless. Requires a D2H sync; incompatible with CUDA Graph capture."
     }
   ],
-
   "provenance": {
     "relationship": "original",
     "license": "BSD-3-Clause"
   },
-
   "docs": "stage_bitpack.html",
   "sourcePath": "modules/coders/bitpack",
   "versionAdded": "1.0"

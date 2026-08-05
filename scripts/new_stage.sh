@@ -122,7 +122,7 @@ cat > "${MODULE_DIR}/${LOWER}_stage.h" << HEADER
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include <cuda_runtime.h>
+#include "backend/types.h"   // NOT <cuda_runtime.h> — see memory/hip_compliance.md
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -239,7 +239,7 @@ cat > "${MODULE_DIR}/${LOWER}_stage.cu" << IMPL
 #include "${CATEGORY}/${LOWER}/${LOWER}_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
-#include <cuda_runtime.h>
+#include "backend/api.h"     // NOT <cuda_runtime.h> — see memory/hip_compliance.md
 #include <stdexcept>
 #include <string>
 

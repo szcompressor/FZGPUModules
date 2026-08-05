@@ -512,7 +512,7 @@ TEST(GInterpStage, GI17_RoundTripREL_3D) {
     p.setDims(NX, NY, NZ);
     auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
     stage->setErrorBound(eb);
-    stage->setErrorBoundMode(ErrorBoundMode::REL);
+    stage->setErrorBoundMode(ErrorBoundMode::PREL);
     p.finalize();
 
     CudaStream cs;
@@ -569,7 +569,7 @@ TEST(GInterpStage, GI19_RoundTripREL_2D) {
     p.setDims(NX, NY, NZ);
     auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
     stage->setErrorBound(eb);
-    stage->setErrorBoundMode(ErrorBoundMode::REL);
+    stage->setErrorBoundMode(ErrorBoundMode::PREL);
     p.finalize();
 
     CudaStream cs;
@@ -1270,7 +1270,7 @@ TEST(GInterpStage, GI42_isGraphCompatible_ConfigAware) {
 
     // REL/NOA without precomputed_value_base → scan fires
     stage.setAutoTuning(0);
-    stage.setErrorBoundMode(ErrorBoundMode::REL);
+    stage.setErrorBoundMode(ErrorBoundMode::PREL);
     EXPECT_FALSE(stage.isGraphCompatible()) << "REL without value_base fires scan";
 
     stage.setValueBase(1.0f);
@@ -1571,7 +1571,7 @@ TEST(GInterpStage, GID3_RoundTripREL_Double3D) {
     p.setDims(NX, NY, NZ);
     auto* stage = p.addStage<GInterpStage<double, uint16_t>>();
     stage->setErrorBound(static_cast<float>(rel_eb));
-    stage->setErrorBoundMode(ErrorBoundMode::REL);
+    stage->setErrorBoundMode(ErrorBoundMode::PREL);
     p.finalize();
 
     CudaStream cs;

@@ -739,25 +739,30 @@ void QuantizerStage<TInput, TCode>::execute(
         computed_abs_eb_     = static_cast<TInput>(0);
         computed_value_base_ = 0.0f;
     } else {
-        // NOA: scan for value_range
+        // NOA:  scan for value_range   = max(data) - min(data)
+        // PREL: scan for value_base    = max(|data|)
+        // Both then collapse to a single absolute bound.
+        const char* mode_name =
+            (config_.eb_mode == ErrorBoundMode::NOA) ? "NOA" : "PREL";
         float value_base = config_.precomputed_value_base;
         if (value_base <= 0.0f) {
             value_base = computeValueBase<TInput>(
                 static_cast<const TInput*>(inputs[0]),
-                scan_N, ErrorBoundMode::NOA, stream, pool);
+                scan_N, config_.eb_mode, stream, pool);
         }
         computed_value_base_ = value_base;
         if (value_base <= 0.0f) {
             FZ_LOG(WARN,
-                "QuantizerStage NOA: value_range is zero (constant/empty data?); "
-                "falling back to ABS with user_eb");
+                "QuantizerStage %s: value base is zero (constant/empty data?); "
+                "falling back to ABS with user_eb", mode_name);
             computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
         } else {
             computed_abs_eb_ = static_cast<TInput>(config_.error_bound)
                                * static_cast<TInput>(value_base);
         }
         FZ_LOG(DEBUG,
-            "QuantizerStage NOA: user_eb=%.6g value_range=%.6g -> abs_eb=%.6g",
+            "QuantizerStage %s: user_eb=%.6g value_base=%.6g -> abs_eb=%.6g",
+            mode_name,
             static_cast<double>(config_.error_bound),
             static_cast<double>(value_base),
             static_cast<double>(computed_abs_eb_));

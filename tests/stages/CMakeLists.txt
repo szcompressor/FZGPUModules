@@ -132,6 +132,14 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── LogTransformStage (log-space point-wise relative transform) ─────────────
+fz_add_test(
+    NAME    test_log_transform
+    SOURCES test_log_transform.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── MergeStage (structural concat/split) ────────────────────────────────────
 fz_add_test(
     NAME    test_merge_stage
@@ -160,6 +168,14 @@ fz_add_test(
 fz_add_test(
     NAME    test_lorenzo
     SOURCES test_lorenzo.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── Per-tile adaptive multi-order Lorenzo (FSZ prediction stage) ────────────
+fz_add_test(
+    NAME    test_adaptive_lorenzo
+    SOURCES test_adaptive_lorenzo.cpp
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )

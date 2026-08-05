@@ -40,7 +40,7 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | Setting | Purpose | Notes |
 |---|---|---|
 | `setErrorBound(eb)` | User error bound | Interpreted by `setErrorBoundMode()` |
-| `setErrorBoundMode(mode)` | ABS / NOA / REL | REL is exact pointwise relative (log-space) |
+| `setErrorBoundMode(mode)` | ABS / NOA / REL / PREL | **`REL` is the exact pointwise relative bound** (log-space) — this is the only stage that provides it |
 | `setQuantRadius(r)` | Quantization radius | Used by ABS/NOA modes |
 | `setOutlierCapacity(f)` | Outlier reserve fraction | 0.0-1.0 of element count |
 | `setZigzagCodes(enable)` | Zigzag-encode codes | ABS/NOA only; improves compressibility |

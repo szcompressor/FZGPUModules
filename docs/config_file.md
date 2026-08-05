@@ -143,14 +143,47 @@ string; runtime spatial dimensions come from [pipeline].dims.
 | input_type | string | "float32" | Input element type. "float32" or "float64". |
 | code_type | string | "uint16" | Quantization code type. "uint8", "uint16", or "uint32". |
 | error_bound | float | 1e-3 | Error bound value. Interpretation depends on error_bound_mode. |
-| error_bound_mode | string | "ABS" | "ABS" (absolute), "REL" (point-wise relative), or "NOA" (value-range relative). |
+| error_bound_mode | string | "ABS" | "ABS" (absolute), "NOA" (value-range relative), or "PREL" (pseudo-relative, `eb × max\|data\|`). "REL" is accepted but warns and maps to "PREL" — this stage has no exact per-element relative bound. |
 | quant_radius | integer | 32768 | Quantization radius. Must match the range of code_type (e.g. 32768 for uint16). |
 | outlier_capacity | float | 0.2 | Fraction of elements reserved as outlier capacity (0.0-1.0). |
 | zigzag_codes | boolean | false | Zigzag-encode codes before output to improve downstream compressibility. |
+| centering | boolean | false | Per-tile mean centering: seed each 1024-element tile's prediction chain with the tile mean instead of 0, so its first residual is `q0 - mu` rather than the raw `q0`. **1-D only** — loading this with 2-D/3-D dims throws. Adds a "means" output port. Helps most on fields with a large constant offset; can hurt on sparse data where blocks already encode to nothing. |
 
-**Output ports:** "codes", "outlier_errors", "outlier_indices", "outlier_count".
+**Output ports:** "codes", "outlier_errors", "outlier_indices", "outlier_count"
+(plus "means" when `centering = true`).
 Ports not referenced in any downstream inputs become pipeline outputs and are
 stored in the .fzm file.
+
+### Lorenzo
+
+Plain integer Lorenzo predictor (lossless delta / prefix sum).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "int32" | Signed integer element type. "int8", "int16", "int32", or "int64". |
+| block_size | integer | 0 | 1-D block-local reset period. `0` = N-D inclusion-exclusion delta; `n > 0` forces the 1-D path resetting every `n` elements (cuSZp uses 32). Must be in [0, 1024]. |
+| centering | boolean | false | Per-block mean centering. Requires `block_size > 0`; adds a "means" output port. |
+| order | integer | 1 | Prediction order: `1` (first difference) or `2` (second difference, FSZ's LZ2). `2` requires `block_size > 0`. |
+
+**Output ports:** "output", plus "means" when `centering = true`.
+
+### AdaptiveLorenzo
+
+Per-tile adaptive multi-order Lorenzo predictor with centering (FSZ prediction
+stage). Picks LZ1 / LZ2 / LZ1+centering / LZ2+centering per tile by exact encoded
+byte cost. Pair with `AdaptiveBitpack` at `block_size = 32`, which is what the
+cost model assumes.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "int32" | Signed integer element type. "int16" or "int32". |
+| coder_block_size | integer | 32 | Downstream coder block size. Must be 32. |
+| blocks_per_tile | integer | 8 | Coder blocks per adaptation tile; tile = 32 x this. Must be in [1, 32]. |
+| enable_order2 | boolean | true | Include the second-order (LZ2) variants. |
+| enable_centering | boolean | true | Include the mean-centered variants. |
+
+**Output ports:** "output" (residuals), "modes" (1 byte per tile), "means"
+(one element per tile). Ports not referenced downstream become pipeline outputs.
 
 ### Bitshuffle
 
@@ -310,7 +343,7 @@ supports ABS, NOA, and REL (log-space) error bound modes.
 | input_type | string | "float32" | Input element type. "float32" or "float64". |
 | code_type | string | "uint32" | Quantization code type. "uint16" or "uint32". |
 | error_bound | float | 1e-3 | Error bound value. Interpretation depends on error_bound_mode. |
-| error_bound_mode | string | "REL" | "ABS" (absolute), "REL" (pointwise relative log-space), or "NOA" (value-range relative). |
+| error_bound_mode | string | "REL" | "ABS" (absolute), "REL" (exact pointwise relative, log-space), "NOA" (value-range relative), or "PREL" (pseudo-relative, `eb × max\|data\|`). |
 | quant_radius | integer | 32768 | Quantization radius. |
 | outlier_capacity | float | 0.05 | Fraction of elements reserved as outlier capacity (0.0-1.0). |
 | zigzag_codes | boolean | true | Zigzag-encode codes before output to improve downstream compressibility. No effect in REL mode. |
@@ -356,6 +389,12 @@ bytes -- smaller than the input when nbits < 8*sizeof(T). nbits must be a power 
 |---|---|---|---|
 | input_type | string | "uint16" | Element type of the input codes. One of "uint8", "uint16", "uint32". |
 | nbits | integer | 16 | Bits per element. Must be a power of two: 1, 2, 4, 8 for uint8; 1-16 for uint16; 1-32 for uint32. |
+| base | integer | 0 | Frame-of-reference offset. Packs (v - base) and restores v = packed + base, removing dead high bits when values cluster away from zero. Always lossless. |
+| shift | integer | 0 | Right shift applied after the base subtraction, removing dead low bits. Must be in [0, 8*sizeof(T)-1]. **Lossy** unless every (v - base) has that many trailing zeros -- prefer auto_shift. |
+| auto_base | boolean | false | Min-reduce the input and use the minimum as base. Lossless. Disables CUDA Graph capture. |
+| auto_shift | boolean | false | OR-reduce every (v - base) and use its trailing-zero count as shift -- the largest shift that drops no information. Always lossless. Disables CUDA Graph capture. |
+| auto_detect | boolean | false | Scan for the maximum and pick the smallest power-of-two nbits covering the shifted range. Disables CUDA Graph capture. |
+| adaptive | boolean | false | Shorthand for auto_base + auto_shift + auto_detect: fully adaptive, lossless. |
 
 ### Huffman
 

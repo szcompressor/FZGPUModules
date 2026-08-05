@@ -45,7 +45,7 @@ Using any other combination will result in a linker error. Most common: `Lorenzo
 | Setting | Purpose | Notes |
 |---|---|---|
 | `setErrorBound(eb)` | User error bound | Interpreted by `setErrorBoundMode()` |
-| `setErrorBoundMode(mode)` | ABS / NOA / REL | REL is a global approximation (see below) |
+| `setErrorBoundMode(mode)` | ABS / NOA / PREL | `REL` warns and maps to `PREL` (see below) |
 | `setQuantRadius(r)` | Quantization radius | Must fit in `TCode` range |
 | `setOutlierCapacity(f)` | Outlier reserve fraction | 0.0-1.0x of element count |
 | `setZigzagCodes(enable)` | Zigzag-encode codes | Can improve compressibility |
@@ -95,11 +95,51 @@ p.connect(next_stage, lorenzo, "codes");
 |---|---|---|
 | `ABS` | `abs(error) <= eb` | Default |
 | `NOA` | `abs_eb = eb × (max - min)` | Uses value range; can be precomputed via `setValueBase()` |
-| `REL` | `abs_eb = eb × max(abs(data))` | Global approximation (not exact per-element) |
+| `PREL` | `abs_eb = eb × max(abs(data))` | Pseudo-relative; can be precomputed via `setValueBase()` |
+| `REL` | — | **Not supported here.** Deprecated alias for `PREL`; warns and maps. |
 
-REL is supported, but because it uses a single global scale (`max(abs(x))`), small
-values can exceed the per-element relative bound. For exact pointwise REL bounds,
-use `QuantizerStage` with `ErrorBoundMode::REL`.
+All three supported modes resolve to a **single absolute bound** before
+quantizing. That is inherent to the stage: it quantizes prediction *residuals*
+against one global tolerance, and reconstruction is a running prefix-sum over
+dequantized residuals, so a per-element varying bound cannot be threaded through
+it. For an exact pointwise relative bound use `QuantizerStage` with
+`ErrorBoundMode::REL`.
+
+### Why `PREL` is not `REL`
+
+`PREL` sets `abs_eb = eb × max(abs(x))` and then behaves exactly like `ABS`. It
+therefore bounds
+
+```
+|error| / max(|x|)  <=  eb          (what PREL gives you)
+|error| / |x|       <=  eb          (what REL means)
+```
+
+These agree only for elements at the peak magnitude. The effective per-element
+relative error degrades in direct proportion to how far below peak an element
+sits — roughly 10× looser per decade — and elements at or near zero are
+unbounded in relative terms.
+
+Measured on `CLDHGH.f32` (3600×1800) at `eb = 1e-3`, via
+`examples/eb_mode_analysis.cpp`:
+
+| `\|x\|` / peak | count | worst `\|e\|/\|x\|` | vs. requested `eb` |
+|---|---|---|---|
+| `[1e-1, 1e-0)` | 5,417,230 | 9.90e-03 | 9.9× |
+| `[1e-2, 1e-1)` | 1,050,426 | 9.09e-02 | 90.9× |
+| `[1e-3, 1e-2)` | 12,344 | 3.33e-01 | 333.3× |
+
+74% of elements exceed the requested relative bound. `QuantizerStage` REL on the
+same data stays at 1.0× in every decade with zero violations.
+
+**When `PREL` is nevertheless the right choice:** when what you actually care
+about is fidelity relative to the *field's* scale rather than each element's —
+which is the common case for PSNR-driven work, and is why the SZ family reports
+against the data range. `PREL` and `NOA` differ only in the scan statistic
+(`max|x|` vs `max−min`) and coincide within 2× for data straddling zero.
+
+Run `examples/eb_mode_analysis.cpp` on your own data to see the profile before
+committing to a mode.
 
 ---
 

@@ -55,6 +55,10 @@ struct CliSettings {
 
     float error_bound = 1e-3f;
     ErrorBoundMode error_mode = ErrorBoundMode::REL;
+    /// True once `--mode` is seen. Lets the predictor stages distinguish "the
+    /// user asked for REL" (warn, map to PREL) from "REL is just the default"
+    /// (map to PREL silently — that is what the default has always done).
+    bool error_mode_explicit = false;
     int quant_radius = 32768;
 
     MemoryStrategy strategy = MemoryStrategy::PREALLOCATE;
@@ -153,10 +157,11 @@ static bool parse_bool(const std::string& text, const char* name) {
 
 static ErrorBoundMode parse_error_mode(const std::string& text) {
     const std::string mode = to_lower(trim(text));
-    if (mode == "rel") return ErrorBoundMode::REL;
-    if (mode == "abs") return ErrorBoundMode::ABS;
-    if (mode == "noa") return ErrorBoundMode::NOA;
-    throw std::runtime_error("Unknown error mode: '" + text + "' (expected rel|abs|noa)");
+    if (mode == "rel")  return ErrorBoundMode::REL;
+    if (mode == "abs")  return ErrorBoundMode::ABS;
+    if (mode == "noa")  return ErrorBoundMode::NOA;
+    if (mode == "prel") return ErrorBoundMode::PREL;
+    throw std::runtime_error("Unknown error mode: '" + text + "' (expected rel|abs|noa|prel)");
 }
 
 static MemoryStrategy parse_strategy(const std::string& text) {
@@ -327,7 +332,10 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
     if (contains(opts, "type")) s->type = to_lower(opts.at("type"));
     if (contains(opts, "stages")) s->stages = opts.at("stages");
     if (contains(opts, "error-bound")) s->error_bound = parse_float(opts.at("error-bound"), "error-bound");
-    if (contains(opts, "mode")) s->error_mode = parse_error_mode(opts.at("mode"));
+    if (contains(opts, "mode")) {
+        s->error_mode = parse_error_mode(opts.at("mode"));
+        s->error_mode_explicit = true;
+    }
     if (contains(opts, "radius")) s->quant_radius = parse_integer<int>(opts.at("radius"), "radius");
     if (contains(opts, "strategy")) s->strategy = parse_strategy(opts.at("strategy"));
     if (contains(opts, "pool-mult")) s->pool_multiplier = parse_float(opts.at("pool-mult"), "pool-mult");
@@ -480,7 +488,12 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         if (name == "lorenzo") {
             auto* lrz = pipeline->addStage<LorenzoQuantStage<T, uint16_t>>();
             lrz->setErrorBound(s.error_bound);
-            lrz->setErrorBoundMode(s.error_mode);
+            // The CLI default (REL) predates the REL/PREL split and has always
+            // meant the approximate mode on this stage — map it silently. Only
+            // an explicit `--mode rel` earns the deprecation warning.
+            lrz->setErrorBoundMode(
+                (!s.error_mode_explicit && s.error_mode == ErrorBoundMode::REL)
+                    ? ErrorBoundMode::PREL : s.error_mode);
             lrz->setQuantRadius(s.quant_radius);
             lrz->setOutlierCapacity(0.10f);
             lrz->setZigzagCodes(true);
@@ -579,13 +592,20 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
                    name == "rle4" || name == "rle8") {
             // Optional trailing digit selects the word size (default 2, matching
             // the historical uint16_t default); mirrors rze[1|2|4|8]/rre[1|2|4|8].
+            // RLE defaults to its whole-array path; an explicit --chunk-size
+            // switches it to the (much faster, marginally worse CR) chunked
+            // path.  Unlike the other chunked coders it is not opted in by the
+            // default chunk size, so existing invocations are unaffected.
             Stage* rle = nullptr;
             const int width = name.size() > 3 ? (name[3] - '0') : 2;
+            const size_t rle_cs =
+                (s.chunk_size == kDefaultChunkSize) ? 0 : s.chunk_size;
+            auto set_cs = [&](auto* st) { st->setChunkSize(rle_cs); return st; };
             switch (width) {
-                case 1: rle = pipeline->addStage<RLEStage<uint8_t>>();  break;
-                case 2: rle = pipeline->addStage<RLEStage<uint16_t>>(); break;
-                case 4: rle = pipeline->addStage<RLEStage<uint32_t>>(); break;
-                case 8: rle = pipeline->addStage<RLEStage<uint64_t>>(); break;
+                case 1: rle = set_cs(pipeline->addStage<RLEStage<uint8_t>>());  break;
+                case 2: rle = set_cs(pipeline->addStage<RLEStage<uint16_t>>()); break;
+                case 4: rle = set_cs(pipeline->addStage<RLEStage<uint32_t>>()); break;
+                case 8: rle = set_cs(pipeline->addStage<RLEStage<uint64_t>>()); break;
             }
             connect_next(rle);
         } else if (name == "huffman" || name == "huf") {
@@ -721,9 +741,10 @@ static void print_summary(const std::string& label, const TimingSummary& stats, 
 
 static std::string error_mode_str(ErrorBoundMode m) {
     switch (m) {
-        case ErrorBoundMode::REL: return "rel";
-        case ErrorBoundMode::ABS: return "abs";
-        case ErrorBoundMode::NOA: return "noa";
+        case ErrorBoundMode::REL:  return "rel";
+        case ErrorBoundMode::ABS:  return "abs";
+        case ErrorBoundMode::NOA:  return "noa";
+        case ErrorBoundMode::PREL: return "prel";
     }
     return "rel";
 }

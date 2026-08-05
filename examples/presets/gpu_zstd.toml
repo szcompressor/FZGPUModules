@@ -31,7 +31,7 @@ type = "LorenzoQuant"
 input_type = "float32"
 code_type = "uint16"
 error_bound = 1e-3
-error_bound_mode = "REL"
+error_bound_mode = "PREL"
 # quant_radius is capped by the literals Huffman, not by the predictor:
 # HuffmanStage histograms into *shared* memory, so its 2*radius-entry codebook
 # has to fit there. 2048 -> 4096 entries -> 16 KB is fine; 32768 -> 64 K

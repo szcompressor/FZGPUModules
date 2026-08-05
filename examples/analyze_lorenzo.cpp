@@ -117,9 +117,11 @@ static Args parse_args(int argc, char** argv) {
         } else if (arg == "--eb-mode") {
             std::string m = next("--eb-mode");
             if (m == "abs") a.eb_mode = fz::ErrorBoundMode::ABS;
-            else if (m == "rel") a.eb_mode = fz::ErrorBoundMode::REL;
+            else if (m == "prel") a.eb_mode = fz::ErrorBoundMode::PREL;
             else if (m == "noa") a.eb_mode = fz::ErrorBoundMode::NOA;
-            else { std::cerr << "Unknown eb-mode: " << m << "\n"; std::exit(1); }
+            // "rel" kept as an alias; LorenzoQuantStage maps it to PREL and warns.
+            else if (m == "rel") a.eb_mode = fz::ErrorBoundMode::REL;
+            else { std::cerr << "Unknown eb-mode: " << m << " (abs|noa|prel)\n"; std::exit(1); }
         } else if (arg == "--radius") {
             a.radius = std::stoi(next("--radius"));
         } else if (arg == "--dims") {
@@ -294,6 +296,7 @@ int main(int argc, char** argv) {
             case fz::ErrorBoundMode::ABS: return "ABS";
             case fz::ErrorBoundMode::REL: return "REL";
             case fz::ErrorBoundMode::NOA: return "NOA";
+            case fz::ErrorBoundMode::PREL: return "PREL";
         }
         return "?";
     };

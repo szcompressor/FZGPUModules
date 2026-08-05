@@ -36,7 +36,7 @@ for the complete lifecycle/enum reference.
 |---|---|---|---|
 | Predictors | `modules/predictors/` | Model-based decorrelation (Lorenzo, tiled Lorenzo, diff/delta) | [docs/stages/predictors.md](docs/stages/predictors.md) |
 | Quantizers | `modules/quantizers/` | Lossy discrete mapping (error-bounded quantizer) | [docs/stages/quantizers.md](docs/stages/quantizers.md) |
-| Transforms | `modules/transforms/` | Invertible basis changes (zigzag, negabinary, ADM) | [docs/stages/transforms.md](docs/stages/transforms.md) |
+| Transforms | `modules/transforms/` | Invertible basis changes (zigzag, negabinary, ADM, log) | [docs/stages/transforms.md](docs/stages/transforms.md) |
 | Coders | `modules/coders/` | Symbol-to-bitstream encoding (RLE, RZE, RRE, bitpack, adaptive bitpack, Huffman, ANS) | [docs/stages/coders.md](docs/stages/coders.md) |
 | Shufflers | `modules/shufflers/` | Lossless data restructuring for better compressibility (bitshuffle) | [docs/stages/shufflers.md](docs/stages/shufflers.md) |
 | Fused | `modules/fused/` | Combined multi-operation kernels (lorenzo_quant, GInterp, bitplane_rze) | [docs/stages/fused.md](docs/stages/fused.md) |
