@@ -70,15 +70,25 @@ int high_level<E>::encode(
     // four 8-bit codes exactly fill the shard accumulator (4×8=32).  Longer codes
     // would overflow the reduce-merge in the ReVISIT-lite kernel.
     // HuffmanWord<4> layout: bitcount occupies bits [31:27] → h_bk4[i] >> 27.
-    bool use_fine = false;
-    if (buf->use_HFR) {
-        uint8_t max_cl = 0;
-        for (uint16_t i = 0; i < buf->rt_bklen; ++i) {
-            uint8_t cl = static_cast<uint8_t>(buf->h_bk4[i] >> 27);
-            if (cl > max_cl) max_cl = cl;
-        }
-        use_fine = (max_cl <= 8);
+    // Scanned unconditionally (a few thousand host iterations, negligible next to the
+    // kernels) so the max code length is reportable in coarse mode too — it is what
+    // tells a caller whether switching to Fine would actually take the fine path.
+    // Symbols with zero frequency are left as 0xffffffff by build_canonized_codebook
+    // and MUST be skipped: their bitcount field reads as 31, which is above the fine
+    // path's 8-bit limit and would veto the fine path on essentially every real book
+    // (any bklen larger than the number of distinct symbols has such slots).  No real
+    // entry can be 0xffffffff — bitcounts above FIELD_CODE=27 are clamped to
+    // OUTLIER_CUTOFF=28 — so the sentinel is unambiguous.
+    uint8_t max_cl = 0;
+    for (uint16_t i = 0; i < buf->rt_bklen; ++i) {
+        if (buf->h_bk4[i] == 0xffffffffu) continue;
+        uint8_t cl = static_cast<uint8_t>(buf->h_bk4[i] >> 27);
+        if (cl > max_cl) max_cl = cl;
     }
+    const bool use_fine = buf->use_HFR && (max_cl <= 8);
+
+    buf->last_max_codelen = max_cl;
+    buf->last_used_fine   = use_fine;
 
     if (use_fine) {
         phf_module<E>::GPU_fine_encode(

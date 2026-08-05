@@ -44,11 +44,12 @@ Only these types are compiled and linked:
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
 | `setBklen(n)` | `uint32_t` | 256 (U8), 1024 (U16/U32) | Codebook length — number of distinct symbols |
-| `setEncodeMode(m)` | `HuffmanEncodeMode` | `Coarse` | `Fine` removes the mid-encode CPU sync |
+| `setEncodeMode(m)` | `HuffmanEncodeMode` | `Coarse` | Leave at `Coarse`. `Fine` is experimental and does not engage on realistic data — see [Experimental: `Fine` encode mode](#huffman-fine-reachability) |
 | `setBookSource(s)` | `HuffmanBookSource` | `PerBlock` | `Adaptive`/`Fixed` reuse one codebook — see [Pre-built codebooks](#huffman-prebuilt-book) |
 | `setAdaptiveFloorShift(k)` | `uint8_t` | 24 | `Adaptive` frequency floor, as `max_freq >> k` |
 | `setRefitThreshold(r)` | `float` | 1.2 | `Adaptive` refits when the bit rate degrades past `r`x the fitted rate (0 = never) |
 | `setRefitInterval(n)` | `uint32_t` | 0 | `Adaptive` refits every `n` calls (0 = off) |
+| `setValidateSymbolRange(b)` | `bool` | `true` | GPU check that symbols stay in `[0, bklen)` when a book is pinned |
 | `setFixedBookFromModel(spec)` | `HuffmanBookSpec` | — | Build a `Fixed` book from an analytic distribution |
 | `setFixedBookFromFreq(f, n)` | `const uint32_t*`, `uint32_t` | — | Build a `Fixed` book from a frequency table |
 
@@ -126,11 +127,12 @@ name        = "huf"
 type        = "Huffman"
 input_type  = "uint16"   # "uint8", "uint16", or "uint32"
 bklen       = 1024       # optional; defaults to 256 (uint8) or 1024 (uint16/uint32)
-encode_mode = "Coarse"   # optional; "Coarse" (default) or "Fine"
+encode_mode = "Coarse"   # optional; leave at "Coarse" ("Fine" is experimental)
 book_source = "PerBlock" # optional; "PerBlock" (default), "Adaptive", or "Fixed"
 book_floor_shift = 24    # Adaptive only; frequency floor as max_freq >> shift
 book_refit_threshold = 1.2  # Adaptive only; refit when bit rate degrades past this (0 = never)
 book_refit_interval  = 0    # Adaptive only; refit every N calls (0 = off)
+validate_symbol_range = true # check symbols stay in [0, bklen) when a book is pinned
 book_model  = "Gaussian" # Fixed only; "Gaussian", "Laplace", "GeneralizedNormal", "Uniform"
 book_center = -1.0       # Fixed only; negative means bklen/2
 book_scale  = 32.0       # Fixed only; distribution width in symbols
@@ -263,11 +265,16 @@ on your own data, upstream stage, *and* error bound.
 - **The bitstream is unchanged.**  The reverse codebook still travels in every
   encoded stream, so output from either mode decodes through the stock path with no
   extra configuration and no file-format change.
-- **The out-of-range symbol check goes away with the histogram.**  In `PerBlock` mode
-  a symbol `>= bklen` is caught by the `sum(h_freq) == inlen` test.  Once a book is
-  pinned nothing histograms the input, so the encode kernel simply indexes past the
-  codebook.  The caller owns that invariant — `Adaptive` still checks on its one
-  sampling call, `Fixed` never checks at all.
+- **The out-of-range symbol check is restored by a device-side guard.**  In
+  `PerBlock` a symbol `>= bklen` is caught by the `sum(h_freq) == inlen` test.  Once a
+  book is pinned nothing histograms, so `setValidateSymbolRange()` (default on) runs a
+  grid-stride kernel and throws before `encode()` launches — necessarily before,
+  because an out-of-range index faults inside the encode kernel and cannot be reported
+  afterwards.  That costs one stream sync: about 16% of `Adaptive`'s throughput at
+  24.7 MiB (24.4 vs 29.0 GB/s, still 1.35x over `PerBlock`), within noise at 1 MiB.
+  Disable it for CUDA Graph capture, or when the range is guaranteed upstream —
+  disabling it with genuinely out-of-range symbols is undefined behaviour and in
+  practice takes down the CUDA context.
 - **Codes cannot exceed 27 bits.**  `HuffmanWord<4>` holds the code in a 27-bit
   field.  A frequency distribution skewed enough to need a wider code is rejected with
   an exception in `PerBlock` and `Fixed` mode (the reference builder clamped it to an
@@ -286,7 +293,7 @@ trained on a sample of real data cannot make that promise.
 Only the model form round-trips through TOML — a raw frequency table exceeds the
 128-byte per-stage config slot and has to be re-supplied through the C++ API.
 
-Fixed books do **not** make the stage graph-capturable on their own; see below.
+Fixed books do **not** make the stage graph-capturable; see below.
 
 ---
 
@@ -297,10 +304,10 @@ requires two host-synchronous operations inside each forward execute call — on
 transfer the histogram to the CPU for codebook construction, and one to synchronize
 partition metadata for prefix-sum computation.
 
-Each has its own opt-out. `setBookSource()` with `Adaptive` or `Fixed` removes steps
-1–4 below (barrier 1) from every call after the first;
-`setEncodeMode(HuffmanEncodeMode::Fine)` removes barrier 2 inside step 6. The flow
-below is the default `PerBlock` + `Coarse` path.
+`setBookSource()` with `Adaptive` or `Fixed` removes steps 1–4 below (barrier 1)
+from every call after the first. Barrier 2 has no working opt-out: the experimental
+`Fine` mode targets it but does not engage on realistic data, so the flow below is
+what runs in every supported configuration.
 
 ### Forward pass
 
@@ -324,11 +331,46 @@ GPU  ←input T[]                                       output uint8_t[]→
 ```
 
 **Consequence:** the CPU-visible barriers per compress call make this stage
-latency-bound. `Adaptive`/`Fixed` + `Fine` removes both of the barriers above, but
-`isGraphCompatible()` still returns `false`: `encode()` returns `total_nbit` /
-`total_ncell` to the host to assemble `phf_header` before the H2D merge, in both
-encode modes. Making the stage capturable additionally requires assembling that
-header and running the merge on the device.
+latency-bound. `Adaptive`/`Fixed` removes barrier 1; barrier 2 remains in every
+supported configuration. `isGraphCompatible()` returns `false` regardless, because
+`encode()` returns `total_nbit` / `total_ncell` to the host to assemble `phf_header`
+before the H2D merge. Making the stage capturable would additionally require
+assembling that header and running the merge on the device. **Not planned** — graph
+capture has not shown a measurable benefit elsewhere in the library, which does not
+justify that rework.
+
+### Experimental: `Fine` encode mode {#huffman-fine-reachability}
+
+The fine kernel packs four codes into a 32-bit shard accumulator, so it requires
+**every** code in the book to fit in 8 bits. `encode()` scans the built book and
+falls back to the coarse path when it does not. Two accessors make that visible:
+
+| Accessor | Meaning |
+|---|---|
+| `getLastUsedFineEncode()` | Did the last forward call actually run the fine kernel? Always `false` in `Coarse` mode. |
+| `getLastMaxCodeLen()` | Longest code, in bits, in the book the last call used. Reported in both modes — in `Coarse` it is what says whether switching to `Fine` would take effect (it engages only at ≤ 8). |
+
+A fallback also logs one `FZ_LOG(WARN)`, re-armed only when the code length changes,
+so a resident `Fixed`/`Adaptive` book does not warn on every call.
+
+Measured through `LorenzoQuant -> Huffman` (bklen 1024, radius 512) on CESM-ATM
+`CLDHGH`/`CLDLOW`/`FLDSC`/`PRECT`/`TS` at `eb` `1e-2 … 1e-5`, the longest code is
+**12–24 bits in all 20 cells — never ≤ 8**, so the fine path never ran.
+
+This is structural rather than a tuning problem. By Kraft's inequality an 8-bit
+ceiling admits at most **256** codewords, and these fields carry 322–1025 distinct
+quantization symbols at every bound but the coarsest. Length-limiting cannot
+manufacture a code that does not exist:
+
+| Constraint | Constructible? | Cost vs unconstrained Huffman |
+|---|---|---|
+| ≤ 8 bits | only when ≤ 256 distinct symbols (4 of 12 cells) | +1.8% … +14.6% bits/symbol |
+| ≤ 16 bits | always | **+0.00% … +0.31%** |
+
+So the change that would make the fine path reachable is a **2x16-bit shard
+geometry**, not length-limiting to 8 bits. Until then, treat `Fine` as effective
+only for small alphabets — bitplane or byte-oriented inputs rather than
+wide-radius quantization codes.
 
 ### Inverse pass
 
@@ -392,13 +434,12 @@ Consequence: **when pairing with `LorenzoQuantStage`, `zigzag_codes=true` is
 required** unless you set `bklen=65536`.  Raw signed-delta codes are not contiguous
 in `[0, bklen)` for any `bklen < 65536`.
 
-**Not CUDA Graph compatible in any configuration.**  In the default path two
-device-to-host synchronization points exist in every forward call (histogram D2H for
-codebook construction; partition metadata D2H for prefix-sum computation);
-`HuffmanBookSource::Adaptive` / `::Fixed` and `HuffmanEncodeMode::Fine` remove them
-respectively,
-but the encoded-size round trip in `encode()` remains.  The stage cannot be included
-in a graph-captured pipeline.
+**Not CUDA Graph compatible in any configuration.**  Two device-to-host
+synchronization points exist in every forward call (histogram D2H for codebook
+construction; partition metadata D2H for prefix-sum computation).
+`HuffmanBookSource::Adaptive` / `::Fixed` removes the first, but the second and the
+encoded-size round trip in `encode()` remain.  The stage cannot be included in a
+graph-captured pipeline.
 
 **Latency-bound, not throughput-bound.**  The CPU codebook build and the D2H syncs
 are serial barriers.  Kernel execution time is small relative to round-trip PCIe

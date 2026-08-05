@@ -237,8 +237,6 @@ int main(int argc, char** argv) {
                         "this may exceed the shared-memory histogram\n", radius, bklen);
         auto* huf = p.addStage<HuffmanStage<uint16_t>>();
         huf->setBklen(bklen);
-        if (const char* fm = std::getenv("GPU_ZSTD_HUF_FINE"); fm && *fm == '1')
-            huf->setEncodeMode(HuffmanEncodeMode::Fine);
         p.connect(huf, lz, "literals");
 
         auto* ans_len  = p.addStage<ANSStage>();

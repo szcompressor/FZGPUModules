@@ -23,6 +23,34 @@
 
 namespace fz {
 
+// ── Device-side symbol-range check ────────────────────────────────────────────
+//
+// PerBlock catches out-of-range symbols for free: the histogram kernel skips any
+// symbol >= bklen, so sum(h_freq) != inlen means some were dropped.  Once Adaptive
+// or Fixed pins a codebook nothing histograms, and the encode kernel indexes d_bk4
+// with the raw symbol — an out-of-range value reads past the codebook and produces a
+// stream that cannot be decoded, with no diagnostic at all.
+//
+// This restores the guarantee.  The kernel records the largest offending symbol
+// (biased by +1, so 0 means "none").  The verdict must be read *before* encode
+// launches — a post-encode check is too late, because the out-of-range index has
+// already faulted — so it costs a stream sync.  That sync is still far cheaper than
+// the PerBlock path it replaces (a 4-byte D2H instead of bklen words, and no host
+// tree build), but it is not free; see setValidateSymbolRange().
+template <typename T>
+__global__ void huffmanSymbolRangeKernel(
+    const T* __restrict__ in, size_t n, uint32_t bklen, uint32_t* __restrict__ out)
+{
+    const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
+    uint32_t local = 0;
+    for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         i < n; i += stride) {
+        const uint32_t s = static_cast<uint32_t>(in[i]);
+        if (s >= bklen && s + 1u > local) local = s + 1u;
+    }
+    if (local != 0) atomicMax(out, local);
+}
+
 // ── Constructor / destructor ───────────────────────────────────────────────────
 // Defined here (not defaulted in the header) so that the unique_ptr<phf::Buf<T>>
 // destructor can see the complete phf::Buf<T> type.
@@ -360,6 +388,42 @@ void HuffmanStage<T>::execute(
             // encode kernel, so the caller owns that invariant once a book is pinned.
             if (book_source_ == HuffmanBookSource::Fixed && !fixed_book_resident_)
                 buildFixedBook(stream);
+
+            if (validate_symbol_range_) {
+                // The verdict has to be known *before* encode launches, not after:
+                // an out-of-range symbol makes the encode kernel read past d_bk4,
+                // and that illegal access has already happened by the time any
+                // post-encode check could report it (it takes down the context).
+                // So this costs a real stream sync — cheaper than PerBlock's
+                // (a 4-byte D2H rather than bklen words, and no host tree build),
+                // but a sync nonetheless.  setValidateSymbolRange(false) removes it
+                // for callers who guarantee the range upstream.
+                //
+                // d_freq / h_freq are the histogram buffers, idle on this path —
+                // reuse word 0 rather than allocating a flag of our own.
+                FZ_CUDA_CHECK(cudaMemsetAsync(buf_->d_freq, 0, sizeof(uint32_t), stream));
+                constexpr int kBlock = 256;
+                const int grid = static_cast<int>(
+                    std::min<size_t>((inlen + kBlock - 1) / kBlock, 4096));
+                huffmanSymbolRangeKernel<T><<<grid, kBlock, 0, stream>>>(
+                    d_input, inlen, bklen_, buf_->d_freq);
+                FZ_CUDA_CHECK(cudaGetLastError());
+                FZ_CUDA_CHECK(cudaMemcpyAsync(buf_->h_freq, buf_->d_freq,
+                                              sizeof(uint32_t),
+                                              cudaMemcpyDeviceToHost, stream));
+                FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+                if (buf_->h_freq[0] != 0) {
+                    const uint32_t offender = buf_->h_freq[0] - 1u;
+                    throw std::runtime_error(
+                        "HuffmanStage: symbol " + std::to_string(offender) +
+                        " is outside [0, " + std::to_string(bklen_) + "). With a "
+                        "pinned codebook (Adaptive/Fixed) nothing histograms the "
+                        "input, so the encode kernel would index past the codebook "
+                        "and fault. Increase bklen, or use setZigzagCodes(true) "
+                        "with LorenzoQuantStage.");
+                }
+            }
         } else {
             // Zero frequency array (histogram kernel uses atomicAdd into d_freq)
             FZ_CUDA_CHECK(cudaMemsetAsync(
@@ -424,6 +488,24 @@ void HuffmanStage<T>::execute(
         size_t   outlen = 0;
         phf::high_level<T>::encode(
             buf_.get(), d_input, inlen, &d_out, &outlen, header_, stream);
+
+        // Mirror out which encode path actually ran.  Fine falls back to coarse for
+        // books with codes longer than 8 bits, and without this the fallback is
+        // invisible to anyone benchmarking the two modes against each other.
+        last_used_fine_   = buf_->last_used_fine;
+        last_max_codelen_ = buf_->last_max_codelen;
+
+        // Warn on the first fallback and again only if the code length moves, so a
+        // resident Fixed/Adaptive book does not emit this once per compress call.
+        if (encode_mode_ == HuffmanEncodeMode::Fine && !last_used_fine_ &&
+            last_max_codelen_ != warned_max_codelen_) {
+            warned_max_codelen_ = last_max_codelen_;
+            FZ_LOG(WARN,
+                   "HuffmanStage: Fine encode requested but max code length is %u bits "
+                   "(> 8); fell back to the coarse path. Measurements from this stage "
+                   "are coarse-path numbers.",
+                   static_cast<unsigned>(last_max_codelen_));
+        }
 
         // ── Adaptive refit trigger ───────────────────────────────────────────
         // encode() already reports total_nbit, so the achieved bit rate costs

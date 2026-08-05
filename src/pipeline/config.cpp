@@ -608,6 +608,7 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     const auto        floor_shift = static_cast<uint8_t>(optInt(t, "book_floor_shift", 24));
     const auto        refit_thr   = static_cast<float>(optDbl(t, "book_refit_threshold", 1.2));
     const auto        refit_ivl   = static_cast<uint32_t>(optInt(t, "book_refit_interval", 0));
+    const bool        validate_rng = optBool(t, "validate_symbol_range", true);
     HuffmanBookSpec spec;
     spec.model  = huffmanBookModelFromString(optStr(t, "book_model", "Gaussian"));
     spec.center = optDbl(t, "book_center", -1.0);
@@ -620,6 +621,7 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
         s->setAdaptiveFloorShift(floor_shift);
         s->setRefitThreshold(refit_thr);
         s->setRefitInterval(refit_ivl);
+        s->setValidateSymbolRange(validate_rng);
         if      (book_src == "Fixed")    s->setFixedBookFromModel(spec);
         else if (book_src == "Adaptive") s->setBookSource(HuffmanBookSource::Adaptive);
         else if (book_src != "PerBlock")
@@ -1020,9 +1022,12 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
         if (sp.model == HuffmanBookModel::GeneralizedNormal)
             out << "book_shape = " << sp.shape << "\n";
     };
-    if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  emitBook(hs);
-    else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) emitBook(hs);
-    else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) emitBook(hs);
+    auto emitValidate = [&out](auto* hs) {
+        if (!hs->getValidateSymbolRange()) out << "validate_symbol_range = false\n";
+    };
+    if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  { emitBook(hs); emitValidate(hs); }
+    else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) { emitBook(hs); emitValidate(hs); }
+    else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) { emitBook(hs); emitValidate(hs); }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

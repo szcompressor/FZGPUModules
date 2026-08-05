@@ -74,6 +74,12 @@ struct Buf {
 
     uint16_t rt_bklen;
     int      numSMs;
+
+    // Diagnostics written by high_level<E>::encode() on every forward call.  The fine
+    // path is only *requested* by use_HFR; encode() falls back to coarse when the built
+    // book has a code longer than 8 bits, so these record what actually ran.
+    uint8_t  last_max_codelen = 0;      ///< Max Huffman code length in the book just used.
+    bool     last_used_fine   = false;  ///< True iff GPU_fine_encode ran on the last call.
     size_t   total_footprint_d = 0;
     size_t   total_footprint_h = 0;
 

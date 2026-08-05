@@ -38,6 +38,7 @@
  *   HF30  HuffmanStage/OverlongCodeThrows              — >27-bit codes throw instead of being silently clamped
  *   HF31  HuffmanStage/AdaptiveBook_DegenerateSampleNotPinned — a constant first block must not pin the book
  *   HF32  HuffmanStage/AdaptiveBook_RefitOnRateRegression     — bit-rate regression triggers a refit
+ *   HF33  HuffmanStage/PinnedBookSymbolRangeGuard            — pinned books still reject symbols >= bklen
  */
 
 #include <gtest/gtest.h>
@@ -1071,4 +1072,144 @@ TEST(HuffmanStage, AdaptiveBook_RefitOnRateRegression) {
     huffman_encode(pinned, narrow, cs.stream, *pool);
     huffman_encode(pinned, broad, cs.stream, *pool);
     EXPECT_EQ(pinned.getRefitCount(), 0u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF33 — PinnedBookSymbolRangeGuard
+// PerBlock catches symbols >= bklen for free via sum(h_freq) != inlen (HF12).
+// A pinned codebook skips the histogram, so that guard stops running and the
+// encode kernel indexes past d_bk4 — an undecodable stream, silently. The
+// device-side check must restore parity for both Adaptive and Fixed, and must
+// be defeatable for callers who guarantee the range upstream.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, PinnedBookSymbolRangeGuard) {
+    const size_t N = 8192;
+    std::vector<uint16_t> ok(N), bad(N);
+    for (size_t i = 0; i < N; ++i) {
+        ok[i]  = static_cast<uint16_t>(400 + (i * 37) % 200);
+        bad[i] = ok[i];
+    }
+    bad[N / 2] = 5000;   // >= bklen (1024)
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t));
+
+    // Adaptive: first call fits and pins, second call carries the bad symbol.
+    HuffmanStage<uint16_t> adaptive;
+    adaptive.setBklen(1024);
+    adaptive.setBookSource(HuffmanBookSource::Adaptive);
+    EXPECT_TRUE(adaptive.getValidateSymbolRange());
+    huffman_encode(adaptive, ok, cs.stream, *pool);          // pins the book
+    EXPECT_THROW(huffman_encode(adaptive, bad, cs.stream, *pool), std::runtime_error);
+
+    // Fixed: never histograms at all, so the very first call must be checked.
+    HuffmanStage<uint16_t> fixed;
+    fixed.setBklen(1024);
+    fixed.setFixedBookFromModel({HuffmanBookModel::Laplace, -1.0, 64.0, 2.0});
+    EXPECT_THROW(huffman_encode(fixed, bad, cs.stream, *pool), std::runtime_error);
+
+    // In-range data is unaffected, and still round-trips.
+    HuffmanStage<uint16_t> good;
+    good.setBklen(1024);
+    good.setBookSource(HuffmanBookSource::Adaptive);
+    huffman_encode(good, ok, cs.stream, *pool);
+    auto enc = huffman_encode(good, ok, cs.stream, *pool);
+    good.setInverse(false);
+    auto dec = huffman_decode(good, enc, N, cs.stream, *pool);
+    ASSERT_EQ(dec.size(), N);
+    for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec[i], ok[i]);
+
+    // Opting out must not disturb the normal path.  Deliberately exercised with
+    // in-range data only: feeding an out-of-range symbol with the check disabled
+    // is undefined behaviour by construction — it reads past the codebook, and in
+    // practice takes down the CUDA context, which is precisely why the check
+    // defaults to on.
+    HuffmanStage<uint16_t> unchecked;
+    unchecked.setBklen(1024);
+    unchecked.setBookSource(HuffmanBookSource::Adaptive);
+    unchecked.setValidateSymbolRange(false);
+    EXPECT_FALSE(unchecked.getValidateSymbolRange());
+    huffman_encode(unchecked, ok, cs.stream, *pool);
+    auto enc2 = huffman_encode(unchecked, ok, cs.stream, *pool);
+    unchecked.setInverse(false);
+    auto dec2 = huffman_decode(unchecked, enc2, N, cs.stream, *pool);
+    ASSERT_EQ(dec2.size(), N);
+    for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec2[i], ok[i]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF34 — EncodePathIsReported
+// setEncodeMode(Fine) is a request, not a guarantee: the fine kernel packs four
+// codes into a 32-bit shard, so encode() falls back to the coarse path whenever
+// the book holds a code longer than 8 bits.  Nothing observable distinguished
+// the two, which silently invalidated any fine-vs-coarse measurement.
+//
+// This also pins the sentinel-skip fix.  build_canonized_codebook leaves unused
+// symbols as 0xffffffff, whose bitcount field reads as 31.  The path-selection
+// scan used to count those, so any bklen larger than the symbol count reported
+// 31 bits and vetoed the fine path unconditionally — Fine was unreachable on
+// every real book.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, EncodePathIsReported) {
+    const size_t N = 65536;
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t));
+
+    // Few distinct symbols in a large book: every unused slot is a 0xffffffff
+    // sentinel.  A short, flat alphabet keeps all real codes well under 8 bits.
+    std::vector<uint16_t> flat(N);
+    for (size_t i = 0; i < N; ++i) flat[i] = static_cast<uint16_t>(i % 16);
+
+    HuffmanStage<uint16_t> fine;
+    fine.setBklen(1024);
+    fine.setEncodeMode(HuffmanEncodeMode::Fine);
+
+    // Before any forward call there is nothing to report.
+    EXPECT_EQ(fine.getLastMaxCodeLen(), 0);
+    EXPECT_FALSE(fine.getLastUsedFineEncode());
+
+    auto enc = huffman_encode(fine, flat, cs.stream, *pool);
+
+    // 16 equiprobable symbols → a uniform 4-bit code.  Were the 0xffffffff slots
+    // still being scanned this would read 31 and take the coarse path.
+    EXPECT_LE(fine.getLastMaxCodeLen(), 8);
+    EXPECT_TRUE(fine.getLastUsedFineEncode());
+
+    fine.setInverse(false);
+    auto dec = huffman_decode(fine, enc, N, cs.stream, *pool);
+    ASSERT_EQ(dec.size(), N);
+    for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec[i], flat[i]);
+
+    // Coarse mode never reports the fine path, but still reports the code length,
+    // which is what tells a caller whether switching to Fine would take effect.
+    HuffmanStage<uint16_t> coarse;
+    coarse.setBklen(1024);
+    coarse.setEncodeMode(HuffmanEncodeMode::Coarse);
+    huffman_encode(coarse, flat, cs.stream, *pool);
+    EXPECT_FALSE(coarse.getLastUsedFineEncode());
+    EXPECT_LE(coarse.getLastMaxCodeLen(), 8);
+    EXPECT_GT(coarse.getLastMaxCodeLen(), 0);
+
+    // A skewed alphabet needs codes longer than 8 bits, so Fine must fall back
+    // and must say so rather than silently reporting itself as fine.
+    // Geometric: symbol s occurs N>>s times, so the rarest sits at probability
+    // 2^-16 and earns a code far longer than 8 bits.
+    std::vector<uint16_t> skewed(N, 0);
+    size_t pos = 0;
+    for (uint16_t s = 1; s <= 16 && pos < N; ++s) {
+        for (size_t k = 0; k < (N >> s) && pos < N; ++k) skewed[pos++] = s;
+    }
+    while (pos < N) skewed[pos++] = 0;
+    HuffmanStage<uint16_t> fallback;
+    fallback.setBklen(1024);
+    fallback.setEncodeMode(HuffmanEncodeMode::Fine);
+    auto enc_fb = huffman_encode(fallback, skewed, cs.stream, *pool);
+    EXPECT_GT(fallback.getLastMaxCodeLen(), 8);
+    EXPECT_FALSE(fallback.getLastUsedFineEncode());
+
+    // The fallback is a performance property, not a correctness one.
+    fallback.setInverse(false);
+    auto dec_fb = huffman_decode(fallback, enc_fb, N, cs.stream, *pool);
+    ASSERT_EQ(dec_fb.size(), N);
+    for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec_fb[i], skewed[i]);
 }
