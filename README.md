@@ -94,13 +94,21 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `LorenzoStage<T>` | Plain integer Lorenzo predictor (lossless) |
 | `TiledLorenzoStage<T>` | Dimension-aware (tiled separable) Lorenzo predictor (lossless, 2D/3D, cuSZp3 delta) |
 | `GInterpStage<TInput, TCode>` | Multi-level spline interpolation predictor + quantizer (lossy, 3D, cuSZ-Hi port) |
+| `AdaptiveLorenzoStage<T>` | Per-tile adaptive Lorenzo — picks the cheapest of LZ1/LZ2 x centering by exact encoded cost (lossless, FSZ) |
 | `QuantizerStage<TInput, TCode>` | Direct-value quantizer (ABS/REL/NOA error modes) |
 | `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |
+| `LogTransformStage<TInput>` | Log transform — turns a point-wise relative bound into an absolute one for a downstream ABS quantizer (Liang et al., CLUSTER'18) |
 | `ADMStage` | Adaptive data mapping — remaps uint16/uint32 streams to a compact 8-bit symbol domain (MANS port) |
 | `RLEStage<T>` | Run-length encoding |
 | `BitshuffleStage` | GPU bit-matrix transpose |
+| `TUPLStage` | AoS <-> SoA tuple transpose — regroups interleaved `dim`-field records by field (LC `TUPLk` port) |
 | `RZEStage` | Recursive zero-byte elimination |
 | `RREStage` | Repetition-reduction encoding (LC framework lossless component) |
+| `RAZEStage` | Auto-`k` RZE — picks the elimination depth per chunk instead of taking it as a parameter (LC port) |
+| `RAREStage` | Auto-`k` RRE — picks the repetition depth per chunk instead of taking it as a parameter (LC port) |
+| `CLOGStage` | Per-subchunk adaptive bit-width coding, 32 subchunks per chunk (LC port) |
+| `HCLOGStage` | CLOG plus a per-subchunk TCMS/zigzag reinterpretation fallback (LC port) |
+| `GPULZStage` | GPU LZSS dictionary coder (ICS'23 port); optional split mode emits literals/lengths/offsets/meta as four ports for a GPU-ZSTD-style chain |
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
@@ -164,17 +172,21 @@ fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --repo
 
 ## Acknowledgements
 
-FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. All are BSD-3-Clause licensed except dietGPU (MIT).
+FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), GPULZ and AIZ_VLDB26 (no license declared upstream), and FSZ (paper-only, no reference implementation).
 
 | Project | Stages |
 |---|---|
-| [LC framework](https://github.com/burtscher/LC-framework) — Burtscher et al., Texas State University | `RZEStage`, `RREStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
+| [LC framework](https://github.com/burtscher/LC-framework) — Burtscher et al., Texas State University | `RZEStage`, `RREStage`, `RAZEStage`, `RAREStage`, `CLOGStage`, `HCLOGStage`, `TUPLStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
 | [cuSZ / PHF](https://github.com/szcompressor/cuSZ) — Argonne NL, Indiana U, et al. | `LorenzoQuantStage`, `HuffmanStage` |
 | [FZ-GPU](https://github.com/szcompressor/cuSZ) — Zhang, Tian et al. (via cuSZ repo) | `BitplaneRZEStage` |
 | [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) — Indiana U, Argonne NL | `GInterpStage` |
 | [cuSZp / cuSZp2 / cuSZp3](https://github.com/szcompressor/cuSZp) — Huang, Di et al., Argonne NL | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | [MANS](https://github.com/hpdps-group/MANS) — Huang, Yang et al. | `ADMStage` |
 | [dietGPU](https://github.com/facebookresearch/dietgpu) — Meta Platforms (MIT) | `ANSStage` |
+| [GPULZ](https://github.com/hpdps-group/ICS23-GPULZ) — Zhang, Tian, Di et al. (ICS '23; *no license declared upstream*) | `GPULZStage` |
+| [AIZ_VLDB26](https://github.com/boyuanzhang62/AIZ_VLDB26) — Boyuan Zhang (*no license declared upstream*) | `GPULZStage` all-zero-chunk fast path |
+| FSZ — Jiajun Huang, SC '26 (arXiv:2607.15413) — *algorithmic attribution only; written from the paper, no reference implementation exists* | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
+| Liang, Di, Tao, Chen, Cappello — IEEE CLUSTER 2018 — *algorithmic attribution only* | `LogTransformStage` |
 
 For per-stage attribution details, copyright notices, relationship types (direct port, algorithmic reimplementation, or vendored), and paper citations, see [`docs/acknowledgements.md`](docs/acknowledgements.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).
 

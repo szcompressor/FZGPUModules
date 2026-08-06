@@ -133,10 +133,11 @@ stages except Lorenzo, which uses named ports "codes", "outlier_errors",
 
 ## Stage Types
 
-### Lorenzo1D / Lorenzo2D / Lorenzo3D
+### LorenzoQuant
 
-Error-bounded prediction and quantization. Dimensionality is encoded in the type
-string; runtime spatial dimensions come from [pipeline].dims.
+Fused Lorenzo predictor + error-bounded quantizer. Dimensionality is not part of
+the type string -- the stage adapts to the runtime spatial dimensions from
+`[pipeline].dims`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -166,6 +167,23 @@ Plain integer Lorenzo predictor (lossless delta / prefix sum).
 | order | integer | 1 | Prediction order: `1` (first difference) or `2` (second difference, FSZ's LZ2). `2` requires `block_size > 0`. |
 
 **Output ports:** "output", plus "means" when `centering = true`.
+
+### TiledLorenzo
+
+Dimension-aware tiled separable Lorenzo predictor (lossless, cuSZp3 delta).
+Applies the delta along each axis within a tile rather than over the flat
+array, so the prediction respects 2-D/3-D locality. Requires
+`pipeline.setDims()` (or `-l`) to be set.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "int32" | Signed integer element type. "int16" or "int32". |
+| tile_x | integer | 0 | Tile extent along x. `0` on all three = stage-chosen default shape. |
+| tile_y | integer | 0 | Tile extent along y. |
+| tile_z | integer | 0 | Tile extent along z. |
+
+Setting any one of `tile_x`/`tile_y`/`tile_z` sets the whole shape; the unset
+axes fall back to `1`, not to the default shape.
 
 ### AdaptiveLorenzo
 
@@ -280,6 +298,30 @@ per subchunk. `word_size` selects an unsigned type only.
 |---|---|---|---|
 | chunk_size | integer | 16384 | Chunk size in bytes: 4096, 8192, or 16384. |
 | word_size | integer | 1 | Word granularity in bytes: 1, 2, 4, or 8 (LC HCLOG_1/HCLOG_2/HCLOG_4/HCLOG_8). |
+
+### GPULZ
+
+LZSS dictionary coder -- lossless (GPULZ, ICS '23). Per-chunk sliding-window
+match search; chunks that do not compress fall back to raw, and all-zero chunks
+are skipped entirely.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| chunk_size | integer | 2048 | Chunk size in bytes: 1024, 2048, or 4096. |
+| word_size | integer | 4 | Word granularity in bytes: 1, 2, 4, or 8. Match the upstream symbol width. |
+| match_level | integer | 1 | `0` = exact longest match over the 32-element near window only; `1` additionally consults a hashed two-word table for long-range candidates. Level 0 is faster, level 1 compresses better; the container format is identical and the level is not serialized. |
+| split_mode | boolean | false | Emit four separate ports instead of one interleaved stream (see below). |
+
+**Output ports:** "output" when `split_mode = false`; otherwise "literals",
+"lengths", "offsets", and "meta".
+
+Split mode is the Zstandard split -- the parts have very different symbol
+distributions, and interleaving them raises the entropy a downstream coder
+sees. **All four ports must be entropy coded and re-merged**: unlike the
+single-stream form, a split leaks any byte left out. Feed "literals" to a
+symbol-width-matched coder (e.g. `Huffman` with `input_type = "uint16"` for
+uint16 quant codes) rather than a byte coder; that alphabet effect is the
+larger half of the gain. See `examples/presets/gpu_zstd.toml`.
 
 ### Merge
 
@@ -421,6 +463,75 @@ bklen      = 1024
 inputs     = [{from = "lrz", port = "codes"}]
 ```
 
+### ANS
+
+GPU rANS entropy coder (dietGPU port). Byte-alphabet coder -- feed it a byte
+stream, not wide symbols.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| prob_bits | integer | 10 | Symbol probability precision in bits. |
+
+Not available on the HIP backend; adding the stage there throws.
+
+### AdaptiveBitpack
+
+Per-block adaptive fixed-rate bit-plane coding (cuSZp / cuSZp2 port). Each
+block is packed to the minimum bit width its own max magnitude needs.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| input_type | string | "int32" | Signed integer element type. "int16" or "int32". |
+| block_size | integer | 32 | Elements per block. Use 32 when pairing with `AdaptiveLorenzo`, whose cost model assumes it. |
+| outlier_selection | boolean | false | cuSZp2 per-block plain/outlier selection: a block may instead store element 0 as a raw outlier and pack only the rest, whichever is smaller. Helps non-sparse, high-smoothness data. |
+
+### ADM
+
+Adaptive data mapping (MANS port). Remaps a uint16/uint32 stream into a compact
+8-bit symbol domain so a byte coder downstream sees a denser alphabet.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| dtype | string | "uint16" | Input element type: "uint16" or "uint32". |
+
+### LogTransform
+
+Log transform for point-wise relative error (Liang et al., CLUSTER '18).
+Converts a point-wise *relative* bound into a plain *absolute* one, so an
+ordinary ABS quantizer downstream delivers the relative guarantee. `float`
+input only.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| error_bound | float | 1e-3 | The point-wise relative error bound to be realized. |
+| threshold | float | 0.0 | Magnitudes at or below this are treated as near-zero and routed to the outlier channel rather than transformed. |
+| outlier_capacity | float | 0.05 | Fraction of elements reserved for outliers (zeros, sign changes, sub-threshold values). |
+
+### GInterp
+
+Multi-level spline interpolation predictor with fused error-bounded
+quantization (cuSZ-Hi port). 3-D primary path; 2-D supported with a
+deterministic parameter fallback. Requires `pipeline.setDims()`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| input_type | string | "float32" | "float32" or "float64". |
+| code_type | string | "uint16" | Quantization code type: "uint8", "uint16", or "uint32". |
+| error_bound | float | 1e-3 | Error bound value. |
+| error_bound_mode | string | "ABS" | "ABS", "REL", "PREL", or "NOA". |
+| quant_radius | integer | 0 | Codes lie in `[0, 2*radius)`. `0` enables the radius auto-tune. |
+| outlier_capacity | float | 0.10 | Fraction of elements reserved for out-of-radius outliers. |
+| auto_tuning | integer | 0 | cuSZ-Hi `INTERPOLATION_PARAMS` auto-tuning: `0` off, `1` cheap, `3` full, `4` full + alpha sweep, `5` manual alpha/beta. Modes 1/3/4 disable CUDA Graph capture for this stage; mode 5 is graph-safe. 3-D only. |
+
+**Output ports:** "codes" (connect downstream stages here, not "output"), plus
+the fused outlier channel.
+
+### BitplaneRZE
+
+Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port).
+
+No tunable keys -- the configuration is derived from the input length.
+
 ---
 
 ## Complete Examples
@@ -442,7 +553,7 @@ num_streams      = 1
 
 [[stage]]
 name             = "lorenzo"
-type             = "Lorenzo2D"
+type             = "LorenzoQuant"
 input_type       = "float32"
 code_type        = "uint16"
 error_bound      = 1e-4
@@ -527,11 +638,11 @@ fzgmod-cli -b -c examples/presets/pfpl.toml -i data.f32
 - No post-load parameter editing. Because loadConfig() calls finalize()
   internally, stages are immutable after loading. Change parameters by editing
   the .toml file.
-- Supported stage types only. The factory handles the types listed above
-  (Lorenzo1D/2D/3D, Quantizer, Bitshuffle, RZE, RLE, Difference, Zigzag,
-  Negabinary, Bitpack, Huffman). Custom stages written outside the library
-  require a manual addStage() / connect() / finalize() call chain (or a PR
-  to add the type to the dispatch table in config.cpp).
+- Supported stage types only. The factory handles exactly the types documented
+  above; run `fzgmod-cli --list-stages` for the authoritative list from this
+  build. Custom stages written outside the library require a manual addStage()
+  / connect() / finalize() call chain (or a PR to add the type to
+  `kStageRegistry` in config.cpp).
 - Single-source pipelines only. The [pipeline] table has one input_size and
   one dims triple. Multi-source pipelines are not currently representable in
   the config format and must be constructed manually.

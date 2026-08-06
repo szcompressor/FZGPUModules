@@ -572,12 +572,21 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             if (name.size() > 4) {
                 const std::string rest = name.substr(4);
                 const auto us = rest.find('_');
-                if (us == std::string::npos)
-                    throw std::runtime_error(
+                const auto bad = [&]() {
+                    return std::runtime_error(
                         "Unknown stage '" + name + "' in --stages. "
                         "Expected 'tupl' or 'tupl<dim>_<word_size>', e.g. tupl6_4");
-                dim = static_cast<size_t>(std::stoi(rest.substr(0, us)));
-                word = static_cast<size_t>(std::stoi(rest.substr(us + 1)));
+                };
+                if (us == std::string::npos) throw bad();
+                // stoi throws std::invalid_argument on a non-numeric suffix, whose
+                // message is just "stoi" -- translate it to the same guidance the
+                // missing-underscore case gets.
+                try {
+                    dim  = static_cast<size_t>(std::stoi(rest.substr(0, us)));
+                    word = static_cast<size_t>(std::stoi(rest.substr(us + 1)));
+                } catch (const std::logic_error&) {
+                    throw bad();
+                }
             }
             auto* tupl = pipeline->addStage<TUPLStage>();
             tupl->setBlockSize(s.chunk_size);
@@ -626,7 +635,9 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
             connect_next(ans);
         } else if (name == "adm") {
             auto* adm = pipeline->addStage<ADMStage>();
-            // If upstream emits uint16_t codes (predictor), use U16; otherwise U16 is the default.
+            // The linear CLI path only ever produces uint16_t codes upstream
+            // (both `lorenzo` and `quantizer` are hardcoded to uint16_t), so U16
+            // is always right here. Use a TOML config for a U32 ADM.
             adm->setDtype(ADMDtype::U16);
             connect_next(adm);
         } else if (name == "none") {
@@ -636,8 +647,8 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
                 "Unknown stage '" + name + "' in --stages. "
                 "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], "
                 "rare[1|2|4|8], raze[1|2|4|8], clog[1|2|4|8], hclog[1|2|4|8], "
-                "tupl[<dim>_<word_size>], diff, "
-                "rle[1|2|4|8], huffman, ans, adm");
+                "tupl[<dim>_<word_size>], gpulz[1|2|4|8], diff, "
+                "rle[1|2|4|8], huffman, ans, adm, none");
         }
     }
 

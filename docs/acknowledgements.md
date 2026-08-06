@@ -20,6 +20,10 @@ see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
 | [cuSZp / cuSZp2 / cuSZp3](#cuszp--cuszp2--cuszp3) | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | [MANS](#mans) | BSD-3-Clause | Direct port of kernels | `ADMStage` |
 | [dietGPU](#dietgpu) | MIT | Vendored headers | `ANSStage` |
+| [GPULZ](#gpulz) | **None declared upstream** | Direct port of encode/decode kernels | `GPULZStage` |
+| [AIZ_VLDB26](#aiz_vldb26) | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
+| [FSZ](#fsz) | n/a — paper only | **Algorithmic attribution only; no code used** | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
+| [Point-wise relative transform](#point-wise-relative-error-transform) | n/a — paper only | **Algorithmic attribution only; no code used** | `LogTransformStage` |
 
 ---
 
@@ -243,3 +247,112 @@ Advisors: Dingwen Tao, Guangming Tan
   `GpuANSStatistics.h` removed and replaced by the shared
   `fz::module::GPU_histogram_generic<uint8_t>` utility; namespace `multibyte_ans` adapted
   to `fz::ans`. All other kernel logic is unchanged from the original.
+
+---
+
+## GPULZ
+
+**Repository:** https://github.com/hpdps-group/ICS23-GPULZ
+**License:** **none declared upstream** — see the caveat below
+**Authors:** Boyuan Zhang, Jiannan Tian, Sheng Di, Xiaodong Yu, Martin Swany,
+Dingwen Tao, Franck Cappello
+**Paper:** "GPULZ: Optimizing LZSS Lossless Compression for Multi-byte Data on Modern
+GPUs", ICS '23
+
+**Stages:**
+
+- **`GPULZStage`** (`modules/coders/gpulz/`) — the encode/decode kernels are a direct
+  port of `compressKernelI` / `decompressKernel` from the upstream `gpulz.cu`. The
+  per-chunk sliding-window match search (shared-memory lookahead buffer + window,
+  Blelloch prefix sum over per-item byte sizes, literal/match flag-bitmap construction)
+  is preserved, retargeted from upstream's fixed `BLOCK_SIZE`/`WINDOW_SIZE`/`INPUT_TYPE`
+  macro configuration to compile-time template parameters (`T`, `CS`) dispatched at
+  runtime.
+
+  **Changes from original:** the per-chunk container format (raw-fallback flag, CUB
+  exclusive-scan packing offsets, deferred tail-size readback via `postStreamSync()`) is
+  FZGPUModules' own, following the same pattern as `RREStage`/`RZEStage`. Upstream's
+  separate flag/data pack-out step (`compressKernelIII`) is folded into FZGPUModules'
+  `gpulzPackKernel`. Split mode (emitting `flags` and `literals` as separate output
+  ports) has no upstream counterpart.
+
+  **License caveat:** the upstream repository publishes no `LICENSE` file and declares no
+  license. No terms are reproduced here because none exist upstream — this differs from
+  every other entry on this page. Anyone redistributing FZGPUModules including
+  `GPULZStage` should contact the GPULZ authors to confirm terms before relying on this
+  component outside research or internal use.
+
+---
+
+## AIZ_VLDB26
+
+**Repository:** https://github.com/boyuanzhang62/AIZ_VLDB26
+**License:** **none declared upstream** — same situation as GPULZ above
+**Author:** Boyuan Zhang
+
+**Stages:**
+
+- **`GPULZStage` all-zero-chunk fast path** (`modules/coders/gpulz/`) — skipping the match
+  search and the flag/data encode entirely for chunks that are wholly zero, gated on a
+  warp-vote check, is adapted from the `notEmptyFlagArr` optimization in the "sparse"
+  GPULZ variant at `test/gpulz.cuh` upstream.
+
+  **Changes from original:** retargeted to `GPULZStage`'s compile-time-templated kernel
+  structure, using `fz::backend::anySync32` for the warp vote and FZGPUModules' own
+  container format — empty chunks are marked with a `(flag_size=0, data_size=0)` sentinel,
+  distinct from the raw-fallback sentinel, and the corresponding output span is zero-filled
+  on decode.
+
+---
+
+## FSZ
+
+**License:** not applicable — **no source release exists**; these stages were written from
+the paper's description alone.
+**Author:** Jiajun Huang (University of South Florida)
+**Paper:** "FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy Compression",
+SC '26, arXiv:2607.15413
+
+**Relationship: algorithmic attribution only — no code was used.**
+
+**Stages:** `AdaptiveLorenzoStage` (`modules/fused/adaptive_lorenzo/`),
+`LorenzoStage::setCentering()` / `setOrder(2)` (`modules/predictors/lorenzo/`),
+`LorenzoQuantStage::Config::centering` (`modules/fused/lorenzo_quant/`).
+
+The ideas taken from the paper are:
+
+- **Cross-block prediction state** — running the prediction chain across the encoding
+  blocks within a tile rather than restarting at every block, so a tile carries one raw
+  seed instead of one per block.
+- **Per-tile adaptive multi-order prediction and centering** — selecting, per tile, among
+  first- and second-order Lorenzo with and without subtracting the tile mean, by exact
+  encoded size rather than by an entropy proxy.
+- **Single-pass four-way evaluation** — costing all four variants from one data read, using
+  the fact that a constant offset cancels exactly in k-th order finite differences
+  (`delta^k(q - mu) == delta^k(q)`) for every element with `k` predecessors, so centering
+  perturbs only a tile's first one or two residuals.
+
+**Differences from the paper:** the reference fuses prediction, quantization and encoding
+into a single CUDA kernel with a decoupled-lookback prefix sum; FZGPUModules implements the
+prediction step alone as a DAG stage that composes with `QuantizerStage` and
+`AdaptiveBitpackStage`. Kernel structure, the cost model's coupling to
+`AdaptiveBitpackStage`'s rate formula, port layout, side-channel compaction, serialization,
+and all host-side plumbing are FZGPUModules code.
+
+---
+
+## Point-wise relative error transform
+
+**License:** not applicable — **algorithmic attribution only**; the stage was written from
+the paper's description, no reference implementation was used.
+**Authors:** Xin Liang, Sheng Di, Dingwen Tao, Zizhong Chen, Franck Cappello
+**Paper:** "An efficient transformation scheme for lossy data compression with point-wise
+relative error bound", IEEE CLUSTER 2018, pp. 179–189
+
+**Stages:**
+
+- **`LogTransformStage`** (`modules/transforms/log_transform/`) — implements the paper's
+  transformation scheme: mapping data into log space so that a point-wise *relative* error
+  bound becomes a plain *absolute* bound, letting an ordinary ABS quantizer downstream
+  deliver the relative guarantee. Kernel implementation, the sign/zero/near-zero outlier
+  handling, and the DAG stage plumbing are FZGPUModules code.
