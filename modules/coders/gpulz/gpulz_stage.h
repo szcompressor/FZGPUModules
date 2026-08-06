@@ -185,23 +185,32 @@ public:
         const size_t n_bytes  = input_sizes.empty() ? 0 : input_sizes[0];
         const size_t n_chunks = (n_bytes + chunk_size_ - 1) / chunk_size_;
         const size_t hdr      = 4 + 4 + 8 * n_chunks;
+        // Every bound below is against the PADDED extent, not the input size.
+        // execute() zero-pads a partial tail chunk up to chunk_size_ and encodes
+        // it as a full chunk, so the tail can contribute chunk_size_ bytes of
+        // output from fewer than chunk_size_ bytes of input. Bounding by
+        // `n_bytes` therefore under-reserves by exactly the tail padding, and
+        // the encode writes past the buffer the DAG allocated (E22 in the
+        // benchmarking repo: overruns of 4-40 B observed, silent when this
+        // stage is mid-pipeline).
+        const size_t padded = n_chunks * chunk_size_;
 
         if (split_mode_) {
             const size_t block_elems = chunk_size_ / word_size_;
             const size_t flag_stride = (block_elems + 7) / 8;
-            // literals: every element a literal (or every chunk raw) -> n_bytes.
+            // literals: every element a literal (or every chunk raw) -> padded.
             // lengths/offsets: one byte per match, at most one match per element.
             // meta: header + every chunk's full-width bitmap.
-            return {align4(n_bytes),
+            return {align4(padded),
                     align4(n_chunks * block_elems),
                     align4(n_chunks * block_elems),
                     align4(hdr + n_chunks * flag_stride)};
         }
-        // Forward: worst case = original data (every chunk falls back to raw
+        // Forward: worst case = padded data (every chunk falls back to raw
         // storage) + stream header (two uint32_t per chunk).
         // postStreamSync() rounds the final size up to a 4-byte boundary and
         // zero-fills the pad; reserve that pad here too (see RREStage).
-        return {align4(n_bytes + hdr)};
+        return {align4(padded + hdr)};
     }
 
     std::unordered_map<std::string, size_t>

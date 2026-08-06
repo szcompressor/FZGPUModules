@@ -62,6 +62,24 @@ void NODE_STACK::inorder_traverse(NodeType* root, H* book)
     using PW = HuffmanWord<sizeof(H)>;
     constexpr auto MAX_LEN = PW::FIELD_CODE;
 
+    // Degenerate alphabet: one distinct symbol makes the root a LEAF, and the
+    // generic traversal below then falls straight into the emit branch with
+    // len == 0, giving that symbol a ZERO-BIT code. Nothing rejects it: the
+    // encoder adds 0 bits per symbol so the whole partition encodes to an empty
+    // bitstream, and the decoder — which advances by the code length — cannot
+    // make progress and returns zeros. The result is silent corruption, not a
+    // failure, and it is invisible on the most common constant input of all
+    // (an all-zero field) because the corrupt value it produces is also zero.
+    //
+    // Real data hits this: CESM-2D SFCLDICE and SFCLDLIQ are entirely zero.
+    // Canonical Huffman's usual convention applies — a one-symbol alphabet
+    // still needs one bit to encode.
+    if (root != nullptr && root->left == nullptr && root->right == nullptr) {
+        book[root->symbol] = 0;
+        reinterpret_cast<PW*>(&book[root->symbol])->bitcount = 1;
+        return;
+    }
+
     auto s    = new NODE_STACK();
     auto p    = root;
     bool done = false;

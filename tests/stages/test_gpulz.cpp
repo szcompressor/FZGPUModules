@@ -18,6 +18,10 @@
 #include <vector>
 #include <random>
 #include <cstring>
+#include <algorithm>
+#include <memory>
+#include <cstdio>
+#include <string>
 
 using namespace fz;
 using namespace fz_test;
@@ -600,4 +604,168 @@ TEST(GPULZStage, SplitPortNamesAndArity) {
     s.setInverse(true);
     EXPECT_EQ(s.getNumInputs(), 4u);
     EXPECT_EQ(s.getNumOutputs(), 1u);
+}
+
+// ── output-bound correctness on a partial tail chunk ──────────────────────
+// Regression for E22. Every helper above pads to a chunk multiple *before*
+// calling estimateOutputSizes(), so nothing in this suite ever exercised the
+// one shape that breaks: an unpadded input whose last chunk is partial.
+// execute() zero-pads that chunk internally and encodes it as a full one, so
+// the declared bound has to cover the padded extent — bounding by the input
+// size under-reserves by exactly the tail padding, and the encode writes past
+// the buffer the DAG allocated (silently, when this stage is mid-pipeline).
+//
+// Allocates exactly the declared bound plus a canary region and checks both
+// the reported size and the bytes past the bound.
+static void expect_bound_holds(size_t n_bytes, int word_size, size_t chunk_size,
+                               bool split) {
+    constexpr size_t kGuard = 4096;
+    constexpr uint8_t kCanary = 0xA5;
+
+    std::mt19937 rng((uint32_t)(n_bytes ^ (chunk_size << 8) ^ (size_t)word_size));
+    std::uniform_int_distribution<int> dist(0, 5);
+    std::vector<uint8_t> data(n_bytes);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+
+    CudaStream cs;
+    auto pool = make_test_pool(n_bytes * 4 + (1 << 20));
+
+    GPULZStage enc;
+    enc.setChunkSize(chunk_size);
+    enc.setWordSize(word_size);
+    enc.setSplitMode(split);
+    const auto caps = enc.estimateOutputSizes({n_bytes});
+    const size_t n_ports = split ? 4u : 1u;
+    ASSERT_EQ(caps.size(), n_ports);
+
+    CudaBuffer<uint8_t> d_in(n_bytes);
+    d_in.upload(data, cs.stream);
+
+    std::vector<std::unique_ptr<CudaBuffer<uint8_t>>> outs;
+    std::vector<void*> out_ptrs;
+    for (size_t i = 0; i < n_ports; i++) {
+        outs.emplace_back(new CudaBuffer<uint8_t>(caps[i] + kGuard));
+        cudaMemset(outs.back()->get(), kCanary, caps[i] + kGuard);
+        out_ptrs.push_back(outs.back()->void_ptr());
+    }
+    cudaStreamSynchronize(cs.stream);
+
+    std::vector<void*>  in_ptrs = {d_in.void_ptr()};
+    std::vector<size_t> in_sz   = {n_bytes};
+    enc.execute(cs.stream, pool.get(), in_ptrs, out_ptrs, in_sz);
+    enc.postStreamSync(cs.stream);
+    ASSERT_EQ(cudaStreamSynchronize(cs.stream), cudaSuccess);
+
+    for (size_t i = 0; i < n_ports; i++) {
+        EXPECT_LE(enc.getActualOutputSize((int)i), caps[i])
+            << "port " << i << " reported past its declared bound"
+            << " (n_bytes=" << n_bytes << ", chunk=" << chunk_size
+            << ", ws=" << word_size << ", split=" << split << ")";
+
+        std::vector<uint8_t> guard(kGuard);
+        cudaMemcpy(guard.data(), outs[i]->get() + caps[i], kGuard,
+                   cudaMemcpyDeviceToHost);
+        size_t clobbered = 0;
+        for (uint8_t b : guard) clobbered += (b != kCanary);
+        EXPECT_EQ(clobbered, 0u)
+            << clobbered << " byte(s) written past port " << i << "'s bound"
+            << " (n_bytes=" << n_bytes << ", chunk=" << chunk_size
+            << ", ws=" << word_size << ", split=" << split << ")";
+    }
+}
+
+TEST(GPULZStage, OutputBoundCoversPartialTailChunk) {
+    // Tail sizes chosen around the extremes: a 4-byte tail (almost all padding)
+    // and a chunk_size-4 tail (almost none) bracket the overrun, which scales
+    // with the tail's shape rather than with input size.
+    for (size_t chunk : {size_t(1024), size_t(2048), size_t(4096)})
+        for (size_t tail : {size_t(4), size_t(512), size_t(1020), chunk - 4})
+            expect_bound_holds(8 * chunk + tail, /*word_size=*/4, chunk,
+                               /*split=*/false);
+}
+
+TEST(GPULZStage, OutputBoundCoversPartialTailChunkSplit) {
+    for (size_t chunk : {size_t(1024), size_t(2048), size_t(4096)})
+        for (size_t tail : {size_t(4), size_t(512), chunk - 4})
+            expect_bound_holds(8 * chunk + tail, /*word_size=*/4, chunk,
+                               /*split=*/true);
+}
+
+TEST(GPULZStage, OutputBoundHoldsAtExactChunkMultiples) {
+    // The shape that already worked — kept so a future fix to the partial case
+    // cannot regress it.
+    for (size_t chunk : {size_t(1024), size_t(2048), size_t(4096)}) {
+        expect_bound_holds(8 * chunk, 4, chunk, false);
+        expect_bound_holds(8 * chunk, 4, chunk, true);
+    }
+}
+
+TEST(GPULZStage, OutputBoundCoversPartialTailAllWordSizes) {
+    for (int ws : {1, 2, 4, 8})
+        expect_bound_holds(8 * 2048 + 500, ws, 2048, false);
+}
+
+TEST(GPULZStage, UnpaddedPartialChunkRoundTrip) {
+    // The bound is only half of it: the stream must still decode. Feeds an
+    // unpadded input straight through, as a DAG does.
+    std::mt19937 rng(77);
+    std::uniform_int_distribution<int> dist(0, 5);
+    std::vector<uint8_t> data(8 * 2048 + 500);
+    for (auto& b : data) b = (uint8_t)dist(rng);
+
+    CudaStream cs;
+    auto pool = make_test_pool(data.size() * 4 + (1 << 20));
+
+    GPULZStage enc;
+    enc.setChunkSize(2048);
+    enc.setWordSize(4);
+    const size_t cap = enc.estimateOutputSizes({data.size()})[0];
+    const auto compressed = run_gpulz(enc, data, cap, cs.stream, *pool);
+
+    GPULZStage dec;
+    dec.setChunkSize(2048);
+    dec.setWordSize(4);
+    dec.setInverse(true);
+    const auto restored = run_gpulz(dec, compressed, data.size() + 8192,
+                                    cs.stream, *pool);
+
+    // The stage reports the padded extent; the leading bytes must be exact and
+    // the tail padding zero.
+    ASSERT_GE(restored.size(), data.size());
+    EXPECT_TRUE(std::equal(data.begin(), data.end(), restored.begin()))
+        << "unpadded GPULZ round-trip mismatch";
+    for (size_t i = data.size(); i < restored.size(); i++)
+        EXPECT_EQ(restored[i], 0) << "tail padding not zero at " << i;
+}
+
+TEST(GPULZStage, UnpaddedSparsePatternRoundTrip) {
+    // The shape that corrupted CESM-2D-qcodes/PRECT: a highly sparse chunk
+    // (one nonzero every 16 words, the rest zero) at an unpadded length.
+    // Nearly-empty chunks are the interesting case because they sit right next
+    // to the all-zero-chunk fast path.
+    const size_t n_words = 4 * 512 + 1;              // 4 chunks + a 4-byte tail
+    std::vector<uint8_t> data(n_words * 4, 0);
+    auto* w = reinterpret_cast<uint32_t*>(data.data());
+    for (size_t i = 0; i < n_words; i += 16) w[i] = 6;
+
+    CudaStream cs;
+    auto pool = make_test_pool(data.size() * 4 + (1 << 20));
+
+    GPULZStage enc;
+    enc.setChunkSize(2048);
+    enc.setWordSize(4);
+    const size_t cap = enc.estimateOutputSizes({data.size()})[0];
+    const auto compressed = run_gpulz(enc, data, cap, cs.stream, *pool);
+
+    GPULZStage dec;
+    dec.setChunkSize(2048);
+    dec.setWordSize(4);
+    dec.setInverse(true);
+    const auto restored = run_gpulz(dec, compressed, data.size() + 8192,
+                                    cs.stream, *pool);
+
+    ASSERT_GE(restored.size(), data.size());
+    size_t bad = 0;
+    for (size_t i = 0; i < data.size(); i++) bad += (restored[i] != data[i]);
+    EXPECT_EQ(bad, 0u) << bad << " of " << data.size() << " bytes wrong";
 }

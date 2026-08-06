@@ -381,3 +381,66 @@ TEST(CLI, BenchmarkGraphModeFallsBackOnIncompatibleStage) {
     EXPECT_NE(json.find("\"active\": false"), std::string::npos);
     EXPECT_NE(json.find("\"incompatible_reason\""), std::string::npos);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPULZ file round-trip at an input length that is NOT a multiple of
+// chunk_size. Regression for the inverse-DAG sink-buffer sizing bug: the
+// recorded uncompressed size *overrode* GPULZ's larger inverse estimate, so the
+// decode kernel's padded-extent write ran off the end of its buffer. Under
+// PREALLOCATE the region behind it holds the compressed stream, so the tail
+// chunk's write raced the other chunks' reads of that stream and they decoded
+// to zeros -- whole chunks lost, far from the tail, with the run reporting
+// success and exit code 0. CESM-2D qcodes/PRECT lost 14,480 B across 372 of
+// 6,329 chunks that way.
+//
+// This lives at the CLI level, not the stage level, because that is where it
+// reproduces: the stage round-trips correctly in isolation, and so does a warm
+// in-process Pipeline round trip. It needs the compress and decompress DAGs
+// built separately (as -z then -x does), a pool-managed decompress output, and
+// enough data for the overrun to reach the compressed buffer.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(CLI, GpulzUnpaddedInputFileRoundTripIsLossless) {
+    TempWorkspace tmp;
+
+    // Deliberately not multiples of chunk_size (2048 B). Several sizes because
+    // whether the overrun lands on the compressed buffer depends on how the
+    // pool packs, which varies with size.
+    for (const size_t kN : {(1u << 20) + 1, (1u << 20) + 129, (1u << 20) + 511,
+                            (1u << 22) + 129, 3240000u}) {
+    ASSERT_NE((kN * sizeof(float)) % 2048, 0u);
+
+    // Sparse but not empty. Most chunks take the coded path, so a chunk that is
+    // zero-filled instead of decoded shows up immediately; an all-zero chunk
+    // would legitimately decode to zeros and hide it.
+    std::vector<float> input(kN, 0.0f);
+    for (size_t i = 0; i < kN; i += 16) input[i] = 6.0f;
+
+    const auto input_path  = tmp.file("gpulz_unpadded.f32");
+    const auto comp_path   = tmp.file("gpulz_unpadded.fzm");
+    const auto decomp_path = tmp.file("gpulz_unpadded.out");
+    write_float_file(input_path, input);
+
+    ASSERT_EQ(run_cli({"fzgmod-cli", "-z",
+                       "-i", input_path.string(),
+                       "-o", comp_path.string(),
+                       "-t", "f32", "-l", std::to_string(kN),
+                       "--stages", "gpulz",
+                       "--strategy", "preallocate"}), 0);
+    ASSERT_TRUE(std::filesystem::exists(comp_path));
+
+    ASSERT_EQ(run_cli({"fzgmod-cli", "-x",
+                       "-i", comp_path.string(),
+                       "-o", decomp_path.string(),
+                       "-t", "f32"}), 0);
+
+    const auto restored = read_float_file(decomp_path);
+    ASSERT_EQ(restored.size(), kN);
+
+    size_t bad = 0, first_bad = kN;
+    for (size_t i = 0; i < kN; i++) {
+        if (restored[i] != input[i]) { if (bad == 0) first_bad = i; bad++; }
+    }
+    EXPECT_EQ(bad, 0u) << bad << " of " << kN << " values wrong, first at "
+                       << first_bad << " (chunk " << first_bad / 512 << ")";
+    }
+}

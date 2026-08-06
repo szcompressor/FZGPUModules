@@ -191,15 +191,38 @@ __global__ void KERNEL_CUHIP_Huffman_ReVISIT_lite(
         auto p_bits{0u};
         Hf   p_reduced{0x0};
 
+        // Stop at the chunk's valid length instead of masking only the bit count.
+        //
+        // The staging loop above writes s_to_encode[] only where `id < len`, so on
+        // a trailing partial chunk its tail slots are never initialized. This loop
+        // used to read them anyway and use the value as a CODEBOOK INDEX
+        // (`s_book[p_key]`), with `(idx < allowed_len())` suppressing only the bit
+        // count, not the read. Uninitialized shared memory as an index into a
+        // MaxBkLen array is an out-of-bounds read — observed as a CUDA illegal
+        // memory access, reported at the next sync point rather than here.
+        //
+        // Only reachable when the fine path actually engages, which needs every
+        // code <= 8 bits, which in practice means a degenerate (single-symbol)
+        // block — so it fired on genuinely constant data whose length is not a
+        // multiple of ChunkSize. CESM-2D SFCLDICE and SFCLDLIQ are entirely zero
+        // at 6,480,000 elements and hit it through the default cusz.toml preset.
+        //
+        // `break` rather than masking is also what makes the OUTPUT right: the
+        // masked version still OR-ed the out-of-range symbol's code bits into
+        // p_reduced at the current bit offset, where a later shuffle-merge
+        // atomicOr could preserve them. idx increases with i, so break is exact.
+        const auto valid = allowed_len();
         for (auto i = 0; i < ShardSize; i++) {
-            auto idx      = (threadIdx.x * ShardSize) + i;
+            auto idx = (threadIdx.x * ShardSize) + i;
+            if (idx >= valid) break;
+
             auto p_key    = s_to_encode[idx];
             auto p_val    = s_book[p_key];
             auto sym_bits = bitcount_of(&p_val);
 
             p_val <<= (BITWIDTH - sym_bits);
             p_reduced |= (p_val >> p_bits);
-            p_bits    += sym_bits * (idx < allowed_len());
+            p_bits    += sym_bits;
         }
 
         s_reduced[threadIdx.x]  = p_reduced;

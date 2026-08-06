@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 
 namespace fz {
 
@@ -139,13 +140,29 @@ Pipeline::buildInverseDAG(
             }
         }
     }
-    // Override each source's result buffer with its exact known size.
+    // Grow each source's result buffer to its exact known uncompressed size.
+    //
+    // Deliberately max(), not an override. The recorded source size is exact
+    // for what the sink stage *reports*, but a stage may legitimately *write*
+    // more than it reports: GPULZ zero-pads a partial tail chunk and its decode
+    // kernel writes the whole padded extent, then reports the pre-padding size
+    // so downstream element counts stay right. Overriding with the smaller
+    // number shrank the buffer below what the kernel writes, and in PREALLOCATE
+    // the overrun landed in the packed region behind it -- which is the *input*
+    // compressed buffer, so the tail chunk's write raced the other chunks'
+    // reads of the same stream and they decoded to garbage. It presented as
+    // whole chunks coming back zero-filled, far from the tail: CESM-2D
+    // qcodes/PRECT lost 14,480 bytes across 372 of 6,329 chunks, silently, with
+    // status ok. Taking the max keeps the exact size where the estimate is
+    // smaller (its original purpose) without ever undercutting the stage.
     for (const auto& fwd_desc : fwd_stages) {
         if (!source_sizes.count(fwd_desc.stage)) continue;
         auto sz_it  = source_sizes.find(fwd_desc.stage);
         auto buf_it = inv_result_map.find(fwd_desc.stage);
         if (sz_it != source_sizes.end() && buf_it != inv_result_map.end()) {
-            inv_dag->updateBufferSize(buf_it->second, sz_it->second);
+            const size_t est_sz = inv_dag->getBufferSize(buf_it->second);
+            inv_dag->updateBufferSize(buf_it->second,
+                                      std::max(est_sz, sz_it->second));
         }
     }
 

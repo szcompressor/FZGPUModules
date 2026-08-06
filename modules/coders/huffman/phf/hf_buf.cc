@@ -11,6 +11,7 @@
 //   - When use_HFR=true, allocates fine-path async-total buffers (d/h_total_nbit/ncell)
 //     and CUB temp storage (d_cub_temp); all null otherwise.
 
+#include <algorithm>
 #include <cstddef>
 
 #include "hf.h"
@@ -51,6 +52,20 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
       use_HFR(_use_HFR),
       revbk4_bytes(_revbk4_bytes(_bklen)),
       bitstream_max_len(inlen / 2),
+      // See scratch4_len's comment in hf_buf.h. The encoded-blob term mirrors
+      // memcpy_merge()'s writes exactly: header, reverse codebook, par_nbit,
+      // par_entry, bitstream. Rounded up to whole H4 words.
+      scratch4_len(std::max<size_t>(
+          inlen,
+          // PHFHEADER_FORCED_ALIGN, not sizeof(phf_header): the format reserves a
+          // fixed 128-byte slot for the header (hf_hl.cc's make_metadata sets
+          // nbyte[PHFHEADER_HEADER] to it), while the struct itself is only ~64
+          // bytes. Using sizeof() here under-reserves by 64 bytes, which is
+          // exactly enough to keep the original overrun alive.
+          (PHFHEADER_FORCED_ALIGN + _revbk4_bytes(_bklen)
+           + 2 * (((inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1)
+                  * sizeof(M))
+           + (inlen / 2) * sizeof(H4) + sizeof(H4) - 1) / sizeof(H4))),
       rt_bklen(0),
       numSMs(0),
       pool_(pool)
@@ -58,8 +73,8 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
     (void)_pardeg;
     cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
 
-    h_scratch4   = PALLOC_PIN(H4,       len,                "huf_h_scratch4");
-    d_scratch4   = PALLOC_DEV(H4,       len,                "huf_d_scratch4");
+    h_scratch4   = PALLOC_PIN(H4,       scratch4_len,       "huf_h_scratch4");
+    d_scratch4   = PALLOC_DEV(H4,       scratch4_len,       "huf_d_scratch4");
     h_bk4        = PALLOC_PIN(H4,       bklen,              "huf_h_bk4");
     d_bk4        = PALLOC_DEV(H4,       bklen,              "huf_d_bk4");
     h_revbk4     = PALLOC_PIN(PHF_BYTE, revbk4_bytes,       "huf_h_revbk4");
@@ -100,13 +115,13 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
 
     size_t fine_d_extra = _use_HFR ? (cub_temp_bytes + 2 * sizeof(uint64_t)) : 0;
     size_t fine_h_extra = _use_HFR ? (2 * sizeof(uint64_t)) : 0;
-    total_footprint_d  = (sizeof(H4) * len) + (sizeof(H4) * bklen) +
+    total_footprint_d  = (sizeof(H4) * scratch4_len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
                          (sizeof(uint32_t) * bklen) +
                          fine_d_extra;
-    total_footprint_h  = (sizeof(H4) * len) + (sizeof(H4) * bklen) +
+    total_footprint_h  = (sizeof(H4) * scratch4_len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
@@ -178,13 +193,16 @@ void Buf<E>::memcpy_merge(Header& header, phf_stream_t stream)
 template <typename E>
 void Buf<E>::clear_buffer()
 {
-    cudaMemset(d_scratch4,   0, len);
-    cudaMemset(d_bk4,        0, bklen);
+    // Sizes are BYTES. These were passed element counts, so every buffer whose
+    // element is wider than a byte was only partially cleared (d_scratch4 got
+    // 1/4 of its bytes, the par arrays 1/4, d_bitstream4 1/4).
+    cudaMemset(d_scratch4,   0, sizeof(H4) * scratch4_len);
+    cudaMemset(d_bk4,        0, sizeof(H4) * bklen);
     cudaMemset(d_revbk4,     0, revbk4_bytes);
-    cudaMemset(d_bitstream4, 0, bitstream_max_len);
-    cudaMemset(d_par_nbit,   0, pardeg);
-    cudaMemset(d_par_ncell,  0, pardeg);
-    cudaMemset(d_par_entry,  0, pardeg);
+    cudaMemset(d_bitstream4, 0, sizeof(H4) * bitstream_max_len);
+    cudaMemset(d_par_nbit,   0, sizeof(M) * pardeg);
+    cudaMemset(d_par_ncell,  0, sizeof(M) * pardeg);
+    cudaMemset(d_par_entry,  0, sizeof(M) * pardeg);
 }
 
 }  // namespace phf

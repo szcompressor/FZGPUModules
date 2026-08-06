@@ -39,6 +39,7 @@
  *   HF31  HuffmanStage/AdaptiveBook_DegenerateSampleNotPinned — a constant first block must not pin the book
  *   HF32  HuffmanStage/AdaptiveBook_RefitOnRateRegression     — bit-rate regression triggers a refit
  *   HF33  HuffmanStage/PinnedBookSymbolRangeGuard            — pinned books still reject symbols >= bklen
+ *   HF35  HuffmanStage/FineEncode_PartialChunkTail          — fine path on a trailing partial chunk: no OOB shared read, exact round-trip
  */
 
 #include <gtest/gtest.h>
@@ -1212,4 +1213,107 @@ TEST(HuffmanStage, EncodePathIsReported) {
     auto dec_fb = huffman_decode(fallback, enc_fb, N, cs.stream, *pool);
     ASSERT_EQ(dec_fb.size(), N);
     for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec_fb[i], skewed[i]);
+}
+
+// ── HF35 ─────────────────────────────────────────────────────────────────────
+// The fine kernel stages its chunk into shared memory under `if (id < len)`, so
+// on a TRAILING PARTIAL CHUNK the tail slots of s_to_encode are never written.
+// The reduce-merge loop then read them anyway and used the value as a codebook
+// index (s_book[p_key]) — an out-of-bounds shared read whose only guard,
+// `(idx < allowed_len())`, suppressed the bit count and not the read. When the
+// stale shared memory happened to hold a large value it faulted; the CUDA error
+// surfaced at the next sync point, blaming hf_buf.cc rather than this kernel.
+//
+// It needs the fine path to actually ENGAGE, which needs every code <= 8 bits.
+// In practice that means a degenerate or very small alphabet — which is why it
+// went unseen on ordinary data but killed genuinely constant fields: CESM-2D
+// SFCLDICE and SFCLDLIQ are entirely zero at 6,480,000 elements (not a multiple
+// of ChunkSize=1024) and could not be compressed at all by the stock cusz preset.
+//
+// Lengths below are deliberately NOT multiples of 1024. The all-identical case
+// is the one that reliably faulted; the small-alphabet cases cover the same tail
+// with more than one symbol. A pass here means no fault AND an exact round-trip.
+TEST(HuffmanStage, FineEncode_PartialChunkTail) {
+    CudaStream cs;
+
+    // Every N here is a partial chunk (not a multiple of ChunkSize = 1024).
+    // 1025 and 1200 additionally sit below the point where the merged blob
+    // outgrows an `inlen`-sized scratch buffer, which used to overrun it — see
+    // Buf::scratch4_len.
+    //
+    // Single-symbol input: one 1-bit code, so the fine path is guaranteed to run.
+    for (size_t N : {1025u, 1200u, 3000u, 65537u, 100003u}) {
+        auto pool = make_test_pool(N * sizeof(uint16_t));
+        std::vector<uint16_t> constant(N, 7);
+
+        HuffmanStage<uint16_t> h;
+        h.setBklen(1024);
+        h.setEncodeMode(HuffmanEncodeMode::Fine);
+
+        auto enc = huffman_encode(h, constant, cs.stream, *pool);
+        EXPECT_TRUE(h.getLastUsedFineEncode())
+            << "N=" << N << ": a single-symbol book must reach the fine path, "
+               "otherwise this test is not exercising the partial-chunk tail";
+
+        h.setInverse(false);
+        auto dec = huffman_decode(h, enc, N, cs.stream, *pool);
+        ASSERT_EQ(dec.size(), N) << "N=" << N;
+        size_t bad = 0, first_bad = N;
+        for (size_t i = 0; i < N; ++i)
+            if (dec[i] != constant[i]) { if (!bad) first_bad = i; ++bad; }
+        EXPECT_EQ(bad, 0u) << "FINE N=" << N << ": " << bad
+                           << " wrong symbols, first at " << first_bad;
+
+        // Coarse control on the identical input. If this diverges from Fine the
+        // defect is in the fine path, not in the codebook or the decoder.
+        HuffmanStage<uint16_t> c;
+        c.setBklen(1024);
+        c.setEncodeMode(HuffmanEncodeMode::Coarse);
+        auto enc_c = huffman_encode(c, constant, cs.stream, *pool);
+        c.setInverse(false);
+        auto dec_c = huffman_decode(c, enc_c, N, cs.stream, *pool);
+        ASSERT_EQ(dec_c.size(), N) << "coarse N=" << N;
+        size_t bad_c = 0, first_bad_c = N;
+        for (size_t i = 0; i < N; ++i)
+            if (dec_c[i] != constant[i]) { if (!bad_c) first_bad_c = i; ++bad_c; }
+        EXPECT_EQ(bad_c, 0u) << "COARSE N=" << N << ": " << bad_c
+                             << " wrong symbols, first at " << first_bad_c;
+    }
+
+    // Two-symbol control: if this passes where the single-symbol case fails, the
+    // defect is specific to a degenerate one-entry codebook, not to length.
+    for (size_t N : {1100u, 3000u, 65537u}) {
+        auto pool = make_test_pool(N * sizeof(uint16_t));
+        std::vector<uint16_t> two(N);
+        for (size_t i = 0; i < N; ++i) two[i] = static_cast<uint16_t>(i & 1u);
+
+        HuffmanStage<uint16_t> c;
+        c.setBklen(1024);
+        c.setEncodeMode(HuffmanEncodeMode::Coarse);
+        auto enc_c = huffman_encode(c, two, cs.stream, *pool);
+        c.setInverse(false);
+        auto dec_c = huffman_decode(c, enc_c, N, cs.stream, *pool);
+        size_t bad_c = 0;
+        for (size_t i = 0; i < N; ++i) if (dec_c[i] != two[i]) ++bad_c;
+        EXPECT_EQ(bad_c, 0u) << "COARSE 2-symbol N=" << N << ": " << bad_c << " wrong";
+    }
+
+    // Small alphabet, still under the 8-bit ceiling, still a partial final chunk.
+    for (size_t N : {1500u, 5000u, 33333u}) {
+        auto pool = make_test_pool(N * sizeof(uint16_t));
+        std::vector<uint16_t> small(N);
+        for (size_t i = 0; i < N; ++i) small[i] = static_cast<uint16_t>(i % 16);
+
+        HuffmanStage<uint16_t> h;
+        h.setBklen(1024);
+        h.setEncodeMode(HuffmanEncodeMode::Fine);
+
+        auto enc = huffman_encode(h, small, cs.stream, *pool);
+        EXPECT_TRUE(h.getLastUsedFineEncode()) << "N=" << N;
+
+        h.setInverse(false);
+        auto dec = huffman_decode(h, enc, N, cs.stream, *pool);
+        ASSERT_EQ(dec.size(), N) << "N=" << N;
+        for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec[i], small[i]) << "N=" << N << " i=" << i;
+    }
 }

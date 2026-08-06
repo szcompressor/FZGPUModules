@@ -71,6 +71,18 @@ struct Buf {
     const bool   use_HFR;
     const size_t revbk4_bytes;
     const size_t bitstream_max_len;
+    /// H4-word capacity of d_scratch4/h_scratch4.
+    ///
+    /// The scratch buffer serves two unrelated purposes: phase-1 fill needs one
+    /// H4 word per input element (`len`), while `d_encoded` ALIASES it and must
+    /// hold the whole merged blob — header + reverse codebook + the two pardeg
+    /// arrays + the bitstream. The second is not bounded by the first: the
+    /// reverse codebook is a fixed size set by `bklen` (2,304 bytes at
+    /// bklen = 1024) and does not shrink with the input, so on small inputs it
+    /// dominates. Sizing this at `len` alone therefore overran the allocation
+    /// for `len` below ~1,224 elements at bklen = 1024, which `memcpy_merge`
+    /// reported as a cudaMemcpyAsync "invalid argument". Hence: the max of both.
+    const size_t scratch4_len;
 
     uint16_t rt_bklen;
     int      numSMs;

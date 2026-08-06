@@ -159,6 +159,12 @@ struct FZMStageInfo {
     // Total: 2+2+1+1+2+16+16+128+4+84 = 256 bytes
 
     FZMStageInfo() {
+        // Zero the WHOLE object, not just the named arrays. This struct is
+        // written to disk verbatim, and the compiler's implicit tail padding
+        // (fields end at 254, sizeof is 256) is not covered by the member-wise
+        // initialization below — so an .fzm archive carried a few bytes of stack
+        // garbage and was not byte-reproducible across runs. See FZMBufferEntry.
+        std::memset(this, 0, sizeof(*this));
         stage_type   = StageType::UNKNOWN;
         stage_version = 0;
         num_inputs   = 0;
@@ -200,6 +206,18 @@ struct FZMBufferEntry {
     uint8_t reserved2[14]; ///< Reserved for future use (14B)
 
     FZMBufferEntry() {
+        // Zero the WHOLE object before setting fields. The named members end at
+        // byte 250 but sizeof(FZMBufferEntry) is 256 (8-byte alignment), and
+        // those 6 padding bytes are written straight to disk with the rest of
+        // the struct. Left uninitialized they made compression non-deterministic:
+        // two runs over CESM-2D/CLDHGH through gpu_zstd_lossless.toml produced
+        // archives differing in exactly 12 bytes — 2 padding bytes in each of the
+        // 4 buffer entries, plus the 4-byte header_checksum computed over them.
+        // Round-trip was unaffected (the padding is never read back), which is
+        // why it survived; but it breaks byte-for-byte reproducibility, and
+        // benchkit records compressed_sha256 per row and compares baselines
+        // across machines on exactly that.
+        std::memset(this, 0, sizeof(*this));
         stage_type         = StageType::UNKNOWN;
         stage_version      = 0;
         data_type          = DataType::UINT8;

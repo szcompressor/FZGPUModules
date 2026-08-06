@@ -30,6 +30,7 @@
 #include "backend/algorithms.h"
 #include "backend/cub.h"
 #include <stdexcept>
+#include <type_traits>
 #include <string>
 
 namespace fz {
@@ -127,15 +128,18 @@ __global__ void adaptive_lorenzo_forward_kernel(
     bool enable_order2,
     bool enable_centering)
 {
-    extern __shared__ char smem[];
-    T*         s   = reinterpret_cast<T*>(smem);
-    long long* red = reinterpret_cast<long long*>(smem + tile_size * sizeof(T));
-
-    __shared__ uint32_t acc1[kMaxBlocksPerTile];  // per coder block, LZ1
-    __shared__ uint32_t acc2[kMaxBlocksPerTile];  // per coder block, LZ2
-    __shared__ T        s_mu;
-    __shared__ T        s_q0;                     // tile's first value, kept live
-    __shared__ uint8_t  s_mode;
+    // All shared state is now per-WARP, not per-element: nwarps <= 32 because a
+    // tile is at most 32 coder blocks of 32. The tile-sized `s` staging buffer and
+    // the tile-sized `red` reduction buffer are both gone, so this kernel needs no
+    // dynamic shared memory at all (see the launch site).
+    __shared__ uint32_t  acc1[kMaxBlocksPerTile];    // per coder block, LZ1
+    __shared__ uint32_t  acc2[kMaxBlocksPerTile];    // per coder block, LZ2
+    __shared__ long long red[kMaxBlocksPerTile];     // per-warp partial sums (mean)
+    __shared__ T         sb_last[kMaxBlocksPerTile]; // v at lane 31 of each warp
+    __shared__ T         sb_prev[kMaxBlocksPerTile]; // v at lane 30 of each warp
+    __shared__ T         s_mu;
+    __shared__ T         s_q0;                       // tile's first value, kept live
+    __shared__ uint8_t   s_mode;
 
     const size_t   base   = static_cast<size_t>(blockIdx.x) * tile_size;
     const unsigned tid    = threadIdx.x;
@@ -148,38 +152,67 @@ __global__ void adaptive_lorenzo_forward_kernel(
     const T v = live ? in[gid] : static_cast<T>(0);
     if (tid == 0) s_q0 = v;
 
-    // ---- Tile mean ----
+    // ---- Per-warp partials for BOTH the mean and the difference chain ----
+    //
+    // Everything this block needs from its neighbours crosses only warp
+    // boundaries, so a single barrier serves both computations below. Previously
+    // the mean ran a shared-memory tree reduction (log2(tile_size) barriers, 8 at
+    // the default 256-element tile) and the differences staged the whole tile
+    // twice (4 more). Centering was therefore paying for barriers, not for
+    // arithmetic: measured 1.725 ms with centering against 0.954 ms without, on
+    // NYX 512^3 -- 45% of the stage for one integer mean.
     if (enable_centering) {
-        red[tid] = live ? static_cast<long long>(v) : 0LL;
-        __syncthreads();
-        unsigned p = 1u;
-        while (p < tile_size) p <<= 1;
-        for (unsigned stride = p >> 1; stride > 0u; stride >>= 1) {
-            if (tid < stride && tid + stride < tile_size) red[tid] += red[tid + stride];
-            __syncthreads();
-        }
-        if (tid == 0) {
-            // Trailing partial tile: divide by the live count, not tile_size.
-            const long long count =
-                static_cast<long long>(min(static_cast<size_t>(tile_size), n - base));
-            const long long tot = red[0];
-            s_mu = static_cast<T>((tot >= 0) ? (tot + count / 2) / count
-                                             : (tot - count / 2) / count);
+        // Warp-level sum: no barriers, and `red` shrinks from tile_size entries
+        // to one per warp.
+        long long ssum = live ? static_cast<long long>(v) : 0LL;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            ssum += fz::backend::shflDown(ssum, off, 32);
+        if (lane == 0u) red[warp] = ssum;
+    }
+
+    // The difference chain d1[i] = v[i] - v[i-1], d2[i] = d1[i] - d1[i-1] is a
+    // neighbour access: inside a warp it is a shuffle, and only lane 0 of each
+    // warp reaches across. Lane 0 of warp w needs v[w*32-1] for d1 and
+    // d1[w*32-1] = v[w*32-1] - v[w*32-2] for d2, so publishing the last TWO
+    // values of each warp covers both — one barrier instead of four.
+    if (lane == 31u) sb_last[warp] = v;
+    if (lane == 30u) sb_prev[warp] = v;
+
+    __syncthreads();
+
+    if (enable_centering) {
+        if (warp == 0u) {
+            long long t = (lane < nwarps) ? red[lane] : 0LL;
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1)
+                t += fz::backend::shflDown(t, off, 32);
+            if (lane == 0u) {
+                // Trailing partial tile: divide by the live count, not tile_size.
+                const long long count =
+                    static_cast<long long>(min(static_cast<size_t>(tile_size), n - base));
+                s_mu = static_cast<T>((t >= 0) ? (t + count / 2) / count
+                                               : (t - count / 2) / count);
+            }
         }
     } else if (tid == 0) {
         s_mu = static_cast<T>(0);
     }
-    __syncthreads();
 
     // ---- First and second differences across the whole tile ----
-    s[tid] = v;
-    __syncthreads();
-    const T d1 = static_cast<T>(s[tid] - ((tid > 0u) ? s[tid - 1] : static_cast<T>(0)));
-    __syncthreads();
-    s[tid] = d1;
-    __syncthreads();
-    const T d2 = static_cast<T>(s[tid] - ((tid > 0u) ? s[tid - 1] : static_cast<T>(0)));
-    __syncthreads();
+    // Reads sb_* published before the barrier above; independent of s_mu, so it
+    // overlaps the warp-0 mean reduction rather than waiting on it.
+    T vm1 = fz::backend::shflUp(v, 1u, 32);
+    if (lane == 0u) vm1 = (warp > 0u) ? sb_last[warp - 1] : static_cast<T>(0);
+    const T d1 = static_cast<T>(v - vm1);
+
+    T d1m1 = fz::backend::shflUp(d1, 1u, 32);
+    if (lane == 0u)
+        d1m1 = (warp > 0u) ? static_cast<T>(sb_last[warp - 1] - sb_prev[warp - 1])
+                           : static_cast<T>(0);
+    const T d2 = static_cast<T>(d1 - d1m1);
+
+    __syncthreads();  // publish s_mu
 
     const T mu = s_mu;
     const T q0 = s_q0;
@@ -270,7 +303,6 @@ __global__ void adaptive_lorenzo_inverse_kernel(
     uint32_t tile_size)
 {
     extern __shared__ char smem[];
-    T* s = reinterpret_cast<T*>(smem);
 
     const size_t gid = static_cast<size_t>(blockIdx.x) * tile_size + threadIdx.x;
     const int    tid = static_cast<int>(threadIdx.x);
@@ -279,21 +311,64 @@ __global__ void adaptive_lorenzo_inverse_kernel(
     const bool    ord2 = (mode & kModeOrder2) != 0;
     const bool    cent = (mode & kModeCentering) != 0;
 
-    s[tid] = (gid < n) ? residuals[gid] : static_cast<T>(0);
-    __syncthreads();
+    // Two-level warp-cooperative inclusive scan.
+    //
+    // This was a shared-memory Hillis-Steele scan with TWO __syncthreads() per
+    // stride, i.e. 2*log2(tile_size) barriers per pass and twice that for LZ2 —
+    // 32 barriers at the default 256-element tile. The kernel was barrier-bound,
+    // not memory-bound, which is the same failure mode already fixed in
+    // TiledLorenzoStage (3.2x) and the 1-D LorenzoStage scan (5.1x).
+    //
+    // The warp-level scan needs no barriers at all (shflUp is warp-synchronous),
+    // so a pass costs 2 barriers regardless of tile_size instead of 2*log2.
+    //
+    // Bit-exactness with the original: the old code accumulated in T, wrapping at
+    // each step; this accumulates in Acc (widened only for sub-32-bit T, to reach
+    // a shuffle overload) and truncates on store. Two's-complement addition is
+    // modular, and truncation is a ring homomorphism Z/2^32 -> Z/2^16, so the
+    // wrapped result is identical either way.
+    using Acc = typename std::conditional<(sizeof(T) < sizeof(int)), int, T>::type;
+
+    const int lane    = tid & 31;
+    const int warpId  = tid >> 5;
+    const int nWarps  = static_cast<int>((tile_size + 31) / 32);
+
+    // Only the per-warp totals need shared memory now — at most 32 of them,
+    // against the tile_size elements the Hillis-Steele version staged.
+    Acc* wsum = reinterpret_cast<Acc*>(smem);
+
+    Acc v = (gid < n) ? static_cast<Acc>(residuals[gid]) : static_cast<Acc>(0);
 
     // One inclusive scan undoes one difference; LZ2 needs two, in the same order.
     const int passes = ord2 ? 2 : 1;
     for (int pass = 0; pass < passes; ++pass) {
-        for (int stride = 1; stride < static_cast<int>(tile_size); stride <<= 1) {
-            T val = (tid >= stride) ? s[tid - stride] : static_cast<T>(0);
-            __syncthreads();
-            s[tid] += val;
-            __syncthreads();
+        // intra-warp inclusive scan — warp-synchronous, no __syncthreads
+        for (int d = 1; d < 32; d <<= 1) {
+            Acc up = fz::backend::shflUp(v, d, 32);
+            if (lane >= d) v += up;
         }
+        if (lane == 31) wsum[warpId] = v;
+        __syncthreads();
+
+        // One warp scans the per-warp totals (nWarps <= 32 because tile_size
+        // <= 1024 = 32 warps), then every thread adds its warp's exclusive prefix.
+        if (warpId == 0) {
+            Acc t = (lane < nWarps) ? wsum[lane] : static_cast<Acc>(0);
+            for (int d = 1; d < 32; d <<= 1) {
+                Acc up = fz::backend::shflUp(t, d, 32);
+                if (lane >= d) t += up;
+            }
+            if (lane < nWarps) wsum[lane] = t;
+        }
+        __syncthreads();
+
+        if (warpId > 0) v += wsum[warpId - 1];
+        // Next pass re-scans this pass's result; wsum is rewritten before it is
+        // read again, but the read above must complete for every thread first.
+        if (pass + 1 < passes) __syncthreads();
     }
 
-    T q = s[tid];
+    T q = static_cast<T>(v);
     if (cent) q = static_cast<T>(q + means[offsets[blockIdx.x]]);
     if (gid < n) out[gid] = q;
 }
@@ -307,9 +382,10 @@ void launchAdaptiveLorenzoForward(
     bool enable_order2, bool enable_centering, cudaStream_t stream)
 {
     if (n == 0) return;
-    const int    grid  = static_cast<int>((n + tile_size - 1) / tile_size);
-    const size_t shmem = tile_size * (sizeof(T) + sizeof(long long));
-    adaptive_lorenzo_forward_kernel<T><<<grid, tile_size, shmem, stream>>>(
+    const int grid = static_cast<int>((n + tile_size - 1) / tile_size);
+    // No dynamic shared memory: the kernel's shared state is now per-warp
+    // (<= 32 entries each) and lives in static __shared__ arrays.
+    adaptive_lorenzo_forward_kernel<T><<<grid, tile_size, 0, stream>>>(
         d_input, d_residuals, d_modes_dense, d_means_dense, d_flags, n, tile_size,
         enable_order2, enable_centering);
     FZ_CUDA_CHECK(cudaGetLastError());
@@ -350,7 +426,11 @@ void launchAdaptiveLorenzoInverse(
 {
     if (n == 0) return;
     const int grid = static_cast<int>((n + tile_size - 1) / tile_size);
-    adaptive_lorenzo_inverse_kernel<T><<<grid, tile_size, tile_size * sizeof(T), stream>>>(
+    // Only the per-warp partial sums are staged now (<= 32 of them), not the
+    // whole tile: the scan itself runs in registers via warp shuffles.
+    using Acc = typename std::conditional<(sizeof(T) < sizeof(int)), int, T>::type;
+    const size_t shmem = ((tile_size + 31) / 32) * sizeof(Acc);
+    adaptive_lorenzo_inverse_kernel<T><<<grid, tile_size, shmem, stream>>>(
         d_residuals, d_modes, d_means, d_offsets, d_output, n, tile_size);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
