@@ -67,9 +67,16 @@ function(fz_add_test)
     # CTest reads CROSSCOMPILING_EMULATOR from the target and prepends it to the
     # test command in CTestTestfile.cmake — no changes to individual test files needed.
     if(FZGMOD_COMPUTE_SANITIZER_WRAPPER)
+        # --require-cuda-init=no: several suites (test_zigzag, test_negabinary,
+        # test_module_cards, test_large_data, test_golden) are pure host code and
+        # never make a CUDA call. Without this, compute-sanitizer exits non-zero
+        # with "Target application terminated before first instrumented API call"
+        # *after every one of their tests passed*, so the run reports 5 failures
+        # that say nothing about the code — and a real regression hiding among
+        # them would be indistinguishable from the usual noise.
         set_target_properties(${ARG_NAME} PROPERTIES
             CROSSCOMPILING_EMULATOR
-                "compute-sanitizer;--tool;memcheck;--error-exitcode;1"
+                "compute-sanitizer;--tool;memcheck;--error-exitcode;1;--require-cuda-init=no"
         )
     endif()
 

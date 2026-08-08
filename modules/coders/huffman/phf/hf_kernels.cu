@@ -456,6 +456,16 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase3_sync(
         cudaMemcpyDeviceToHost, (cudaStream_t)stream));
     FZ_CUDA_CHECK(cudaStreamSynchronize((cudaStream_t)stream));
 
+    // h_par_entry is an EXCLUSIVE prefix sum, so entry 0 is 0 by definition — but
+    // nothing wrote it. The memcpy below fills [1, pardeg) and the accumulation
+    // starts at i=1, so entry 0 was whatever the buffer already held.
+    //
+    // That is not hypothetical: h_par_entry is pool-allocated pinned memory, so a
+    // second HuffmanStage sharing a pool with a first one inherits its bytes, and
+    // the stale value then propagates through every entry (each is += its
+    // predecessor). A first use of a fresh pool happens to get zeroed memory,
+    // which is why this only bites on pool reuse.
+    h_par_entry[0] = 0;
     memcpy(h_par_entry + 1, h_par_ncell, (hfpar.pardeg - 1) * sizeof(M));
     for (auto i = 1; i < hfpar.pardeg; i++) h_par_entry[i] += h_par_entry[i - 1];
 
