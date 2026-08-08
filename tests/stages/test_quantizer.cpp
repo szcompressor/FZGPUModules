@@ -108,17 +108,17 @@ struct QuantizerForwardResult {
 // pre-allocate the stage-private outlier-count scratch (or rely on lazy alloc
 // — onFinalize is only required for PREALLOCATE callers; tests using MINIMAL
 // pools get away without it since initOutlierCountScratch is idempotent).
-template<typename TCode>
+template<typename TCode, typename TInput = float>
 static QuantizerForwardResult run_quantizer_forward(
-    QuantizerStage<float, TCode>& stage,
-    const std::vector<float>&     h_input,
-    cudaStream_t                  stream,
-    fz::MemoryPool&               pool)
+    QuantizerStage<TInput, TCode>& stage,
+    const std::vector<TInput>&     h_input,
+    cudaStream_t                   stream,
+    fz::MemoryPool&                pool)
 {
     size_t n = h_input.size();
-    size_t in_bytes = n * sizeof(float);
+    size_t in_bytes = n * sizeof(TInput);
 
-    CudaBuffer<float> d_in(n);
+    CudaBuffer<TInput> d_in(n);
     d_in.upload(h_input, stream);
 
     stage.onFinalize(in_bytes, &pool);
@@ -158,19 +158,19 @@ static QuantizerForwardResult run_quantizer_forward(
 // `stage` must have its outlier count set — typically by deserializeHeader()
 // in the caller, which carries the count over from the forward stage's
 // serialized config.
-template<typename TCode>
-static std::vector<float> run_quantizer_inverse(
-    QuantizerStage<float, TCode>& stage,
-    const QuantizerForwardResult& fwd,
-    size_t                         n_elements,
-    cudaStream_t                   stream,
-    fz::MemoryPool&                pool)
+template<typename TCode, typename TInput = float>
+static std::vector<TInput> run_quantizer_inverse(
+    QuantizerStage<TInput, TCode>& stage,
+    const QuantizerForwardResult&  fwd,
+    size_t                          n_elements,
+    cudaStream_t                    stream,
+    fz::MemoryPool&                 pool)
 {
     CudaBuffer<uint8_t> d_codes(fwd.codes_raw.size()); d_codes.upload(fwd.codes_raw, stream);
     CudaBuffer<uint8_t> d_vals (fwd.vals_raw.size());  d_vals.upload(fwd.vals_raw,  stream);
     CudaBuffer<uint8_t> d_idxs (fwd.idxs_raw.size());  d_idxs.upload(fwd.idxs_raw,  stream);
 
-    CudaBuffer<float> d_out(n_elements);
+    CudaBuffer<TInput> d_out(n_elements);
 
     std::vector<void*>  inputs  = {d_codes.void_ptr(), d_vals.void_ptr(),
                                     d_idxs.void_ptr()};
@@ -366,6 +366,112 @@ TEST(QuantizerNOA, ConstantInput) {
     for (size_t i = 0; i < N; i++)
         EXPECT_FLOAT_EQ(h_recon[i], VAL)
             << "NOA constant input mismatch at index " << i;
+}
+
+// QZ5b: f64 field whose range is tiny next to its offset, in LINEAR mode — the
+// shape that exposed the float32 downcast in the forward kernel.
+//
+// Modelled on S3D/N2 as the cuszp2/cuszp3 presets see it: values ~0.7369 spanning
+// a range of 1.10e-5, quantized with linear_mode (no radius clamp, cuSZp-style).
+// At a 1e-4 NOA bound abs_eb is 1.103e-09, while the float32 spacing at 0.7369 is
+// 5.96e-08 — 54x the bound. Rounding through float32 therefore blew the bound
+// before quantization did any work, and all four cuszp variants round-tripped at
+// 48 dB reporting `status: ok`, every one with err_over_bound = 81.08.
+//
+// Linear mode is the mode that can express this. The radius-clamped path cannot:
+// an inlier needs |x|/abs_eb < 2*quant_radius, which forces abs_eb above the
+// float32 spacing at |x|, so the radius check always escalates to an outlier
+// first. That is why this test is here and not on the ABS/NOA outlier path.
+TEST(QuantizerLinear, DoubleTinyRangeLargeOffsetRespectsBound) {
+    CudaStream stream;
+    constexpr size_t N       = 1 << 14;
+    constexpr double OFFSET  = 0.7369;
+    constexpr double RANGE   = 1.10e-5;
+    constexpr double USER_EB = 1.0e-4;    // NOA: abs_eb = USER_EB * range
+    const size_t in_bytes    = N * sizeof(double);
+
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = OFFSET + RANGE * (0.5 + 0.5 * std::sin(i * 0.01));
+
+    const double vmin = *std::min_element(h_input.begin(), h_input.end());
+    const double vmax = *std::max_element(h_input.begin(), h_input.end());
+    const double expected_abs_eb = USER_EB * (vmax - vmin);
+
+    // Sanity: this test only means something if float32 genuinely cannot express
+    // the bound. If that stops being true the test has lost its teeth.
+    const double f32_spacing = std::nextafterf(static_cast<float>(OFFSET),
+                                               std::numeric_limits<float>::infinity())
+                             - static_cast<float>(OFFSET);
+    ASSERT_GT(f32_spacing, expected_abs_eb * 10.0)
+        << "test no longer models the float32-downcast failure";
+
+    CudaBuffer<double> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 6.0f);
+    auto* q = pipeline.addStage<QuantizerStage<double, uint32_t>>();
+    q->setErrorBound(static_cast<float>(USER_EB));
+    q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setLinearMode(true);
+    pipeline.setPoolManagedDecompOutput(false);
+    pipeline.finalize();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    ASSERT_NO_THROW(
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream));
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(pipeline.decompress(nullptr, 0, &d_dec, &dec_sz, stream));
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<double> h_recon(N);
+    cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost);
+    cudaFree(d_dec);
+
+    double max_err = 0.0;
+    for (size_t i = 0; i < N; i++)
+        max_err = std::max(max_err, std::abs(h_recon[i] - h_input[i]));
+
+    EXPECT_LE(max_err, expected_abs_eb * 1.02)
+        << "f64 linear NOA round-trip max_err=" << max_err
+        << " exceeds abs_eb=" << expected_abs_eb
+        << " (ratio " << (max_err / expected_abs_eb) << "x)";
+}
+
+// QZ5c: the same shape, but with a bound that is genuinely unrepresentable in
+// the input type. No kernel can satisfy it, so the stage must refuse rather
+// than emit a stream that decodes cleanly into out-of-bound values.
+TEST(QuantizerNOA, RefusesBoundBelowInputTypeSpacing) {
+    CudaStream stream;
+    constexpr size_t N      = 2048;
+    constexpr float  OFFSET = 7.0e5f;   // f32 spacing here is ~0.0625
+    constexpr float  RANGE  = 1.0e-3f;
+    constexpr float  USER_EB = 1.0e-4f; // abs_eb = 1e-7, ~600,000x below spacing
+
+    auto pool = make_test_pool(N * sizeof(float) * 24);
+
+    std::vector<float> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = OFFSET + RANGE * (0.5f + 0.5f * std::sin(i * 0.01f));
+
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(USER_EB);
+    fwd.setErrorBoundMode(ErrorBoundMode::NOA);
+    fwd.setQuantRadius(32768);
+    fwd.setOutlierCapacity(0.5f);
+
+    // Lambda, not a direct call: the comma in the explicit template argument
+    // list would be read as a macro argument separator.
+    auto run = [&] { return run_quantizer_forward<uint32_t, float>(fwd, h_input, stream, *pool); };
+    EXPECT_THROW(run(), std::runtime_error);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -20,9 +20,10 @@ name = "bshuf"
 type = "Bitshuffle"
 element_width = 4
 block_size = 16384
-input_port = "quant:codes"
+inputs = [{from = "quant", port = "codes"}]
 
 [[stage]]
 name = "rze"
 type = "RZE"
 word_size = 1
+inputs = [{from = "bshuf", port = "output"}]

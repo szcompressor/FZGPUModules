@@ -20,11 +20,14 @@ namespace fz {
 /**
  * Serialized quantizer configuration stored in FZMBufferEntry.stage_config.
  * Written by `serializeHeader()`; read back by `deserializeHeader()`.
- * 52 bytes — fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
+ * 72 bytes — fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
  */
 struct QuantizerConfig {
+    /// @deprecated Narrow copy of the absolute EB, kept so old readers still parse.
+    /// New code must read `abs_error_bound_f64` — see the f64 note on that field.
     float    abs_error_bound;   ///< Absolute EB after mode conversion (0 for REL).
     float    user_error_bound;  ///< Original user-specified EB.
+    /// @deprecated Narrow copy; new code reads `value_base_f64`.
     float    value_base;        ///< value_range (NOA); 0 for ABS/REL.
     uint32_t quant_radius;      ///< Quantization radius.
     uint32_t num_elements;      ///< Total element count.
@@ -40,6 +43,14 @@ struct QuantizerConfig {
     uint8_t  _pad[5];           ///< Alignment padding (dither_seed needs 8-byte alignment) — must be zero.
     uint64_t dither_seed;       ///< Deterministic per-element dither seed; meaningful only when dither.
     float    dither_strength;   ///< Dither offset amplitude as a fraction of abs_eb, in (0,1]; meaningful only when dither.
+    uint32_t _pad2;             ///< Alignment padding (the f64 fields need 8-byte alignment) — must be zero.
+    /// Full-precision absolute EB. The float copy above cannot carry an f64
+    /// bound: decode computes `recon = q * 2*abs_eb`, and for a field like
+    /// S3D/N2 (q ~ 3.3e8) a 6e-08 *relative* error in abs_eb lands as a 4.4e-08
+    /// absolute error — 40x the bound. Headers written before 2026-08-07 leave
+    /// this 0 and the reader falls back to the float field.
+    double   abs_error_bound_f64;
+    double   value_base_f64;    ///< Full-precision value_base; 0 in pre-2026-08-07 headers.
 
     QuantizerConfig()
         : abs_error_bound(0.0f), user_error_bound(0.0f), value_base(0.0f),
@@ -48,7 +59,8 @@ struct QuantizerConfig {
           eb_mode(0), zigzag_codes(0),
           outlier_threshold(std::numeric_limits<float>::infinity()),
           inplace_outliers(0), linear_mode(0), dither(0), _pad{}, dither_seed(0),
-          dither_strength(1.0f) {}
+          dither_strength(1.0f), _pad2(0),
+          abs_error_bound_f64(0.0), value_base_f64(0.0) {}
 };
 static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
               "QuantizerConfig must fit in FZM_STAGE_CONFIG_SIZE");
@@ -322,8 +334,8 @@ private:
     bool     is_inverse_          = false;
     TInput   computed_abs_eb_     = static_cast<TInput>(1e-4);
     TInput   saved_computed_abs_eb_ = static_cast<TInput>(1e-4);
-    float    computed_value_base_ = 0.0f;
-    float    saved_computed_value_base_ = 0.0f;
+    TInput   computed_value_base_ = static_cast<TInput>(0);
+    TInput   saved_computed_value_base_ = static_cast<TInput>(0);
     /// Stage-private 4-byte device scratch holding the live outlier count.
     /// Allocated lazily via `pool->allocatePersistentDevice(4, ...)` — see
     /// `initOutlierCountScratch()`. Used by the forward kernel as the atomic

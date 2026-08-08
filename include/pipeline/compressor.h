@@ -384,7 +384,10 @@ public:
      * Disable when per-buffer memory inspection is needed (e.g. cuda-memcheck).
      * Must be called before finalize().
      */
-    void setColoringEnabled(bool enable) { dag_->setColoringEnabled(enable); }
+    void setColoringEnabled(bool enable) {
+        coloring_enabled_ = enable;              // survives a setMemoryStrategy() DAG swap
+        dag_->setColoringEnabled(enable);
+    }
     bool isColoringEnabled() const       { return dag_->isColoringEnabled(); }
     size_t getColorRegionCount() const   { return dag_->getColorRegionCount(); }
 
@@ -835,6 +838,9 @@ private:
     bool was_compressed_;
 
     bool profiling_enabled_;
+    /// Pipeline-level mirror of the DAG's coloring flag. Needed because
+    /// setMemoryStrategy() replaces dag_ wholesale and must restore it.
+    bool coloring_enabled_ = true;
     PipelinePerfResult last_perf_result_;
 
     std::vector<DAGNode*> input_nodes_;

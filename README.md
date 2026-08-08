@@ -172,7 +172,7 @@ fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --repo
 
 ## Acknowledgements
 
-FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), GPULZ and AIZ_VLDB26 (no license declared upstream), and FSZ (paper-only, no reference implementation).
+FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), and GPULZ and AIZ_VLDB26 (no license declared upstream).
 
 | Project | Stages |
 |---|---|
@@ -185,7 +185,7 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 | [dietGPU](https://github.com/facebookresearch/dietgpu) — Meta Platforms (MIT) | `ANSStage` |
 | [GPULZ](https://github.com/hpdps-group/ICS23-GPULZ) — Zhang, Tian, Di et al. (ICS '23; *no license declared upstream*) | `GPULZStage` |
 | [AIZ_VLDB26](https://github.com/boyuanzhang62/AIZ_VLDB26) — Boyuan Zhang (*no license declared upstream*) | `GPULZStage` all-zero-chunk fast path |
-| FSZ — Jiajun Huang, SC '26 (arXiv:2607.15413) — *algorithmic attribution only; written from the paper, no reference implementation exists* | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
+| [FSZ](https://github.com/JiajunHuang1999/FSZ) — Jiajun Huang, SC '26 (arXiv:2607.15413) — *algorithmic attribution only; written from the paper, before FSZ 1.0.0 was released* | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | Liang, Di, Tao, Chen, Cappello — IEEE CLUSTER 2018 — *algorithmic attribution only* | `LogTransformStage` |
 
 For per-stage attribution details, copyright notices, relationship types (direct port, algorithmic reimplementation, or vendored), and paper citations, see [`docs/acknowledgements.md`](docs/acknowledgements.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).

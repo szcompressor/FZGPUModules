@@ -1,0 +1,129 @@
+diff --git a/Makefile b/Makefile
+index d0c8db7..7b38c93 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,10 +1,12 @@
++GENCODE = -gencode arch=compute_90,code=sm_90 -gencode arch=compute_90,code=compute_90
++
+ main: src/fz.cu
+-	nvcc src/claunch_cuda.cu -Iinclude --extended-lambda -c
+-	nvcc src/fz.cu claunch_cuda.o -o fz-gpu
++	nvcc $(GENCODE) src/claunch_cuda.cu -Iinclude --extended-lambda -c
++	nvcc $(GENCODE) src/fz.cu claunch_cuda.o -o fz-gpu
+ 
+ isolated: src/fz_isolated.cu
+-	nvcc src/claunch_cuda.cu -Iinclude --extended-lambda -c
+-	nvcc src/fz_isolated.cu claunch_cuda.o -o fz-gpu-isolated
++	nvcc $(GENCODE) src/claunch_cuda.cu -Iinclude --extended-lambda -c
++	nvcc $(GENCODE) src/fz_isolated.cu claunch_cuda.o -o fz-gpu-isolated
+ 
+ clean:
+ 	rm -rf fz-gpu fz-gpu-isolated claunch_cuda.o
+diff --git a/src/fz.cu b/src/fz.cu
+index 60062df..8e6b53e 100644
+--- a/src/fz.cu
++++ b/src/fz.cu
+@@ -394,7 +394,9 @@ __global__ void decompressionFusedKernel(
+     deviceOutput[tid + bid * blockDim.x * blockDim.y] = dataChunk[threadIdx.y][threadIdx.x];
+ }
+ 
+-void runFzgpu(std::string fileName, int x, int y, int z, double eb)
++void runFzgpu(std::string fileName, int x, int y, int z, double eb,
++              std::string compress_out, std::string decompress_out,
++              cudaStream_t stream)
+ {
+     auto inputDimension = dim3(x, y, z);
+     int  inputSize = GetFileSize(fileName);
+@@ -453,10 +455,6 @@ void runFzgpu(std::string fileName, int x, int y, int z, double eb)
+     CHECK_CUDA(cudaMemset(deviceDecompressedOutput, 0, sizeof(float) * paddingDataTypeLen));
+ 
+     CHECK_CUDA(cudaMemcpy(deviceInput, hostInput, sizeof(float) * dataTypeLen, cudaMemcpyHostToDevice));
+-    
+-    
+-    cudaStream_t stream;
+-    cudaStreamCreate(&stream);
+ 
+     compressionStart = std::chrono::system_clock::now();
+ 
+@@ -469,6 +467,28 @@ void runFzgpu(std::string fileName, int x, int y, int z, double eb)
+     cudaDeviceSynchronize();
+     compressionEnd = std::chrono::system_clock::now();
+ 
++    CHECK_CUDA(cudaMemcpy(&offsetSum, deviceOffsetCounter, sizeof(uint32_t), cudaMemcpyDeviceToHost));
++
++    if (!compress_out.empty()) {
++        uint32_t u_dataChunkSize = (uint32_t)dataChunkSize;
++        uint32_t nChunks = (uint32_t)floor(quantizationCodeByteLen / 4096);
++        uint32_t* hBitFlag    = new uint32_t[u_dataChunkSize];
++        uint32_t* hStartPos   = new uint32_t[nChunks];
++        uint32_t* hCompressed = new uint32_t[offsetSum];
++        CHECK_CUDA(cudaMemcpy(hBitFlag,    deviceBitFlagArr,                      sizeof(uint32_t) * u_dataChunkSize, cudaMemcpyDeviceToHost));
++        CHECK_CUDA(cudaMemcpy(hStartPos,   deviceStartPosition,                   sizeof(uint32_t) * nChunks,         cudaMemcpyDeviceToHost));
++        CHECK_CUDA(cudaMemcpy(hCompressed, (uint32_t*)deviceCompressedOutput,     sizeof(uint32_t) * offsetSum,       cudaMemcpyDeviceToHost));
++        std::ofstream ofs(compress_out, std::ios::binary | std::ios::out);
++        ofs.write(reinterpret_cast<char*>(&u_dataChunkSize), sizeof(uint32_t));
++        ofs.write(reinterpret_cast<char*>(&nChunks),         sizeof(uint32_t));
++        ofs.write(reinterpret_cast<char*>(&offsetSum),        sizeof(uint32_t));
++        ofs.write(reinterpret_cast<char*>(hBitFlag),    sizeof(uint32_t) * u_dataChunkSize);
++        ofs.write(reinterpret_cast<char*>(hStartPos),   sizeof(uint32_t) * nChunks);
++        ofs.write(reinterpret_cast<char*>(hCompressed), sizeof(uint32_t) * offsetSum);
++        ofs.close();
++        delete[] hBitFlag; delete[] hStartPos; delete[] hCompressed;
++    }
++
+     decompressionStart = std::chrono::system_clock::now();
+ 
+     // de-bitshuffle kernel
+@@ -480,6 +500,13 @@ void runFzgpu(std::string fileName, int x, int y, int z, double eb)
+     cudaDeviceSynchronize();
+     decompressionEnd = std::chrono::system_clock::now();
+ 
++    if (!decompress_out.empty()) {
++        float* hDecomp = new float[dataTypeLen];
++        CHECK_CUDA(cudaMemcpy(hDecomp, deviceDecompressedOutput, sizeof(float) * dataTypeLen, cudaMemcpyDeviceToHost));
++        write_array_to_binary(decompress_out, hDecomp, (size_t)dataTypeLen);
++        delete[] hDecomp;
++    }
++
+ #ifdef VERIFICATION
+ 
+     uint16_t* hostQuantizationCode;
+@@ -556,7 +583,6 @@ void runFzgpu(std::string fileName, int x, int y, int z, double eb)
+ 
+ #endif
+ 
+-    CHECK_CUDA(cudaMemcpy(&offsetSum, deviceOffsetCounter, sizeof(uint32_t), cudaMemcpyDeviceToHost));
+     printf("original size: %d\n", inputSize);
+     printf("compressed size: %ld\n", sizeof(uint32_t) * dataChunkSize + offsetSum * sizeof(uint32_t) + sizeof(uint32_t) * int(quantizationCodeByteLen / 4096));
+     printf("compression ratio: %f\n", float(inputSize) / float(sizeof(uint32_t) * dataChunkSize + offsetSum * sizeof(uint32_t) + sizeof(uint32_t) * floor(quantizationCodeByteLen / 4096)));
+@@ -582,7 +608,7 @@ void runFzgpu(std::string fileName, int x, int y, int z, double eb)
+     CHECK_CUDA(cudaFree(deviceDecompressedQuantizationCode));
+     CHECK_CUDA(cudaFree(deviceDecompressedOutput));
+ 
+-    cudaStreamDestroy(stream);
++    // stream is caller-owned (see main()) — not destroyed here.
+ 
+     delete[] hostInput;
+ 
+@@ -598,7 +624,20 @@ int main(int argc, char* argv[])
+     int    y  = std::stoi(argv[3]);
+     int    z  = std::stoi(argv[4]);
+     double eb = std::stod(argv[5]);
++    std::string compress_out   = argc > 6 ? argv[6] : "";
++    std::string decompress_out = argc > 7 ? argv[7] : "";
++    // Optional 8th arg: in-process repeat count for benchmarking (default 1).
++    // Loops runFzgpu() N times sharing one CUDA stream/context, so device
++    // timing reflects a warm GPU/clock state instead of a fresh-process cold
++    // start (see benchkit docs/adapters/fzgpu.md for why this matters).
++    int repeat = argc > 8 ? std::stoi(argv[8]) : 1;
++    if (repeat < 1) repeat = 1;
+ 
+-    runFzgpu(fileName, x, y, z, eb);
++    cudaStream_t stream;
++    cudaStreamCreate(&stream);
++    for (int r = 0; r < repeat; r++) {
++        runFzgpu(fileName, x, y, z, eb, compress_out, decompress_out, stream);
++    }
++    cudaStreamDestroy(stream);
+     return 0;
+ }

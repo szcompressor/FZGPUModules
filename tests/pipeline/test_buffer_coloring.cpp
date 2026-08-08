@@ -106,6 +106,34 @@ TEST(BufferColoring, DisabledWhenRequested) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BC3b: setColoringEnabled(false) survives a later setMemoryStrategy() call.
+//
+// setMemoryStrategy() replaces dag_ wholesale, so any DAG-level flag set on the
+// Pipeline beforehand has to be re-applied to the replacement.  Coloring was not,
+// and because every TOML preset carries a `memory_strategy` key, loadConfig()
+// routes through setMemoryStrategy() -- so setColoringEnabled(false) followed by
+// loadConfig() was silently a no-op.  That produced a *plausible wrong answer*
+// (an uncolored-vs-colored peak-memory sweep reporting 0 bytes saved on all 15
+// presets) rather than an error, which is what made it survive.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(BufferColoring, DisabledSurvivesMemoryStrategyChange) {
+    Pipeline p(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
+    p.setColoringEnabled(false);
+    p.setMemoryStrategy(MemoryStrategy::PREALLOCATE);  // swaps the DAG underneath
+    EXPECT_FALSE(p.isColoringEnabled())
+        << "setColoringEnabled(false) must be re-applied to the replacement DAG";
+
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(kEB);
+    lrz->setQuantRadius(512);
+    lrz->setOutlierCapacity(0.2f);
+    p.setPoolManagedDecompOutput(false);
+    p.finalize();
+    EXPECT_EQ(p.getColorRegionCount(), 0u)
+        << "No color regions should exist when coloring was disabled";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BC4: A colored pipeline produces identical output to an uncolored one
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(BufferColoring, ColoredAndUncoloredMatchExactly) {

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <type_traits>
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -708,17 +709,21 @@ void LorenzoQuantStage<TInput, TCode>::execute(
 
         if (config_.eb_mode == ErrorBoundMode::ABS) {
             computed_abs_eb_    = static_cast<TInput>(config_.error_bound);
-            computed_value_base_ = 0.0f;
+            computed_value_base_ = static_cast<TInput>(0);
         } else {
-            float value_base = config_.precomputed_value_base;
-            if (value_base <= 0.0f) {
+            // TInput, not float: narrowing the range here puts a ~6e-08 relative
+            // error into abs_eb before the kernel ever sees it, which the inverse
+            // then amplifies by the prefix-sum magnitude.
+            TInput value_base = static_cast<TInput>(config_.precomputed_value_base);
+            TInput data_abs_max = TInput(0);
+            if (value_base <= TInput(0)) {
                 value_base = computeValueBase<TInput>(
                     static_cast<const TInput*>(inputs[0]),
-                    scan_N, config_.eb_mode, stream, pool);
+                    scan_N, config_.eb_mode, stream, pool, &data_abs_max);
             }
             computed_value_base_ = value_base;
 
-            if (value_base <= 0.0f) {
+            if (value_base <= TInput(0)) {
                 FZ_LOG(WARN,
                     "LorenzoQuantStage: value_base is zero for %s mode "
                     "(constant or empty data?); falling back to ABS",
@@ -734,6 +739,29 @@ void LorenzoQuantStage<TInput, TCode>::execute(
                 static_cast<double>(config_.error_bound),
                 static_cast<double>(value_base),
                 static_cast<double>(computed_abs_eb_));
+
+            // Representability backstop — same rule as QuantizerStage. A relative
+            // mode can derive an abs_eb finer than TInput resolves at the data's
+            // magnitude, which no implementation can honour: round-tripping the
+            // input through TInput already exceeds it.
+            const TInput spacing = std::numeric_limits<TInput>::epsilon() * data_abs_max;
+            if (data_abs_max > TInput(0) && computed_abs_eb_ > TInput(0)
+                && spacing > computed_abs_eb_) {
+                char msg[512];
+                std::snprintf(msg, sizeof(msg),
+                    "LorenzoQuantStage %s: requested abs_eb=%.6g is below the "
+                    "representable spacing of the input type at this data's magnitude "
+                    "(%.6g at |x|max=%.6g, %.1fx the bound). No quantizer can honour "
+                    "it — the input's own round-trip error already exceeds it. Use a "
+                    "wider input type, a looser error bound, or ABS mode with an "
+                    "explicit bound.",
+                    config_.eb_mode == ErrorBoundMode::NOA ? "NOA" : "PREL",
+                    static_cast<double>(computed_abs_eb_),
+                    static_cast<double>(spacing),
+                    static_cast<double>(data_abs_max),
+                    static_cast<double>(spacing / computed_abs_eb_));
+                throw std::runtime_error(msg);
+            }
         }
 
         // Calculate ebx2_r = 1 / (2 * abs_error_bound) for pre-quantization

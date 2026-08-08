@@ -144,6 +144,19 @@ p.connect(lrz, quant, "codes");
 | `NOA` | `abs(error) / value_range ≤ eb` | Scales ABS by the data range |
 | `REL` | `abs(error) / abs(x_orig) ≤ eb` | Ratio of error to original value |
 
+**Precision.** ABS and NOA quantize, compare, and reconstruct in `TInput`, so a
+`double` field gets a `double` bound. REL is float32 internally (its log2/exp2
+approximations are single-precision) and does not currently benefit from
+`TInput = double`.
+
+**Unsatisfiable bounds are refused.** NOA and PREL derive `abs_eb = eb * value_base`,
+which for a field whose range is small next to its offset can fall below what
+`TInput` itself can resolve at that magnitude — the input's own round-trip through
+`TInput` then exceeds the bound, so no compressor could honour it. The stage compares
+`abs_eb` against `epsilon(TInput) * max(abs(data))` and throws rather than emitting a
+stream that decodes cleanly into out-of-bound values. Use a wider input type, a looser
+bound, or `ABS` with an explicit bound.
+
 **REL mode details:**
 <!-- - Encodes magnitude in log2 space (PFPL), then reconstructs `x_hat` from the log bin. -->
 - Zeros, denormals, infinities, and NaNs are stored as outliers to preserve exact values.

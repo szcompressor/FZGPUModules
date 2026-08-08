@@ -1,0 +1,311 @@
+diff --git a/codec/hf/src/hf_hl.cc b/codec/hf/src/hf_hl.cc
+index 69cdf347..74c36864 100644
+--- a/codec/hf/src/hf_hl.cc
++++ b/codec/hf/src/hf_hl.cc
+@@ -256,8 +256,8 @@ int encode_hfr_v2(
+     hf_stream_t stream, float* opt_ms_encoder, float* opt_ms_lago, HFR_Opts opts)
+ {
+   const int reduce_times = opts.reduce_times;
+-  const RMerge rm = opts.rm;
+-  const SMerge sm = opts.sm;
++  const auto rm = opts.rm;
++  const auto sm = opts.sm;
+   if constexpr (sizeof(E) > 2) {
+     (void)buf;
+     (void)in;
+@@ -329,8 +329,8 @@ int encode_hfr_v3(
+     hf_stream_t stream, float* opt_ms_encoder, float* opt_ms_lago, HFR_Opts opts)
+ {
+   const int reduce_times = opts.reduce_times;
+-  const RMerge rm = opts.rm;
+-  const SMerge sm = opts.sm;
++  const auto rm = opts.rm;
++  const auto sm = opts.sm;
+   if constexpr (sizeof(E) > 2) {
+     (void)buf;
+     (void)in;
+@@ -402,8 +402,8 @@ int encode_hfr_pbkc(
+     hf_stream_t stream, float* opt_ms_encoder, float* opt_ms_lago, HFR_Opts opts)
+ {
+   const int reduce_times = opts.reduce_times;
+-  const RMerge rm = opts.rm;
+-  const SMerge sm = opts.sm;
++  const auto rm = opts.rm;
++  const auto sm = opts.sm;
+   if constexpr (sizeof(E) > 2) {
+     (void)buf;
+     (void)in;
+@@ -474,8 +474,8 @@ int encode_hfr_pbkgo(
+     hf_stream_t stream, float* opt_ms_encoder, float* opt_ms_lago, HFR_Opts opts)
+ {
+   const int reduce_times = opts.reduce_times;
+-  const RMerge rm = opts.rm;
+-  const SMerge sm = opts.sm;
++  const auto rm = opts.rm;
++  const auto sm = opts.sm;
+   if constexpr (sizeof(E) > 2) {
+     (void)buf;
+     (void)in;
+diff --git a/psz/include/cusz/context.h b/psz/include/cusz/context.h
+index ec36b4be..34707a50 100644
+--- a/psz/include/cusz/context.h
++++ b/psz/include/cusz/context.h
+@@ -45,6 +45,11 @@ struct psz_cli_config {
+ 
+   // HFR family reduce-merge pass count (--rmerge-count, 2|3|4); encode-only.
+   int hfr_rmerge_count;
++
++  // In-process repeat count for -R time benchmarking (--repeat, default 1).
++  // Loops the compress/decompress task N times in one process so device timing
++  // reflects a warm CUDA context/clock state, not a fresh-process cold start.
++  int repeat;
+ };
+ typedef psz_cli_config psz_cli_config;
+ 
+diff --git a/psz/src/cli/cli.cc b/psz/src/cli/cli.cc
+index 5155dbf5..1450aeea 100644
+--- a/psz/src/cli/cli.cc
++++ b/psz/src/cli/cli.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "cusz.h"
+ #include "executor.hh"
++#include "ptb.hh"
+ #include "query.hh"
+ #include "utils/format.hh"
+ 
+@@ -72,8 +73,18 @@ int psz_run_from_CLI(int argc, char** argv)
+   }
+ 
+   try {
+-    if (args->cli->task_reduction)      psz_compress_task(args);
+-    else                                psz_decompress_task(args);  // validation guarantees one is set
++    // In-process repeat (--repeat N, default 1): loops the same task N times in
++    // this process so -R time device timing reflects a warm CUDA context/clock
++    // state, not a fresh-process cold start. The CUDA stream is created ONCE
++    // here and shared across reps (also fixed executor.cc's psz_compress_task
++    // to stop deleting the caller-owned args->cli on release — see its
++    // comment and docs/adapters/cusz.md for why rep 2+ used to misbehave).
++    auto stream = _ptb::make_gpu_stream();
++    int  reps   = args->cli->repeat > 0 ? args->cli->repeat : 1;
++    for (int r = 0; r < reps; r++) {
++      if (args->cli->task_reduction)      psz_compress_task(args, stream.get());
++      else                                psz_decompress_task(args, stream.get());  // validation guarantees one is set
++    }
+   }
+   catch (const std::runtime_error& e) {
+     cerr << LOG_ERR << e.what() << endl;
+diff --git a/psz/src/cli/context.cc b/psz/src/cli/context.cc
+index 39b4cce6..16f5aa11 100644
+--- a/psz/src/cli/context.cc
++++ b/psz/src/cli/context.cc
+@@ -136,6 +136,7 @@ static const auto psz_cli = _ptb::arg_builder("cusz")
+   .string("auto",     {"-a", "--auto"},                               "",     "auto-tuning: cr-first, rd-first, int")
+   .string("scheme",   {"-s", "--scheme"},                             "",     "shorthand: tp|speed or cr")
+   .string("rmerge_count", {"--rmerge-count"},  "3",  "HFR reduce-merge pass count 2|3|4 (default 3)")
++  .integer("repeat",  {"--repeat"},                                          1,      "in-process repeat count for -R time benchmarking")
+   .flag("compress",   {"-z", "--zip", "--compress"},                          "run compression")
+   .flag("decompress", {"-x", "--unzip", "--decompress"},                      "run decompression")
+   .flag("verbose",    {"--verbose"},                                          "verbose output")
+@@ -330,6 +331,9 @@ static void psz_cli_bind(const _ptb::arg_result& args, psz_ctx* ctx)
+     ctx->cli->hfr_rmerge_count = v;
+   }
+ 
++  // in-process repeat count for -R time benchmarking (--repeat, default 1)
++  ctx->cli->repeat = static_cast<int>(args.get<i8>("repeat"));
++
+   // post-parse fixup: PBK variants by passes histogram
+   if (ctx->header->pipeline.codec1 == psz_codec::HFR_PBKC or
+       ctx->header->pipeline.codec1 == psz_codec::HFR_PBKGO)
+@@ -465,6 +469,7 @@ psz_ctx* pszctx_default_values()
+               .report_cr           = false,
+               .verbose             = false,
+               .hfr_rmerge_count    = 3,
++              .repeat              = 1,
+           },
+       .bklen           = 1024,
+       .len_linear      = 1,
+diff --git a/psz/src/cli/executor.cc b/psz/src/cli/executor.cc
+index 1cceab29..58de7543 100644
+--- a/psz/src/cli/executor.cc
++++ b/psz/src/cli/executor.cc
+@@ -29,7 +29,8 @@ using std::string;
+ template <typename T>
+ static void report_decomp(psz_args* args, psz_header* header, size_t len)
+ {
+-  if (args->cli->report_time) psz_review_decompression(nullptr, sizeof(T) * len);
++  // psz_review_decompression is not yet implemented (throws); device timing is
++  // output as JSON in psz_decompress_task when -R time is set.
+   if (args->cli->verbose) psz_review_decomp_time_from_header(header);
+ }
+ 
+@@ -66,11 +67,8 @@ static void write_decomp_to_disk(
+ // Compression task
+ // ---------------------------------------------------------------------------
+ 
+-void psz_compress_task(psz_args* args)
++void psz_compress_task(psz_args* args, cudaStream_t stream)
+ {
+-  auto         stream_owner = _ptb::make_gpu_stream();
+-  cudaStream_t stream       = stream_owner.get();
+-
+   auto len = CLI_x(args) * CLI_y(args) * CLI_z(args);
+ 
+   uint8_t*      d_internal_compressed;
+@@ -78,6 +76,11 @@ void psz_compress_task(psz_args* args)
+   size_t        compressed_len;
+   psz_resource* m{nullptr};
+ 
++  float        compress_ms = -1.f;
++  cudaEvent_t  ev_c0, ev_c1;
++  cudaEventCreate(&ev_c0);
++  cudaEventCreate(&ev_c1);
++
+   _ptb::utils::dtype_dispatch()
+       .on<float, F4>([&](auto) {
+         auto d_in = MAKE_UNIQUE_DEVICE(float, len);
+@@ -90,9 +93,13 @@ void psz_compress_task(psz_args* args)
+         m->cli                     = args->cli;
+         m->spline_variant          = args->spline_variant;
+         m->header->pipeline.codec2 = CLI_codec2(args);
++        cudaEventRecord(ev_c0, stream);
+         psz_compress_float(
+             m, {CLI_mode(args), CLI_eb(args), CLI_radius(args)}, d_in.get(), &header,
+             &d_internal_compressed, &compressed_len);
++        cudaEventRecord(ev_c1, stream);
++        cudaEventSynchronize(ev_c1);
++        cudaEventElapsedTime(&compress_ms, ev_c0, ev_c1);
+       })
+       .on<double, F8>([&](auto) {
+         auto d_in = MAKE_UNIQUE_DEVICE(double, len);
+@@ -105,13 +112,27 @@ void psz_compress_task(psz_args* args)
+         m->cli                     = args->cli;
+         m->spline_variant          = args->spline_variant;
+         m->header->pipeline.codec2 = CLI_codec2(args);
++        cudaEventRecord(ev_c0, stream);
+         psz_compress_double(
+             m, {CLI_mode(args), CLI_eb(args), CLI_radius(args)}, d_in.get(), &header,
+             &d_internal_compressed, &compressed_len);
++        cudaEventRecord(ev_c1, stream);
++        cudaEventSynchronize(ev_c1);
++        cudaEventElapsedTime(&compress_ms, ev_c0, ev_c1);
+       })
+       .call(CLI_dtype(args));
+ 
+-  if (args->cli->report_time) fprintf(stderr, "Reporting time is disabled/to be updated.\n");
++  cudaEventDestroy(ev_c0);
++  cudaEventDestroy(ev_c1);
++
++  if (args->cli->report_time) {
++    printf(
++        "{\"compress_device_ms\": %.4f, \"original_bytes\": %zu, \"compressed_bytes\": %zu}\n",
++        (double)compress_ms,
++        (size_t)len * (CLI_dtype(args) == F4 ? 4 : 8),
++        compressed_len);
++    fflush(stdout);
++  }
+ 
+   if (args->cli->report_cr) {
+     psz_review_comp_time_from_header(&header);
+@@ -133,6 +154,15 @@ void psz_compress_task(psz_args* args)
+   // Sync before unique_ptr destructors run; see note in psz_decompress_task.
+   sync_by_stream(stream);
+ 
++  // m->cli is an ALIAS to args->cli (set above, per dtype branch), not an
++  // owned copy — psz_release_resource() unconditionally `delete`s manager->cli
++  // (libcusz.cc), which would free the caller's args->cli out from under it.
++  // Harmless for a single-shot process (the process exits right after), but
++  // fatal for --repeat N > 1: rep 2 dereferences a freed args->cli (reads
++  // garbage/silently misbehaves), and by rep 3 that freed memory has been
++  // reused by a later allocation, corrupting real state and segfaulting.
++  // Null it out first so release() only frees what it actually owns.
++  m->cli = nullptr;
+   if (m) psz_release_resource(m);
+ }
+ 
+@@ -162,11 +192,8 @@ static void check_header_or_throw(const psz_header* header, size_t on_disk_size)
+ // Decompression task
+ // ---------------------------------------------------------------------------
+ 
+-void psz_decompress_task(psz_args* args)
++void psz_decompress_task(psz_args* args, cudaStream_t stream)
+ {
+-  auto         stream_owner = _ptb::make_gpu_stream();
+-  cudaStream_t stream       = stream_owner.get();
+-
+   // extract basename w/o suffix
+   auto basename = string(args->cli->file_input);
+   basename      = basename.substr(0, basename.rfind('.'));
+@@ -188,23 +215,44 @@ void psz_decompress_task(psz_args* args)
+ 
+   psz_resource* m = psz_create_resource_manager_from_header(header, stream);
+ 
++  float        decompress_ms = -1.f;
++  cudaEvent_t  ev_d0, ev_d1;
++  cudaEventCreate(&ev_d0);
++  cudaEventCreate(&ev_d1);
++
+   _ptb::utils::dtype_dispatch()
+       .on<float, F4>([&](auto) {
+         auto d_decomped = MAKE_UNIQUE_DEVICE(float, len);
++        cudaEventRecord(ev_d0, stream);
+         psz_decompress_float(m, d_comped.get(), comp_len, d_decomped.get());
++        cudaEventRecord(ev_d1, stream);
++        cudaEventSynchronize(ev_d1);
++        cudaEventElapsedTime(&decompress_ms, ev_d0, ev_d1);
+         report_decomp<float>(args, header, len);
+         compare_with_origin<float>(args, stream, d_decomped.get(), len, comp_len, header);
+         write_decomp_to_disk<float>(args, stream, d_decomped.get(), len, basename);
+       })
+       .on<double, F8>([&](auto) {
+         auto d_decomped = MAKE_UNIQUE_DEVICE(double, len);
++        cudaEventRecord(ev_d0, stream);
+         psz_decompress_double(m, d_comped.get(), comp_len, d_decomped.get());
++        cudaEventRecord(ev_d1, stream);
++        cudaEventSynchronize(ev_d1);
++        cudaEventElapsedTime(&decompress_ms, ev_d0, ev_d1);
+         report_decomp<double>(args, header, len);
+         compare_with_origin<double>(args, stream, d_decomped.get(), len, comp_len, header);
+         write_decomp_to_disk<double>(args, stream, d_decomped.get(), len, basename);
+       })
+       .call(CLI_dtype(m));
+ 
++  cudaEventDestroy(ev_d0);
++  cudaEventDestroy(ev_d1);
++
++  if (args->cli->report_time) {
++    printf("{\"decompress_device_ms\": %.4f}\n", (double)decompress_ms);
++    fflush(stdout);
++  }
++
+   // Sync before any unique_ptr destructors run, so we don't free GPU buffers
+   // while the stream still has pending work. (cudaStreamDestroy syncs too,
+   // but with RAII it runs LAST, after the buffers are gone.)
+diff --git a/psz/src/cli/executor.hh b/psz/src/cli/executor.hh
+index e28c7d8d..b2215e87 100644
+--- a/psz/src/cli/executor.hh
++++ b/psz/src/cli/executor.hh
+@@ -1,14 +1,21 @@
+ #ifndef _PSZ_CLI_EXECUTOR_HH
+ #define _PSZ_CLI_EXECUTOR_HH
+ 
++#include <cuda_runtime.h>
++
+ #include "cusz/context.h"
+ 
+ // Run the compression task: read file_input, compress according to ctx,
+ // optionally report and write `<file_input>.cusza` to disk.
+-void psz_compress_task(psz_args* args);
++//
++// `stream` is owned by the caller (cli.cc), not created here — this lets
++// `--repeat N` loop this call N times in one process sharing one CUDA
++// context/stream, instead of paying stream create+destroy on every call.
++void psz_compress_task(psz_args* args, cudaStream_t stream);
+ 
+ // Run the decompression task: read `<file_input>.cusza`, decompress,
+ // optionally compare against `file_compare` and write `<basename>.cuszx` to disk.
+-void psz_decompress_task(psz_args* args);
++// `stream` is caller-owned; see psz_compress_task.
++void psz_decompress_task(psz_args* args, cudaStream_t stream);
+ 
+ #endif

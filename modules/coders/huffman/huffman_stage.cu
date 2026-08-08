@@ -375,9 +375,14 @@ void HuffmanStage<T>::execute(
         // The histogram (and with it the D2H, the host sync, and the out-of-range
         // symbol check) runs every call under PerBlock, once under Adaptive, and
         // never under Fixed.
+        // A stage that fell back to Adaptive follows Adaptive's rule from then on:
+        // histogram only while no book is pinned. Leaving it on PerBlock's rule would
+        // rebuild the same floored book — and re-log the same warning — every call.
+        const bool adaptive_rule =
+            (book_source_ == HuffmanBookSource::Adaptive) || adaptive_fallback_;
         const bool need_histogram =
-            (book_source_ == HuffmanBookSource::PerBlock) ||
-            (book_source_ == HuffmanBookSource::Adaptive && !fixed_book_resident_);
+            (book_source_ == HuffmanBookSource::PerBlock && !adaptive_fallback_) ||
+            (adaptive_rule && !fixed_book_resident_);
 
         if (!need_histogram) {
             // Reusing a book: no histogram kernel, no frequency D2H, no host stream
@@ -458,7 +463,7 @@ void HuffmanStage<T>::execute(
                         "Increase bklen or use setZigzagCodes(true) with LorenzoQuantStage.");
             }
 
-            if (book_source_ == HuffmanBookSource::Adaptive) {
+            if (book_source_ == HuffmanBookSource::Adaptive || adaptive_fallback_) {
                 // First call only: build a floored, reusable book from this histogram
                 // and pin it.  Every later call takes the !need_histogram branch.
                 buildAdaptiveBook(buf_->h_freq, stream);
@@ -469,17 +474,34 @@ void HuffmanStage<T>::execute(
 
                 // A histogram spanning a wide enough dynamic range drives the rarest
                 // symbol past the 27-bit code limit, which the builder clamps silently
-                // (see findUnusableCode).  Fail instead of emitting an undecodable stream.
+                // (see findUnusableCode) and then emits a stream nothing can decode.
+                //
+                // Fall back to an Adaptive book rather than fail. This is NOT a
+                // relaxation of the error bound -- the bound belongs to the quantizer,
+                // and flooring the frequencies only changes how symbols are spelled,
+                // not what they mean. Measured on the two fields that hard-failed:
+                // HACC/vy at 1e-2 gives CR 15.27x at 44.78 dB and HACC/xx at 1e-3
+                // gives 13.79x at 64.77 dB, both with max_abs_err exactly equal to
+                // the bound. Throwing instead cost the cuSZ preset every
+                // wide-dynamic-range field in the corpus, which is a worse answer
+                // than a book the format can actually hold.
+                //
+                // buildAdaptiveBook halves the floor shift until the book fits and
+                // shift 0 is uniform, so the fallback always terminates.
                 const int bad = findUnusableCode(buf_->h_freq);
-                if (bad >= 0)
-                    throw std::runtime_error(
-                        "HuffmanStage: symbol " + std::to_string(bad) +
-                        " needs a code longer than " +
-                        std::to_string(HuffmanWord<4>::FIELD_CODE) +
-                        " bits, which the 32-bit codeword format cannot hold. The symbol "
-                        "distribution is too skewed for this bklen; reduce bklen, or use "
-                        "setBookSource(HuffmanBookSource::Adaptive), which flattens the "
-                        "frequency range until the codebook fits.");
+                if (bad >= 0) {
+                    FZ_LOG(WARN,
+                        "HuffmanStage: symbol %d needs a code longer than %d bits, which "
+                        "the 32-bit codeword format cannot hold; the symbol distribution "
+                        "is too skewed for bklen=%u. Falling back to an Adaptive "
+                        "(frequency-floored) codebook for the rest of this stage's life. "
+                        "The error bound is unaffected. Set "
+                        "setBookSource(HuffmanBookSource::Adaptive) explicitly, or reduce "
+                        "bklen, to choose this deliberately.",
+                        bad, static_cast<int>(HuffmanWord<4>::FIELD_CODE), bklen_);
+                    adaptive_fallback_ = true;
+                    buildAdaptiveBook(buf_->h_freq, stream);
+                }
             }
         }
 
@@ -517,7 +539,7 @@ void HuffmanStage<T>::execute(
         // Unpinning here makes the *next* call histogram and re-pin.  This call is
         // already encoded and is not retroactively improved, which is the price of
         // detecting drift without paying for a histogram to predict it.
-        if (book_source_ == HuffmanBookSource::Adaptive && inlen > 0) {
+        if ((book_source_ == HuffmanBookSource::Adaptive || adaptive_fallback_) && inlen > 0) {
             const double bits_per_sym =
                 static_cast<double>(header_.total_nbit) / static_cast<double>(inlen);
             if (just_fitted_) {

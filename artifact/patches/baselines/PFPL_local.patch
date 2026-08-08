@@ -1,0 +1,17 @@
+diff --git a/makefile b/makefile
+index 36cad25..b4df428 100644
+--- a/makefile
++++ b/makefile
+@@ -1,4 +1,4 @@
+-NV_SM := 70
++NV_SM := 90
+ 
+ all: serial openmp gpu
+ 
+@@ -51,4 +51,4 @@ gpu:
+ 	nvcc -O3 -arch=sm_$(NV_SM) -fmad=false -Xcompiler "-O3 -march=native -fopenmp -mno-fma -ffp-contract=off" -I./src/ -o bin/f64/gpu/f64_noa_decompress_cuda src/f64_noa_decomp_gpu.cu
+ 
+ clean:
+-	rm -rf bin/ 
+\ No newline at end of file
++	rm -rf bin/ 

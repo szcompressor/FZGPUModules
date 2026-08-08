@@ -70,12 +70,21 @@ __global__ void minmax_partial_kernel(
  *
  * Synchronises the stream and performs a small D2H copy.  Latency is
  * proportional to min(n, 1024) blocks, typically a few µs.
+ *
+ * Returns TInput, not float: for an f64 field the NOA bound is eb * range, and
+ * narrowing the range here puts a ~6e-08 relative error into abs_eb before the
+ * quantizer ever sees it. Callers that keep a float local get exactly the old
+ * behaviour.
  */
 template<typename TInput>
-inline float computeValueBase(
+inline TInput computeValueBase(
     const TInput* d_data, size_t n,
     ErrorBoundMode mode,
-    cudaStream_t stream, MemoryPool* pool
+    cudaStream_t stream, MemoryPool* pool,
+    /// Optional out: max(|data|). The scan already has it; NOA throws it away by
+    /// returning only the range. Callers need it to tell whether the bound they
+    /// derived is even representable at the data's magnitude.
+    TInput* out_abs_max = nullptr
 ) {
     constexpr int kBlockSize = 256;
     int num_blocks = static_cast<int>(std::min(
@@ -108,13 +117,12 @@ inline float computeValueBase(
         if (h_pmax[i] > gmax) gmax = h_pmax[i];
     }
 
-    if (mode == ErrorBoundMode::NOA) {
-        return static_cast<float>(gmax - gmin);
-    } else {
-        TInput abs_min = (gmin < TInput(0)) ? -gmin : gmin;
-        TInput abs_max = (gmax < TInput(0)) ? -gmax : gmax;
-        return static_cast<float>(abs_min > abs_max ? abs_min : abs_max);
-    }
+    TInput abs_min = (gmin < TInput(0)) ? -gmin : gmin;
+    TInput abs_max = (gmax < TInput(0)) ? -gmax : gmax;
+    TInput peak    = abs_min > abs_max ? abs_min : abs_max;
+    if (out_abs_max) *out_abs_max = peak;
+
+    return (mode == ErrorBoundMode::NOA) ? (gmax - gmin) : peak;
 }
 
 // ===== Scatter Kernels =====

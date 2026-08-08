@@ -357,12 +357,22 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
         else s->verbose_level = parse_integer<int>(v, "verbose");
     }
 
+    // WARN is on by default, not gated behind -v.
+    //
+    // Without this the CLI installed no log sink at all unless asked, so every
+    // FZ_LOG(WARN) in the library went nowhere — and WARN is precisely the level
+    // used for "recoverable, but you need to know": outlier drops, codebook
+    // fallbacks, deprecated-mode remapping. That has already cost this project
+    // twice; the outlier-overflow corruption was invisible for exactly this
+    // reason and had to be promoted to a throw to be seen at all. A warning
+    // nobody can see is not a warning.
+    fz::LogLevel log_level = fz::LogLevel::WARN;
     if (s->verbose_level > 0) {
-        fz::LogLevel log_level = fz::LogLevel::INFO;
+        log_level = fz::LogLevel::INFO;
         if      (s->verbose_level >= 3) log_level = fz::LogLevel::TRACE;
         else if (s->verbose_level >= 2) log_level = fz::LogLevel::DEBUG;
-        fz::Logger::enableStderr(log_level);
     }
+    fz::Logger::enableStderr(log_level);
 
     if (contains(opts, "z")) s->operation = CliOperation::Compress;
     if (contains(opts, "x")) s->operation = CliOperation::Decompress;

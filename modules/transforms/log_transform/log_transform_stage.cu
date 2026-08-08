@@ -10,6 +10,8 @@
 
 #include <cmath>
 #include <limits>
+#include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 
 namespace fz {
@@ -353,12 +355,25 @@ void LogTransformStage<TInput>::postStreamSync(cudaStream_t stream)
 
     if (overflowed) {
         // Unlike a quantizer, dropping an outlier here is not a bounded-error
-        // event — the element's value is simply lost. Say so loudly.
-        FZ_LOG(WARN,
-            "LogTransformStage: outlier buffer overflow — %u needed, capacity %u. "
-            "Reconstruction will be WRONG at the dropped positions. Raise "
-            "setOutlierCapacity() or lower setThreshold().",
-            h_count, cap);
+        // event — the element's value is simply lost. That makes failing *more*
+        // clearly correct here than elsewhere, not less.
+        //
+        // Was FZ_LOG(WARN), which is invisible at the default log level: the
+        // "Reconstruction will be WRONG" warning nobody saw. Matches the policy
+        // in LorenzoQuantStage / QuantizerStage / GInterpStage.
+        char msg[512];
+        std::snprintf(msg, sizeof(msg),
+            "LogTransformStage: outlier buffer overflow — %u needed, capacity %u "
+            "(%.1f%% of %zu elements). Reconstruction would be WRONG at the "
+            "dropped positions — the values are lost, not merely coarsened. Raise "
+            "setOutlierCapacity() to at least %.2f, or lower setThreshold().",
+            h_count, cap,
+            num_elements_ > 0 ? 100.0f * h_count / static_cast<float>(num_elements_) : 0.0f,
+            num_elements_,
+            num_elements_ > 0
+                ? std::min(1.0f, 1.1f * h_count / static_cast<float>(num_elements_))
+                : 1.0f);
+        throw std::runtime_error(msg);
     }
 
     FZ_LOG(DEBUG, "LogTransformStage: %u / %zu outliers (%.1f%%)",

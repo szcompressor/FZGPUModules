@@ -354,9 +354,12 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 (`modules/predictors/lorenzo/`), `LorenzoQuantStage::Config::centering`
 (`modules/fused/lorenzo_quant/`)
 
-**Relationship: algorithmic attribution only — no code was used.** FSZ has no
-published source release; these stages were written from the paper's
-description. The ideas taken are:
+**Relationship: algorithmic attribution only — no code was used.** These stages
+were written from the paper's description alone, before FSZ had a published
+source release. FSZ 1.0.0 was released afterwards, on 2026-08, under
+BSD-3-Clause at https://github.com/JiajunHuang1999/FSZ; it has been used since
+only as a reference build for validation, never consulted for implementation.
+The ideas taken are:
 
 - **Cross-block prediction state** — running the prediction chain across the
   encoding blocks within a tile rather than restarting at every block, so a

@@ -978,6 +978,60 @@ TEST(HuffmanStage, OverlongCodeThrows) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HF36 — PerBlockFallsBackToAdaptiveOnOverlongCode
+// The *histogram-driven* counterpart to HF30. A user-supplied frequency table
+// that cannot fit the 27-bit code field is a configuration error and still
+// throws; real input data that happens to histogram that way is not, and
+// throwing there cost the cuSZ preset every wide-dynamic-range field in the
+// corpus (HACC/vy, HACC/xx, EXAFEL/data all hard-failed). PerBlock must fall
+// back to a floored Adaptive book, stay lossless, and say so.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(HuffmanStage, PerBlockFallsBackToAdaptiveOnOverlongCode) {
+    // Fibonacci counts force a degenerate (linear) Huffman tree, so depth tracks
+    // the symbol count. 30 symbols gives depth ~29, past the 27-bit field, and
+    // sums to Fib(32)-1 ~ 2.18M elements — big enough to be a real histogram,
+    // small enough for a unit test. (HF30 needs 48 symbols only because it hands
+    // the frequencies over directly and never materializes the data.)
+    const uint32_t BK = 30;
+    std::vector<uint32_t> freq(BK);
+    uint64_t a = 1, b = 1;
+    for (uint32_t i = 0; i < BK; ++i) {
+        freq[BK - 1 - i] = static_cast<uint32_t>(a);
+        const uint64_t n = a + b; a = b; b = n;
+    }
+
+    std::vector<uint8_t> h_in;
+    for (uint32_t sym = 0; sym < BK; ++sym)
+        h_in.insert(h_in.end(), freq[sym], static_cast<uint8_t>(sym));
+    const size_t N = h_in.size();
+    ASSERT_GT(N, 1u << 20);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * 4);
+
+    HuffmanStage<uint8_t> stage;          // PerBlock — the default
+    stage.setBklen(BK);
+    ASSERT_EQ(stage.getBookSource(), HuffmanBookSource::PerBlock);
+
+    std::vector<uint8_t> enc;
+    ASSERT_NO_THROW(enc = huffman_encode(stage, h_in, cs.stream, *pool))
+        << "PerBlock must fall back, not throw, on a histogram it cannot code";
+    ASSERT_GT(enc.size(), 0u);
+
+    EXPECT_TRUE(stage.getAdaptiveFallbackUsed())
+        << "the fallback must be observable — a silent one is the bug, not the fix";
+    // The configured value is reported as configured; only behaviour changed.
+    EXPECT_EQ(stage.getBookSource(), HuffmanBookSource::PerBlock);
+
+    // Falling back is only acceptable if the stream is still exactly decodable —
+    // this is entropy coding, the round-trip is lossless or it is broken.
+    auto dec = huffman_decode(stage, enc, N, cs.stream, *pool);
+    ASSERT_EQ(dec.size(), N);
+    for (size_t i = 0; i < N; ++i)
+        ASSERT_EQ(dec[i], h_in[i]) << "mismatch at " << i;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HF31 — AdaptiveBook_DegenerateSampleNotPinned
 // A constant first block teaches the codebook nothing but "one symbol". Pinning
 // it would freeze that book for the rest of the run (measured at 42% mean ratio

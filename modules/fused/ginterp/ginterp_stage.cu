@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <stdexcept>
 
 namespace fz {
@@ -1156,13 +1157,22 @@ void GInterpStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
                               / static_cast<float>(num_elements_);
         float capacity_pct = 100.0f * max_outliers
                               / static_cast<float>(num_elements_);
-        FZ_LOG(WARN,
-               "GInterp outlier overflow! Detected %u (%.1f%%) outliers but "
-               "only %.1f%% capacity allocated. Outliers beyond capacity were "
-               "DROPPED — data will be corrupted for those elements. "
-               "Increase outlier_capacity to at least %.1f%%.",
-               h_outlier_count, actual_pct, capacity_pct, actual_pct * 1.1f);
-        h_outlier_count = static_cast<uint32_t>(max_outliers);
+        // Was FZ_LOG(WARN) — invisible at the default log level, so the corruption
+        // it describes was silent in practice. Fail instead, matching
+        // LorenzoQuantStage and QuantizerStage: a stage that cannot honour its
+        // error bound must say so rather than return a cleanly-decoding stream of
+        // wrong values. (outlier_capacity == 0 is handled as an explicit opt-in
+        // where those stages support it; GInterp has no such mode.)
+        char msg[512];
+        std::snprintf(msg, sizeof(msg),
+               "GInterpStage: outlier overflow — %u of %zu elements (%.1f%%) fell "
+               "outside the quantizer radius, but outlier_capacity reserves only "
+               "%.1f%%. Dropping the excess would corrupt those elements. Raise "
+               "outlier_capacity to at least %.2f, widen quant_radius, or loosen "
+               "the error bound.",
+               h_outlier_count, num_elements_, actual_pct, capacity_pct,
+               std::min(1.0f, actual_pct * 1.1f / 100.0f));
+        throw std::runtime_error(msg);
     }
 
     actual_outlier_count_   = h_outlier_count;

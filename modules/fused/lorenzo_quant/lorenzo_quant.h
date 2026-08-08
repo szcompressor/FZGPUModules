@@ -92,15 +92,23 @@ struct LorenzoQuantConfig {
     uint8_t  zigzag_codes;  ///< 1 if codes are zigzag-encoded, else 0.
     uint8_t  centering;     ///< 1 if per-tile mean centering is enabled, else 0.
     uint8_t  reserved[2];   ///< Must be zero.
+    /// Full-precision absolute bound. `error_bound` above is a narrow copy kept
+    /// for older readers and CANNOT carry an f64 bound: the inverse reconstructs
+    /// by prefix-summing quantized residuals and scaling by 2*abs_eb, so for a
+    /// field like S3D/N2 (sum ~ 3.3e8) a 6e-08 *relative* error in the stored
+    /// bound lands as a 4.4e-08 absolute error -- 40x the bound itself.
+    /// 0 in headers written before 2026-08-08; readers fall back to `error_bound`.
+    double   error_bound_f64;
+    double   value_base_f64;  ///< Full-precision value_base; 0 in pre-2026-08-08 headers.
 
-    // Total: 44 bytes (fits easily in 128B stage_config)
+    // Total: 60 bytes (fits easily in 128B stage_config)
 
     LorenzoQuantConfig()
         : error_bound(0.0f), quant_radius(0), num_elements(0), outlier_count(0),
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           ndim(1), eb_mode(0), dim_x(0), dim_y(1), dim_z(1),
           user_eb(0.0f), value_base(0.0f), zigzag_codes(0), centering(0),
-          reserved{0, 0} {}
+          reserved{0, 0}, error_bound_f64(0.0), value_base_f64(0.0) {}
 };
 static_assert(sizeof(LorenzoQuantConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoQuantConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
@@ -319,7 +327,9 @@ public:
         config.dim_y         = static_cast<uint32_t>(config_.dims[1]);
         config.dim_z         = static_cast<uint32_t>(config_.dims[2]);
         config.user_eb       = static_cast<float>(config_.error_bound);  // original user-specified value
-        config.value_base    = computed_value_base_;
+        config.value_base    = static_cast<float>(computed_value_base_);
+        config.error_bound_f64 = static_cast<double>(computed_abs_eb_);
+        config.value_base_f64  = static_cast<double>(computed_value_base_);
         config.zigzag_codes  = config_.zigzag_codes ? uint8_t{1} : uint8_t{0};
         config.centering     = config_.centering ? uint8_t{1} : uint8_t{0};
         config.reserved[0]   = 0; config.reserved[1] = 0; config.reserved[2] = 0;
@@ -344,8 +354,12 @@ public:
         std::memcpy(&config, header_buffer, std::min(size, sizeof(LorenzoQuantConfig)));
 
         // error_bound in the header is always the absolute bound used at compression.
+        // Prefer the full-precision copy; pre-2026-08-08 headers leave it 0.
+        constexpr size_t kSizeBeforeF64 = 44;
+        const bool has_f64 = (size > kSizeBeforeF64 && config.error_bound_f64 != 0.0);
         config_.error_bound  = config.error_bound;
-        computed_abs_eb_     = static_cast<TInput>(config.error_bound);
+        computed_abs_eb_     = has_f64 ? static_cast<TInput>(config.error_bound_f64)
+                                       : static_cast<TInput>(config.error_bound);
         config_.quant_radius = static_cast<TCode>(config.quant_radius);
         num_elements_        = config.num_elements;
         actual_outlier_count_= config.outlier_count;
@@ -359,14 +373,20 @@ public:
             config_.eb_mode                = (stored == ErrorBoundMode::REL)
                                              ? ErrorBoundMode::PREL : stored;
             config_.precomputed_value_base = config.value_base;
-            computed_value_base_           = config.value_base;
+            computed_value_base_           = has_f64
+                                             ? static_cast<TInput>(config.value_base_f64)
+                                             : static_cast<TInput>(config.value_base);
         } else {
             config_.eb_mode                = ErrorBoundMode::ABS;
             config_.precomputed_value_base = 0.0f;
-            computed_value_base_           = 0.0f;
+            computed_value_base_           = static_cast<TInput>(0);
         }
-        // zigzag_codes field added in v2 (≥44B).
-        if (size >= sizeof(LorenzoQuantConfig)) {
+        // zigzag_codes field added in v2 (≥44B). Compared against the literal v2
+        // size, not sizeof(LorenzoQuantConfig) — the struct has grown since (the
+        // f64 bound fields), and keying off sizeof would stop reading these
+        // fields from every v2 archive.
+        constexpr size_t kV2Size = 44;
+        if (size >= kV2Size) {
             config_.zigzag_codes = (config.zigzag_codes != 0);
             // `centering` reuses a byte older writers zeroed as `reserved`, so
             // pre-centering archives decode as centering-off.
@@ -412,7 +432,7 @@ private:
     TInput computed_abs_eb_ = 0;
     /// Scaling factor used in the conversion: value_range (NOA) or max(|data|) (REL).
     /// Stored so serializeHeader() can embed it in the output stream.
-    float computed_value_base_ = 0.0f;
+    TInput computed_value_base_ = static_cast<TInput>(0);
     /// Stage-private 4-byte device scratch holding the live outlier count.
     /// Allocated lazily via `pool->allocatePersistentDevice(4, ...)` — see
     /// `initOutlierCountScratch()`. Used by the forward kernel as the atomic

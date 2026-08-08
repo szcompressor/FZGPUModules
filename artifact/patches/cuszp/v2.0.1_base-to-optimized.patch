@@ -1,0 +1,1273 @@
+diff -ruN a/include/cuSZp/cuSZp_kernels_f32.h b/include/cuSZp/cuSZp_kernels_f32.h
+--- a/include/cuSZp/cuSZp_kernels_f32.h	2024-11-17 06:11:17.000000000 +0000
++++ b/include/cuSZp/cuSZp_kernels_f32.h	2026-07-21 17:09:42.784448702 +0000
+@@ -1,8 +1,15 @@
+ #ifndef CUSZP_INCLUDE_CUSZP_CUSZP_KERNELS_F32_H
+ #define CUSZP_INCLUDE_CUSZP_CUSZP_KERNELS_F32_H
+ 
+-static const int cmp_tblock_size = 32; // Fixed to 32, cannot be modified.
+-static const int dec_tblock_size = 32; // Fixed to 32, cannot be modified.
++// Warps per thread block. Was hard-fixed to 1 (tblock_size=32); H100 profiling
++// showed 1-warp blocks cap achieved occupancy at 50% (block-count/SM limit binds
++// before the warp/thread limit) and force every warp to walk the decoupled-lookback
++// chain individually across the whole grid. Grouping warps into blocks lets a cheap
++// intra-block scan shrink that chain by this factor. Tunable.
++static const int cmp_warps_per_block = 8;
++static const int dec_warps_per_block = 8;
++static const int cmp_tblock_size = cmp_warps_per_block * 32;
++static const int dec_tblock_size = dec_warps_per_block * 32;
+ static const int cmp_chunk = 1024;
+ static const int dec_chunk = 1024;
+ 
+diff -ruN a/include/cuSZp/cuSZp_kernels_f64.h b/include/cuSZp/cuSZp_kernels_f64.h
+--- a/include/cuSZp/cuSZp_kernels_f64.h	2024-11-17 06:11:17.000000000 +0000
++++ b/include/cuSZp/cuSZp_kernels_f64.h	2026-07-21 19:50:13.505554733 +0000
+@@ -1,8 +1,15 @@
+ #ifndef CUSZP_INCLUDE_CUSZP_CUSZP_KERNELS_F64_H
+ #define CUSZP_INCLUDE_CUSZP_CUSZP_KERNELS_F64_H
+ 
+-static const int cmp_tblock_size = 32; // Fixed to 32, cannot be modified.
+-static const int dec_tblock_size = 32; // Fixed to 32, cannot be modified.
++// Warps per thread block. Was hard-fixed to 1 (tblock_size=32); H100 profiling
++// showed 1-warp blocks cap achieved occupancy at 50% (block-count/SM limit binds
++// before the warp/thread limit) and force every warp to walk the decoupled-lookback
++// chain individually across the whole grid. Grouping warps into blocks lets a cheap
++// intra-block scan shrink that chain by this factor. Tunable.
++static const int cmp_warps_per_block = 8;
++static const int dec_warps_per_block = 8;
++static const int cmp_tblock_size = cmp_warps_per_block * 32;
++static const int dec_tblock_size = dec_warps_per_block * 32;
+ static const int cmp_chunk = 1024;
+ static const int dec_chunk = 1024;
+ 
+diff -ruN a/src/cuSZp_kernels_f32.cu b/src/cuSZp_kernels_f32.cu
+--- a/src/cuSZp_kernels_f32.cu	2026-07-19 21:45:05.485179923 +0000
++++ b/src/cuSZp_kernels_f32.cu	2026-07-21 17:15:22.361254911 +0000
+@@ -35,14 +35,16 @@
+                                                   volatile int* const __restrict__ flag, 
+                                                   const float eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[cmp_warps_per_block];
++    __shared__ unsigned int s_warp_excl[cmp_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = cmp_chunk >> 5;
+     const int rate_ofs = (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+     const float recipPrecision = 0.5f/eb;
+@@ -52,7 +54,7 @@
+     int quant_chunk_idx;
+     int block_idx;
+     int currQuant, lorenQuant, prevQuant;
+-    int absQuant[cmp_chunk];
++    int absQuant[32];
+     unsigned int sign_flag[block_num];
+     int sign_ofs;
+     int fixed_rate[block_num];
+@@ -79,7 +81,7 @@
+             for(int i=base_block_start_idx; i<base_block_end_idx; i+=4)
+             {
+                 tmp_buffer = reinterpret_cast<const float4*>(oriData)[i/4];
+-                quant_chunk_idx = j * 32 + i % 32;
++                quant_chunk_idx = i % 32;
+ 
+                 currQuant = quantization(tmp_buffer.x, recipPrecision);
+                 lorenQuant = currQuant - prevQuant;
+@@ -123,7 +125,7 @@
+         {
+             if(base_block_start_idx >= nbEle)
+             {
+-                quant_chunk_idx = j * 32 + base_block_start_idx % 32;
++                quant_chunk_idx = base_block_start_idx % 32;
+                 for(int i=quant_chunk_idx; i<quant_chunk_idx+32; i++) absQuant[i] = 0;
+             }
+             else
+@@ -133,7 +135,7 @@
+ 
+                 for(int i=base_block_start_idx; i<base_block_start_idx+remainbEle; i++)
+                 {
+-                    quant_chunk_idx = j * 32 + i % 32;
++                    quant_chunk_idx = i % 32;
+                     currQuant = quantization(oriData[i], recipPrecision);
+                     lorenQuant = currQuant - prevQuant;
+                     prevQuant = currQuant;
+@@ -145,9 +147,9 @@
+                     else outlier = absQuant[quant_chunk_idx];
+                 }
+ 
+-                quant_chunk_idx = j * 32 + nbEle % 32;
++                quant_chunk_idx = nbEle % 32;
+                 for(int i=quant_chunk_idx; i<quant_chunk_idx+zeronbEle; i++) absQuant[i] = 0;
+-            }  
++            }
+         }
+ 
+         int fr1 = get_bit_num(maxQuant);
+@@ -180,79 +182,73 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
+-    {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    // Two-level scan: combine this block's WPB per-warp totals with a cheap serial
++    // scan (done by one leader thread), then run a single decoupled lookback per
++    // BLOCK instead of per warp. This is what shrinks the serial dependency chain
++    // by ~cmp_warps_per_block versus the old one-warp-per-block design, and lets
++    // occupancy be limited by the warp/thread count instead of the block count.
++    if(warp_in_block==0 && lane==0)
++    {
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<cmp_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            // Block 0 has no predecessor, so its exclusive prefix sum is always 0.
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
+-        }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            cmpOffset[warp] = excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            if(bid==gridDim.x-1) cmpOffset[bid+1] = cmpOffset[bid] + locOffset[bid+1];
+             __threadfence();
+-            if(warp==gridDim.x-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
++            flag[bid] = 2;
+             __threadfence();
+-            flag[warp] = 2;
+-            __threadfence(); 
+-        } 
++        }
+     }
+     __syncthreads();
+-    
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+ 
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+@@ -261,7 +257,56 @@
+         int encoding_selection = fixed_rate[j] >> 7;
+         int outlier_byte_num = ((fixed_rate[j] & 0x60) >> 5) + 1;
+         fixed_rate[j] &= 0x1f;
+-        int chunk_idx_start = j*32;
++        int chunk_idx_start = 0;
++
++        base_block_start_idx = base_start_idx + j * 1024 + lane * 32;
++        base_block_end_idx = base_block_start_idx + 32;
++        prevQuant = 0;
++        if(base_block_end_idx < nbEle)
++        {
++            #pragma unroll 8
++            for(int i=base_block_start_idx; i<base_block_end_idx; i+=4)
++            {
++                tmp_buffer = reinterpret_cast<const float4*>(oriData)[i/4];
++                quant_chunk_idx = i % 32;
++
++                currQuant = quantization(tmp_buffer.x, recipPrecision);
++                lorenQuant = currQuant - prevQuant;
++                prevQuant = currQuant;
++                absQuant[quant_chunk_idx] = abs(lorenQuant);
++
++                currQuant = quantization(tmp_buffer.y, recipPrecision);
++                lorenQuant = currQuant - prevQuant;
++                prevQuant = currQuant;
++                absQuant[quant_chunk_idx+1] = abs(lorenQuant);
++
++                currQuant = quantization(tmp_buffer.z, recipPrecision);
++                lorenQuant = currQuant - prevQuant;
++                prevQuant = currQuant;
++                absQuant[quant_chunk_idx+2] = abs(lorenQuant);
++
++                currQuant = quantization(tmp_buffer.w, recipPrecision);
++                lorenQuant = currQuant - prevQuant;
++                prevQuant = currQuant;
++                absQuant[quant_chunk_idx+3] = abs(lorenQuant);
++            }
++        }
++        else
++        {
++            for(int i=0; i<32; i++) absQuant[i] = 0;
++            if(base_block_start_idx < nbEle)
++            {
++                int remainbEle = nbEle - base_block_start_idx;
++                for(int i=base_block_start_idx; i<base_block_start_idx+remainbEle; i++)
++                {
++                    quant_chunk_idx = i % 32;
++                    currQuant = quantization(oriData[i], recipPrecision);
++                    lorenQuant = currQuant - prevQuant;
++                    prevQuant = currQuant;
++                    absQuant[quant_chunk_idx] = abs(lorenQuant);
++                }
++            }
++        }
+ 
+         if(!encoding_selection) tmp_byte_ofs = (fixed_rate[j]) ? (4 + fixed_rate[j] * 4) : 0;
+         else tmp_byte_ofs = 4 + outlier_byte_num + fixed_rate[j] * 4;
+@@ -665,20 +710,22 @@
+                                                     volatile int* const __restrict__ flag, 
+                                                     const float eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[dec_warps_per_block];
++    __shared__ unsigned int s_warp_excl[dec_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = dec_chunk >> 5;
+     const int rate_ofs = (nbEle+dec_tblock_size*dec_chunk-1)/(dec_tblock_size*dec_chunk)*(dec_tblock_size*dec_chunk)/32;
+ 
+     int base_start_idx;
+     int base_block_start_idx, base_block_end_idx;
+-    int block_idx;    
++    int block_idx;
+     int absQuant[32];
+     int currQuant, lorenQuant, prevQuant;
+     int sign_ofs;
+@@ -708,74 +755,65 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    if(warp_in_block==0 && lane==0)
+     {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<dec_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            flag[bid] = 2;
++            __threadfence();
+         }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane) cmpOffset[warp] = excl_sum;
+-        __threadfence();
+-        if(!lane) flag[warp] = 2;
+-        __threadfence();  
+     }
+     __syncthreads();
+ 
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+-
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+@@ -1264,14 +1302,16 @@
+                                                 volatile int* const __restrict__ flag, 
+                                                 const float eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[cmp_warps_per_block];
++    __shared__ unsigned int s_warp_excl[cmp_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = cmp_chunk >> 5;
+     const int rate_ofs = (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+     const float recipPrecision = 0.5f/eb;
+@@ -1383,79 +1423,67 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    if(warp_in_block==0 && lane==0)
+     {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<cmp_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
+-        }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            cmpOffset[warp] = excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            if(bid==gridDim.x-1) cmpOffset[bid+1] = cmpOffset[bid] + locOffset[bid+1];
+             __threadfence();
+-            if(warp==gridDim.x-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
++            flag[bid] = 2;
+             __threadfence();
+-            flag[warp] = 2;
+-            __threadfence(); 
+         }
+     }
+     __syncthreads();
+-    
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+ 
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+@@ -1602,20 +1630,22 @@
+                                                   volatile int* const __restrict__ flag, 
+                                                   const float eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[dec_warps_per_block];
++    __shared__ unsigned int s_warp_excl[dec_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = dec_chunk >> 5;
+     const int rate_ofs = (nbEle+dec_tblock_size*dec_chunk-1)/(dec_tblock_size*dec_chunk)*(dec_tblock_size*dec_chunk)/32;
+ 
+     int base_start_idx;
+     int base_block_start_idx, base_block_end_idx;
+-    int block_idx;    
++    int block_idx;
+     int absQuant[32];
+     int currQuant, lorenQuant, prevQuant;
+     int sign_ofs;
+@@ -1640,74 +1670,65 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    if(warp_in_block==0 && lane==0)
+     {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<dec_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            flag[bid] = 2;
++            __threadfence();
+         }
+-        __syncthreads();
+     }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane) cmpOffset[warp] = excl_sum;
+-        __threadfence();
+-        if(!lane) flag[warp] = 2;
+-        __threadfence();  
+-    }
+-    __syncthreads();
+-
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+     __syncthreads();
+ 
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+diff -ruN a/src/cuSZp_kernels_f64.cu b/src/cuSZp_kernels_f64.cu
+--- a/src/cuSZp_kernels_f64.cu	2026-07-19 21:45:05.485717009 +0000
++++ b/src/cuSZp_kernels_f64.cu	2026-07-21 19:48:24.014542947 +0000
+@@ -20,14 +20,16 @@
+                                                   volatile int* const __restrict__ flag, 
+                                                   const double eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[cmp_warps_per_block];
++    __shared__ unsigned int s_warp_excl[cmp_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = cmp_chunk >> 5;
+     const int rate_ofs = (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+     const double recipPrecision = 0.5f/eb;
+@@ -37,6 +39,10 @@
+     int quant_chunk_idx;
+     int block_idx;
+     int currQuant, lorenQuant, prevQuant;
++    // FP64 quantization (double-precision multiply/add/convert) is expensive enough
++    // on this GPU that redoing it in phase 2 (the recompute-instead-of-store trick
++    // used for f32) measured as a net loss here -- keep the full per-thread buffer
++    // and only pay the (now fenced-once, multi-warp-scanned) memory cost instead.
+     int absQuant[cmp_chunk];
+     unsigned int sign_flag[block_num];
+     int sign_ofs;
+@@ -132,7 +138,7 @@
+ 
+                 quant_chunk_idx = j * 32 + nbEle % 32;
+                 for(int i=quant_chunk_idx; i<quant_chunk_idx+zeronbEle; i++) absQuant[i] = 0;
+-            }  
++            }
+         }
+ 
+         int fr1 = get_bit_num(maxQuant);
+@@ -165,79 +171,73 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
+-    {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    // Two-level scan: combine this block's WPB per-warp totals with a cheap serial
++    // scan (done by one leader thread), then run a single decoupled lookback per
++    // BLOCK instead of per warp. This is what shrinks the serial dependency chain
++    // by ~cmp_warps_per_block versus the old one-warp-per-block design, and lets
++    // occupancy be limited by the warp/thread count instead of the block count.
++    if(warp_in_block==0 && lane==0)
++    {
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<cmp_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            // Block 0 has no predecessor, so its exclusive prefix sum is always 0.
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
+-        }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            cmpOffset[warp] = excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
+             __threadfence();
+-            if(warp==gridDim.x-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
++            if(bid==gridDim.x-1) cmpOffset[bid+1] = cmpOffset[bid] + locOffset[bid+1];
+             __threadfence();
+-            flag[warp] = 2;
+-            __threadfence(); 
+-        } 
++            flag[bid] = 2;
++            __threadfence();
++        }
+     }
+     __syncthreads();
+-    
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+ 
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+@@ -650,20 +650,22 @@
+                                                     volatile int* const __restrict__ flag, 
+                                                     const double eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[dec_warps_per_block];
++    __shared__ unsigned int s_warp_excl[dec_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = dec_chunk >> 5;
+     const int rate_ofs = (nbEle+dec_tblock_size*dec_chunk-1)/(dec_tblock_size*dec_chunk)*(dec_tblock_size*dec_chunk)/32;
+ 
+     int base_start_idx;
+     int base_block_start_idx, base_block_end_idx;
+-    int block_idx;    
++    int block_idx;
+     int absQuant[32];
+     int currQuant, lorenQuant, prevQuant;
+     int sign_ofs;
+@@ -693,74 +695,65 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    if(warp_in_block==0 && lane==0)
+     {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<dec_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            flag[bid] = 2;
++            __threadfence();
+         }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane) cmpOffset[warp] = excl_sum;
+-        __threadfence();
+-        if(!lane) flag[warp] = 2;
+-        __threadfence();  
+     }
+     __syncthreads();
+ 
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+-
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+@@ -1249,14 +1242,16 @@
+                                                 volatile int* const __restrict__ flag, 
+                                                 const double eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[cmp_warps_per_block];
++    __shared__ unsigned int s_warp_excl[cmp_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = cmp_chunk >> 5;
+     const int rate_ofs = (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+     const double recipPrecision = 0.5f/eb;
+@@ -1266,6 +1261,9 @@
+     int quant_chunk_idx;
+     int block_idx;
+     int currQuant, lorenQuant, prevQuant, maxQuant;
++    // FP64 quantization is expensive enough on this GPU that redoing it in phase 2
++    // (the recompute-instead-of-store trick used for f32) measured as a net loss
++    // here -- keep the full per-thread buffer instead.
+     int absQuant[cmp_chunk];
+     unsigned int sign_flag[block_num];
+     int sign_ofs;
+@@ -1351,7 +1349,7 @@
+ 
+                 quant_chunk_idx = j * 32 + nbEle % 32;
+                 for(int i=quant_chunk_idx; i<quant_chunk_idx+zeronbEle; i++) absQuant[i] = 0;
+-            }  
++            }
+         }
+ 
+         fixed_rate[j] = get_bit_num(maxQuant);
+@@ -1368,79 +1366,67 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    if(warp_in_block==0 && lane==0)
+     {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<cmp_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
+-        }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            cmpOffset[warp] = excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            if(bid==gridDim.x-1) cmpOffset[bid+1] = cmpOffset[bid] + locOffset[bid+1];
+             __threadfence();
+-            if(warp==gridDim.x-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
++            flag[bid] = 2;
+             __threadfence();
+-            flag[warp] = 2;
+-            __threadfence(); 
+         }
+     }
+     __syncthreads();
+-    
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+ 
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;
+@@ -1530,20 +1516,22 @@
+                                                   volatile int* const __restrict__ flag, 
+                                                   const double eb, const size_t nbEle)
+ {
+-    __shared__ unsigned int excl_sum;
+-    __shared__ unsigned int base_idx;
++    __shared__ unsigned int s_warp_totals[dec_warps_per_block];
++    __shared__ unsigned int s_warp_excl[dec_warps_per_block];
++    __shared__ unsigned int s_block_excl;
+ 
+     const int tid = threadIdx.x;
+     const int bid = blockIdx.x;
+     const int idx = bid * blockDim.x + tid;
+     const int lane = idx & 0x1f;
+     const int warp = idx >> 5;
++    const int warp_in_block = tid >> 5;
+     const int block_num = dec_chunk >> 5;
+     const int rate_ofs = (nbEle+dec_tblock_size*dec_chunk-1)/(dec_tblock_size*dec_chunk)*(dec_tblock_size*dec_chunk)/32;
+ 
+     int base_start_idx;
+     int base_block_start_idx, base_block_end_idx;
+-    int block_idx;    
++    int block_idx;
+     int absQuant[32];
+     int currQuant, lorenQuant, prevQuant;
+     int sign_ofs;
+@@ -1568,74 +1556,65 @@
+     }
+     __syncthreads();
+ 
+-    if(lane==31) 
++    if(lane==31) s_warp_totals[warp_in_block] = thread_ofs;
++    __syncthreads();
++
++    if(warp_in_block==0 && lane==0)
+     {
+-        locOffset[warp+1] = thread_ofs;
+-        __threadfence();
+-        if(warp==0)
+-        {
+-            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
+-            // Previously left unset here: excl_sum is __shared__ and only ever
+-            // assigned inside `if(warp>0){...}` below, so warp 0 read it
+-            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
+-            // down -- undefined behavior (whatever was last in that physical
+-            // shared-memory bank). See docs/adapters/cuszp.md for the full
+-            // writeup of how this was found.
+-            excl_sum = 0;
++        unsigned int running = 0;
++        #pragma unroll
++        for(int w=0; w<dec_warps_per_block; w++)
++        {
++            s_warp_excl[w] = running;
++            running += s_warp_totals[w];
++        }
++        unsigned int block_total = running;
++
++        if(bid==0)
++        {
++            locOffset[1] = block_total;
++            __threadfence();
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+             __threadfence();
++            s_block_excl = 0;
+         }
+         else
+         {
+-            flag[warp+1] = 1;
+-            __threadfence();    
+-        }
+-    }
+-    __syncthreads();
++            locOffset[bid+1] = block_total;
++            __threadfence();
++            flag[bid+1] = 1;
++            __threadfence();
+ 
+-    if(warp>0)
+-    {
+-        if(!lane)
+-        {
+-            int lookback = warp;
+-            int loc_excl_sum = 0;
++            int lookback = bid;
++            unsigned int loc_excl_sum = 0;
+             while(lookback>0)
+             {
+                 int status;
+                 do{
+                     status = flag[lookback];
+-                    __threadfence();
+                 } while (status==0);
++                __threadfence();
+                 if(status==2)
+                 {
+                     loc_excl_sum += cmpOffset[lookback];
+-                    __threadfence();
+                     break;
+                 }
+-                if(status==1) loc_excl_sum += locOffset[lookback];
++                loc_excl_sum += locOffset[lookback];
+                 lookback--;
+-                __threadfence();
+             }
+-            excl_sum = loc_excl_sum;
++            s_block_excl = loc_excl_sum;
++
++            cmpOffset[bid] = s_block_excl;
++            __threadfence();
++            flag[bid] = 2;
++            __threadfence();
+         }
+-        __syncthreads();
+-    }
+-    
+-    if(warp>0)
+-    {
+-        if(!lane) cmpOffset[warp] = excl_sum;
+-        __threadfence();
+-        if(!lane) flag[warp] = 2;
+-        __threadfence();  
+     }
+     __syncthreads();
+ 
+-    if(!lane) base_idx = excl_sum + rate_ofs;
+-    __syncthreads();
+-
+-    unsigned int base_cmp_byte_ofs = base_idx;
++    unsigned int base_cmp_byte_ofs = rate_ofs + s_block_excl + s_warp_excl[warp_in_block];
+     unsigned int cmp_byte_ofs;
+     unsigned int tmp_byte_ofs = 0;
+     unsigned int cur_byte_ofs = 0;

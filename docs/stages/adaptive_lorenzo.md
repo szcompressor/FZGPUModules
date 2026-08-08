@@ -124,8 +124,19 @@ the design of **FSZ**:
 > Jiajun Huang. *FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy
 > Compression.* SC'26. arXiv:2607.15413.
 
-This stage is an independent reimplementation for the FZGPUModules DAG model; no
-FSZ source was used. The reference implementation fuses prediction,
-quantization, and encoding into a single CUDA kernel, whereas this is the
-prediction step alone and composes with `QuantizerStage` upstream and
+This stage is an independent reimplementation for the FZGPUModules DAG model,
+written from the paper alone before FSZ had a source release; no FSZ source was
+used. FSZ 1.0.0 was released 2026-08 under BSD-3-Clause at
+https://github.com/JiajunHuang1999/FSZ. The reference implementation fuses
+prediction, quantization, and encoding into a single CUDA kernel, whereas this
+is the prediction step alone and composes with `QuantizerStage` upstream and
 `AdaptiveBitpackStage` downstream.
+
+**Checked against the reference (2026-08-07, H100, 20 cells).** PSNR is identical
+on every cell and the bitpacked payload is byte-for-byte the same size, so the
+two make identical per-tile decisions. CR is 0.9928 of the reference (geomean);
+99.6% of that deficit is the `modes` port above — FSZ carries the same two flags
+free in spare bits of its per-block rate byte (its rate needs 5 of 8), which a
+predictor decoupled from its coder cannot do. That is the exact price of the
+port/DAG boundary: 0.0078 bits/element, invisible at CR 3 and 3% at CR 128.
+See `compression_benchmarking/docs/adapters/fsz.md`.

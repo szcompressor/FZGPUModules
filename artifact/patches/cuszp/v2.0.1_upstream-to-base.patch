@@ -1,0 +1,594 @@
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2024-11-17 06:11:17.000000000 +0000
++++ b/CMakeLists.txt	2026-07-19 13:03:40.663120060 +0000
+@@ -19,7 +19,7 @@
+ # Set CUDA host compiler
+ set(CMAKE_CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
+ set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
+-set(CMAKE_CUDA_ARCHITECTURES 60 61 62 70 75 80 86)
++set(CMAKE_CUDA_ARCHITECTURES 60 61 62 70 75 80 86 90)
+ set(CUDA_PROPAGATE_HOST_FLAGS ON)
+ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+ 
+diff -ruN a/examples/cuSZp.cpp b/examples/cuSZp.cpp
+--- a/examples/cuSZp.cpp	2024-11-17 06:11:17.000000000 +0000
++++ b/examples/cuSZp.cpp	2026-07-19 21:49:36.737576219 +0000
+@@ -195,9 +195,22 @@
+     }
+ 
+     // cuSZp compression.
++    // Timed as an average over TIMING_REPEATS back-to-back launches (one event pair
++    // around the whole loop, not one per launch): on some platforms (observed on a
++    // GPU-passthrough cloud VM) a single very short kernel timed via
++    // cudaEventElapsedTime carries a large, ~fixed per-launch dispatch-latency tax
++    // that isn't part of the kernel's actual execution time (confirmed with
++    // nsys/hardware counters: true kernel time ~145us, single-shot cudaEventElapsedTime
++    // reported ~3.2ms on that platform for the same call). Batching amortizes that
++    // fixed cost across many launches so the reported number reflects sustained
++    // throughput instead of dispatch overhead. cmpSize is identical every rep
++    // (deterministic algorithm, same input) so re-running doesn't change correctness.
++    const int TIMING_REPEATS = 100;
+     timer_GPU.StartCounter(); // set timer
+-    cuSZp_compress(d_oriData, d_cmpBytes, nbEle, &cmpSize, errorBound, dataType, encodingMode, stream);
+-    float cmpTime = timer_GPU.GetCounter();
++    for (int i = 0; i < TIMING_REPEATS; i++) {
++        cuSZp_compress(d_oriData, d_cmpBytes, nbEle, &cmpSize, errorBound, dataType, encodingMode, stream);
++    }
++    float cmpTime = timer_GPU.GetCounter() / TIMING_REPEATS;
+ 
+     // Transfer compressed data to CPU then back to GPU, making sure compression ratio is correct.
+     // No need to add this part for real-world usages, this is only for testing compresion ratio correcness.
+@@ -211,10 +224,12 @@
+     }
+     cudaMemcpy(d_cmpBytes, cmpBytes_dup, cmpSize*sizeof(unsigned char), cudaMemcpyHostToDevice);
+ 
+-    // cuSZp decompression.
++    // cuSZp decompression. Batched the same way as compression, see above.
+     timer_GPU.StartCounter(); // set timer
+-    cuSZp_decompress(d_decData, d_cmpBytes, nbEle, cmpSize, errorBound, dataType, encodingMode, stream);
+-    float decTime = timer_GPU.GetCounter();
++    for (int i = 0; i < TIMING_REPEATS; i++) {
++        cuSZp_decompress(d_decData, d_cmpBytes, nbEle, cmpSize, errorBound, dataType, encodingMode, stream);
++    }
++    float decTime = timer_GPU.GetCounter() / TIMING_REPEATS;
+ 
+     // Print result.
+     printf("cuSZp finished!\n");
+diff -ruN a/src/cuSZp_entry_f32.cu b/src/cuSZp_entry_f32.cu
+--- a/src/cuSZp_entry_f32.cu	2024-11-17 06:11:17.000000000 +0000
++++ b/src/cuSZp_entry_f32.cu	2026-07-19 21:25:34.841975927 +0000
+@@ -1,6 +1,41 @@
+ #include "cuSZp_entry_f32.h"
+ #include "cuSZp_kernels_f32.h"
+ 
++// Scratch-buffer cache: cuSZp_{compress,decompress}_{plain,outlier}_f32 originally
++// cudaMalloc'd + cudaFree'd their 3 small scratch arrays (d_cmpOffset/d_locOffset/
++// d_flag) on *every call*. That's cheap on bare-metal GPUs but on some platforms
++// (observed on a GPU-passthrough cloud VM) cudaMalloc/cudaFree carry large, highly
++// variable latency (seen up to several hundred ms for a single call) that dwarfs the
++// actual kernel time (~145us for a 26MB field) and dominates any per-call timing.
++// These caches grow-allocate once per distinct cmpOffSize and are reused across
++// calls — same correctness (still memset to 0 every call), no more per-call
++// malloc/free. Freed only at process exit, which is fine for this CLI; a caller
++// embedding this as a long-running service with widely varying, one-off sizes
++// would want an explicit release API instead (not needed here).
++namespace {
++struct CuszpScratch {
++    unsigned int* d_cmpOffset = nullptr;
++    unsigned int* d_locOffset = nullptr;
++    int* d_flag = nullptr;
++    size_t capacity = 0;
++
++    void ensure(size_t cmpOffSize) {
++        if (cmpOffSize <= capacity) return;
++        if (d_cmpOffset) cudaFree(d_cmpOffset);
++        if (d_locOffset) cudaFree(d_locOffset);
++        if (d_flag) cudaFree(d_flag);
++        cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int) * cmpOffSize);
++        cudaMalloc((void**)&d_locOffset, sizeof(unsigned int) * cmpOffSize);
++        cudaMalloc((void**)&d_flag, sizeof(int) * cmpOffSize);
++        capacity = cmpOffSize;
++    }
++};
++CuszpScratch g_compress_plain_f32;
++CuszpScratch g_decompress_plain_f32;
++CuszpScratch g_compress_outlier_f32;
++CuszpScratch g_decompress_outlier_f32;
++}  // namespace
++
+ /** ************************************************************************
+  * @brief cuSZp end-to-end compression API for device pointers
+  *        Compression is executed in GPU.
+@@ -21,16 +56,14 @@
+     int gsize = (nbEle + bsize * cmp_chunk - 1) / (bsize * cmp_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU compression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
++    // Initializing global memory for GPU compression (cached, see CuszpScratch above).
++    g_compress_plain_f32.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_compress_plain_f32.d_cmpOffset;
++    unsigned int* d_locOffset = g_compress_plain_f32.d_locOffset;
++    int* d_flag = g_compress_plain_f32.d_flag;
+     unsigned int glob_sync;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU compression.
+@@ -38,14 +71,9 @@
+     dim3 gridSize(gsize);
+     cuSZp_compress_kernel_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+ 
+-    // Obtain compression ratio and move data back to CPU.  
++    // Obtain compression ratio and move data back to CPU.
+     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+     *cmpSize = (size_t)glob_sync + (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+-
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+ 
+  /** ************************************************************************
+@@ -54,7 +82,7 @@
+  *        Compressed data is stored as device pointers (in GPU).
+  *        Reconstructed data is stored as device pointers (in GPU).
+  *        P.S. Reconstructed data and original data have the same shape.
+- * 
++ *
+  * @param   d_decData       reconstructed data (device pointer)
+  * @param   d_cmpBytes      compressed data (device pointer)
+  * @param   nbEle           reconstructed data size (number of floating point)
+@@ -69,26 +97,19 @@
+     int gsize = (nbEle + bsize * dec_chunk - 1) / (bsize * dec_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU decompression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
++    // Initializing global memory for GPU decompression (cached, see CuszpScratch above).
++    g_decompress_plain_f32.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_decompress_plain_f32.d_cmpOffset;
++    unsigned int* d_locOffset = g_decompress_plain_f32.d_locOffset;
++    int* d_flag = g_decompress_plain_f32.d_flag;
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU decompression.
+     dim3 blockSize(bsize);
+     dim3 gridSize(gsize);
+     cuSZp_decompress_kernel_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+-    
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+ 
+ /** ************************************************************************
+@@ -111,16 +132,14 @@
+     int gsize = (nbEle + bsize * cmp_chunk - 1) / (bsize * cmp_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU compression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
++    // Initializing global memory for GPU compression (cached, see CuszpScratch above).
++    g_compress_outlier_f32.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_compress_outlier_f32.d_cmpOffset;
++    unsigned int* d_locOffset = g_compress_outlier_f32.d_locOffset;
++    int* d_flag = g_compress_outlier_f32.d_flag;
+     unsigned int glob_sync;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU compression.
+@@ -128,14 +147,9 @@
+     dim3 gridSize(gsize);
+     cuSZp_compress_kernel_outlier_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+ 
+-    // Obtain compression ratio and move data back to CPU.  
++    // Obtain compression ratio and move data back to CPU.
+     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+     *cmpSize = (size_t)glob_sync + (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+-
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+ 
+  /** ************************************************************************
+@@ -144,7 +158,7 @@
+  *        Compressed data is stored as device pointers (in GPU).
+  *        Reconstructed data is stored as device pointers (in GPU).
+  *        P.S. Reconstructed data and original data have the same shape.
+- * 
++ *
+  * @param   d_decData       reconstructed data (device pointer)
+  * @param   d_cmpBytes      compressed data (device pointer)
+  * @param   nbEle           reconstructed data size (number of floating point)
+@@ -159,24 +173,17 @@
+     int gsize = (nbEle + bsize * dec_chunk - 1) / (bsize * dec_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU decompression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
++    // Initializing global memory for GPU decompression (cached, see CuszpScratch above).
++    g_decompress_outlier_f32.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_decompress_outlier_f32.d_cmpOffset;
++    unsigned int* d_locOffset = g_decompress_outlier_f32.d_locOffset;
++    int* d_flag = g_decompress_outlier_f32.d_flag;
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU decompression.
+     dim3 blockSize(bsize);
+     dim3 gridSize(gsize);
+     cuSZp_decompress_kernel_outlier_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+-    
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+\ No newline at end of file
+diff -ruN a/src/cuSZp_entry_f64.cu b/src/cuSZp_entry_f64.cu
+--- a/src/cuSZp_entry_f64.cu	2024-11-17 06:11:17.000000000 +0000
++++ b/src/cuSZp_entry_f64.cu	2026-07-19 15:24:27.480382342 +0000
+@@ -1,12 +1,38 @@
+ #include "cuSZp_entry_f64.h"
+ #include "cuSZp_kernels_f64.h"
+ 
++// Scratch-buffer cache: see cuSZp_entry_f32.cu for the full rationale. Same fix,
++// f64 side.
++namespace {
++struct CuszpScratch {
++    unsigned int* d_cmpOffset = nullptr;
++    unsigned int* d_locOffset = nullptr;
++    int* d_flag = nullptr;
++    size_t capacity = 0;
++
++    void ensure(size_t cmpOffSize) {
++        if (cmpOffSize <= capacity) return;
++        if (d_cmpOffset) cudaFree(d_cmpOffset);
++        if (d_locOffset) cudaFree(d_locOffset);
++        if (d_flag) cudaFree(d_flag);
++        cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int) * cmpOffSize);
++        cudaMalloc((void**)&d_locOffset, sizeof(unsigned int) * cmpOffSize);
++        cudaMalloc((void**)&d_flag, sizeof(int) * cmpOffSize);
++        capacity = cmpOffSize;
++    }
++};
++CuszpScratch g_compress_plain_f64;
++CuszpScratch g_decompress_plain_f64;
++CuszpScratch g_compress_outlier_f64;
++CuszpScratch g_decompress_outlier_f64;
++}  // namespace
++
+ /** ************************************************************************
+  * @brief cuSZp end-to-end compression API for device pointers
+  *        Compression is executed in GPU.
+  *        Original data is stored as device pointers (in GPU).
+  *        Compressed data is stored back as device pointers (in GPU).
+- * 
++ *
+  * @param   d_oriData       original data (device pointer)
+  * @param   d_cmpBytes      compressed data (device pointer)
+  * @param   nbEle           original data size (number of floating point)
+@@ -21,16 +47,14 @@
+     int gsize = (nbEle + bsize * cmp_chunk - 1) / (bsize * cmp_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU compression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
++    // Initializing global memory for GPU compression (cached, see CuszpScratch above).
++    g_compress_plain_f64.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_compress_plain_f64.d_cmpOffset;
++    unsigned int* d_locOffset = g_compress_plain_f64.d_locOffset;
++    int* d_flag = g_compress_plain_f64.d_flag;
+     unsigned int glob_sync;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU compression.
+@@ -38,14 +62,9 @@
+     dim3 gridSize(gsize);
+     cuSZp_compress_kernel_plain_f64<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+ 
+-    // Obtain compression ratio and move data back to CPU.  
++    // Obtain compression ratio and move data back to CPU.
+     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+     *cmpSize = (size_t)glob_sync + (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+-
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+ 
+  /** ************************************************************************
+@@ -54,7 +73,7 @@
+  *        Compressed data is stored as device pointers (in GPU).
+  *        Reconstructed data is stored as device pointers (in GPU).
+  *        P.S. Reconstructed data and original data have the same shape.
+- * 
++ *
+  * @param   d_decData       reconstructed data (device pointer)
+  * @param   d_cmpBytes      compressed data (device pointer)
+  * @param   nbEle           reconstructed data size (number of floating point)
+@@ -69,26 +88,19 @@
+     int gsize = (nbEle + bsize * dec_chunk - 1) / (bsize * dec_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU decompression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
++    // Initializing global memory for GPU decompression (cached, see CuszpScratch above).
++    g_decompress_plain_f64.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_decompress_plain_f64.d_cmpOffset;
++    unsigned int* d_locOffset = g_decompress_plain_f64.d_locOffset;
++    int* d_flag = g_decompress_plain_f64.d_flag;
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU decompression.
+     dim3 blockSize(bsize);
+     dim3 gridSize(gsize);
+     cuSZp_decompress_kernel_plain_f64<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+-    
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+ 
+ /** ************************************************************************
+@@ -96,7 +108,7 @@
+  *        Compression is executed in GPU.
+  *        Original data is stored as device pointers (in GPU).
+  *        Compressed data is stored back as device pointers (in GPU).
+- * 
++ *
+  * @param   d_oriData       original data (device pointer)
+  * @param   d_cmpBytes      compressed data (device pointer)
+  * @param   nbEle           original data size (number of floating point)
+@@ -111,16 +123,14 @@
+     int gsize = (nbEle + bsize * cmp_chunk - 1) / (bsize * cmp_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU compression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
++    // Initializing global memory for GPU compression (cached, see CuszpScratch above).
++    g_compress_outlier_f64.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_compress_outlier_f64.d_cmpOffset;
++    unsigned int* d_locOffset = g_compress_outlier_f64.d_locOffset;
++    int* d_flag = g_compress_outlier_f64.d_flag;
+     unsigned int glob_sync;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU compression.
+@@ -128,14 +138,9 @@
+     dim3 gridSize(gsize);
+     cuSZp_compress_kernel_outlier_f64<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+ 
+-    // Obtain compression ratio and move data back to CPU.  
++    // Obtain compression ratio and move data back to CPU.
+     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
+     *cmpSize = (size_t)glob_sync + (nbEle+cmp_tblock_size*cmp_chunk-1)/(cmp_tblock_size*cmp_chunk)*(cmp_tblock_size*cmp_chunk)/32;
+-
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+ }
+ 
+  /** ************************************************************************
+@@ -144,7 +149,7 @@
+  *        Compressed data is stored as device pointers (in GPU).
+  *        Reconstructed data is stored as device pointers (in GPU).
+  *        P.S. Reconstructed data and original data have the same shape.
+- * 
++ *
+  * @param   d_decData       reconstructed data (device pointer)
+  * @param   d_cmpBytes      compressed data (device pointer)
+  * @param   nbEle           reconstructed data size (number of floating point)
+@@ -159,24 +164,17 @@
+     int gsize = (nbEle + bsize * dec_chunk - 1) / (bsize * dec_chunk);
+     int cmpOffSize = gsize + 1;
+ 
+-    // Initializing global memory for GPU decompression.
+-    unsigned int* d_cmpOffset;
+-    unsigned int* d_locOffset;
+-    int* d_flag;
+-    cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
++    // Initializing global memory for GPU decompression (cached, see CuszpScratch above).
++    g_decompress_outlier_f64.ensure(cmpOffSize);
++    unsigned int* d_cmpOffset = g_decompress_outlier_f64.d_cmpOffset;
++    unsigned int* d_locOffset = g_decompress_outlier_f64.d_locOffset;
++    int* d_flag = g_decompress_outlier_f64.d_flag;
+     cudaMemset(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
+     cudaMemset(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize);
+-    cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
+     cudaMemset(d_flag, 0, sizeof(int)*cmpOffSize);
+ 
+     // cuSZp GPU decompression.
+     dim3 blockSize(bsize);
+     dim3 gridSize(gsize);
+     cuSZp_decompress_kernel_outlier_f64<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+-    
+-    // Free memory that is used.
+-    cudaFree(d_cmpOffset);
+-    cudaFree(d_locOffset);
+-    cudaFree(d_flag);
+-}
+\ No newline at end of file
++}
+diff -ruN a/src/cuSZp_kernels_f32.cu b/src/cuSZp_kernels_f32.cu
+--- a/src/cuSZp_kernels_f32.cu	2024-11-17 06:11:17.000000000 +0000
++++ b/src/cuSZp_kernels_f32.cu	2026-07-19 21:45:05.485179923 +0000
+@@ -186,6 +186,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+@@ -706,6 +714,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+@@ -1373,6 +1389,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+@@ -1622,6 +1646,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+diff -ruN a/src/cuSZp_kernels_f64.cu b/src/cuSZp_kernels_f64.cu
+--- a/src/cuSZp_kernels_f64.cu	2024-11-17 06:11:17.000000000 +0000
++++ b/src/cuSZp_kernels_f64.cu	2026-07-19 21:45:05.485717009 +0000
+@@ -171,6 +171,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+@@ -691,6 +699,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+@@ -1358,6 +1374,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;
+@@ -1550,6 +1574,14 @@
+         __threadfence();
+         if(warp==0)
+         {
++            // Warp 0 has no predecessor, so its exclusive prefix sum is always 0.
++            // Previously left unset here: excl_sum is __shared__ and only ever
++            // assigned inside `if(warp>0){...}` below, so warp 0 read it
++            // uninitialized at the `base_idx = excl_sum + rate_ofs` line further
++            // down -- undefined behavior (whatever was last in that physical
++            // shared-memory bank). See docs/adapters/cuszp.md for the full
++            // writeup of how this was found.
++            excl_sum = 0;
+             flag[0] = 2;
+             __threadfence();
+             flag[1] = 1;

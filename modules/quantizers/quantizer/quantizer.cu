@@ -5,7 +5,9 @@
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
 #include "backend/api.h"
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -15,6 +17,33 @@
 #include <limits>
 
 namespace fz {
+
+// =============================================================================
+// Precision helpers
+// =============================================================================
+
+/**
+ * Round-to-nearest-even, in the *input's* precision.
+ *
+ * The ABS/NOA kernels used to round with an unconditional `__float2int_rn`,
+ * which capped quantization at float32 precision no matter what TInput was.
+ * That silently broke every f64 field whose values sit far from zero relative
+ * to their own range: S3D/N2 spans 1.1e-5 about 0.7369, where the float32
+ * spacing (5.96e-08) is 54x the abs_eb that a 1e-4 NOA bound asks for
+ * (1.103e-09). The float32 rounding error alone blew the bound, so round-trips
+ * came back at 48-53 dB reporting `status: ok`. Measured 2026-08-07; see the
+ * FZGM paper notes.
+ *
+ * `int` is still the bin type: codes are at most 32-bit, and widening q would
+ * change the wrap semantics linear mode documents.
+ */
+template<typename T> __device__ __forceinline__ int quantRound(T v);
+template<> __device__ __forceinline__ int quantRound<float>(float v)   { return __float2int_rn(v); }
+template<> __device__ __forceinline__ int quantRound<double>(double v) { return __double2int_rn(v); }
+
+/// |v| without a detour through float — fabsf() was the other silent downcast.
+template<typename T>
+__device__ __forceinline__ T quantAbs(T v) { return v < T(0) ? -v : v; }
 
 // =============================================================================
 // ABS / NOA kernels — uniform quantization in value space
@@ -59,17 +88,20 @@ __global__ void quantizer_abs_fwd_kernel(
     if (i >= n) return;
 
     TInput x = in[i];
-    // Round to nearest quantization bin (signed, centred at 0)
-    int q = __float2int_rn((float)x * (float)ebx2_r);
+    // Round to nearest quantization bin (signed, centred at 0), in TInput precision
+    int q = quantRound<TInput>(x * ebx2_r);
 
     // |q| < quant_radius and |x| < threshold → representable
-    bool representable = (q > -(int)quant_radius && q < (int)quant_radius && fabsf((float)x) < threshold);
+    bool representable = (q > -(int)quant_radius && q < (int)quant_radius
+                          && quantAbs(x) < static_cast<TInput>(threshold));
 
     if constexpr (Dither) {
         if (representable) {
-            float offset = ditherUnit(i, dither_seed) * static_cast<float>(dither_amp);
-            float recon  = static_cast<float>(q) * static_cast<float>(ebx2) + offset;
-            if (fabsf(static_cast<float>(x) - recon) > static_cast<float>(abs_eb)) {
+            // ditherUnit is float by construction (a hash-derived unit offset); the
+            // *check* is what has to be exact, so promote before multiplying.
+            TInput offset = static_cast<TInput>(ditherUnit(i, dither_seed)) * dither_amp;
+            TInput recon  = static_cast<TInput>(q) * ebx2 + offset;
+            if (quantAbs(x - recon) > abs_eb) {
                 representable = false;  // dither pushed this element over bound → escalate
             }
         }
@@ -119,11 +151,11 @@ __global__ void quantizer_abs_fwd_inplace_kernel(
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
 
-    TInput x  = in[i];
-    float  fx = static_cast<float>(x);
-    int    q  = __float2int_rn(fx * static_cast<float>(ebx2_r));
+    TInput x = in[i];
+    int    q = quantRound<TInput>(x * ebx2_r);
 
-    if (q > -(int)quant_radius && q < (int)quant_radius && fabsf(fx) < threshold) {
+    if (q > -(int)quant_radius && q < (int)quant_radius
+        && quantAbs(x) < static_cast<TInput>(threshold)) {
         // TCMS (zigzag) encode: valid codes are in [0, 2 * quant_radius)
         uint32_t uq = static_cast<uint32_t>((q << 1) ^ (q >> 31));
         codes[i] = static_cast<TCode>(uq);
@@ -153,7 +185,7 @@ __global__ void quantizer_linear_fwd_kernel(
 ) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
-    int q = __float2int_rn(static_cast<float>(in[i]) * static_cast<float>(ebx2_r));
+    int q = quantRound<TInput>(in[i] * ebx2_r);
     codes[i] = static_cast<TCode>(q);  // signed stored as two's-complement
 }
 
@@ -189,11 +221,13 @@ __global__ void quantizer_abs_inv_kernel(
         // so whatever dequant writes there is harmless.
         q = static_cast<int>(static_cast<typename std::make_signed<TCode>::type>(codes[i]));
     }
-    float recon = static_cast<float>(q) * static_cast<float>(ebx2);
+    // Reconstruct in TInput: the forward kernel checked the bound at this
+    // precision, so anything narrower here reintroduces the violation it ruled out.
+    TInput recon = static_cast<TInput>(q) * ebx2;
     if constexpr (Dither) {
-        recon += ditherUnit(i, dither_seed) * static_cast<float>(dither_amp);
+        recon += static_cast<TInput>(ditherUnit(i, dither_seed)) * dither_amp;
     }
-    out[i] = static_cast<TInput>(recon);
+    out[i] = recon;
 }
 
 /**
@@ -733,25 +767,26 @@ void QuantizerStage<TInput, TCode>::execute(
     // ── Resolve absolute error bound ──────────────────────────────────────────
     if (config_.eb_mode == ErrorBoundMode::ABS) {
         computed_abs_eb_     = static_cast<TInput>(config_.error_bound);
-        computed_value_base_ = 0.0f;
+        computed_value_base_ = static_cast<TInput>(0);
     } else if (config_.eb_mode == ErrorBoundMode::REL) {
         // REL: no abs_eb needed (log-space kernels use user_eb directly)
         computed_abs_eb_     = static_cast<TInput>(0);
-        computed_value_base_ = 0.0f;
+        computed_value_base_ = static_cast<TInput>(0);
     } else {
         // NOA:  scan for value_range   = max(data) - min(data)
         // PREL: scan for value_base    = max(|data|)
         // Both then collapse to a single absolute bound.
         const char* mode_name =
             (config_.eb_mode == ErrorBoundMode::NOA) ? "NOA" : "PREL";
-        float value_base = config_.precomputed_value_base;
-        if (value_base <= 0.0f) {
+        TInput value_base = static_cast<TInput>(config_.precomputed_value_base);
+        TInput data_abs_max = TInput(0);
+        if (value_base <= TInput(0)) {
             value_base = computeValueBase<TInput>(
                 static_cast<const TInput*>(inputs[0]),
-                scan_N, config_.eb_mode, stream, pool);
+                scan_N, config_.eb_mode, stream, pool, &data_abs_max);
         }
         computed_value_base_ = value_base;
-        if (value_base <= 0.0f) {
+        if (value_base <= TInput(0)) {
             FZ_LOG(WARN,
                 "QuantizerStage %s: value base is zero (constant/empty data?); "
                 "falling back to ABS with user_eb", mode_name);
@@ -766,6 +801,33 @@ void QuantizerStage<TInput, TCode>::execute(
             static_cast<double>(config_.error_bound),
             static_cast<double>(value_base),
             static_cast<double>(computed_abs_eb_));
+
+        // Representability backstop.
+        //
+        // A relative mode can derive an abs_eb finer than TInput can resolve at
+        // the data's own magnitude — the bound is then unsatisfiable by *any*
+        // implementation, since round-tripping the input through TInput already
+        // exceeds it. Quantizing in TInput (see quantRound) is what makes this
+        // rare; before that, float32 rounding put S3D/N2 54x over its bound while
+        // reporting `status: ok`. Refuse rather than emit a stream that decodes
+        // cleanly into out-of-bound values.
+        const TInput spacing = std::numeric_limits<TInput>::epsilon() * data_abs_max;
+        if (data_abs_max > TInput(0) && computed_abs_eb_ > TInput(0)
+            && spacing > computed_abs_eb_) {
+            char msg[512];
+            std::snprintf(msg, sizeof(msg),
+                "QuantizerStage %s: requested abs_eb=%.6g is below the representable "
+                "spacing of the input type at this data's magnitude (%.6g at |x|max=%.6g, "
+                "%.1fx the bound). No quantizer can honour it — the input's own "
+                "round-trip error already exceeds it. Use a wider input type, a "
+                "looser error bound, or ABS mode with an explicit bound.",
+                mode_name,
+                static_cast<double>(computed_abs_eb_),
+                static_cast<double>(spacing),
+                static_cast<double>(data_abs_max),
+                static_cast<double>(spacing / computed_abs_eb_));
+            throw std::runtime_error(msg);
+        }
     }
 
     // ── Launch forward kernel ─────────────────────────────────────────────────
@@ -929,17 +991,61 @@ void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
     // counter even when the buffer is full, so h_count may exceed max_outliers.
     // Only min(h_count, max_outliers) entries were actually written.
     uint32_t cap = static_cast<uint32_t>(getMaxOutlierCount(num_elements_));
+
+    // Overflow means the excess outliers were DROPPED, and a dropped outlier
+    // reconstructs to whatever the quantizer's code path leaves behind — for a
+    // field whose whole range sits far outside the radius, that is effectively
+    // zero. The caller gets a stream that decodes cleanly into wrong values, so
+    // this cannot stay a log line.
+    //
+    // It was one, at DEBUG, and the corruption was silent for real fields:
+    // S3D/N2 (range 1.1e-5 on an offset of 0.74) drives every element outside a
+    // 32768 radius, overflows a 10% capacity, and round-trips at -96 dB PSNR
+    // with `status: ok`. Measured 2026-08-07; see the FZGM paper notes.
+    //
+    // Policy matches LorenzoQuantStage: outlier_capacity == 0 is an explicit
+    // opt-in to the lossy trade-off and stays a quiet drop; any other capacity
+    // that overflows is a failure to honour the error bound, and must say so.
+    if (h_count > cap) {
+        if (config_.outlier_capacity == 0.0f) {
+            FZ_LOG(DEBUG,
+                   "QuantizerStage: outlier_capacity=0, silently dropped %u outlier(s) "
+                   "(%.1f%% of data). Reconstruction error for these elements may "
+                   "exceed the error bound.",
+                   h_count,
+                   num_elements_ > 0
+                       ? 100.0f * h_count / static_cast<float>(num_elements_) : 0.0f);
+        } else {
+            const float actual_pct   = num_elements_ > 0
+                ? 100.0f * h_count / static_cast<float>(num_elements_) : 0.0f;
+            const float capacity_pct = num_elements_ > 0
+                ? 100.0f * cap / static_cast<float>(num_elements_) : 0.0f;
+            char msg[512];
+            std::snprintf(msg, sizeof(msg),
+                   "QuantizerStage: outlier overflow — %u of %zu elements (%.1f%%) "
+                   "fell outside the quantizer radius, but outlier_capacity reserves "
+                   "only %.1f%%. Dropping the excess would violate the error bound. "
+                   "Raise outlier_capacity to at least %.2f, widen quant_radius, or "
+                   "loosen the error bound. Set outlier_capacity = 0 to opt into "
+                   "dropping outliers deliberately. (A field whose value range is "
+                   "tiny next to its offset — e.g. range 1e-5 around 0.74 — puts "
+                   "every element outside the radius and will always overflow.)",
+                   h_count, num_elements_, actual_pct, capacity_pct,
+                   std::min(1.0f, actual_pct * 1.1f / 100.0f));
+            throw std::runtime_error(msg);
+        }
+    }
+
     actual_outlier_count_ = (h_count > cap) ? cap : h_count;
 
     actual_output_sizes_[1] = actual_outlier_count_ * sizeof(TInput);
     actual_output_sizes_[2] = actual_outlier_count_ * sizeof(uint32_t);
 
-    FZ_LOG(DEBUG, "QuantizerStage: %u / %zu outliers (%.1f%%)%s",
+    FZ_LOG(DEBUG, "QuantizerStage: %u / %zu outliers (%.1f%%)",
            actual_outlier_count_, num_elements_,
            num_elements_ > 0
                ? static_cast<double>(actual_outlier_count_) * 100.0 / static_cast<double>(num_elements_)
-               : 0.0,
-           h_count > cap ? " [outlier buffer full — excess dropped]" : "");
+               : 0.0);
 }
 
 template<typename TInput, typename TCode>
@@ -953,9 +1059,12 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
             std::to_string(max_size));
 
     QuantizerConfig cfg;
+    // Narrow copies are written for older readers; the f64 fields are authoritative.
     cfg.abs_error_bound  = static_cast<float>(computed_abs_eb_);
     cfg.user_error_bound = config_.error_bound;
-    cfg.value_base       = computed_value_base_;
+    cfg.value_base       = static_cast<float>(computed_value_base_);
+    cfg.abs_error_bound_f64 = static_cast<double>(computed_abs_eb_);
+    cfg.value_base_f64      = static_cast<double>(computed_value_base_);
     cfg.quant_radius     = static_cast<uint32_t>(config_.quant_radius);
     cfg.num_elements     = static_cast<uint32_t>(num_elements_);
     cfg.outlier_count    = actual_outlier_count_;
@@ -979,10 +1088,11 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
     const uint8_t* buf, size_t size
 ) {
     // Accept old (28-byte), pre-dither (36-byte), pre-dither_strength (48-byte),
-    // and current (52-byte) header formats.
+    // pre-f64 (56-byte), and current (72-byte) header formats.
     constexpr size_t kMinSize                 = 28;  // size before outlier_threshold/inplace_outliers fields
     constexpr size_t kSizeBeforeDither         = 36;  // size before dither/dither_seed fields
     constexpr size_t kSizeBeforeDitherStrength = 48;  // size before dither_strength field
+    constexpr size_t kSizeBeforeF64            = 56;  // size before abs_error_bound_f64/value_base_f64
     if (size < kMinSize)
         throw std::runtime_error(
             "QuantizerConfig header too small: got " + std::to_string(size) +
@@ -998,8 +1108,15 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
     config_.zigzag_codes  = (cfg.zigzag_codes != 0);
     num_elements_         = cfg.num_elements;
     actual_outlier_count_ = cfg.outlier_count;
-    computed_abs_eb_      = static_cast<TInput>(cfg.abs_error_bound);
-    computed_value_base_  = cfg.value_base;
+    // Prefer the full-precision fields; fall back to the narrow copies for
+    // headers written before they existed (they are 0 there, not merely stale).
+    if (size > kSizeBeforeF64 && cfg.abs_error_bound_f64 != 0.0) {
+        computed_abs_eb_     = static_cast<TInput>(cfg.abs_error_bound_f64);
+        computed_value_base_ = static_cast<TInput>(cfg.value_base_f64);
+    } else {
+        computed_abs_eb_     = static_cast<TInput>(cfg.abs_error_bound);
+        computed_value_base_ = static_cast<TInput>(cfg.value_base);
+    }
     // New fields: default to safe values when reading old-format headers
     if (size >= kSizeBeforeDither) {
         config_.outlier_threshold = cfg.outlier_threshold;

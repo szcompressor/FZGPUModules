@@ -22,7 +22,7 @@ see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
 | [dietGPU](#dietgpu) | MIT | Vendored headers | `ANSStage` |
 | [GPULZ](#gpulz) | **None declared upstream** | Direct port of encode/decode kernels | `GPULZStage` |
 | [AIZ_VLDB26](#aiz_vldb26) | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
-| [FSZ](#fsz) | n/a — paper only | **Algorithmic attribution only; no code used** | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
+| [FSZ](#fsz) | BSD-3-Clause | **Algorithmic attribution only; no code used** (written from the paper before FSZ 1.0.0 was released) | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | [Point-wise relative transform](#point-wise-relative-error-transform) | n/a — paper only | **Algorithmic attribution only; no code used** | `LogTransformStage` |
 
 ---
@@ -307,13 +307,25 @@ GPUs", ICS '23
 
 ## FSZ
 
-**License:** not applicable — **no source release exists**; these stages were written from
-the paper's description alone.
+**License:** BSD-3-Clause (FSZ 1.0.0, released 2026-08).
+**Repository:** https://github.com/JiajunHuang1999/FSZ
 **Author:** Jiajun Huang (University of South Florida)
 **Paper:** "FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy Compression",
 SC '26, arXiv:2607.15413
 
-**Relationship: algorithmic attribution only — no code was used.**
+**Relationship: algorithmic attribution only — no code was used.** These stages were
+written from the paper's description alone, *before* any source release existed. FSZ
+1.0.0 was published afterwards, on 2026-08; it has not been consulted for
+implementation, only used as a reference build for validation (see below).
+
+**Validated against the reference implementation (2026-08-07, H100, 20 cells).** The
+reconstruction is faithful: PSNR is identical to the reference on every cell, and the
+bitpacked payload is byte-for-byte the same size (4,277,784 B on NYX/`baryon_density`),
+so the two make identical per-tile decisions. Compression ratio is 0.9928 of the
+reference (geomean), and 99.6% of that deficit is FZGPUModules' separate `modes` port:
+FSZ packs the same two flags free into spare bits of its per-block rate byte, which a
+predictor stage decoupled from its coder cannot do. See
+`compression_benchmarking/docs/adapters/fsz.md`.
 
 **Stages:** `AdaptiveLorenzoStage` (`modules/fused/adaptive_lorenzo/`),
 `LorenzoStage::setCentering()` / `setOrder(2)` (`modules/predictors/lorenzo/`),

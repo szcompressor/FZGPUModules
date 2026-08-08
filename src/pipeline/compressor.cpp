@@ -78,6 +78,14 @@ void Pipeline::setMemoryStrategy(MemoryStrategy strategy) {
     // decompress-only.  Anything else added to CompressionDAG that is configured
     // before finalize() must be re-applied here too.
     dag_->enableProfiling(profiling_enabled_);
+    // Buffer coloring is the second such setting, and it went missing the same way:
+    // setColoringEnabled(false) before loadConfig() was silently discarded, because
+    // every TOML preset carries a `memory_strategy` key and so routes through here.
+    // The symptom was a *plausible wrong number* rather than an error -- an
+    // uncolored-vs-colored peak-memory comparison reported identical peaks for all
+    // 15 presets, i.e. "liveness coloring saves nothing", when in fact coloring had
+    // simply never been turned off.
+    dag_->setColoringEnabled(coloring_enabled_);
 }
 
 void Pipeline::setNumStreams(int num_streams) {

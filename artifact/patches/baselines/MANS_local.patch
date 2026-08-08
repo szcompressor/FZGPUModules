@@ -1,0 +1,15 @@
+diff --git a/nv/ans/CMakeLists.txt b/nv/ans/CMakeLists.txt
+index 5dca644..76ca59e 100644
+--- a/nv/ans/CMakeLists.txt
++++ b/nv/ans/CMakeLists.txt
+@@ -5,7 +5,9 @@
+ # LICENSE file in the root directory of this source tree.
+ #set(CMAKE_MODULE_PATH "/usr/local/python3/lib/python3.8/site-packages/torch/cmake/modules" ${CMAKE_MODULE_PATH})
+ cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
+-set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
++if(NOT DEFINED CMAKE_CUDA_COMPILER)
++    set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
++endif()
+ project(multibyte_ans LANGUAGES CUDA CXX VERSION 1.0)
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_C_STANDARD 11)

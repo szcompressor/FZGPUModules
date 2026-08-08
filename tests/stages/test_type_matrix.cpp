@@ -23,6 +23,7 @@
 #include "quantizers/quantizer/quantizer.h"
 #include "fzgpumodules.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -205,6 +206,65 @@ TYPED_TEST(LorenzoTypeMatrix, SerializeDeserialize) {
     ASSERT_NO_THROW(restored.deserializeHeader(buf, written));
 
     EXPECT_EQ(restored.getQuantRadius(), static_cast<TC>(qr));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TM4b: LorenzoQuant honours an f64 bound the header used to narrow.
+//
+// The header stored `error_bound` as a float, so a `double` stage round-tripped
+// its own bound through float32 — a ~6e-08 relative error. That sounds harmless
+// and is not: the inverse reconstructs by prefix-summing quantized residuals and
+// scaling by 2*abs_eb, so the error is amplified by the magnitude of the sum. For
+// S3D/N2 (values ~0.7369 at abs_eb 1.103e-09) it lands as ~4.4e-08 absolute —
+// 40x the bound — and the cell round-tripped at 53 dB reporting `status: ok`.
+//
+// Driven through a full compress/decompress because the bound is only resolved
+// during execute(); a header-only assertion would compare two zeroes.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(LorenzoQuantHeader, DoubleNoaTinyRangeLargeOffsetRespectsBound) {
+    CudaStream stream;
+    constexpr size_t N       = 1 << 14;
+    constexpr double OFFSET  = 0.7369;
+    constexpr double RANGE   = 1.10e-5;
+    constexpr double USER_EB = 1.0e-4;   // NOA: abs_eb = USER_EB * range
+
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = OFFSET + RANGE * (0.5 + 0.5 * std::sin(i * 0.01));
+
+    const double vmin = *std::min_element(h_input.begin(), h_input.end());
+    const double vmax = *std::max_element(h_input.begin(), h_input.end());
+    const double abs_eb = USER_EB * (vmax - vmin);
+
+    // NOA, not ABS, and that distinction is the whole point. In ABS mode the
+    // bound comes straight from `config_.error_bound`, which is already a float,
+    // so the header narrowing is a no-op and an ABS test passes vacuously. Only a
+    // relative mode computes abs_eb as a genuine double (user_eb * value_base),
+    // which is the precision the header then threw away.
+    ASSERT_NE(static_cast<double>(static_cast<float>(abs_eb)), abs_eb)
+        << "pick a bound float32 cannot hold, or this test proves nothing";
+
+    Pipeline p(N * sizeof(double), MemoryStrategy::MINIMAL, 8.0f);
+    auto* lrz = p.addStage<LorenzoQuantStage<double, uint16_t>>();
+    lrz->setErrorBound(static_cast<double>(USER_EB));
+    lrz->setErrorBoundMode(ErrorBoundMode::NOA);
+    lrz->setQuantRadius(static_cast<uint16_t>(32768));
+    lrz->setOutlierCapacity(0.5f);
+    p.setPoolManagedDecompOutput(false);
+    p.finalize();
+
+    // A FILE round-trip, deliberately. An in-process compress/decompress reuses
+    // the live stage object, whose computed_abs_eb_ is already exact — it never
+    // reads the serialized header, so it cannot see this bug at all.
+    const std::string tmp = "/tmp/fzgmod_lq_f64_bound.fzm";
+    auto res = pipeline_file_round_trip<double>(p, h_input, stream, tmp);
+    std::remove(tmp.c_str());
+    ASSERT_EQ(res.data.size(), h_input.size());
+
+    EXPECT_LE(res.max_error, abs_eb * 1.01)
+        << "f64 NOA LorenzoQuant file round-trip max_err=" << res.max_error
+        << " exceeds abs_eb=" << abs_eb
+        << " (ratio " << (res.max_error / abs_eb) << "x)";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -280,6 +280,19 @@ public:
     uint8_t getAdaptiveFloorShiftUsed() const    { return adaptive_shift_used_; }
 
     /**
+     * True once a `PerBlock`/`Fixed` build has fallen back to an Adaptive book
+     * because the histogram drove a symbol past the 27-bit code field.
+     *
+     * The fallback is not a relaxation of the error bound — the bound belongs to
+     * the quantizer, and Adaptive only flattens the frequency floor until every
+     * code fits.  It does change which book the stage used, so a caller comparing
+     * compression ratios across fields needs to know it happened; the configured
+     * `getBookSource()` is deliberately left untouched so it still reports what
+     * was asked for.
+     */
+    bool getAdaptiveFallbackUsed() const { return adaptive_fallback_; }
+
+    /**
      * Refit trigger for `Adaptive`: rebuild the codebook once the encoded bit rate
      * degrades past `ratio` times the rate the book achieved when it was fitted.
      *
@@ -485,6 +498,11 @@ private:
     bool                  has_book_spec_ = false;
     uint8_t               adaptive_floor_shift_ = 24;
     uint8_t               adaptive_shift_used_  = 24;
+    /// Set when a PerBlock/Fixed build could not fit the 27-bit code field and
+    /// fell back to an Adaptive book.  Sticky for the life of the stage: once the
+    /// data has shown it needs a floored book, re-deriving that every call would
+    /// rebuild the same book and re-log the same warning.
+    bool                  adaptive_fallback_    = false;
 
     // Refit bookkeeping (Adaptive only).
     float    refit_threshold_  = 1.2f;
