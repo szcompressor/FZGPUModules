@@ -992,6 +992,10 @@ TEST(HuffmanStage, PerBlockFallsBackToAdaptiveOnOverlongCode) {
     // sums to Fib(32)-1 ~ 2.18M elements — big enough to be a real histogram,
     // small enough for a unit test. (HF30 needs 48 symbols only because it hands
     // the frequencies over directly and never materializes the data.)
+    // 30, not 32, and deliberately: with uint8_t symbols the reverse codebook is
+    // 256 + bklen bytes, so bklen 30 puts the bitstream at offset 2 mod 4. The
+    // decode kernel reads it as uint32* and silently returned wrong symbols, so
+    // this doubles as the regression test for setBklen's alignment rounding.
     const uint32_t BK = 30;
     std::vector<uint32_t> freq(BK);
     uint64_t a = 1, b = 1;
@@ -1008,6 +1012,19 @@ TEST(HuffmanStage, PerBlockFallsBackToAdaptiveOnOverlongCode) {
 
     CudaStream cs;
     auto pool = make_test_pool(N * 4);
+
+    // Control: does an EXPLICIT Adaptive book round-trip this same data? If it
+    // does not, the defect is in Adaptive, not in the fallback that selects it.
+    {
+        HuffmanStage<uint8_t> control;
+        control.setBklen(BK);
+        control.setBookSource(HuffmanBookSource::Adaptive);
+        auto cenc = huffman_encode(control, h_in, cs.stream, *pool);
+        auto cdec = huffman_decode(control, cenc, N, cs.stream, *pool);
+        ASSERT_EQ(cdec.size(), N);
+        for (size_t i = 0; i < N; ++i)
+            ASSERT_EQ(cdec[i], h_in[i]) << "explicit Adaptive mismatch at " << i;
+    }
 
     HuffmanStage<uint8_t> stage;          // PerBlock — the default
     stage.setBklen(BK);

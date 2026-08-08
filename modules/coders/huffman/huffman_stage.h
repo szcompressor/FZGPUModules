@@ -150,14 +150,25 @@ public:
      * Default: 256 for uint8_t, 1024 for uint16_t/uint32_t.
      */
     /**
-     * An **odd** bklen is rounded up to the next even value. The reverse
-     * codebook occupies `4*(2*32) + sizeof(SYM)*bklen` bytes, so with a 2-byte
-     * symbol an odd bklen makes it an odd number of 16-bit words; that shifts
-     * the bitstream section to a 2-mod-4 offset, and the decode kernel reads
-     * the bitstream as `uint32*` and faults on the misaligned load. Rounding up
-     * is always safe -- a larger codebook only adds unused symbol slots.
+     * bklen is rounded **up until `sizeof(T) * bklen` is a multiple of 4**.
+     *
+     * The reverse codebook occupies `4*(2*32) + sizeof(T)*bklen` bytes — a
+     * 4-aligned 256-byte prefix plus the symbol table — and the bitstream begins
+     * immediately after it. The decode kernel reads that bitstream as `uint32*`,
+     * so the symbol table must not push it off a 4-byte boundary.
+     *
+     * This used to round odd up to even, which is only sufficient for a 2-byte
+     * symbol. With `uint8_t` symbols the requirement is a multiple of **4**, and
+     * a bklen of, say, 30 left the bitstream at offset 2 mod 4. That did not
+     * fault — it decoded to **wrong symbols, silently**: an all-`uint8_t`
+     * round-trip at bklen 30 returned symbol 0 where symbol 1 began and reported
+     * success. `uint32_t` symbols are aligned at any bklen. Rounding up is always
+     * safe — a larger codebook only adds unused symbol slots.
      */
-    void     setBklen(uint32_t bklen) { bklen_ = bklen + (bklen & 1u); }
+    void setBklen(uint32_t bklen) {
+        constexpr uint32_t kMul = (4u / sizeof(T)) ? (4u / sizeof(T)) : 1u;
+        bklen_ = ((bklen + kMul - 1u) / kMul) * kMul;
+    }
     uint32_t getBklen() const         { return bklen_; }
 
     /**
@@ -291,6 +302,14 @@ public:
      * was asked for.
      */
     bool getAdaptiveFallbackUsed() const { return adaptive_fallback_; }
+
+    /// Surfaces getAdaptiveFallbackUsed() to Pipeline::collectRunNotes(), so a
+    /// benchmark row can tell a fallback-encoded field from a normally-encoded
+    /// one.  See Stage::getRunNotes().
+    std::vector<std::string> getRunNotes() const override {
+        if (adaptive_fallback_) return {"huffman_adaptive_fallback"};
+        return {};
+    }
 
     /**
      * Refit trigger for `Adaptive`: rebuild the codebook once the encoded bit rate
@@ -465,6 +484,23 @@ public:
         if (size >= 3) {
             uint16_t bk;
             std::memcpy(&bk, buf + 1, sizeof(uint16_t));
+            // Take the archive's bklen verbatim — NOT through setBklen(). Decode has
+            // to reproduce the layout the encoder actually used, so rounding here
+            // would describe a different reverse codebook than the one in the stream.
+            //
+            // But an archive written before setBklen enforced 4-byte alignment can
+            // carry a bklen that puts the bitstream at a non-4 offset, and the decode
+            // kernel reads it as uint32*. That does not merely decode wrong: it
+            // poisons the CUDA context, and every later allocation in the process
+            // fails with "misaligned address" — a failure that points nowhere near
+            // this stage. Refuse it here, where the cause is still legible.
+            if ((sizeof(T) * static_cast<size_t>(bk)) % 4u != 0)
+                throw std::runtime_error(
+                    "HuffmanStage: archive declares bklen=" + std::to_string(bk) +
+                    " with a " + std::to_string(sizeof(T)) + "-byte symbol, which puts "
+                    "the bitstream at a non-4-byte offset. Such archives were written "
+                    "by a build predating the alignment fix and cannot be decoded "
+                    "correctly — the stream itself is malformed, not just this reader.");
             bklen_ = bk;
         }
         if (size >= 11)

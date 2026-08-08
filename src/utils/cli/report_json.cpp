@@ -130,6 +130,7 @@ void write_report_json(const std::string& path, const ReportData& d) {
       << ", \"radius\": " << d.radius << ",\n";
     o << "    \"pipeline\": " << str_or_null(d.pipeline) << ",\n";
     o << "    \"memory_strategy\": " << str_or_null(d.memory_strategy)
+      << ", \"coloring\": " << (d.coloring ? "true" : "false")
       << ", \"chunk_size\": " << d.chunk_size
       << ", \"n_runs\": " << d.n_runs << "\n";
     o << "  },\n";
@@ -200,7 +201,7 @@ void write_report_json(const std::string& path, const ReportData& d) {
           << "\", \"device_ms\": " << num(s.device_ms) << " }";
     }
     o << (d.stages.empty() ? "]" : "\n  ]");
-    if (d.graph_requested || !d.stage_versions.empty()) o << ",";
+    if (d.graph_requested || !d.stage_versions.empty() || !d.run_notes.empty()) o << ",";
     o << "\n";
 
     // stage_versions: source fingerprint of each stage that ran.  Omitted entirely
@@ -212,6 +213,26 @@ void write_report_json(const std::string& path, const ReportData& d) {
         for (const auto& kv : d.stage_versions) {
             o << (first ? "" : ",") << "\n    \"" << esc(kv.first) << "\": \""
               << esc(kv.second) << "\"";
+            first = false;
+        }
+        o << "\n  }";
+        if (d.graph_requested || !d.run_notes.empty()) o << ",";
+        o << "\n";
+    }
+
+    // run_notes: what a stage actually did, when it differs from what was asked
+    // for in a way that affects comparability (see Stage::getRunNotes()).  Omitted
+    // when empty -- absence reads as "nothing surprising happened", which is the
+    // overwhelmingly common case and should not cost bytes in every row.
+    if (!d.run_notes.empty()) {
+        o << "  \"run_notes\": {";
+        bool first = true;
+        for (const auto& kv : d.run_notes) {
+            o << (first ? "" : ",") << "\n    \"" << esc(kv.first) << "\": [";
+            for (size_t i = 0; i < kv.second.size(); ++i) {
+                o << (i ? ", " : "") << "\"" << esc(kv.second[i]) << "\"";
+            }
+            o << "]";
             first = false;
         }
         o << "\n  }";

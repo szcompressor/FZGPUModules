@@ -1152,6 +1152,15 @@ void Pipeline::loadConfig(const std::string& path) {
 
         if (auto v = (*pl)["num_streams"].as_integer())
             setNumStreams(static_cast<int>(v->get()));
+
+        // Buffer coloring.  Read *after* memory_strategy on purpose: setMemoryStrategy()
+        // rebuilds the DAG and re-applies the stored coloring flag, so setting coloring
+        // first would be re-applied rather than overwritten — but relying on that
+        // ordering silently is how this setting got lost once already (a plain
+        // setColoringEnabled(false) before loadConfig() was discarded, making the
+        // uncolored arm of the peak-memory sweep a no-op).  Keep it last and explicit.
+        if (auto v = (*pl)["coloring"].as_boolean())
+            setColoringEnabled(v->get());
     }
 
     // ── Stage construction pass ───────────────────────────────────────────────
@@ -1249,6 +1258,9 @@ void Pipeline::saveConfig(const std::string& path) const {
     out << "[pipeline]\n";
     out << "input_size = " << static_cast<int64_t>(input_size_hint_) << "\n";
     out << "memory_strategy = \"" << strategyToString(strategy_) << "\"\n";
+    // Only emitted when non-default, so round-tripping a normal pipeline does not
+    // grow a key nobody set. Round-trips through loadConfig()'s "coloring" reader.
+    if (!coloring_enabled_) out << "coloring = false\n";
     out << std::setprecision(std::numeric_limits<double>::max_digits10);
     out << "pool_multiplier = " << static_cast<double>(pool_multiplier_) << "\n";
     out << "num_streams = " << static_cast<int64_t>(num_streams_) << "\n";

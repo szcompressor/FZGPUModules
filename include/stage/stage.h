@@ -179,6 +179,26 @@ public:
     virtual void restoreState() {}
 
     /**
+     * Notes about *what this stage actually did* on the last run, when that
+     * differs from what was configured in a way that affects comparability.
+     *
+     * Motivating case: `HuffmanStage` silently falls back to an Adaptive book
+     * when a `PerBlock`/`Fixed` build drives a symbol past the 27-bit code
+     * field.  The fallback is correct — it does not relax the error bound — but
+     * a field encoded with a different codebook is not compression-ratio
+     * comparable to one that was not, and `getBookSource()` deliberately keeps
+     * reporting what was *asked for*.  Without a channel like this, a benchmark
+     * row records the two cases identically and the difference is unrecoverable
+     * after the fact.
+     *
+     * Returns short stable machine-readable tokens (e.g. `"adaptive_fallback"`),
+     * not prose — these are meant to land in a benchmark row and be grouped on.
+     * Empty by default; a stage that never surprises its caller need not
+     * implement it.
+     */
+    virtual std::vector<std::string> getRunNotes() const { return {}; }
+
+    /**
      * Called once by Pipeline::finalize() so stages can react to the dataset
      * dimensions set via Pipeline::setDims() after construction.
      * @param dims  {x, y, z} extents (z==1 → 2-D; y==z==1 → 1-D)

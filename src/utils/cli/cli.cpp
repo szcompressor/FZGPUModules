@@ -72,6 +72,11 @@ struct CliSettings {
     bool print_pipeline = false;
     bool bounds_check = false;
     bool use_graph = false;
+    /// --no-coloring: disable liveness-driven buffer aliasing under PREALLOCATE.
+    /// Exists for the peak-memory ablation — with coloring off, the pool peak is
+    /// the sum of worst-case stage outputs, i.e. what a framework that cannot know
+    /// real extents would have to reserve.
+    bool no_coloring = false;
 
     size_t chunk_size = kDefaultChunkSize;
 
@@ -247,6 +252,7 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
             (key == "profile") ||
             (key == "print-pipeline") ||
             (key == "bounds-check") ||
+            (key == "no-coloring") ||
             (key == "graph");
 
         if (is_flag) {
@@ -348,6 +354,7 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
     s->print_pipeline = contains(opts, "print-pipeline") && parse_bool(opts.at("print-pipeline"), "print-pipeline");
     s->bounds_check   = contains(opts, "bounds-check")   && parse_bool(opts.at("bounds-check"),   "bounds-check");
     s->use_graph      = contains(opts, "graph")          && parse_bool(opts.at("graph"),           "graph");
+    s->no_coloring    = contains(opts, "no-coloring")    && parse_bool(opts.at("no-coloring"),     "no-coloring");
 
     if (contains(opts, "verbose")) {
         const std::string& v = opts.at("verbose");
@@ -663,6 +670,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
     }
 
     if (s.bounds_check) pipeline->enableBoundsCheck(true);
+    if (s.no_coloring)  pipeline->setColoringEnabled(false);   // before finalize()
     pipeline->finalize();
     if (s.print_pipeline) pipeline->printPipeline();
 }
@@ -801,8 +809,24 @@ static fz::cli::ReportData make_report_base(const CliSettings& s, const char* op
     d.radius          = s.quant_radius;
     d.pipeline        = s.config_path.empty() ? s.stages : s.config_path;
     d.memory_strategy = strategy_str(s.strategy);
+    // Default from the CLI flag; overwritten by fill_from_pipeline() wherever a
+    // Pipeline exists, since a TOML `coloring` key can set it too and the pipeline
+    // is the only place that knows the resolved value.
+    d.coloring        = !s.no_coloring;
     d.chunk_size      = s.chunk_size;
     return d;
+}
+
+// Copy the report fields that only the live Pipeline can answer: what coloring
+// resolved to (CLI flag *or* TOML key) and any per-stage run notes.
+static void fill_from_pipeline(fz::cli::ReportData& d, const Pipeline& p) {
+    d.coloring = p.isColoringRequested();
+    d.run_notes.clear();
+    for (auto& kv : p.collectRunNotes()) d.run_notes.emplace_back(kv.first, kv.second);
+    // Stable output: collectRunNotes() returns an unordered_map, and an unstable
+    // key order would make otherwise-identical reports diff.
+    std::sort(d.run_notes.begin(), d.run_notes.end(),
+              [](const auto& a2, const auto& b2) { return a2.first < b2.first; });
 }
 
 // Append per-stage device timings from a perf result into the report.
@@ -892,6 +916,7 @@ static int run_compress(CliSettings s) {
             pipeline->setWarmupOnFinalize(s.warmup);
             pipeline->enableProfiling(prof);
             if (s.bounds_check) pipeline->enableBoundsCheck(true);
+            if (s.no_coloring)  pipeline->setColoringEnabled(false);   // loadConfig() finalizes
             pipeline->loadConfig(s.config_path);
             if (s.print_pipeline) pipeline->printPipeline();
         } else {
@@ -937,6 +962,7 @@ static int run_compress(CliSettings s) {
         if (want_json) {
             const auto& perf = pipeline->getLastPerfResult();
             fz::cli::ReportData d = make_report_base(s, "compress");
+            fill_from_pipeline(d, *pipeline);
             d.has_size          = true;
             d.original_bytes    = payload_bytes;
             d.compressed_bytes  = compressed_size;
@@ -1039,6 +1065,12 @@ static int run_decompress(CliSettings s) {
         if (want_json) {
             const size_t element_size = (s.type == "f64" || s.type == "i64") ? 8 : 4;
             fz::cli::ReportData d = make_report_base(s, "decompress");
+            // No fill_from_pipeline() here: this path goes through the static
+            // Pipeline::decompressFromFile(), which builds and owns its pipeline
+            // internally, so there is no object to query. Neither field is
+            // meaningful for a standalone decompress anyway — the Huffman book
+            // fallback is an encode-side event, and coloring is decided inside the
+            // helper. `coloring` keeps the make_report_base() default.
             d.has_size          = true;
             d.original_bytes    = usable_size;                  // uncompressed
             d.compressed_bytes  = decomp_perf.input_bytes;      // = header compressed_size
@@ -1108,6 +1140,7 @@ static int run_benchmark(CliSettings s) {
                     gp->setDims(s.nx, s.ny, s.nz);
                     gp->setWarmupOnFinalize(false);
                     if (s.bounds_check) gp->enableBoundsCheck(true);
+                    if (s.no_coloring)  gp->setColoringEnabled(false);
                     gp->enableProfiling(true);
                     gp->enableGraphMode(true);
                     gp->loadConfig(s.config_path);   // calls finalize() internally
@@ -1159,6 +1192,7 @@ static int run_benchmark(CliSettings s) {
                 pipeline->setWarmupOnFinalize(s.warmup);
                 pipeline->enableProfiling(true);
                 if (s.bounds_check) pipeline->enableBoundsCheck(true);
+                if (s.no_coloring)  pipeline->setColoringEnabled(false);
                 pipeline->loadConfig(s.config_path);
                 if (s.print_pipeline) pipeline->printPipeline();
             } else {
@@ -1259,6 +1293,7 @@ static int run_benchmark(CliSettings s) {
 
         if (want_json) {
             fz::cli::ReportData d = make_report_base(s, "benchmark");
+            fill_from_pipeline(d, *pipeline);
             d.has_size          = true;
             d.original_bytes    = payload_bytes;
             d.compressed_bytes  = compressed_size;

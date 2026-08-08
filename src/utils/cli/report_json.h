@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace fz {
@@ -66,6 +67,10 @@ struct ReportData {
     int                 radius = 0;
     std::string         pipeline;        ///< resolved stage chain or config name
     std::string         memory_strategy;
+    /// Whether liveness-driven buffer coloring was *requested* (not whether the
+    /// DAG found anything to alias). Echoed so a benchmark row can identify the
+    /// colored/uncolored arms of a peak-memory ablation after the fact.
+    bool                coloring = true;
     size_t              chunk_size = 0;
     int                 n_runs = 1;
 
@@ -91,6 +96,11 @@ struct ReportData {
     // ── stages (only when profiling produced per-stage timings) ──
     std::vector<StageTimeJson> stages;
     StageVersionsJson          stage_versions;
+
+    /// Per-stage run notes — see Stage::getRunNotes(). {stage_name: [tokens]}.
+    /// Emitted only when non-empty, so the common "nothing surprising happened"
+    /// case costs no bytes and an absent key reads as "no notes".
+    std::vector<std::pair<std::string, std::vector<std::string>>> run_notes;
 
     // ── graph mode (benchmark only; omitted entirely when graph_requested is false) ──
     bool        graph_requested = false;

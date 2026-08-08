@@ -16,7 +16,9 @@
 #include <array>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace fz {
 
@@ -390,6 +392,34 @@ public:
     }
     bool isColoringEnabled() const       { return dag_->isColoringEnabled(); }
     size_t getColorRegionCount() const   { return dag_->getColorRegionCount(); }
+
+    /**
+     * What coloring was *asked for*, as opposed to isColoringEnabled(), which
+     * reports whether the DAG actually applied it.  The two differ under
+     * MINIMAL (nothing to color) and before finalize().  A benchmark row wants
+     * the requested value, so a colored/uncolored pair can be identified even
+     * when a topology gave coloring nothing to do.
+     */
+    bool isColoringRequested() const     { return coloring_enabled_; }
+
+    /**
+     * Per-stage notes from the last run — see Stage::getRunNotes().  Keyed by
+     * stage name; stages with nothing to report are omitted, so an empty map is
+     * the normal case and means "nothing surprising happened."
+     *
+     * Exists so benchmark rows can record events that change how a result should
+     * be compared (currently: a Huffman codebook fallback) rather than losing
+     * them to a log line.
+     */
+    std::unordered_map<std::string, std::vector<std::string>> collectRunNotes() const {
+        std::unordered_map<std::string, std::vector<std::string>> notes;
+        for (const auto& s : stages_) {
+            if (!s) continue;
+            auto n = s->getRunNotes();
+            if (!n.empty()) notes.emplace(s->getName(), std::move(n));
+        }
+        return notes;
+    }
 
     // ── CUDA Graph Capture (compression-only) ─────────────────────────────────
 
