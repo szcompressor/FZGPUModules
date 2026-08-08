@@ -15,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -344,6 +345,12 @@ private:
     /// Same lifecycle as `QuantizerStage::d_outlier_count_scratch_`.
     uint32_t*   d_outlier_count_scratch_ = nullptr;
     MemoryPool* persistent_pool_         = nullptr;
+    /// Expires if the pool is destroyed before this stage. `persistent_pool_` is a
+    /// raw borrow used in the destructor, and only Pipeline's declaration order
+    /// (mem_pool_ before stages_) makes that safe — a stage built against a
+    /// caller-owned pool has no such guarantee. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> persistent_pool_alive_;
+
 
     void initOutlierCountScratch(MemoryPool* pool);
 

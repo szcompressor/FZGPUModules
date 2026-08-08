@@ -472,8 +472,27 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase3_sync(
 
 PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase4(
     H* in_buf, const size_t /*len*/, M* par_entry, M* par_ncell,
-    phf::par_config hfpar, H* bitstream, const size_t /*max_bitstream_len*/, void* stream)
+    phf::par_config hfpar, H* bitstream, const size_t max_bitstream_len,
+    const size_t total_ncell, void* stream)
 {
+    // max_bitstream_len was passed in and ignored by this function. On the coarse
+    // path phase3_sync has already brought the exact cell total to the host, so
+    // checking it costs nothing and is the last point at which an overflow is a
+    // diagnosable error rather than a silent out-of-bounds write into whatever the
+    // pool placed after the bitstream.
+    //
+    // Buf now sizes the bitstream for the worst case the codeword format allows
+    // (27 bits/symbol), so this should be unreachable; it stays as the backstop the
+    // old `inlen / 2` sizing never had. total_ncell == 0 means "not yet known" —
+    // the fine path computes its totals on device after this point, and is covered
+    // by the sizing alone.
+    if (total_ncell > max_bitstream_len)
+        throw std::runtime_error(
+            "PHF encode: concatenated bitstream needs " + std::to_string(total_ncell) +
+            " cells but only " + std::to_string(max_bitstream_len) +
+            " were allocated. The codebook is a poor enough fit for this data that "
+            "the encoding expands past the buffer bound.");
+
     phf::KERNEL_CUHIP_encode_phase4_concatenate<H, M>
         <<<hfpar.pardeg, 128, 0, (cudaStream_t)stream>>>
         (in_buf, par_entry, par_ncell, hfpar.sublen, bitstream);
@@ -526,7 +545,9 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode(
     GPU_coarse_encode_phase3_sync(
         hfpar, d_par_nbit, h_par_nbit, d_par_ncell, h_par_ncell, d_par_entry, h_par_entry,
         out_total_nbit, out_total_ncell, nullptr, stream);
-    GPU_coarse_encode_phase4(d_scratch4, data_len, d_par_entry, d_par_ncell, hfpar, d_bitstream4, bitstream_max_len, stream);
+    GPU_coarse_encode_phase4(
+        d_scratch4, data_len, d_par_entry, d_par_ncell, hfpar, d_bitstream4,
+        bitstream_max_len, out_total_ncell ? *out_total_ncell : 0, stream);
 }
 
 PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_fine_encode(
@@ -551,7 +572,7 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_fine_encode(
     // Phase 4: scatter partitions to final bitstream positions using d_par_entry
     GPU_coarse_encode_phase4(
         d_scratch4, data_len, d_par_entry, d_par_ncell, hfpar, d_bitstream4,
-        bitstream_max_len, stream);
+        bitstream_max_len, /*total_ncell=*/0, stream);
 
     // Reduce total nbit+ncell and async-copy to pinned mem; ready after caller's sync
     GPU_encode_finalize_totals(

@@ -306,10 +306,13 @@ public:
         size_t* outlen_nbit, size_t* outlen_ncell, float* time_cpu_time,
         void* stream);
 
+    /// `total_ncell` is the exact concatenated cell count when the caller already
+    /// knows it (the coarse path, post phase3_sync), or 0 for "not yet known".
+    /// Non-zero enables the bounds check against `max_bitstream_len`.
     static void GPU_coarse_encode_phase4(
         H* in_buf, const size_t len, M* par_entry, M* par_ncell,
         phf::par_config hfpar, H* bitstream, const size_t max_bitstream_len,
-        void* stream);
+        const size_t total_ncell, void* stream);
 
     // ── Coarse encode (CPU-sync phase 3, stable default) ─────────────────────
     static void GPU_coarse_encode(

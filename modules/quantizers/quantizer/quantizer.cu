@@ -481,6 +481,11 @@ QuantizerStage<TInput, TCode>::QuantizerStage(const Config& config)
 template<typename TInput, typename TCode>
 QuantizerStage<TInput, TCode>::~QuantizerStage()
 {
+    // Skip if the pool died first: `persistent_pool_` is a raw borrow, and only
+    // Pipeline's declaration order (mem_pool_ before stages_) makes using it here
+    // safe. A destroyed pool has already released everything it owned, so this is
+    // correct rather than a leak. See MemoryPool::lifetimeToken().
+    if (persistent_pool_alive_.expired()) { persistent_pool_ = nullptr; return; }
     if (persistent_pool_ != nullptr && d_outlier_count_scratch_ != nullptr) {
         persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
     }
@@ -498,6 +503,7 @@ void QuantizerStage<TInput, TCode>::initOutlierCountScratch(MemoryPool* pool)
             "QuantizerStage: outlier-count scratch requires a MemoryPool");
     }
     persistent_pool_ = pool;
+    persistent_pool_alive_ = pool->lifetimeToken();
     d_outlier_count_scratch_ = static_cast<uint32_t*>(
         pool->allocatePersistentDevice(sizeof(uint32_t), "quantizer_outlier_count"));
 }

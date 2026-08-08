@@ -14,6 +14,7 @@
 #include "backend/types.h"
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "hf.h"
 #include "hf_impl.hh"
@@ -136,6 +137,19 @@ struct Buf {
     static int _revbk4_bytes(int bklen);
     static int _revbk8_bytes(int bklen);
 
+    /// Worst-case H4-word capacity of the concatenated bitstream.
+    ///
+    /// This used to be `inlen / 2`, which is not a bound at all — it silently
+    /// assumes the encoder averages <= 16 bits per symbol. A Huffman code may be
+    /// up to HuffmanWord<4>::FIELD_CODE (27) bits, and any book that is a poor
+    /// fit for the data approaches that: a Gaussian book applied to bimodal data
+    /// measured 18 bits/symbol and phase4_concatenate wrote 4 KB past the end of
+    /// d_bitstream4 (9,216 cells written into an 8,192-cell buffer).
+    ///
+    /// The real bound is per partition: each of `pardeg` partitions holds at most
+    /// `sublen` symbols of at most 27 bits, rounded up to whole 32-bit cells.
+    static size_t _bitstream4_len(size_t pardeg, size_t sublen);
+
     // Non-copyable, non-movable
     Buf(const Buf&)            = delete;
     Buf& operator=(const Buf&) = delete;
@@ -161,6 +175,8 @@ struct Buf {
 
 private:
     fz::MemoryPool* pool_;  // non-owning; used only in destructor to return allocations
+    /// Expires if the pool is destroyed before this Buf. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> pool_alive_;
 };
 
 // ── phf::high_level<E> ───────────────────────────────────────────────────────

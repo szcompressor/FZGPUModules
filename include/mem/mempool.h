@@ -198,7 +198,29 @@ public:
 
     int getDeviceId() const { return config_.device_id; }
 
+    // ── Lifetime token ────────────────────────────────────────────────────────
+
+    /**
+     * A token that expires when this pool is destroyed.
+     *
+     * Stages return their persistent allocations in their own destructors, which
+     * is only safe while the pool is still alive. Nothing orders those two
+     * lifetimes in general: `Pipeline` happens to declare `mem_pool_` before
+     * `stages_` so stages are destroyed first, but a stage constructed directly
+     * against a caller-owned pool has no such guarantee — and if the pool dies
+     * first, the stage's destructor dereferences freed memory. ASan caught
+     * exactly that in `phf::Buf<T>::~Buf()`.
+     *
+     * A stage that frees in its destructor should capture this alongside the raw
+     * pool pointer and skip the frees when it has expired. That is correct as
+     * well as safe: a destroyed pool has already released everything it owned.
+     */
+    std::weak_ptr<const void> lifetimeToken() const { return alive_; }
+
 private:
+    /// Sole purpose is to be observed by lifetimeToken(); destroyed with the pool.
+    std::shared_ptr<const void> alive_ = std::make_shared<const char>('\0');
+
     MemoryPoolConfig config_;
     fz::mempool_t    mem_pool_;
 

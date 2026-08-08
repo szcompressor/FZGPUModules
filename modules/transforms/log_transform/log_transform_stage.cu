@@ -154,6 +154,11 @@ __global__ void logTransformInvKernel(
 template<typename TInput>
 LogTransformStage<TInput>::~LogTransformStage()
 {
+    // Skip if the pool died first: `persistent_pool_` is a raw borrow, and only
+    // Pipeline's declaration order (mem_pool_ before stages_) makes using it here
+    // safe. A destroyed pool has already released everything it owned, so this is
+    // correct rather than a leak. See MemoryPool::lifetimeToken().
+    if (persistent_pool_alive_.expired()) { persistent_pool_ = nullptr; return; }
     if (persistent_pool_ != nullptr && d_outlier_count_scratch_ != nullptr) {
         persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
     }
@@ -170,6 +175,7 @@ void LogTransformStage<TInput>::initOutlierCountScratch(MemoryPool* pool)
             "LogTransformStage: outlier-count scratch requires a MemoryPool");
     }
     persistent_pool_ = pool;
+    persistent_pool_alive_ = pool->lifetimeToken();
     d_outlier_count_scratch_ = static_cast<uint32_t*>(
         pool->allocatePersistentDevice(sizeof(uint32_t), "log_transform_outlier_count"));
 }

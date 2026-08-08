@@ -73,6 +73,11 @@ static int pickAutoRadius(float data_range, float ebx2)
 template <typename TInput, typename TCode>
 GInterpStage<TInput, TCode>::~GInterpStage()
 {
+    // Skip if the pool died first: `persistent_pool_` is a raw borrow, and only
+    // Pipeline's declaration order (mem_pool_ before stages_) makes using it here
+    // safe. A destroyed pool has already released everything it owned, so this is
+    // correct rather than a leak. See MemoryPool::lifetimeToken().
+    if (persistent_pool_alive_.expired()) { persistent_pool_ = nullptr; return; }
     if (persistent_pool_ != nullptr) {
         if (d_profiling_errors_)      persistent_pool_->freePersistentDevice(d_profiling_errors_);
         if (h_profiling_errors_)      persistent_pool_->freePersistentPinned(h_profiling_errors_);
@@ -97,6 +102,7 @@ void GInterpStage<TInput, TCode>::initOutlierCountScratch(MemoryPool* pool)
             "GInterpStage: outlier-count scratch requires a MemoryPool");
     }
     persistent_pool_ = pool;  // safe to overwrite — same pool either way
+    persistent_pool_alive_ = pool->lifetimeToken();
     d_outlier_count_scratch_ = static_cast<uint32_t*>(
         pool->allocatePersistentDevice(sizeof(uint32_t), "ginterp_outlier_count"));
 }

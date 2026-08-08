@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <cstring>
 #include <limits>
 
@@ -347,6 +348,12 @@ private:
     /// Pool that owns `d_outlier_count_scratch_` — captured at allocation
     /// time so the destructor returns it to the right pool.
     MemoryPool* persistent_pool_ = nullptr;
+    /// Expires if the pool is destroyed before this stage. `persistent_pool_` is a
+    /// raw borrow used in the destructor, and only Pipeline's declaration order
+    /// (mem_pool_ before stages_) makes that safe — a stage built against a
+    /// caller-owned pool has no such guarantee. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> persistent_pool_alive_;
+
 
     /// Lazily allocate the 4-byte outlier-count scratch via the pool's
     /// persistent allocator. Idempotent; no-op if already allocated, or if

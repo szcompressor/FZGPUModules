@@ -27,6 +27,17 @@ int Buf<E>::_revbk4_bytes(int bklen)
 }
 
 template <typename E>
+size_t Buf<E>::_bitstream4_len(size_t pardeg, size_t sublen)
+{
+    // HuffmanWord<4>::FIELD_CODE — the widest code the 32-bit codeword format can
+    // hold. hf_bk.cc refuses to build a book that needs more (and HuffmanStage
+    // falls back to a floored Adaptive book), so this is a true ceiling.
+    constexpr size_t kMaxCodeBits = 27;
+    constexpr size_t kCellBits    = 8 * sizeof(uint32_t);
+    return pardeg * ((sublen * kMaxCodeBits + kCellBits - 1) / kCellBits);
+}
+
+template <typename E>
 int Buf<E>::_revbk8_bytes(int bklen)
 {
     return phf_reverse_book_bytes(bklen, 8, sizeof(SYM));
@@ -51,7 +62,9 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
       bklen(_bklen),
       use_HFR(_use_HFR),
       revbk4_bytes(_revbk4_bytes(_bklen)),
-      bitstream_max_len(inlen / 2),
+      bitstream_max_len(_bitstream4_len(
+          (inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1,
+          _use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen))),
       // See scratch4_len's comment in hf_buf.h. The encoded-blob term mirrors
       // memcpy_merge()'s writes exactly: header, reverse codebook, par_nbit,
       // par_entry, bitstream. Rounded up to whole H4 words.
@@ -65,10 +78,14 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
           (PHFHEADER_FORCED_ALIGN + _revbk4_bytes(_bklen)
            + 2 * (((inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1)
                   * sizeof(M))
-           + (inlen / 2) * sizeof(H4) + sizeof(H4) - 1) / sizeof(H4))),
+           + _bitstream4_len(
+                 (inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1,
+                 _use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) * sizeof(H4)
+           + sizeof(H4) - 1) / sizeof(H4))),
       rt_bklen(0),
       numSMs(0),
-      pool_(pool)
+      pool_(pool),
+      pool_alive_(pool->lifetimeToken())
 {
     (void)_pardeg;
     cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, 0);
@@ -135,9 +152,16 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
 template <typename E>
 Buf<E>::~Buf()
 {
-    // Return all allocations to the pool.  The pool is guaranteed to outlive
-    // Buf<E> when used inside a Pipeline (mem_pool_ declared before stages_,
-    // destroyed after them in Pipeline's destructor).
+    // Return all allocations to the pool — but only if the pool is still there.
+    //
+    // Inside a Pipeline it always is (mem_pool_ is declared before stages_, so
+    // stages are destroyed first). That ordering is an accident of declaration
+    // order in one class, not a property of the API: a Buf built against a
+    // caller-owned pool that goes out of scope first would dereference freed
+    // memory here, which ASan caught in test_huffman. A destroyed pool has
+    // already released everything it owned, so skipping is correct, not a leak.
+    if (pool_alive_.expired()) return;
+
     pool_->freePersistentDevice(d_scratch4);
     pool_->freePersistentDevice(d_bk4);
     pool_->freePersistentDevice(d_revbk4);

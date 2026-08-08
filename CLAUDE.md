@@ -65,9 +65,28 @@ profiling binaries to `build/release/bin/profiling/`. Full option/preset list:
 ctest --preset default            # all tests, release build
 ctest --preset stages             # stage unit tests only
 ctest --preset pipeline           # pipeline integration tests only
-ctest --preset asan               # full suite, ASan + UBSan
-ctest --preset compute-san        # full suite, compute-sanitizer memcheck
+ctest --preset asan               # full suite, ASan + UBSan     — see note below
+ctest --preset compute-san        # full suite, compute-sanitizer — see note below
 ```
+
+**Both sanitizer presets need environment setup, and both fail misleadingly without
+it** — `compute-san` reports every test as `Not Run` behind a single "Unable to find
+executable: compute-sanitizer" line, and `asan` aborts all 48 at startup with "ASan
+runtime does not come first in initial library list". Neither looks like a missing
+tool. On the JetStream2 H100 box, `source ~/load-env` puts `compute-sanitizer` on
+PATH and defines `fz-asan`:
+
+```bash
+source ~/load-env
+ctest --preset compute-san        # works once compute-sanitizer is on PATH
+fz-asan ctest --preset asan       # wraps with LD_PRELOAD=libasan + ASAN_OPTIONS
+```
+
+`LD_PRELOAD` must not be exported globally — it would inject ASan into `nvcc` and
+every other process. `ASAN_OPTIONS=protect_shadow_gap=0` is required under CUDA, and
+`detect_leaks=0` because the CUDA runtime holds allocations for process lifetime by
+design. Run `compute-san` on any change to device code: it catches out-of-bounds
+device writes that land in pool slack, which a normal test run reports as passing.
 
 `tests/` layout: `stages/` (per-stage unit tests), `pipeline/` (integration tests),
 `golden/` (reference data), `helpers/`.
