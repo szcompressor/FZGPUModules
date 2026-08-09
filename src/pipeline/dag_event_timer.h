@@ -15,10 +15,10 @@ namespace fz {
  * deliberately excludes host setup and PCIe transfers issued outside the
  * bracket.
  *
- * Contrast with the previous host steady_clock measurement around execute():
- * execute() returns to the host after merely *enqueuing* kernels (it ends in an
- * async cudaStreamWaitEvent barrier), so a host timer there measured launch
- * latency, not GPU compute.
+ * Do not replace this with a host clock around execute(): execute() returns
+ * after merely *enqueuing* kernels, so a host timer there measures launch
+ * latency, not GPU compute. See docs/codebase_notes.md CN-TIMER-1 — which also
+ * covers the corollary, that work outside this bracket is invisible here.
  *
  * When `enabled` is false every operation is a no-op and elapsedMs() returns 0,
  * so the events are only created on the profiling path.  The destructor frees

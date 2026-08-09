@@ -18,7 +18,7 @@ Every pipeline is built with `fz::Pipeline` (`include/pipeline/compressor.h`):
 ```cpp
 fz::Pipeline p(input_bytes, fz::MemoryStrategy::PREALLOCATE, /*pool_mult=*/4.0f);
 p.setDims(nx, ny, nz);                 // before addStage, for dimension-aware stages
-auto* stage = p.addStage<StageType>();
+auto* stage = p.addStage<YourStage>();   // YourStage = a concrete stage class
 p.connect(downstream, upstream, "codes");   // named port, not always "output"
 p.finalize();                          // validates, sorts into levels, (pre-)allocates
 p.compress(d_input, input_bytes, &d_comp, &comp_sz, stream);
@@ -117,6 +117,20 @@ scripts/             helper scripts
   a safety net).
 - `MemoryStrategy::PREALLOCATE` is required for CUDA Graph capture; `MINIMAL` throws.
 
+## Longform notes vs. inline comments
+
+Measurement tables, before/after benchmark numbers, and bug postmortems go in
+[docs/codebase_notes.md](docs/codebase_notes.md) under a stable `CN-<AREA>-<n>`
+ID, not inline. The source keeps the contract, the rule, and a one-line pointer:
+
+```cpp
+// Do NOT collapse this to one block per segment: it starves uneven segments.
+// Measurements and the full story: docs/codebase_notes.md CN-CONCAT-1
+```
+
+Never move a *contract* there — if violating it corrupts data or breaks the
+build, it belongs at the call site. See the conventions section of that page.
+
 ## Changelog
 
 Whenever you make a code change — new feature, fix, refactor, or removal — add an entry to
@@ -133,6 +147,7 @@ Do not add entries for documentation-only or comment-only edits.
 | Full API reference (lifecycle, enums, all setters) | [docs/api_reference.md](docs/api_reference.md) |
 | Per-stage reference (ports, constraints, TOML keys) | [docs/stages/index.md](docs/stages/index.md) |
 | Adding a new stage | [docs/how_to_add_a_stage.md](docs/how_to_add_a_stage.md) |
+| Longform rationale: measurements, postmortems, tuning evidence | [docs/codebase_notes.md](docs/codebase_notes.md) |
 | FZM binary file format | [docs/fzm_format.md](docs/fzm_format.md) |
 | CLI and TOML config syntax | [docs/cli.md](docs/cli.md), [docs/config_file.md](docs/config_file.md) |
 | Building from source (all presets/options) | [docs/building.md](docs/building.md) |

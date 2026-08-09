@@ -4,19 +4,16 @@
 // a single kernel launch.  Threads stride in 16-byte uint4 chunks (bulk path)
 // then handle the remaining <16 bytes in a scalar tail.
 //
-// Grid shape: (kBlocksPerSegment, n_segs).  The original version launched ONE
-// block per segment, which collapsed on any pipeline whose segments are very
-// unevenly sized — precisely the split-mode GPU-Zstd case it exists for.  There
-// the `literals` port is ~99% of the output, so a single 256-thread block was
-// copying ~23 MB: measured 2.27 ms, 60.7% of the whole pipeline's GPU time, at
-// ~20 GB/s on a 3 TB/s H100.  Worse, it sat AFTER the DAG event bracket, so it
-// was invisible in dag_elapsed_ms and only showed up as a 2.9x host/device gap.
+// Grid shape: (kBlocksPerSegment, n_segs) — every block in a segment's row
+// strides through it cooperatively.  Do NOT collapse this to one block per
+// segment: that starves unevenly-sized segments (112x slower on split-mode
+// GPU-Zstd, and invisible to dag_elapsed_ms).
 //
-// kBlocksPerSegment is a compile-time constant rather than a function of the
-// segment size on purpose: the launch configuration must not depend on the data
-// for CUDA Graph capture to stay valid across replays with different inputs
-// (see the graph note below).  Blocks with nothing to do exit after one
-// descriptor read, which costs nothing next to the copy they enable.
+// kBlocksPerSegment must stay a compile-time constant, not a function of the
+// segment size: the launch configuration must not depend on the data, or a
+// captured CUDA Graph stops being valid across replays with different inputs.
+//
+// Measurements and the full story: docs/codebase_notes.md CN-CONCAT-1
 //
 // Alignment contract (enforced by calculateConcatSize / writeConcatBuffer):
 //   - src: pool-allocated, always 256-byte aligned (cudaMallocFromPoolAsync).

@@ -25,14 +25,11 @@ namespace fz {
 /**
  * Round-to-nearest-even, in the *input's* precision.
  *
- * The ABS/NOA kernels used to round with an unconditional `__float2int_rn`,
- * which capped quantization at float32 precision no matter what TInput was.
- * That silently broke every f64 field whose values sit far from zero relative
- * to their own range: S3D/N2 spans 1.1e-5 about 0.7369, where the float32
- * spacing (5.96e-08) is 54x the abs_eb that a 1e-4 NOA bound asks for
- * (1.103e-09). The float32 rounding error alone blew the bound, so round-trips
- * came back at 48-53 dB reporting `status: ok`. Measured 2026-08-07; see the
- * FZGM paper notes.
+ * Do NOT round with an unconditional `__float2int_rn`: that caps quantization at
+ * float32 precision regardless of TInput, and silently blows the error bound on
+ * f64 fields whose values sit far from zero relative to their own range, while
+ * still reporting `status: ok`.
+ * The failing case and its numbers: docs/codebase_notes.md CN-QUANT-1
  *
  * `int` is still the bin type: codes are at most 32-bit, and widening q would
  * change the wrap semantics linear mode documents.
@@ -1004,10 +1001,9 @@ void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
     // zero. The caller gets a stream that decodes cleanly into wrong values, so
     // this cannot stay a log line.
     //
-    // It was one, at DEBUG, and the corruption was silent for real fields:
-    // S3D/N2 (range 1.1e-5 on an offset of 0.74) drives every element outside a
-    // 32768 radius, overflows a 10% capacity, and round-trips at -96 dB PSNR
-    // with `status: ok`. Measured 2026-08-07; see the FZGM paper notes.
+    // It was one, at DEBUG, and the corruption was silent on real fields --
+    // one round-tripped at -96 dB PSNR still reporting `status: ok`.
+    // The failing case: docs/codebase_notes.md CN-QUANT-2
     //
     // Policy matches LorenzoQuantStage: outlier_capacity == 0 is an explicit
     // opt-in to the lossy trade-off and stays a quiet drop; any other capacity

@@ -180,14 +180,11 @@ public:
      *
      * @warning `Fine` is **experimental** and will not engage on realistic data.
      * It requires every code in the book to fit in 8 bits (four codes per 32-bit
-     * shard) and silently falls back to `Coarse` otherwise.  That ceiling admits
-     * at most 256 codewords by Kraft's inequality, and only near-uniform
-     * distributions stay inside it — which are exactly the distributions Huffman
-     * cannot compress.  Measured on CESM-ATM quantization codes, the longest code
-     * is 12–24 bits at every error bound tested, so the fine path never runs.
-     * Use getLastUsedFineEncode() to check rather than assuming.  Making it
-     * reachable needs a 2x16-bit shard geometry plus length-limiting to 16 bits
-     * (measured at ≤ 0.31% ratio cost), which is not implemented.
+     * shard) and silently falls back to `Coarse` otherwise. Use
+     * getLastUsedFineEncode() to check which path ran rather than assuming.
+     * The 8-bit ceiling is a structural barrier, not a tuning matter, and the
+     * fix is a 2x16-bit shard geometry rather than length-limiting:
+     * docs/codebase_notes.md CN-HF-2
      */
     void             setEncodeMode(HuffmanEncodeMode mode) { encode_mode_ = mode; }
     HuffmanEncodeMode getEncodeMode() const                { return encode_mode_; }
@@ -315,9 +312,7 @@ public:
      * Refit trigger for `Adaptive`: rebuild the codebook once the encoded bit rate
      * degrades past `ratio` times the rate the book achieved when it was fitted.
      *
-     * A pinned book goes stale when the symbol distribution moves — measured at
-     * 4.7% mean ratio loss across 23 CESM levels, 8.3% across differing fields, and
-     * far worse if the book was fitted to an unrepresentative block.  Detecting
+     * A pinned book goes stale when the symbol distribution moves.  Detecting
      * that would normally cost the histogram this mode exists to avoid, but encode
      * already reports `total_nbit`, so bits-per-symbol is free.  When it degrades,
      * the *next* call histograms and re-pins; the current call is already encoded
@@ -326,6 +321,9 @@ public:
      * 1.2 (the default) refits after a 20% bit-rate regression.  Lower refits more
      * eagerly, trading throughput for ratio; `PerBlock` is the limit of that trade.
      * 0 disables refitting, pinning the first book forever.
+     *
+     * Drift measurements, and the degenerate-first-block case this guards
+     * against: docs/codebase_notes.md CN-HF-3
      */
     void  setRefitThreshold(float ratio) { refit_threshold_ = ratio; }
     float getRefitThreshold() const      { return refit_threshold_; }
@@ -336,11 +334,9 @@ public:
      * The bit-rate trigger above only fires when the rate gets *worse*, so it
      * catches a distribution drifting toward less compressible — but not a block
      * that is more compressible than the fitted one while still being badly served
-     * by its codebook.  Measured: stepping through five different CESM-ATM
-     * variables, `LHFLX` lost 27.6% ratio to a codebook fitted on `CLDHGH`, yet its
-     * absolute bit rate *fell*, so the threshold never fired.  Deciding that case
-     * properly needs the fresh book's rate for comparison, which means the
-     * histogram this mode exists to avoid.
+     * by its codebook.  That case is real and measured (CN-HF-3); deciding it
+     * properly needs the fresh book's rate, which means the histogram this mode
+     * exists to avoid.
      *
      * A periodic refit sidesteps the question: it costs one histogram every `n`
      * calls, bounding how long a stale book can persist regardless of which

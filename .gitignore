@@ -65,3 +65,5 @@ docs/doxygen/
 # Dependency files
 *.d
 .deps/
+__pycache__/
+

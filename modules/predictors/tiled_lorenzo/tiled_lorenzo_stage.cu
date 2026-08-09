@@ -152,18 +152,15 @@ __global__ void tiled_lorenzo_scan_kernel_phased(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inverse (per-row, fully parallel). One thread owns one x-row = one (tile,ly,lz).
-// The phased one-block-per-tile kernel was barrier-bound (ncu: sm__throughput 51%
-// at 91% resident warps) because it left most of its 64 threads idle across two
-// __syncthreads — even the busiest phase used only ty*tz of tile_elems threads.
-// This kernel removes barriers and idle lanes entirely: every thread is
-// self-contained. Exploiting the separable structure, a row thread re-derives its
-// own seed by walking the tile's tiny x=0 "spine" — the z-column prefix
-// (delta(0,0,0..lz)) then the y-column prefix (delta(0,1..ly,lz)) — then runs its
-// own tx-length x-chain, writing each in-range element. The spine walks are a
-// handful of adds over L1-resident bytes (re-read across the tile's rows, but
-// tile_elems is tiny); the dominant traffic is the coalesced read of each row's
-// contiguous tx deltas plus the inherent tile->natural scatter store. Correctness
-// matches the phased math exactly: reconstructed(lx,ly,lz) =
+// Replaces a phased one-block-per-tile kernel that was barrier-bound; do not go
+// back to it. Every thread here is self-contained: exploiting the separable
+// structure, a row thread re-derives its own seed by walking the tile's tiny x=0
+// "spine" — the z-column prefix (delta(0,0,0..lz)) then the y-column prefix
+// (delta(0,1..ly,lz)) — then runs its own tx-length x-chain, writing each
+// in-range element.
+// Profile numbers and the traffic argument: docs/codebase_notes.md CN-TLRZ-1
+//
+// Correctness matches the phased math exactly: reconstructed(lx,ly,lz) =
 // Σ_{k≤lz} d(0,0,k) + Σ_{1≤k≤ly} d(0,k,lz) + Σ_{1≤k≤lx} d(k,ly,lz); padding deltas
 // are 0, sit past the in-range extent, and are never stored.
 // ─────────────────────────────────────────────────────────────────────────────

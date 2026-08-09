@@ -479,12 +479,9 @@ void HuffmanStage<T>::execute(
                 // Fall back to an Adaptive book rather than fail. This is NOT a
                 // relaxation of the error bound -- the bound belongs to the quantizer,
                 // and flooring the frequencies only changes how symbols are spelled,
-                // not what they mean. Measured on the two fields that hard-failed:
-                // HACC/vy at 1e-2 gives CR 15.27x at 44.78 dB and HACC/xx at 1e-3
-                // gives 13.79x at 64.77 dB, both with max_abs_err exactly equal to
-                // the bound. Throwing instead cost the cuSZ preset every
-                // wide-dynamic-range field in the corpus, which is a worse answer
-                // than a book the format can actually hold.
+                // not what they mean. Throwing instead cost the cuSZ preset every
+                // wide-dynamic-range field in the corpus.
+                // Measurements: docs/codebase_notes.md CN-HF-4
                 //
                 // buildAdaptiveBook halves the floor shift until the book fits and
                 // shift 0 is uniform, so the fallback always terminates.
