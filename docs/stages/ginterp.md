@@ -331,7 +331,8 @@ error_bound  = 1e-2
 error_bound_mode = "ABS"    # "ABS", "NOA", or "PREL"
 quant_radius = 0            # 0 = auto-tune (default); positive = manual override
 outlier_capacity = 0.10
-auto_tuning  = 0            # 0=off, 1=cheap, 2=alt-cheap, 3=full, 4=full+a/b sweep, 5=manual
+auto_tuning  = 0            # 0=off, 1=cheap, 3=full, 4=full+a/b sweep, 5=manual
+                            # (cuSZ-Hi's mode 2 is not wired; 1/3/4 are 3-D only)
 ```
 
 ---

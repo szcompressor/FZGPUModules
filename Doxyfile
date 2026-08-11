@@ -24,6 +24,7 @@ INPUT                  = include/ \
                          docs/architecture.md \
                          docs/performance_tuning.md \
                          docs/how_to_add_a_stage.md \
+                         docs/codebase_notes.md \
                          docs/fzm_format.md \
                          docs/docker.md \
                          docs/libpressio_python.md \

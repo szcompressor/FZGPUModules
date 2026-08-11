@@ -38,40 +38,19 @@ uint32_t capi_phf_encoded_bytes(phf_header* h)
 //   - two pardeg-sized arrays are written into the encoded stream, so a too-small
 //     sublen also costs compression ratio.
 //
-// It was previously the constant 768 (the original cuSZ v1.x tuning), ignoring
-// `inlen` despite taking it as a parameter. On large inputs that leaves a large
-// amount on the table in BOTH directions at once.
+// The rule targets pardeg ~= 131072 and FLOORS at the historical 768 (the old
+// unconditional constant), which makes every change a strict Pareto improvement
+// on every field measured. Below ~64M elements the trade stops being free, so
+// the smaller-sublen regime is opt-in through FZ_HF_SUBLEN rather than default.
 //
-// Measured on H100 (sm_90), LorenzoQuant->Huffman, bklen 1024, book_source
-// Adaptive, encode_mode Coarse -- compress GB/s / decompress GB/s / ratio:
+// Do NOT extrapolate these constants without re-measuring: the curve is not
+// monotonic, and parallelism starvation past ~4096 is a steep cliff.
 //
-//   input          n        sublen=768 (old)     this rule        change
-//   NYX     134,217,728   216.9/139.1/29.03   246.3/151.2/29.67  +14% +9%  +2.2%
-//   CESMATM 168,480,000   143.7/131.9/ 7.97   202.8/137.9/ 8.02  +41% +5%  +0.6%
-//   HACC    280,953,867    80.8/ 80.8/ 3.62   155.4/130.1/ 3.64  +92% +61% +0.6%
-//   HURR     25,000,000   169.8/ 94.8/16.13   unchanged (floor)
-//   CESM      6,480,000    76.3/ 30.4/ 6.19   unchanged (floor)
-//
-// The rule targets pardeg ~= 131072 and FLOORS at the historical 768, which makes
-// every change a strict Pareto improvement -- compress, decompress and ratio all
-// improve or stay equal, on every field measured. That floor is deliberate and
-// conservative: below ~64M elements the trade stops being free, because a smaller
-// sublen buys throughput by spending compression ratio (two pardeg-sized arrays
-// ship inside the stream, and each partition pads to a cell boundary).
-//
-// That smaller-sublen regime is real and sometimes worth taking, but it is a
-// trade, so it is opt-in through FZ_HF_SUBLEN rather than the default. Measured
-// at sublen=256 against the 768 default: CESM 26 MB +27% compress / +161%
-// decompress for -3.9% ratio; EXAALT 11.5 MB +30% / +168% for -1.1% ratio.
-//
-// Do not extrapolate the constants without re-measuring. The curve is not
-// monotonic: parallelism starvation past ~4096 is a steep cliff (CESM-ATM
-// decompress falls 138->92 GB/s going 1024->4096), which is why kMaxSublen sits
-// at the top of the measured range rather than being open-ended.
-//
-// sublen is recorded in phf_header, so streams stay self-describing: archives
+// sublen is recorded in phf_header, so streams stay self-describing -- archives
 // written before this change still decode with their own geometry, and this is
 // not a format change.
+//
+// Measurement tables and the reasoning: docs/codebase_notes.md CN-HF-1
 size_t capi_phf_coarse_tune_sublen(size_t inlen)
 {
     // Escape hatch for tuning experiments, for the small-input throughput/ratio

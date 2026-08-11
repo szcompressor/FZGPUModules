@@ -1,0 +1,47 @@
+name: Docs Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: docs-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs-examples:
+    name: Documentation examples
+    runs-on: ubuntu-24.04
+    # Same image as build-check: supplies g++, python3 and the CUDA headers the
+    # C++ snippet checker compiles against. No GPU is needed — nothing is run,
+    # only parsed and type-checked.
+    container: ghcr.io/szcompressor/fzgpumodules:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Submodules are not needed: the checkers read the source tree and the
+        # public headers, and never configure or build the project.
+
+      # Catches a documented stage `type` or parameter key that the TOML loader
+      # does not accept. Both lists are derived from src/pipeline/config.cpp at
+      # run time, so this cannot drift from the loader. Also covers the shipped
+      # presets in examples/presets/, which are what users copy.
+      - name: TOML examples and presets
+        run: python3 scripts/check_doc_toml.py --verbose
+
+      # Fails only on examples naming API the library no longer has (a removed
+      # setter, a renamed stage class, a changed signature). Snippets that are
+      # merely incomplete — undeclared locals, tutorial placeholders — are
+      # reported but do not fail, since doc fragments are legitimately partial.
+      - name: C++ examples
+        run: python3 scripts/check_doc_cpp.py --verbose
+
+      # Source comments point at docs/codebase_notes.md by note ID instead of
+      # carrying longform rationale inline; this fails if a pointer no longer
+      # resolves to a note.
+      - name: Codebase note references
+        run: python3 scripts/check_note_refs.py --verbose

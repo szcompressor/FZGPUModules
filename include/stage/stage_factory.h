@@ -36,6 +36,7 @@
 #include "quantizers/quantizer/quantizer.h"
 #include "transforms/log_transform/log_transform_stage.h"
 
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <cstring>
@@ -57,9 +58,22 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
     switch (type) {
         case StageType::LORENZO_QUANT: {
             // Dims are restored by deserializeHeader(); template types come from stored fields.
-            if (config_size >= sizeof(LorenzoQuantConfig)) {
-                LorenzoQuantConfig lc;
-                std::memcpy(&lc, config, sizeof(LorenzoQuantConfig));
+            //
+            // Gate on the OLDEST layout deserializeHeader() accepts, not on the
+            // current sizeof. LorenzoQuantConfig grows as fields are added, and
+            // deserializeHeader() is written to negotiate that (kLegacySize 32 /
+            // kV1Size 40 / kSizeBeforeF64 44, each field defaulting when absent).
+            // Gating here on sizeof made that negotiation unreachable and every
+            // archive written before the last growth unreadable, with the format
+            // version unchanged. Keep this constant in sync with kLegacySize.
+            constexpr size_t kMinLorenzoQuantConfig = 32;
+            if (config_size >= kMinLorenzoQuantConfig) {
+                // Zero-init so a short config leaves absent trailing fields at 0,
+                // which is exactly the sentinel deserializeHeader() tests for, and
+                // clamp the copy so a short config is never read past its end.
+                LorenzoQuantConfig lc{};
+                std::memcpy(&lc, config,
+                            std::min(config_size, sizeof(LorenzoQuantConfig)));
                 if (lc.input_type == DataType::FLOAT32 && lc.code_type == DataType::UINT16) {
                     auto* s = new LorenzoQuantStage<float, uint16_t>();
                     s->deserializeHeader(config, config_size);

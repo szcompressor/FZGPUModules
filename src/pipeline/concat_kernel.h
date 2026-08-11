@@ -39,10 +39,8 @@ constexpr unsigned kGatherBlocksPerSegment = 256;
  * enabling all segments to copy in parallel on the SMs.
  *
  * The block-row (rather than one block per segment) matters whenever segment
- * sizes are uneven. GPULZ split mode puts ~99% of the output in `literals`, so
- * a one-block-per-segment grid had a single 256-thread block copying ~23 MB —
- * 2.27 ms and 60.7% of the pipeline's total GPU time, at ~20 GB/s on hardware
- * capable of 3 TB/s.
+ * sizes are uneven — the GPULZ split-mode case, where ~99% of the output is in
+ * `literals`. Measurements: docs/codebase_notes.md CN-CONCAT-1
  *
  * @param descs    Device pointer to array of CopyDesc (one per segment)
  * @param n_segs   Number of segments (== gridDim.y)

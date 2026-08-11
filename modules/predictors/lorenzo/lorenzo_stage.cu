@@ -158,13 +158,12 @@ __global__ void lorenzo_scan_any_kernel(
 // ─────────────────────────────────────────────────────────────────────────────
 // Segmented inverse scan — one CTA per reset segment, Seq elements per thread
 //
-// The original block-mode inverse launched `blockDim == block_size`, which ties
-// the CTA width to the reset period: a 1024-element segment meant 1024-thread
-// blocks and ~2*log2(1024) barriers of Hillis-Steele, and ncu flagged it as
-// barrier-bound (measured 102 -> 69 GB/s going from block_size 512 to 1024).
-// Here each thread owns `Seq` consecutive elements and the scan is
-// serial-in-registers -> warp shuffle -> one pass over the warp totals, which is
-// 2 barriers per scan pass regardless of segment length.
+// Do NOT tie the CTA width to the reset period (`blockDim == block_size`, as the
+// original did): that made the inverse barrier-bound and got *slower* at the
+// highest-ratio block sizes. Here each thread owns `Seq` consecutive elements
+// and the scan is serial-in-registers -> warp shuffle -> one pass over the warp
+// totals, which is 2 barriers per scan pass regardless of segment length.
+// Measurements: docs/codebase_notes.md CN-LRZ-1
 //
 // Handles both prediction orders and centering in one kernel: `passes` scans
 // invert `passes` differences, and centering is undone by a uniform `+ mu`

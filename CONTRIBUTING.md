@@ -49,6 +49,24 @@ LD_PRELOAD=$(gcc --print-file-name=libasan.so) \
 
 See [Building from Source](docs/building.md) for preset details and sanitizer flags.
 
+### Documentation checks
+
+If you touched a documented example, a stage's TOML keys, or a source comment
+that points at a codebase note, run these too. They need no GPU and no build —
+CI runs the same three on every pull request (`.github/workflows/docs-check.yml`):
+
+```bash
+python3 scripts/check_doc_toml.py    # documented TOML + shipped presets vs the loader
+python3 scripts/check_doc_cpp.py     # every ```cpp block still compiles
+python3 scripts/check_note_refs.py   # CN-* pointers resolve to a note
+```
+
+`check_doc_toml.py` derives the valid stage `type` strings and parameter keys
+from `src/pipeline/config.cpp` itself, so adding a stage or a key needs no update
+here. `check_doc_cpp.py` fails only on examples naming API that no longer exists;
+snippets that are merely incomplete are reported but pass. A page built entirely
+around placeholders can opt out with `<!-- doc-check: skip-file — reason -->`.
+
 ---
 
 ## Code style and conventions
@@ -69,6 +87,11 @@ For any code change (fix, feature, refactor, removal), add a one-line entry to
 `CHANGELOG.md` under the appropriate `[Unreleased]` subsection (`Added`, `Changed`,
 `Fixed`, or `Removed`) before finishing the change. Documentation-only edits do
 not need a changelog entry.
+
+Measurement tables, before/after benchmark numbers, and bug postmortems belong in
+[docs/codebase_notes.md](docs/codebase_notes.md) under a stable `CN-<AREA>-<n>`
+ID, with a one-line pointer left at the code. Contracts — anything a caller can
+violate to corrupt data — stay inline.
 
 ---
 

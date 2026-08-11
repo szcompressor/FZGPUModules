@@ -92,9 +92,8 @@ public:
      *  1 — additionally consults a hashed table of two-word keys for
      *      long-range candidates (offsets up to 255).
      *
-     * Measured on an H100 over 24.7 MB of Lorenzo-quantized `CLDHGH`
-     * residuals at chunk_size=2048, word_size=4: level 0 gives 170 GB/s at
-     * 4.36x, level 1 gives 126 GB/s at 5.13x.
+     * Level 1 trades throughput for ratio. Measurements:
+     * docs/codebase_notes.md CN-GPULZ-1
      */
     void setMatchLevel(int level) { match_level_ = static_cast<uint8_t>(level); }
     int  getMatchLevel() const    { return static_cast<int>(match_level_); }
@@ -112,19 +111,18 @@ public:
      * This is the Zstandard split (literals separate from sequences), for the
      * same reason: the parts have very different symbol distributions, and
      * interleaving them into one byte stream raises the entropy a downstream
-     * coder sees. Measured across six SDRB fields, coding the four ports
-     * separately beats the single-stream form by 23-43% compression ratio.
+     * coder sees.
      *
      * The `literals` port keeps the data's natural word alphabet, so it should
      * be fed to a symbol-width-matched coder (`HuffmanStage<uint16_t>` for
-     * uint16 quant codes) rather than a byte coder -- that alphabet effect is
-     * the larger half of the gain.
+     * uint16 quant codes) rather than a byte coder.
      *
      * Every port must be entropy coded and all four re-merged: unlike the
      * single-stream form, which codes the whole payload by construction, a
-     * split leaks any byte left out. Both the raw-fallback chunks and the
-     * per-chunk size table are folded into ports above for exactly that
-     * reason (leaving them out cost 28% and 67% respectively in testing).
+     * split leaks any byte left out.
+     *
+     * Measurements and why each port is folded in:
+     * docs/codebase_notes.md CN-GPULZ-1
      */
     void setSplitMode(bool on) { split_mode_ = on; }
     bool getSplitMode() const  { return split_mode_; }

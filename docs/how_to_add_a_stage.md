@@ -1,5 +1,9 @@
 # How to Add a New Stage {#how_to_add_a_stage}
 
+<!-- doc-check: skip-file — this page is a template walkthrough built around
+     placeholders (`MyStage`, `MY_STAGE`, `<category>/<name>/`), so its snippets
+     are not compilable as written. See scripts/check_doc_cpp.py. -->
+
 Complete walkthrough for adding a new compression/decompression stage to FZGPUModules.
 Use `scripts/new_stage.sh` to generate the file skeleton automatically:
 

@@ -77,7 +77,7 @@ pipeline.connect(bs, lrz, "codes");
 
 auto* rze = pipeline.addStage<fz::RZEStage>();
 rze->setChunkSize(16384);
-rze->setLevels(4);
+rze->setWordSize(1);
 pipeline.connect(rze, bs);
 
 pipeline.finalize();
@@ -575,7 +575,7 @@ inputs = [{ from = "lorenzo", port = "codes" }]
 name       = "rze_codes"
 type       = "RZE"
 chunk_size = 16384
-levels     = 4
+word_size  = 1
 inputs = [{ from = "bshuf_codes" }]
 
 # Lorenzo outlier_errors, outlier_indices, outlier_count are unconnected
@@ -597,8 +597,8 @@ name             = "quant"
 type             = "Quantizer"
 input_type       = "float32"
 code_type        = "uint32"
-error_bound      = 1e-3
-error_bound_mode = "REL"
+error_bound      = 1e-4
+error_bound_mode = "NOA"
 quant_radius     = 32768
 outlier_capacity = 0.1
 zigzag_codes     = true
@@ -614,14 +614,14 @@ inputs = [{ from = "quant", port = "codes" }]
 [[stage]]
 name          = "bshuf"
 type          = "Bitshuffle"
-element_width = 2
+element_width = 4
 block_size    = 16384
 inputs = [{ from = "diff", port = "output" }]
 
 [[stage]]
-name   = "rze"
-type   = "RZE"
-levels = 4
+name      = "rze"
+type      = "RZE"
+word_size = 1
 inputs = [{ from = "bshuf", port = "output" }]
 ```
 
