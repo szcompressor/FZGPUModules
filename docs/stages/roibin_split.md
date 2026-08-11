@@ -148,6 +148,8 @@ peaks_file = "frame.roi"
 Downstream stages connect to the named ports:
 
 ```toml
+[[stage]]
+type   = "TiledLorenzo"
 inputs = [{from = "split", port = "roi"}]   # or "bg", or "peaks"
 ```
 
