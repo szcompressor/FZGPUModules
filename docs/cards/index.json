@@ -17,5 +17,6 @@
   "fzgm-adm.json",
   "fzgm-ginterp.json",
   "fzgm-lorenzo-quant.json",
-  "fzgm-merge.json"
+  "fzgm-merge.json",
+  "fzgm-roibin-split.json"
 ]

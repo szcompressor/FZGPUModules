@@ -402,6 +402,7 @@ add_library(fzgmod_modules
   modules/coders/clog/clog_stage.cu
   modules/coders/hclog/hclog_stage.cu
   modules/structural/merge/merge_stage.cu
+  modules/structural/roibin_split/roibin_split_stage.cu
   modules/coders/bitpack/bitpack_stage.cu
   modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu
   modules/coders/adaptive_bitpack/adaptive_bitpack_stage.cu

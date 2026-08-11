@@ -49,6 +49,7 @@
 #include "shufflers/tupl/tupl_stage.h"
 #include "transforms/log_transform/log_transform_stage.h"
 #include "structural/merge/merge_stage.h"
+#include "structural/roibin_split/roibin_split_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
@@ -526,6 +527,26 @@ static Stage* addTUPLStage(Pipeline& p, const toml::table& t) {
     return tupl;
 }
 
+static Stage* addROIBinSplitStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "float32"));
+    const auto hw   = static_cast<uint32_t>(optInt(t, "roi_half_width", 4));
+    const auto bin  = static_cast<uint32_t>(optInt(t, "bin_factor", 1));
+    const std::string peaks = optStr(t, "peaks_file", "");
+
+    auto configure = [&](auto* s) {
+        s->setRoiHalfWidth(hw);
+        s->setBinFactor(bin);
+        // setPeaksFile after the box/bin settings so the overlap statistic and
+        // the geometry cross-check both see the final configuration. Dimensions
+        // come from Pipeline::setDims() at addStage() time, so the peak file's
+        // own geometry can be validated against them here.
+        if (!peaks.empty()) s->setPeaksFile(peaks);
+        return s;
+    };
+    if (dt == DataType::FLOAT64) return configure(p.addStage<ROIBinSplitStage<double>>());
+    return configure(p.addStage<ROIBinSplitStage<float>>());
+}
+
 static Stage* addMergeStage(Pipeline& p, const toml::table& t) {
     auto* mg = p.addStage<MergeStage>();
     std::vector<std::string> names;
@@ -567,9 +588,16 @@ static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
     uint32_t tx = static_cast<uint32_t>(optInt(t, "tile_x", 0));
     uint32_t ty = static_cast<uint32_t>(optInt(t, "tile_y", 0));
     uint32_t tz = static_cast<uint32_t>(optInt(t, "tile_z", 0));
+    // Optional per-stage dimension override, for branches whose data is not the
+    // pipeline's input shape (e.g. ROIBinSplit's binned background). Without it
+    // finalize() would re-push the global dims over anything set here.
+    const auto dx = static_cast<size_t>(optInt(t, "dim_x", 0));
+    const auto dy = static_cast<size_t>(optInt(t, "dim_y", 0));
+    const auto dz = static_cast<size_t>(optInt(t, "dim_z", 0));
     auto configure = [&](auto* s) {
         if (tx || ty || tz)
             s->setTileShape(tx ? tx : 1, ty ? ty : 1, tz ? tz : 1);
+        if (dx) s->setDimsOverride(dx, dy ? dy : 1, dz ? dz : 1);
         return s;
     };
     if (dt == DataType::INT16) return configure(p.addStage<TiledLorenzoStage<int16_t>>());
@@ -802,6 +830,20 @@ static void saveLogTransformStage(Stage* s, std::ostringstream& out) {
     out << "outlier_capacity = " << lg->getOutlierCapacity() << "\n";
 }
 
+static void saveROIBinSplitStage(Stage* s, std::ostringstream& out) {
+    // The peak table travels in the archive on the `peaks` port, so a saved
+    // config only needs the geometry knobs, not the path it was first read from.
+    if (auto* f = dynamic_cast<ROIBinSplitStage<float>*>(s)) {
+        out << "data_type = \"float32\"\n";
+        out << "roi_half_width = " << f->getRoiHalfWidth() << "\n";
+        out << "bin_factor = "     << f->getBinFactor()    << "\n";
+    } else if (auto* d = dynamic_cast<ROIBinSplitStage<double>*>(s)) {
+        out << "data_type = \"float64\"\n";
+        out << "roi_half_width = " << d->getRoiHalfWidth() << "\n";
+        out << "bin_factor = "     << d->getBinFactor()    << "\n";
+    }
+}
+
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
     auto* mg = static_cast<MergeStage*>(s);
     const auto& names = mg->getSegmentNames();
@@ -836,6 +878,19 @@ static void saveTiledLorenzoStage(Stage* s, std::ostringstream& out) {
     out << "tile_x = " << static_cast<int64_t>(cfg.tile_x) << "\n";
     out << "tile_y = " << static_cast<int64_t>(cfg.tile_y) << "\n";
     out << "tile_z = " << static_cast<int64_t>(cfg.tile_z) << "\n";
+    // Only an explicitly pinned override is persisted; ordinary dims come from
+    // Pipeline::setDims() and writing them here would freeze a saved config to
+    // one input shape.
+    const bool pinned =
+        (dynamic_cast<TiledLorenzoStage<int32_t>*>(s) &&
+         static_cast<TiledLorenzoStage<int32_t>*>(s)->hasDimsOverride()) ||
+        (dynamic_cast<TiledLorenzoStage<int16_t>*>(s) &&
+         static_cast<TiledLorenzoStage<int16_t>*>(s)->hasDimsOverride());
+    if (pinned) {
+        out << "dim_x = " << cfg.dim_x << "\n";
+        out << "dim_y = " << cfg.dim_y << "\n";
+        out << "dim_z = " << cfg.dim_z << "\n";
+    }
 }
 
 static void saveRLEStage(Stage* s, std::ostringstream& out) {
@@ -1072,6 +1127,7 @@ static const StageEntry kStageRegistry[] = {
     { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/shufflers/tupl" },
     { "LogTransform", StageType::LOG_TRANSFORM, addLogTransformStage, saveLogTransformStage, "modules/transforms/log_transform" },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage,        "modules/structural/merge" },
+    { "ROIBinSplit",  StageType::ROIBIN_SPLIT, addROIBinSplitStage,  saveROIBinSplitStage,  "modules/structural/roibin_split" },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage,          "modules/coders/rle" },
     { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage,   "modules/predictors/diff" },
     { "Zigzag",       StageType::ZIGZAG,       addZigzagStage,       saveZigzagStage,       "modules/transforms/zigzag" },

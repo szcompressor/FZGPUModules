@@ -77,9 +77,34 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    void setDims(const std::array<size_t, 3>& dims) override { dims_ = dims; }
-    void setDims(size_t x, size_t y = 1, size_t z = 1) { dims_ = {x, y, z}; }
+    /// Pipeline-driven dims push (at addStage and again at finalize). Ignored once
+    /// setDimsOverride() has pinned explicit dims — see that method for why.
+    void setDims(const std::array<size_t, 3>& dims) override {
+        if (!dims_pinned_) dims_ = dims;
+    }
+    void setDims(size_t x, size_t y = 1, size_t z = 1) {
+        if (!dims_pinned_) dims_ = {x, y, z};
+    }
     std::array<size_t, 3> getDims() const { return dims_; }
+    bool hasDimsOverride() const { return dims_pinned_; }
+
+    /**
+     * Pin this stage's dimensions independently of the pipeline's.
+     *
+     * A branch may carry data whose shape is not the pipeline's input shape —
+     * the binned background produced by ROIBinSplitStage is `ceil(nx/b) x
+     * ceil(ny/b) x nz`, not `nx x ny x nz`. Without pinning, `Pipeline::finalize()`
+     * re-pushes the global dims to every stage and silently overwrites anything
+     * set at construction, so the predictor would decorrelate the binned image
+     * using the full-resolution row stride and produce garbage residuals that
+     * still round-trip (the inverse makes the same mistake) — wrong ratio, no error.
+     * The pinned dims are serialized in this stage's own header, so the inverse
+     * pass recovers them from the archive.
+     */
+    void setDimsOverride(size_t x, size_t y, size_t z) {
+        dims_ = {x, y, z};
+        dims_pinned_ = true;
+    }
 
     /**
      * Set the tile shape. `tz == 1` ⇒ 2-D tile; `ty == tz == 1` ⇒ 1-D tile.
@@ -194,6 +219,7 @@ public:
 
 private:
     bool is_inverse_           = false;
+    bool dims_pinned_          = false;  ///< set by setDimsOverride(); blocks pipeline dim pushes
     size_t actual_output_size_ = 0;
     std::array<size_t, 3>   dims_     = {0, 1, 1};
     std::array<uint32_t, 3> tile_     = {8, 8, 1};

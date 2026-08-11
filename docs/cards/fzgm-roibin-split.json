@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+
+  "id": "fzgm-roibin-split",
+  "stage": "ROIBinSplitStage",
+  "name": "ROI / Binned-Background Split (1→3 / 3→1)",
+
+  "zhubModule": "roibin-split",
+  "isNewGeneralModule": true,
+
+  "category": "structural",
+  "algorithm": "roi-split",
+  "description": "Splits a detector field into full-resolution region-of-interest boxes around supplied peak coordinates, a spatially binned background, and the peak record table. Because the two data streams leave on separate ports they become separate DAG branches, so each can carry its own error bound and coder chain -- the dual-error-bound pipeline a monolithic compressor cannot express. ROI boxes are fixed (2*hw+1)^2 and edge-clamped; overlapping boxes store duplicate pixels so the output size is exact, and scatter is idempotent. bin_factor > 1 is a resolution reduction, NOT an error bound: the background error is then binning plus quantization error and is not bounded by the background branch's bound. The peak table is emitted on the 'peaks' port so the archive is self-contained.",
+
+  "lossy": true,
+  "hardware": "gpu",
+
+  "ports": {
+    "inputs": [{ "name": "field", "arity": 1 }],
+    "outputs": [
+      { "name": "roi", "arity": 1 },
+      { "name": "bg", "arity": 1 },
+      { "name": "peaks", "arity": 1 }
+    ]
+  },
+
+  "provenance": {
+    "relationship": "inspired-by",
+    "reference": "Underwood et al., ROIBIN-SZ: Fast and Science-Preserving Compression for Serial Crystallography",
+    "license": "BSD-3-Clause"
+  },
+
+  "docs": "stage_roibin_split.html",
+  "sourcePath": "modules/structural/roibin_split",
+  "versionAdded": "2.0"
+}

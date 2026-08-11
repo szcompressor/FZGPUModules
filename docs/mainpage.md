@@ -111,6 +111,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
+| \ref stage_roibin_split "ROIBinSplitStage"        | `modules/structural/roibin_split/roibin_split_stage.h` | Split a field into ROI boxes + binned background for dual-error-bound branches (structural) |
 
 ### Memory Strategies
 

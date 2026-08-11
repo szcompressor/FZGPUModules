@@ -24,6 +24,7 @@
 #include "coders/hclog/hclog_stage.h"
 #include "shufflers/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
+#include "structural/roibin_split/roibin_split_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
@@ -350,6 +351,21 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             auto* s = new MergeStage();
             s->deserializeHeader(config, config_size);
             stage = s;
+            break;
+        }
+
+        case StageType::ROIBIN_SPLIT: {
+            // Byte 20 of the header holds the field DataType
+            // (16 B of dims+npeaks, then uint16 hw, uint16 bin).
+            DataType dt = (config_size > 20)
+                ? static_cast<DataType>(config[20])
+                : DataType::FLOAT32;
+            if      (dt == DataType::FLOAT32) stage = new ROIBinSplitStage<float>();
+            else if (dt == DataType::FLOAT64) stage = new ROIBinSplitStage<double>();
+            else throw std::runtime_error(
+                    "Unsupported ROIBinSplitStage DataType: "
+                    + std::to_string(static_cast<int>(dt)));
+            stage->deserializeHeader(config, config_size);
             break;
         }
 

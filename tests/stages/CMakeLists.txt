@@ -148,6 +148,14 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── ROIBinSplitStage (structural ROI/background split) ──────────────────────
+fz_add_test(
+    NAME    test_roibin_split
+    SOURCES test_roibin_split.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── Bitpack transform ────────────────────────────────────────────────────────
 fz_add_test(
     NAME    test_bitpack
