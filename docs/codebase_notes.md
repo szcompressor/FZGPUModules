@@ -375,3 +375,262 @@ The event bracket deliberately excludes host setup and PCIe transfers issued
 outside it. Note the corollary that bit CN-CONCAT-1: work performed outside the
 bracket — such as `concatOutputs()` — is invisible to `dag_elapsed_ms`, so a
 regression there shows up only in the host/device wall-time ratio.
+
+## CN-AB-TR — transpose-based encode: the rate-dependent crossover and threshold 4
+
+**Source:** `modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu`
+(`encode_pack_kernel_warp_tr`, `encode_pack_outlier_kernel_warp_tr`,
+`encodeTransposeThreshold`)
+
+The warp-cooperative pack kernel is ALU-bound, not memory-bound (ncu on CLDHGH,
+H100: pack at ~72% ALU pipe, ~20% DRAM, store efficiency already ~1.1
+sectors/request — the old scalar path's 88%-excessive-sectors store problem is
+gone in the warp kernels). The ALU cost is the O(rate) per-plane `__ballot_sync`
++ bit-extract loop. `encode_pack_*_warp_tr` replaces that loop with a single
+32×32 `warpBitTranspose32` per 32-element half — the exact inverse of the
+transpose *decode* (`decode_unpack_*_warp_tr`), and since the transpose is an
+involution, feeding lane l its magnitude yields plane word l at lane l. The
+archive format is unchanged; the sign region still uses one ballot per half.
+
+The win is entirely rate-dependent, because the gather is O(rate) and the
+transpose is O(1). Per-kernel `gpu__time_duration.sum` (ncu, CLDHGH 3600×1800,
+cuszp2/outlier, isolated pack kernel):
+
+| eb    | gather | transpose (thr 4) | speedup |
+|-------|--------|-------------------|---------|
+| 1e-3  | 51.8µs | 52.3µs            | ~1.00×  |
+| 1e-4  | 64.3µs | 57.4µs            | 1.12×   |
+| 1e-5  | 78.3µs | 58.5µs            | 1.34×   |
+
+The gather climbs with tightening bounds (higher residual magnitudes → higher
+rate); the transpose stays flat at ~58µs. End-to-end **compress** DAG throughput
+(non-graph, matched clock): 1e-3 unchanged, 1e-4 +2.7%, 1e-5 +7.3% — diluted
+because the pack kernel is ~¼ of the compress DAG (Lorenzo + quant + rate + scan
++ pack + concat). Decompress is untouched.
+
+**Threshold 4, not the decode side's 6.** Blocks below the threshold fall back to
+the gather (cheaper at trivial rate). The encode crossover measured lower than
+decode's: at eb=1e-4 threshold 4 (57.4µs) beat threshold 6 (60.6µs) *and* beat
+transpose-all (58.4µs) — a rate-4 block's four ballots already cost more than the
+fixed 5-shuffle transpose, but forcing the transpose onto rate-1..3 blocks loses.
+`FZ_ENCODE_TR` overrides it (`=0` disables entirely for A/B).
+
+**Store coalescing.** The transpose has each of lanes 0..r-1 write one 4-byte
+plane word at `base + word_bytes*(1+lane)` (consecutive words → coalesced). A
+naïve byte-wise store desequences that across lanes (byte 0 of each lane is
+strided by 4) and raised store sectors ~50%. `storePlaneWord` does a single
+aligned `uint32` store when the block's payload base is 4-byte aligned — a
+warp-uniform property, since every plane slot is base + a multiple of 4 — and
+falls back to the byte-wise `store32le` otherwise (outlier `ob_bytes` of 1–3 can
+misalign the base). The alignment branch is warp-uniform, so it never diverges.
+
+## CN-AB-FUSE — why single-pass fused encode (decoupled look-back) was rejected
+
+**Prototyped and reverted (2026-08).** The 3-kernel outlier encode path
+(`encode_rate` → CUB `ExclusiveSum` → `encode_pack`) reads the quantization codes
+twice and recomputes `absU` in both kernels. The obvious fix is to fuse all three
+into one kernel that reads the codes once (keeping them in registers between the
+rate reduce and the pack) and computes the per-block byte offsets inline with a
+Merrill/Garland decoupled look-back at CTA granularity.
+
+It was implemented, validated **bit-exact** against the 3-kernel path (identical
+compressed size and PSNR, 27 stage + 6 cuszp tests, compute-sanitizer memcheck +
+synccheck clean at 25k CTAs), and it was **2.4x slower** — a clean loss. Two real
+concurrency bugs surfaced en route and are worth recording: (1) the tile id must
+be `blockIdx.x`, not a dynamic atomic ticket — decode recomputes offsets by
+scanning costs in natural block order, so a ticket-scrambled payload layout is
+undecodable; (2) aggregate and inclusive prefixes must share a single 64-bit
+`{ready,value}` descriptor read/written atomically — separate flag/value words
+tear at scale and over-count the offset (→ OOB write).
+
+Why it loses (ncu, CLDHGH, H100): the fused kernel runs at **97% occupancy but
+17% SM throughput, with 82% of stall cycles at the CTA `__syncthreads` barrier**.
+The pack cannot start until it knows its byte offset, so all 256 threads block on
+the look-back while only thread 0 does a serial, global-memory-latency-bound scan
+of predecessor descriptors. Embedding the prefix scan into the heavy pack kernel
+entangles the scan's serial dependency with the expensive work. The slowdown is a
+constant ~2.4x across 32/64/128 MB (not superlinear, so not O(n²) degeneration —
+just a fixed structural cost). CUB's standalone scan avoids all of this: it is a
+lightweight kernel where the prefix wavefront propagates over trivial per-tile
+work in ~5 µs, then the pack runs separately at full occupancy. The ~16% saving
+from eliminating the redundant read is dwarfed by the barrier/look-back overhead.
+
+Conclusion: the 3-kernel design is the right architecture for this pipeline. A
+warp-cooperative look-back (32 lanes reducing predecessor descriptors in
+parallel) would cut the barrier stall but its best case is ~parity for a lot of
+added lock-free-concurrency risk — not pursued. Related: the L2-blocked tiling
+probe (`profiling/l2tile_profile.cpp`) is the other rejected traffic/locality
+lever; this pipeline is compute/latency-bound (see CN-AB-TR), not traffic-bound.
+
+## CN-FUSE-PROOF — full block-local fusion reaches native-class throughput (go decision)
+
+**Go/no-go experiment (`profiling/fuse_proof.cu`), 2026-08.** Counterpart to the
+CN-AB-FUSE *negative* result. That one fused only rate+scan+pack and lost 2.4x to
+an in-kernel look-back barrier. This one fuses the **entire block-local chain** —
+`Quantizer(linear) + Lorenzo(32) + AdaptiveBitpack(32,outlier)` — into per-warp
+work: one warp owns one 32-element block and computes quant + Lorenzo delta +
+adaptive-bitpack in registers, so the int32 codes are never written to or read
+from DRAM.
+
+Measured (H100, compress, best-of-10), fused vs the staged FZGM pipeline:
+
+| field            | staged   | fused    | speedup |
+|------------------|----------|----------|---------|
+| CLDHGH 256 MB    | 114 GB/s | 358 GB/s | 3.14x   |
+| HACC/xx 512 MB   | 113 GB/s | 280 GB/s | 2.49x   |
+| NYX 512 MB       | 114 GB/s | 225 GB/s | 1.97x   |
+
+That is native-cuSZp2-class throughput (~200-400 GB/s on H100). Correctness:
+**byte-identical archive to the staged path** on all three fields (exact
+compressed-size match to the byte over 134M elements — any bug in
+quant/Lorenzo/rate/pack would shift a block cost and diverge the size), and
+round-trips within the error bound where the linear quantizer itself is in range
+(CLDHGH; NYX/HACC exceed int32 code range at eb=1e-3 in *both* paths, a
+pre-existing linear-quantizer property, not a fusion bug).
+
+**Why it worked where CN-AB-FUSE failed.** Two design choices: (1) fuse the
+*whole* chain so the front-end quant+Lorenzo compute is hidden — ncu shows the
+fused rate kernel at 74% SM / 74% ALU (healthy), 360 us, vs the staged rate-only
+kernel's 385 us: quant+Lorenzo folded in for ~free while deleting their two
+separate kernels (~482 us) and the code round-trips. (2) Keep the lightweight CUB
+offset scan and **recompute** quant+Lorenzo in the pack kernel rather than
+materialise deltas or run an in-kernel look-back — this sidesteps the barrier
+that sank CN-AB-FUSE, at the cost of reading the input floats twice (still a big
+net win). A true single-kernel variant with an amortised look-back is the
+remaining headroom toward the top of the native range.
+
+Speedup scales inversely with rate: low-rate/high-CR data (CLDHGH) benefits most
+(cheap pack, so front-end elimination dominates); high-rate data (NYX) least (the
+pack's inherent bit-packing ALU dominates). Floor observed ~2x.
+
+**Decision: GO on the auto-fusion framework.** The runtime-modularity tax is
+recoverable and large. This hand-fused kernel is the reference implementation and
+the first "block-local predict+quant+fixedcoder" driver skeleton for the planner;
+the staged path is its byte-exact validation oracle. Aligns with the FZ group's
+domain-specific-compiler-for-lossy-compression direction (WSE case study) — same
+codegen-of-fused-kernels idea, retargeted to CUDA. Next: the `FusionSpec` stage
+contract + a DAG fusion planner (see CN-FUSE-PLAN once landed).
+
+## CN-FUSE-PLAN — the fusion planner: what it identifies and why
+
+**Source:** `include/stage/fusion.h`, `src/pipeline/fusion_planner.cpp`
+
+Step 1 of the auto-fusion framework (motivation: CN-FUSE-PROOF). Pure analysis —
+it changes no execution; it finds the stage chains a fused kernel *could*
+collapse, so a later pass can substitute a fused (registered or NVRTC-generated)
+implementation and leave everything else staged.
+
+`Stage::getFusionSpec()` classifies a stage's data-access pattern — `Map`
+(element-wise), `BlockLocal` (resettable fixed-size neighbourhood), `Cooperative`
+(a per-block fixed-length coder), or `Unfusable` (default; opaque or genuinely
+global). Access pattern, not computation, is what decides fusability, so the
+enum is deliberately tiny. Config-dependent fusability is reported honestly:
+`QuantizerStage` is `Map` only in linear mode (the outlier/in-place paths scatter
+to side buffers), `LorenzoStage` is `BlockLocal` only in 1-D block-reset mode
+(the N-D stencil needs a different driver), `AdaptiveBitpackStage` is
+`Cooperative` only at the warp block sizes 32/64. Inverse stages are always
+`Unfusable`.
+
+`planFusionGroups()` returns maximal groups under four rules, each load-bearing:
+(1) **strictly linear** — a group edge needs the producer to feed exactly one
+stage and the consumer to be fed by exactly one; fan-in/out inside a group would
+break register-resident composition. (2) **one block size** — block-local and
+cooperative members must agree (Map imposes none); mixed periods can't share a
+tile. (3) **coder terminates** — nothing fuses past a `Cooperative` variable-
+length coder, so it's always the tail. (4) **size ≥ 2** — a lone stage is not a
+fusion. The cuszp2 pipeline resolves to exactly one group
+`{Quantizer, Lorenzo, AdaptiveBitpack}`, block 32, coder-terminated — the chain
+the CN-FUSE-PROOF kernel hand-fuses. Tests: `tests/pipeline/test_fusion_planner.cpp`.
+
+Not yet built (next steps): a fused-implementation registry keyed by the
+stage-chain fingerprint (`scripts/gen_stage_fingerprints.py` gives the key), DAG
+substitution of a `FusedStage` for a matched group, and NVRTC codegen that
+assembles a driver skeleton from the members' device functors for chains with no
+hand-written implementation.
+
+## CN-FUSE-EXEC — wiring fused execution into the DAG (Step 2)
+
+**Source:** `include/pipeline/fusion_registry.h`, `src/pipeline/fusion_registry.cpp`,
+`modules/fused/fused_block/`, the fusion hook in `CompressionDAG::execute()`,
+`Pipeline::planAndInstallFusion()`, `FusionPolicy`.
+
+Turns the planner (CN-FUSE-PLAN) into measured speedup. Measured end-to-end
+through the real Pipeline on CLDHGH (H100): staged 107→**234 GB/s** at eb=1e-3
+(2.18x), 105→**220** at 1e-4 (2.10x), identical PSNR — native-class.
+
+**Integration choice: swap execution, not DAG structure.** `buildHeader()` and
+`buildInverseDAG()` read the DAG *nodes*, so keeping all three stage nodes intact
+(only replacing forward execution) leaves the archive byte-identical and
+decompress completely unchanged. The registry (`findFusedImpl`) matches a group's
+exact shape; `CompressionDAG::execute()` runs the matched `FusedImpl` at the
+group's head node — writing the tail node's output buffer — and records every
+member's completion event so downstream waits are satisfied, skipping the members'
+individual `execute()`s. `FusionPolicy::Auto` (default `Off`, `FZ_FUSION=off|auto`
+override) installs groups at finalize; unmatched groups stay staged, so Auto is
+always safe.
+
+**Two non-obvious correctness requirements, both from decompress reusing the
+forward stage objects** (`setInverse(true)`; the in-memory decompress path does
+*not* call `deserializeHeader`, so it relies on forward-execute side effects):
+
+1. **Prime forward-computed state the inverse needs.** The quantizer computes
+   `computed_abs_eb_` during forward `execute()`; fusion skips that, so the reused
+   inverse quant reconstructed with the *default* bound (1e-4) — a silent **10x
+   too small** reconstruction with a byte-identical archive. The fused runner must
+   call `QuantizerStage::primeAbsEbForFusion()` (ABS only). The tail coder
+   likewise needs `num_elements_` via `setFusedResult()`. General rule: a fused
+   runner must establish whatever forward state the group's reused stages read on
+   the inverse path.
+2. **Disable buffer coloring.** Coloring aliases buffers by *staged* liveness,
+   where a group's input dies after its first stage. A fused kernel keeps that
+   input live across the whole group while writing the group's output, so an
+   aliased input/output region corrupts. `planAndInstallFusion()` disables
+   coloring (and CUDA graph mode — the fused runner synchronises to read the
+   archive length) when any group installs.
+
+Validated bit-exact (byte-identical archive to staged, round-trip within bound,
+`rs == rf`) and compute-sanitizer clean: `tests/pipeline/test_fusion_planner.cpp`.
+Next: NVRTC codegen keyed by the stage-chain fingerprint (see CN-FUSE-DRIVER for
+the parametric-driver step that generalised the runner to cuSZp3).
+
+## CN-FUSE-DRIVER — parametric block-local fused driver (cuSZp2 + cuSZp3) (Step 3)
+
+**Source:** `modules/fused/fused_block/` (the templated kernels + two predictor
+policies), `matchesCuszp3`/`runCuszp3` in `src/pipeline/fusion_registry.cpp`,
+`TiledLorenzoStage::getFusionSpec()`.
+
+Generalises the single hand-written cuSZp2 runner (CN-FUSE-EXEC) into one driver
+for the whole *predict+quant+fixed-rate-outlier-coder* family. Key realisation:
+**the fused rate/pack kernels ARE the AdaptiveBitpack outlier warp kernels**
+(`encode_{rate,pack}_outlier_kernel_warp`, CN-AB-TR area), with the materialised
+int-codes array `in[start+idx]` replaced by an inline `pred.delta(lane,b,m)` call.
+So the two kernels are templated on `<int ElemsPerLane, class Pred>` (block_size =
+32*EPL, EPL≤2 keeps the per-lane register arrays from spilling) and a predictor
+policy struct passed by value:
+- `Lorenzo1DPredictor` (EPL=1, cuSZp2): 1-D Lorenzo via intra-warp `__shfl_up`.
+- `TiledLorenzo2DPredictor` (EPL=2, cuSZp3): 2-D separable tiled Lorenzo (tz==1),
+  each element re-quantises its own left/up predecessor from the float field — a
+  pure map, so the neighbour code equals what the staged quantizer produced.
+Because the pack path is byte-for-byte the shipped AB outlier warp encode, and EPL=1
+reduces to the old cuSZp2 kernel exactly, both archives stay byte-identical (the
+cuSZp2 end-to-end test still passes unchanged).
+
+**cuSZp3 element bookkeeping (the non-obvious part):** the AB stage's element count
+is the *padded tile-major* count `num_tiles*tile_elems` (TiledLorenzo emits
+zero-padded edge tiles), so every block is full (count==64) and padding elements are
+`ab_active` with delta 0 — the driver passes `n_ab` (not the natural field size) and
+`setFusedResult(n_ab, …)`. The predictor, by contrast, keys off the *field* bounds
+(`gx<dx && gy<dy`) and returns 0 for padding, matching `tiled_lorenzo_delta_kernel`.
+Matcher requires 2-D (tz==1) tile_elems==64 and AB block 64 + outlier; other shapes
+return 0 and fall back to staged.
+
+Measured end-to-end on CLDHGH 3600x1800 (H100, eb=1e-3), compress steady-state:
+staged 178.9 GB/s dag / 151.5 host → fused **222.7 dag / 196.0 host** (~1.25x dag,
+1.29x host), ratio 8.31x and PSNR 63.7997 identical. Smaller multiple than cuSZp2's
+2.1x because the cuSZp3 staged baseline (efficient per-row TiledLorenzo) is already
+faster; the win is still removing two int32-width DRAM round-trips. Validated
+byte-identical + round-trip on non-tile-aligned dims (300x180, exercises edge-tile
+padding) and compute-sanitizer clean: `tests/pipeline/test_fusion_planner.cpp`
+(`Cuszp3*`). fzgpu is a different family (BitplaneRZE coder, radius/zigzag quant with
+its own outliers) — deferred; the natural next step is NVRTC codegen keyed by the
+stage-chain fingerprint.
