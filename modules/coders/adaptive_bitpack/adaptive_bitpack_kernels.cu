@@ -61,6 +61,27 @@ __device__ __forceinline__ uint32_t warpBitTranspose32(uint32_t v, unsigned lane
     return v;
 }
 
+// Alignment-safe little-endian 32-bit store, the mirror of decode's `load32`.
+// The payload base (payload + offset[b]) is only guaranteed byte-aligned — the
+// metadata region ahead of it is num_blocks*meta_bytes, which need not be a
+// multiple of 4 — so we cannot assume a naturally-aligned uint32 store here.
+__device__ __forceinline__ void store32le(uint8_t* dst, uint32_t v) {
+    dst[0] = static_cast<uint8_t>(v & 0xffu);
+    dst[1] = static_cast<uint8_t>((v >> 8) & 0xffu);
+    dst[2] = static_cast<uint8_t>((v >> 16) & 0xffu);
+    dst[3] = static_cast<uint8_t>((v >> 24) & 0xffu);
+}
+
+// 32-bit plane-word store for the transpose path. When the block's payload base
+// is 4-byte aligned (a warp-uniform property — every plane slot is base + a
+// multiple of 4) a single aligned word store lets consecutive lanes' plane words
+// coalesce; otherwise fall back to the byte-wise little-endian store. `aligned`
+// must be warp-uniform so the branch never diverges.
+__device__ __forceinline__ void storePlaneWord(uint8_t* dst, uint32_t v, bool aligned) {
+    if (aligned) *reinterpret_cast<uint32_t*>(dst) = v;
+    else         store32le(dst, v);
+}
+
 // ── Encode pass A: rate byte + payload cost per block ───────────────────────
 template<typename T>
 __global__ void encode_rate_kernel(
@@ -267,6 +288,77 @@ __global__ void encode_pack_kernel_warp(
                 base[word_bytes * (1u + p) + 4u * m + lane] =
                     static_cast<uint8_t>((plane_mask >> (8u * lane)) & 0xFFu);
         }
+    }
+}
+
+// Transpose-based plain encode. Same archive format and cost as
+// encode_pack_kernel_warp, but the O(rate) per-plane __ballot_sync loop — the
+// ALU bottleneck — is replaced by a single 32x32 warp bit-transpose per
+// 32-element half: it is the exact inverse of decode_unpack_kernel_warp_tr, and
+// warpBitTranspose32 is an involution, so feeding lane l its magnitude yields
+// plane word l at lane l. Warp-uniform branch on the (uniform) rate keeps the
+// cheap gather for small rates where the fixed 5-shuffle transpose does not pay.
+template<typename T, int ElemsPerLane>
+__global__ void encode_pack_kernel_warp_tr(
+    const T* __restrict__ in, size_t num_elements,
+    uint32_t word_bytes, size_t num_blocks,
+    const uint8_t* __restrict__ rate, const uint32_t* __restrict__ offset,
+    uint32_t rate_threshold, uint8_t* __restrict__ payload)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    const int r = rate[b];
+    if (r == 0) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    uint8_t* base = payload + offset[b];
+
+    T v[ElemsPerLane];
+    uint32_t av[ElemsPerLane];
+    bool active[ElemsPerLane];
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        active[m] = idx < count;
+        v[m]  = active[m] ? in[start + idx] : static_cast<T>(0);
+        av[m] = active[m] ? static_cast<uint32_t>(absU<T>(v[m])) : 0u;
+    }
+
+    // Sign region: one ballot per half (cheap, a single plane), unchanged.
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const uint32_t sign_mask = fz::backend::ballotSync32(active[m] && v[m] < 0);
+        if (lane < 4) base[4u * m + lane] = static_cast<uint8_t>((sign_mask >> (8u * lane)) & 0xFFu);
+    }
+
+    // Small-rate blocks: the O(rate) gather is cheaper than a fixed transpose.
+    if (static_cast<uint32_t>(r) < rate_threshold) {
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) {
+                const uint32_t plane_mask = fz::backend::ballotSync32(active[m] && ((av[m] >> p) & 1u));
+                if (lane < 4)
+                    base[word_bytes * (1u + p) + 4u * m + lane] =
+                        static_cast<uint8_t>((plane_mask >> (8u * lane)) & 0xFFu);
+            }
+        }
+        return;
+    }
+
+    // Transpose path: lane l holds magnitude av[l]; the transpose delivers plane
+    // word l (bit k = bit l of av[k]) to lane l. Store planes 0..r-1.
+    const bool aln = (reinterpret_cast<uintptr_t>(base) & 3u) == 0;
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const uint32_t plane_word = warpBitTranspose32(av[m], lane);
+        if (static_cast<int>(lane) < r)
+            storePlaneWord(base + word_bytes * (1u + lane) + 4u * m, plane_word, aln);
     }
 }
 
@@ -736,6 +828,123 @@ __global__ void encode_pack_outlier_kernel_warp(
     }
 }
 
+// Transpose-based outlier encode: the encode_pack_outlier_kernel_warp mirror of
+// the plain _tr kernel above. The O(rate) plane loop (both the plain and the
+// outlier sub-block) is replaced by a single warp bit-transpose. For the
+// outlier sub-block, element 0's magnitude is zeroed before the transpose so it
+// stays out of the plane region (the `plane_active = active && idx>0` predicate
+// in the gather path). Warp-uniform rate branch keeps the gather for small rate.
+template<typename T, int ElemsPerLane>
+__global__ void encode_pack_outlier_kernel_warp_tr(
+    const T* __restrict__ in, size_t num_elements,
+    uint32_t word_bytes, size_t num_blocks,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    uint32_t rate_threshold, uint8_t* __restrict__ payload)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    const int     r   = meta[2 * b];
+    const uint8_t sel = meta[2 * b + 1];
+    const bool is_out = (sel & 1u) != 0;
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), num_elements - start);
+    uint8_t* base = payload + offset[b];
+    const bool use_tr = (static_cast<uint32_t>(r) >= rate_threshold);
+
+    if (!is_out) {
+        if (r == 0) return;
+        T v[ElemsPerLane];
+        uint32_t av[ElemsPerLane];
+        bool active[ElemsPerLane];
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            active[m] = idx < count;
+            v[m]  = active[m] ? in[start + idx] : static_cast<T>(0);
+            av[m] = active[m] ? static_cast<uint32_t>(absU<T>(v[m])) : 0u;
+        }
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            const uint32_t sm = fz::backend::ballotSync32(active[m] && v[m] < 0);
+            if (lane < 4) base[4u * m + lane] = static_cast<uint8_t>((sm >> (8u * lane)) & 0xFFu);
+        }
+        if (use_tr) {
+            const bool aln = (reinterpret_cast<uintptr_t>(base) & 3u) == 0;
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) {
+                const uint32_t plane_word = warpBitTranspose32(av[m], lane);
+                if (static_cast<int>(lane) < r)
+                    storePlaneWord(base + word_bytes * (1u + lane) + 4u * m, plane_word, aln);
+            }
+        } else {
+            for (int p = 0; p < r; ++p) {
+                #pragma unroll
+                for (int m = 0; m < ElemsPerLane; ++m) {
+                    const uint32_t pm = fz::backend::ballotSync32(active[m] && ((av[m] >> p) & 1u));
+                    if (lane < 4)
+                        base[word_bytes * (1u + p) + 4u * m + lane] =
+                            static_cast<uint8_t>((pm >> (8u * lane)) & 0xFFu);
+                }
+            }
+        }
+        return;
+    }
+
+    // Outlier block: [ob_bytes elem0 magnitude LE][sign region][r planes for elems 1..].
+    const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+    if (lane == 0) {
+        const uint32_t mag0 = static_cast<uint32_t>(absU<T>(in[start]));
+        for (uint32_t k = 0; k < ob_bytes; ++k)
+            base[k] = static_cast<uint8_t>((mag0 >> (8u * k)) & 0xffu);
+    }
+    uint8_t* sign   = base + ob_bytes;
+    uint8_t* planes = base + ob_bytes + word_bytes;
+
+    T v[ElemsPerLane];
+    uint32_t av[ElemsPerLane];
+    bool active[ElemsPerLane], plane_active[ElemsPerLane];
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        active[m]       = idx < count;
+        plane_active[m] = active[m] && idx > 0;
+        v[m]  = active[m] ? in[start + idx] : static_cast<T>(0);
+        av[m] = active[m] ? static_cast<uint32_t>(absU<T>(v[m])) : 0u;
+    }
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const uint32_t sm = fz::backend::ballotSync32(active[m] && v[m] < 0);
+        if (lane < 4) sign[4u * m + lane] = static_cast<uint8_t>((sm >> (8u * lane)) & 0xFFu);
+    }
+    if (use_tr) {
+        const bool aln = (reinterpret_cast<uintptr_t>(planes) & 3u) == 0;
+        #pragma unroll
+        for (int m = 0; m < ElemsPerLane; ++m) {
+            // Zero element 0's magnitude so it is excluded from the plane region,
+            // matching the plane_active = active && idx>0 gather predicate.
+            const uint32_t pav = plane_active[m] ? av[m] : 0u;
+            const uint32_t plane_word = warpBitTranspose32(pav, lane);
+            if (static_cast<int>(lane) < r)
+                storePlaneWord(planes + word_bytes * lane + 4u * m, plane_word, aln);
+        }
+    } else {
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) {
+                const uint32_t pm = fz::backend::ballotSync32(plane_active[m] && ((av[m] >> p) & 1u));
+                if (lane < 4)
+                    planes[word_bytes * p + 4u * m + lane] =
+                        static_cast<uint8_t>((pm >> (8u * lane)) & 0xFFu);
+            }
+        }
+    }
+}
+
 template<typename T, int ElemsPerLane>
 __global__ void decode_unpack_outlier_kernel_warp(
     const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
@@ -915,11 +1124,40 @@ void launchEncodeRate(const T* d_in, const Config& c,
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
+// Transpose-based plain/outlier encode is the default (the encode mirror of the
+// transpose decode). Its per-block rate threshold — blocks below it fall back to
+// the O(rate) ballot gather, which is cheaper at trivial rate — defaults to 4.
+// The encode crossover measured lower than the decode's (6): a rate-4 block's
+// four ballots already cost more than the fixed 5-shuffle transpose, and picking
+// 4 wins the mid-rate regime (1.12x on CESM at eb=1e-4) at no measurable low-rate
+// cost. FZ_ENCODE_TR overrides it; FZ_ENCODE_TR=0 disables the transpose entirely
+// (pure gather) for debugging/A-B. Measurements: docs/codebase_notes.md CN-AB-TR.
+// Read once.
+static uint32_t encodeTransposeThreshold() {
+    static const uint32_t thr = [] {
+        const char* e = std::getenv("FZ_ENCODE_TR");
+        return e ? static_cast<uint32_t>(std::atoi(e)) : 4u;
+    }();
+    return thr;
+}
+
 template<typename T>
 void launchEncodePack(const T* d_in, const Config& c,
                       const uint8_t* d_rate, const uint32_t* d_offset,
                       uint8_t* d_payload, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    const uint32_t tr = encodeTransposeThreshold();
+    if (tr && (c.block_size == 32u || c.block_size == 64u)) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        if (c.block_size == 32u)
+            encode_pack_kernel_warp_tr<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_in, c.num_elements, c.word_bytes, c.num_blocks, d_rate, d_offset, tr, d_payload);
+        else
+            encode_pack_kernel_warp_tr<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_in, c.num_elements, c.word_bytes, c.num_blocks, d_rate, d_offset, tr, d_payload);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (c.block_size == 32u) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
         encode_pack_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
@@ -1019,6 +1257,18 @@ void launchEncodePackOutlier(const T* d_in, const Config& c,
                              const uint8_t* d_meta, const uint32_t* d_offset,
                              uint8_t* d_payload, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    const uint32_t tr = encodeTransposeThreshold();
+    if (tr && (c.block_size == 32u || c.block_size == 64u)) {
+        int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
+        if (c.block_size == 32u)
+            encode_pack_outlier_kernel_warp_tr<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_in, c.num_elements, c.word_bytes, c.num_blocks, d_meta, d_offset, tr, d_payload);
+        else
+            encode_pack_outlier_kernel_warp_tr<T, 2><<<grid, kWarpCtaThreads, 0, stream>>>(
+                d_in, c.num_elements, c.word_bytes, c.num_blocks, d_meta, d_offset, tr, d_payload);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (c.block_size == 32u) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
         encode_pack_outlier_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
