@@ -62,7 +62,6 @@ public:
         , cached_orig_bytes_(0)
         , d_scratch_(nullptr)
         , d_sizes_dev_(nullptr)
-        , d_clean_dev_(nullptr)
         , d_dst_off_dev_(nullptr)
         , scratch_capacity_(0)
     {}
@@ -131,8 +130,7 @@ public:
      * Forward pass allocates four persistent pool arrays proportional to
      * n_chunks = ceil(input_bytes / chunk_size_):
      *   d_scratch_    : n_chunks * chunk_size_   (per-chunk worst-case output)
-     *   d_sizes_dev_  : n_chunks * 4             (raw compressed sizes)
-     *   d_clean_dev_  : n_chunks * 4             (flag-stripped sizes)
+     *   d_sizes_dev_  : n_chunks * 4             (raw compressed sizes, flagged)
      *   d_dst_off_dev_: n_chunks * 4             (exclusive prefix-sum offsets)
      */
     size_t estimateScratchBytes(
@@ -197,11 +195,11 @@ private:
     // ── Persistent forward scratch buffers ───────────────────────────────────
     uint8_t*  d_scratch_;
     uint32_t* d_sizes_dev_;
-    uint32_t* d_clean_dev_;
     uint32_t* d_dst_off_dev_;
     mutable bool         tail_readback_pending_ = false;
     mutable fz::stream_t tail_readback_stream_ = nullptr;
     mutable uint32_t     tail_last_index_ = 0;
+    mutable uint32_t     tail_header_size_ = 0;
     mutable uint8_t*     tail_output_ptr_ = nullptr;
     size_t    scratch_capacity_;
     MemoryPool* scratch_pool_owner_ = nullptr;

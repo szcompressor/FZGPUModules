@@ -22,6 +22,7 @@
 
 #include "backend/api.h"
 #include "backend/cub.h"
+#include <thrust/iterator/transform_iterator.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -132,34 +133,31 @@ rzeDecodeKernel(
 }
 
 // ━━━━ helper kernels (word-size independent; mirror RZEStage) ━━━━━━━━━━━━━
-static __global__ void rzeStripFlagKernel(
-    const uint32_t* __restrict__ d_sizes_with_flag,
-    uint32_t*       __restrict__ d_clean_sizes,
-    uint32_t n_chunks)
-{
-    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n_chunks)
-        d_clean_sizes[i] = d_sizes_with_flag[i] & 0x7FFFFFFFu;
-}
 
-static __global__ void rzeAddOffsetKernel(
-    uint32_t* __restrict__ arr, uint32_t n, uint32_t offset)
-{
-    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) arr[i] += offset;
-}
+// Strips the high (uncompressed) flag bit so the encoded size can feed the scan.
+// Used as a CUB TransformInputIterator op so the exclusive-sum masks on the fly —
+// no separate strip kernel, no d_clean_dev_ array (see CN-RZE-HELPERS).
+struct RzeStripFlagOp {
+    __host__ __device__ __forceinline__ uint32_t operator()(uint32_t x) const {
+        return x & 0x7FFFFFFFu;
+    }
+};
 
+// Packs each chunk's compressed bytes from uniform scratch to the packed output.
+// The exclusive-sum offsets are payload-relative; `header_off` (= header_size) is
+// added here rather than in a separate add-offset kernel, and the flag bit is
+// stripped inline rather than in a separate strip kernel.
 static __global__ void rzePackKernel(
     const byte*     __restrict__ d_scratch,
     byte*           __restrict__ d_out,
     const uint32_t* __restrict__ d_dst_offsets,
     const uint32_t* __restrict__ d_sizes,
-    uint32_t CS)
+    uint32_t CS, uint32_t header_off)
 {
     const uint32_t cid     = blockIdx.x;
     const uint32_t src_off = cid * CS;
-    const uint32_t dst_off = d_dst_offsets[cid];
-    const uint32_t sz      = d_sizes[cid];
+    const uint32_t dst_off = header_off + d_dst_offsets[cid];
+    const uint32_t sz      = d_sizes[cid] & 0x7FFFFFFFu;
     const byte* src = d_scratch + src_off;
     byte*       dst = d_out     + dst_off;
     for (uint32_t i = threadIdx.x; i < sz; i += blockDim.x)
@@ -225,21 +223,24 @@ RZEStage::~RZEStage() {
     };
     fwd_free(d_scratch_);
     fwd_free(d_sizes_dev_);
-    fwd_free(d_clean_dev_);
     fwd_free(d_dst_off_dev_);
 }
 
 void RZEStage::postStreamSync(cudaStream_t stream) {
     if (!tail_readback_pending_) return;
 
-    // Batch both tail reads onto the caller's stream; one sync covers both.
+    // Batch both tail reads onto the caller's stream; one sync covers both. The
+    // offsets are payload-relative (add-offset kernel folded into pack), and the
+    // size still carries the flag bit (strip folded into the scan iterator), so
+    // add the header and mask here on the host.
     uint32_t tail_off = 0, tail_sz = 0;
     FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_off, d_dst_off_dev_ + tail_last_index_,
                                   sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-    FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_sz, d_clean_dev_ + tail_last_index_,
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_sz, d_sizes_dev_ + tail_last_index_,
                                   sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-    const size_t total_out = (size_t)tail_off + (size_t)tail_sz;
+    const size_t total_out = (size_t)tail_header_size_ + (size_t)tail_off
+                           + (size_t)(tail_sz & 0x7FFFFFFFu);
     actual_output_size_ = (total_out + 3) & ~size_t(3);
     if (tail_output_ptr_ && actual_output_size_ > total_out) {
         FZ_CUDA_CHECK(cudaMemsetAsync(tail_output_ptr_ + total_out, 0,
@@ -262,10 +263,11 @@ RZEStage::getActualOutputSizesByName() const {
         uint32_t tail_off = 0, tail_sz = 0;
         FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_off, d_dst_off_dev_ + tail_last_index_,
                                       sizeof(uint32_t), cudaMemcpyDeviceToHost, tail_readback_stream_));
-        FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_sz, d_clean_dev_ + tail_last_index_,
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&tail_sz, d_sizes_dev_ + tail_last_index_,
                                       sizeof(uint32_t), cudaMemcpyDeviceToHost, tail_readback_stream_));
         FZ_CUDA_CHECK(cudaStreamSynchronize(tail_readback_stream_));
-        const size_t total_out = (size_t)tail_off + (size_t)tail_sz;
+        const size_t total_out = (size_t)tail_header_size_ + (size_t)tail_off
+                               + (size_t)(tail_sz & 0x7FFFFFFFu);
         const_cast<RZEStage*>(this)->actual_output_size_ = (total_out + 3) & ~size_t(3);
         if (tail_output_ptr_ && actual_output_size_ > total_out) {
             FZ_CUDA_CHECK(cudaMemsetAsync(tail_output_ptr_ + total_out, 0,
@@ -315,7 +317,6 @@ void RZEStage::execute(
     const size_t   n_chunks   = (in_bytes + chunk_size_ - 1) / chunk_size_;
     const uint32_t n_chunks_u = (uint32_t)n_chunks;
     const uint32_t in_bytes_u = (uint32_t)in_bytes;
-    const uint32_t grid256    = (n_chunks_u + 255u) / 256u;
 
     // ── Forward (compress) ───────────────────────────────────────────────
     if (!is_inverse_) {
@@ -331,22 +332,19 @@ void RZEStage::execute(
             };
             fwd_free(d_scratch_);    d_scratch_    = nullptr;
             fwd_free(d_sizes_dev_);  d_sizes_dev_  = nullptr;
-            fwd_free(d_clean_dev_);  d_clean_dev_  = nullptr;
             fwd_free(d_dst_off_dev_);d_dst_off_dev_= nullptr;
 
             if (pool) {
                 d_scratch_    = (uint8_t*) pool->allocate(n_chunks * (size_t)chunk_size_, stream, "rze_scratch", true);
                 d_sizes_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rze_sizes",   true);
-                d_clean_dev_  = (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rze_clean",   true);
                 d_dst_off_dev_= (uint32_t*)pool->allocate(n_chunks * sizeof(uint32_t),    stream, "rze_offsets", true);
-                if (!d_scratch_ || !d_sizes_dev_ || !d_clean_dev_ || !d_dst_off_dev_)
+                if (!d_scratch_ || !d_sizes_dev_ || !d_dst_off_dev_)
                     throw std::runtime_error("RZEStage: failed to allocate persistent forward scratch from MemoryPool");
                 scratch_pool_owner_ = pool;
                 scratch_from_pool_  = true;
             } else {
                 FZ_CUDA_CHECK(cudaMalloc(&d_scratch_,     n_chunks * (size_t)chunk_size_));
                 FZ_CUDA_CHECK(cudaMalloc(&d_sizes_dev_,   n_chunks * sizeof(uint32_t)));
-                FZ_CUDA_CHECK(cudaMalloc(&d_clean_dev_,   n_chunks * sizeof(uint32_t)));
                 FZ_CUDA_CHECK(cudaMalloc(&d_dst_off_dev_, n_chunks * sizeof(uint32_t)));
                 scratch_pool_owner_ = nullptr;
                 scratch_from_pool_  = false;
@@ -372,32 +370,35 @@ void RZEStage::execute(
                                       n_chunks * sizeof(uint32_t),
                                       cudaMemcpyDeviceToDevice, stream));
 
-        // (3) Strip flag bits → clean sizes.
-        rzeStripFlagKernel<<<grid256, 256, 0, stream>>>(d_sizes_dev_, d_clean_dev_, n_chunks_u);
-
-        // (4) Exclusive prefix sum of clean sizes → payload-relative offsets.
+        // (3) Exclusive prefix sum of the flag-stripped sizes → payload-relative
+        //     offsets. The strip is folded into a CUB transform iterator (no
+        //     separate strip kernel / clean-sizes array), and the header offset is
+        //     folded into the pack kernel (no separate add-offset kernel). See
+        //     docs/codebase_notes.md CN-RZE-HELPERS.
         {
+            auto clean_it = thrust::make_transform_iterator(
+                static_cast<const uint32_t*>(d_sizes_dev_), RzeStripFlagOp{});
             auto scan_tmp = fz::backend::withTempStorage(pool, stream, "rze_cub_scan_tmp",
                 [&](void* tmp, size_t& bytes) {
                     cub::DeviceScan::ExclusiveSum(tmp, bytes,
-                                                  d_clean_dev_, d_dst_off_dev_,
+                                                  clean_it, d_dst_off_dev_,
                                                   (int)n_chunks, stream);
                 });
             fz::backend::freeTempStorage(pool, scan_tmp, stream);
         }
 
-        // (5) Convert to absolute output offsets (add header size).
-        rzeAddOffsetKernel<<<grid256, 256, 0, stream>>>(d_dst_off_dev_, n_chunks_u, (uint32_t)header_size);
-
-        // (6) Defer final output-size readback to postStreamSync.
+        // (4) Defer final output-size readback to postStreamSync.
         tail_last_index_       = n_chunks_u - 1;
+        tail_header_size_      = (uint32_t)header_size;
         tail_output_ptr_       = (uint8_t*)outputs[0];
         tail_readback_pending_ = true;
         tail_readback_stream_  = stream;
 
-        // (7) Pack compressed chunks from uniform scratch to packed output.
+        // (5) Pack compressed chunks from uniform scratch to packed output,
+        //     adding the header offset and stripping the flag bit inline.
         rzePackKernel<<<(int)n_chunks, 512, 0, stream>>>(
-            d_scratch_, d_out, d_dst_off_dev_, d_clean_dev_, (uint32_t)chunk_size_);
+            d_scratch_, d_out, d_dst_off_dev_, d_sizes_dev_,
+            (uint32_t)chunk_size_, (uint32_t)header_size);
         FZ_CUDA_CHECK(cudaGetLastError());
 
     // ── Inverse (decompress) ─────────────────────────────────────────────

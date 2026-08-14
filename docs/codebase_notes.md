@@ -678,3 +678,41 @@ This is the "optimize the bottleneck before fusing" result from the PFPL rooflin
 study: bitshuffle was 38% of PFPL runtime and looked compute-bound from the stage
 timing, but was actually a coalescing bug. It also validates the chunk-cooperative
 (CTA-per-chunk, smem-resident) kernel shape a flexible fusion framework would target.
+
+## CN-RZE-HELPERS — folding away the RZE strip/add-offset helper kernels
+
+**Source:** `modules/coders/rze/rze_stage.cu` — `RzeStripFlagOp`, `rzePackKernel`.
+
+The RZE forward path launched six device operations serially on one stream:
+`rzeEncodeKernel` → sizes memcpy → `rzeStripFlagKernel` (`& 0x7FFFFFFF`) → CUB
+`ExclusiveSum` → `rzeAddOffsetKernel` (`+ header_size`) → `rzePackKernel`. Per-kernel
+duration (PFPL on CLDHGH, 1583 chunks, H100, ncu):
+
+| kernel | µs | note |
+|---|---|---|
+| rzeEncodeKernel | 42.5 | compute-bound (72% SM) — the RZE compaction, hard to shrink |
+| rzeStripFlagKernel | 3.1 | 7 blocks — trivial, pure overhead |
+| DeviceScanInit + Scan | 6.6 | CUB offset scan (1583 elems) |
+| rzeAddOffsetKernel | 2.9 | 7 blocks — trivial, pure overhead |
+| rzePackKernel | 12.7 | copies the 4.5 MB packed payload — real memory work |
+| **Σ GPU** | **67.8** | vs a measured 92 µs stage |
+
+The strip and add-offset kernels are folded away: the flag strip becomes a
+`thrust::transform_iterator` feeding `ExclusiveSum` (so the scan reads
+flag-stripped sizes with no separate kernel and no `d_clean_dev_` array), and the
+header offset is added inside `rzePackKernel` (`dst = header_off + offset[cid]`,
+`sz = sizes[cid] & 0x7FFFFFFF`). The tail-size readback reads `d_sizes_dev_` and
+masks/adds `header_size` on the host. Six device ops → four; one device scratch
+array removed; byte-identical archive (22 RZE + 35 stage + 16 pipeline tests pass,
+compute-sanitizer clean, PFPL PSNR unchanged 84.7564 dB).
+
+**Honest payoff: small.** RZE stage 92 → 87 µs, PFPL DAG 0.214 → 0.212 ms (~1%).
+The naive "stage 92 − Σ GPU 68 = 24 µs of launch latency" estimate was optimistic:
+kernels queue asynchronously on the stream, so most of that gap is event-timing
+granularity and encode-tail overlap, not exposed launch stalls — removing two tiny
+kernels only recovers their ~6 µs of GPU time. The change stands as a
+**simplification** (fewer kernels/arrays, cleaner offset handling) with a marginal
+perf bonus, not a bottleneck fix. The RZE stage remains dominated by the
+compute-bound encode (42 µs) and the memory-bound pack (13 µs); shrinking it
+further means a faster compaction algorithm or fusing encode+pack, not trimming
+helpers. Contrast CN-BSHUF-SMEM, where the bottleneck really was addressable.
