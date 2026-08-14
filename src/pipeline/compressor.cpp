@@ -1,9 +1,12 @@
 #include "pipeline/compressor.h"
 #include "pipeline/concat_kernel.h"
+#include "pipeline/fusion_planner.h"
+#include "pipeline/fusion_registry.h"
 #include "pipeline_utils.h"
 #include "fzm_format.h"
 #include "log.h"
 #include "cuda_check.h"
+#include <cstdlib>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
@@ -183,6 +186,51 @@ Stage* Pipeline::addRawStage(Stage* stage) {
     return stage;
 }
 
+void Pipeline::planAndInstallFusion() {
+    // Runtime override (FZ_FUSION=off|auto) wins over the programmatic mode.
+    FusionPolicy mode = fusion_policy_;
+    if (const char* e = std::getenv("FZ_FUSION")) {
+        const std::string v(e);
+        if (v == "off" || v == "0")      mode = FusionPolicy::Off;
+        else if (v == "auto" || v == "1") mode = FusionPolicy::Auto;
+    }
+    if (mode != FusionPolicy::Auto) return;
+
+    std::vector<CompressionDAG::FusedGroupExec> installed;
+    for (auto& g : planFusionGroups(*dag_)) {
+        const FusedImpl* impl = findFusedImpl(g.stages);
+        if (!impl) continue;
+        CompressionDAG::FusedGroupExec fg;
+        fg.impl = impl;
+        fg.stages = g.stages;
+        bool ok = true;
+        for (Stage* s : g.stages) {
+            auto it = stage_to_node_.find(s);
+            if (it == stage_to_node_.end() || !it->second) { ok = false; break; }
+            fg.members.push_back(it->second);
+        }
+        if (!ok) continue;
+        fg.head = fg.members.front();
+        fg.tail = fg.members.back();
+        FZ_LOG(INFO, "Fusion: installed '%s' over %zu stages", impl->name, g.stages.size());
+        installed.push_back(std::move(fg));
+    }
+    if (installed.empty()) return;
+
+    dag_->setFusedGroups(std::move(installed));
+    if (graph_mode_enabled_) {
+        FZ_LOG(WARN, "Fusion active — disabling CUDA graph mode (fused runner synchronises).");
+        graph_mode_enabled_ = false;
+    }
+    // Buffer coloring aliases buffers by the STAGED liveness (the group's input
+    // dies after the first stage). A fused kernel keeps that input live across
+    // the whole group while writing the group's output, so an aliased
+    // input/output region would corrupt. Disable coloring for fused pipelines.
+    // (planAndInstallFusion runs before preallocateBuffers(), where coloring is
+    // applied, so this takes effect.)
+    dag_->setColoringEnabled(false);
+}
+
 void Pipeline::finalize() {
     if (is_finalized_) {
         throw std::runtime_error("Pipeline already finalized");
@@ -203,6 +251,8 @@ void Pipeline::finalize() {
     detectMultiOutputScenario(autoDetectUnconnectedOutputs());
     configureStreamsIfNeeded();
     dag_->finalize();
+
+    planAndInstallFusion();    // may disable graph mode if any group fuses
 
     computeInputAlignment();   // must run before propagateBufferSizes
     propagateBufferSizes();

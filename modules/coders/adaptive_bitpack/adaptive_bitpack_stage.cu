@@ -172,8 +172,8 @@ void AdaptiveBitpackStage<T>::execute(
 
 template<typename T>
 void AdaptiveBitpackStage<T>::postStreamSync(cudaStream_t stream) {
-    // Forward only: refine actual_output_size_ from the scanned payload length.
-    if (is_inverse_ || d_offset_ == nullptr || fwd_num_blocks_ == 0) return;
+    if (is_inverse_ || fwd_num_blocks_ == 0) return;
+    if (d_offset_ == nullptr) return;
     // Batch both tail reads on the caller's stream; one stream-scoped sync covers both.
     const size_t last = fwd_num_blocks_ - 1;
     uint32_t h_last_off = 0, h_last_cost = 0;

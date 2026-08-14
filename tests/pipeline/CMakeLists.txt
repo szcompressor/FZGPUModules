@@ -32,6 +32,14 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── Fusion planner (identifies fusable stage chains in the DAG) ───────────────
+fz_add_test(
+    NAME    test_fusion_planner
+    SOURCES test_fusion_planner.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
 # ─── Config file load/save (TOML) ─────────────────────────────────────────────
 fz_add_test(
     NAME    test_config

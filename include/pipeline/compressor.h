@@ -34,6 +34,17 @@ namespace fz {
  *  - decompress() output is pool-owned by default - do NOT cudaFree it.
  *    Call setPoolManagedDecompOutput(false) to receive a caller-owned pointer instead.
  */
+/**
+ * Kernel-fusion policy for compress. `Off` (default) runs every stage staged.
+ * `Auto` runs the fusion planner at finalize() and, for each fusable chain that
+ * has a registered fused implementation, replaces the group's staged execute()s
+ * with one fused kernel — a compress-only optimization that leaves the archive
+ * byte-identical (decompress is unaffected). Groups with no registered impl stay
+ * staged, so `Auto` is always safe. Enabling fusion disables CUDA graph capture.
+ * Overridable at runtime with FZ_FUSION=off|auto. See CN-FUSE-PROOF/PLAN.
+ */
+enum class FusionPolicy { Off, Auto };
+
 class Pipeline {
 public:
     /**
@@ -62,6 +73,12 @@ public:
 
     /** Must be called before finalize(). */
     void setMemoryStrategy(MemoryStrategy strategy);
+
+    /** Kernel-fusion policy (default Off). Must be called before finalize(). */
+    void setFusionPolicy(FusionPolicy mode) { fusion_policy_ = mode; }
+    FusionPolicy getFusionPolicy() const { return fusion_policy_; }
+    /** Number of fused groups installed at finalize() (0 unless Auto matched). */
+    size_t getFusedGroupCount() const { return dag_ ? dag_->getFusedGroupCount() : 0; }
 
     /** Number of parallel CUDA streams for level-based execution. Must be called before finalize(). */
     void setNumStreams(int num_streams);
@@ -713,6 +730,9 @@ private:
     // finalize() sub-steps
     void typeCheckConnections();
     void computeInputAlignment();
+    /// Run the fusion planner and install matched fused groups on the DAG
+    /// (Auto mode / FZ_FUSION=auto). No-op otherwise. May disable graph mode.
+    void planAndInstallFusion();
     void notifyStagesFinalizeHooks();
     void refinePoolSize();
     void setupGraphModeInput();
@@ -941,6 +961,7 @@ private:
 
     bool graph_mode_enabled_;
     bool graph_captured_;
+    FusionPolicy fusion_policy_ = FusionPolicy::Off;
 
     // Fixed device input buffer whose address is baked into the captured graph.
     // compress() copies user input here before cudaGraphLaunch().

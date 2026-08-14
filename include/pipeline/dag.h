@@ -18,6 +18,7 @@ namespace fz {
 // Forward declarations
 class Stage;
 class MemoryPool;
+struct FusedImpl;
 
 /** Memory allocation strategy for pipeline execution. */
 enum class MemoryStrategy {
@@ -187,6 +188,23 @@ public:
     /** @internal Used by Pipeline::finalize(); not part of the stable public API. */
     size_t getStreamCount() const { return streams_.size(); }
 
+    /**
+     * A fusion group installed for execution: the fused runner replaces the
+     * member stages' individual execute()s with one call at the head node,
+     * writing the tail node's output buffer. See fusion_registry.h.
+     */
+    struct FusedGroupExec {
+        DAGNode*              head = nullptr;   ///< first node (fused kernel runs here)
+        DAGNode*              tail = nullptr;   ///< last node; its output = the archive
+        std::vector<DAGNode*> members;          ///< all group nodes (skipped individually)
+        std::vector<Stage*>   stages;           ///< group stages for the runner context
+        const FusedImpl*      impl = nullptr;   ///< matched fused implementation
+    };
+
+    /** Install fused groups (from Pipeline::finalize) that execute() will honor. */
+    void setFusedGroups(std::vector<FusedGroupExec> groups);
+    size_t getFusedGroupCount() const { return fused_groups_.size(); }
+
     void printDAG() const;
     void printBufferLifetimes() const;
 
@@ -259,6 +277,11 @@ private:
     std::unordered_map<int, int> buffer_color_;
     std::vector<size_t>          color_region_sizes_;
     std::vector<void*>           color_region_ptrs_;
+
+    // Fusion: groups whose staged execute()s are replaced by one fused runner.
+    std::vector<FusedGroupExec>          fused_groups_;
+    std::unordered_map<DAGNode*, size_t> fused_head_;   ///< head node → index in fused_groups_
+    std::unordered_set<DAGNode*>         fused_member_; ///< every node covered by a group
 
     void assignLevels();
     void assignStreams();

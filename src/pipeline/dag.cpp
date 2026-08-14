@@ -1,4 +1,5 @@
 #include "pipeline/dag.h"
+#include "pipeline/fusion_registry.h"
 #include "stage/stage.h"
 #include "mem/mempool.h"
 #include "log.h"
@@ -379,13 +380,58 @@ void CompressionDAG::finalize() {
     is_finalized_ = true;
 }
 
+void CompressionDAG::setFusedGroups(std::vector<FusedGroupExec> groups) {
+    fused_groups_ = std::move(groups);
+    fused_head_.clear();
+    fused_member_.clear();
+    for (size_t i = 0; i < fused_groups_.size(); ++i) {
+        fused_head_[fused_groups_[i].head] = i;
+        for (DAGNode* m : fused_groups_[i].members) fused_member_.insert(m);
+    }
+}
+
 void CompressionDAG::execute(cudaStream_t stream) {
     if (!is_finalized_) {
         throw std::runtime_error("DAG must be finalized before execution");
     }
-    
+
     for (int level = 0; level <= max_level_; level++) {
         for (auto* node : levels_[level]) {
+            // ── Fusion: a matched group runs one fused kernel at its head node
+            // and its member stages' individual execute()s are bypassed. Only
+            // reached with fusion enabled (which also disables graph capture).
+            if (!fused_member_.empty() && fused_member_.count(node)) {
+                auto head_it = fused_head_.find(node);
+                if (head_it == fused_head_.end()) {
+                    // Non-head member: nothing to run; satisfy any waiter.
+                    FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, stream));
+                    continue;
+                }
+                const FusedGroupExec& fg = fused_groups_[head_it->second];
+                for (auto* dep : node->dependencies)
+                    FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
+
+                const BufferInfo& in_buf  = buffers_.at(node->input_buffer_ids[0]);
+                BufferInfo&       out_buf = buffers_.at(fg.tail->output_buffer_ids[0]);
+                FusedRunContext ctx;
+                ctx.stages      = &fg.stages;
+                ctx.d_input     = in_buf.d_ptr;
+                ctx.input_bytes = in_buf.size;
+                ctx.d_output    = out_buf.d_ptr;
+                ctx.pool        = mem_pool_;
+                ctx.stream      = stream;
+                const size_t archive_bytes = fg.impl->run(ctx);
+                out_buf.size = archive_bytes;
+                if (out_buf.allocated_size != 0 && archive_bytes > out_buf.allocated_size)
+                    throw std::runtime_error(
+                        "Fused group '" + std::string(fg.impl->name) + "' wrote " +
+                        std::to_string(archive_bytes) + " bytes into a " +
+                        std::to_string(out_buf.allocated_size) + "-byte buffer");
+                for (DAGNode* m : fg.members)
+                    FZ_CUDA_CHECK(cudaEventRecord(m->completion_event, stream));
+                continue;
+            }
+
             // Use node's assigned stream, or fallback to provided stream.
             // During graph capture, force all work onto the single capture stream
             // so the entire execute() body is recorded in one graph regardless of

@@ -111,6 +111,15 @@ public:
     }
     uint32_t getBlockSize() const { return block_size_; }
 
+    /// Block-local only in 1-D block-reset mode (block_size_ > 0): each
+    /// block_size_-element segment is a self-contained delta chain. The N-D
+    /// default (block_size_ == 0) is a multi-dimensional stencil handled by a
+    /// different driver and is not fused yet.
+    FusionSpec getFusionSpec() const override {
+        if (isInverse() || block_size_ == 0) return {};
+        return FusionSpec{FusionAccess::BlockLocal, block_size_};
+    }
+
     /**
      * Enable per-block mean centering (FSZ-style adaptive centering).
      *

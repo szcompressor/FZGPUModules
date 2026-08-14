@@ -6,6 +6,7 @@
 
 #include "backend/types.h"
 #include "fzm_format.h"
+#include "stage/fusion.h"
 #include <array>
 #include <cstdint>
 #include <stdexcept>
@@ -278,6 +279,18 @@ public:
         (void)input_sizes;
         return 0;
     }
+
+    /**
+     * Fusion contract: how this stage accesses its input, which decides whether
+     * the fusion planner may fold it into a single kernel with its neighbours
+     * (see include/stage/fusion.h and docs/codebase_notes.md CN-FUSE-PROOF).
+     *
+     * Default is `Unfusable` — a stage is only ever fused if it opts in by
+     * overriding this. Stages whose fusability depends on configuration (e.g. a
+     * quantizer is a pure Map only in linear mode) must reflect that here.
+     * Forward-mode only; an inverse stage should report `Unfusable`.
+     */
+    virtual FusionSpec getFusionSpec() const { return {}; }
 };
 
 } // namespace fz

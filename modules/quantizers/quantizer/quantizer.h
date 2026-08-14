@@ -239,6 +239,23 @@ public:
     void setInverse(bool inverse) override { is_inverse_ = inverse; }
     bool isInverse() const override        { return is_inverse_; }
 
+    /// Fusable as a pure Map only in linear/no-outlier forward mode: the outlier
+    /// and in-place paths write side buffers / do scatter, which is not a map.
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || !isLinearMode()) return {};
+        return FusionSpec{FusionAccess::Map, 0};
+    }
+
+    /// Establish the forward-computed absolute error bound for a fused runner
+    /// that bypasses execute(). The inverse quant reconstructs with
+    /// computed_abs_eb_, normally set during forward execute(); a fused pipeline
+    /// reuses this stage object for decompress, so it must be primed. Only ABS
+    /// mode is supported (fusion requires it — see QuantizerStage getFusionSpec).
+    void primeAbsEbForFusion() {
+        if (config_.eb_mode == ErrorBoundMode::ABS)
+            computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
+    }
+
     /// Store the logical grid so the NOA value-range scan can exclude the
     /// LC-chunk zero-padding tail of the input buffer (E16 over-loosening on
     /// all-positive fields). Runtime-only hint; not serialized (decode never

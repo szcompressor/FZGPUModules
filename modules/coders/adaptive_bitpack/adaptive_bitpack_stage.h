@@ -100,6 +100,24 @@ public:
     }
     uint32_t getBlockSize() const { return block_size_; }
 
+    /// A per-block fixed-length coder: warp-cooperative reduce+pack whose only
+    /// cross-block dependency is the payload offset prefix, which the fused
+    /// driver owns. Fuses as the tail of a block-local chain of the same block
+    /// size. Only the warp-cooperative block sizes (32/64) are fusable.
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || (block_size_ != 32u && block_size_ != 64u)) return {};
+        return FusionSpec{FusionAccess::Cooperative, block_size_};
+    }
+
+    /// Set by a fused runner that produced this stage's archive without calling
+    /// execute() (the fused kernel wrote the identical [meta|payload] blob). Lets
+    /// buildHeader()'s num_elements and the DAG's output sizing see a normal
+    /// forward result. postStreamSync() stays a no-op (fwd_num_blocks_ == 0).
+    void setFusedResult(size_t num_elements, size_t archive_bytes) {
+        num_elements_       = num_elements;
+        actual_output_size_ = archive_bytes;
+    }
+
     /// Enable cuSZp2 per-block plain/outlier selection: each block may instead
     /// store element 0 as a raw 1..sizeof(T)-byte outlier and pack only the rest,
     /// whichever is smaller. Helps non-sparse, high-smoothness data (the first

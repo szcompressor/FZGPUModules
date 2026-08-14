@@ -154,6 +154,15 @@ public:
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
+    // Block-local for fusion: forward, 2-D tile (tz == 1). The block a downstream
+    // coder sees is one tile (tile_elems); the fused driver (cuSZp3) recomputes
+    // the separable delta per element. tz > 1 is not fused yet.
+    FusionSpec getFusionSpec() const override {
+        auto t = effectiveTile();
+        if (is_inverse_ || t[2] != 1) return {};
+        return FusionSpec{FusionAccess::BlockLocal, t[0] * t[1]};
+    }
+
     std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const override {

@@ -86,6 +86,26 @@ if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-cuszp2 PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
+# ── L2-blocked tiling prototype (compress locality probe) ────────────────────
+add_executable(fzgmod-profile-l2tile l2tile_profile.cpp)
+target_link_libraries(fzgmod-profile-l2tile PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-l2tile PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-l2tile PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
+# ── Fully-fused cuSZp2 go/no-go proof ────────────────────────────────────────
+add_executable(fzgmod-profile-fuse fuse_proof.cu)
+target_link_libraries(fzgmod-profile-fuse PRIVATE fzgmod)
+target_include_directories(fzgmod-profile-fuse PRIVATE
+    ${CMAKE_SOURCE_DIR}/modules ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(fzgmod-profile-fuse PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-fuse PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()
+
 # ── cuSZp3 nsys / NVTX3 harness ──────────────────────────────────────────────
 # Pipeline: Quantizer(linear,ABS) → TiledLorenzo(8x8) → AdaptiveBitpack(64,outlier)
 # Matches examples/presets/cuszp3_outlier.toml.

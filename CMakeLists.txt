@@ -387,6 +387,7 @@ add_library(FZGMOD::utils ALIAS fzgmod_utils)
 
 #### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
 add_library(fzgmod_modules
+  modules/fused/fused_block/fused_block.cu
   modules/predictors/diff/diff.cu
   modules/predictors/lorenzo/lorenzo_stage.cu
   modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
@@ -497,6 +498,8 @@ add_library(fzgmod_pipeline
   src/pipeline/dag.cpp
   src/pipeline/dag_coloring.cpp
   src/pipeline/dag_query.cpp
+  src/pipeline/fusion_planner.cpp
+  src/pipeline/fusion_registry.cpp
   src/pipeline/perf.cpp
   src/pipeline/stat.cpp
 )
