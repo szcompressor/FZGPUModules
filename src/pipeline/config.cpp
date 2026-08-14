@@ -50,6 +50,8 @@
 #include "transforms/log_transform/log_transform_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
+#include "fused/szx/szx_stage.h"
+#include "fused/szp/szp_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
@@ -581,6 +583,70 @@ static Stage* addAdaptiveBitpackStage(Pipeline& p, const toml::table& t) {
         return s;
     }
     throw std::runtime_error("loadConfig: unsupported AdaptiveBitpack input_type");
+}
+
+// SZx / SZp accept float32/float64 input and error_bound / error_bound_mode
+// (ABS or NOA — these whole-compressor stages have no exact per-element REL).
+// Every optStr/optInt/optDbl read is kept inline in the add function body so the
+// doc/TOML key checker, which parses that body, sees the full accepted-key set.
+static bool szIsNoa(const std::string& m) {
+    return m == "NOA" || m == "noa" || m == "REL" || m == "rel";
+}
+
+static Stage* addSZxStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "float32"));
+    uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 128));
+    double eb = optDbl(t, "error_bound", 1e-3);
+    SZxErrorMode mode = szIsNoa(optStr(t, "error_bound_mode", "ABS"))
+        ? SZxErrorMode::NOA : SZxErrorMode::ABS;
+    auto configure = [&](auto* s) {
+        s->setBlockSize(block_size);
+        s->setErrorBound(eb);
+        s->setErrorMode(mode);
+        return s;
+    };
+    if (dt == DataType::FLOAT32) return configure(p.addStage<SZxStage<float>>());
+    if (dt == DataType::FLOAT64) return configure(p.addStage<SZxStage<double>>());
+    throw std::runtime_error("loadConfig: unsupported SZx data_type (use float32/float64)");
+}
+
+static Stage* addSZpStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "float32"));
+    uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 128));
+    double eb = optDbl(t, "error_bound", 1e-3);
+    SZpErrorMode mode = szIsNoa(optStr(t, "error_bound_mode", "ABS"))
+        ? SZpErrorMode::NOA : SZpErrorMode::ABS;
+    auto configure = [&](auto* s) {
+        s->setBlockSize(block_size);
+        s->setErrorBound(eb);
+        s->setErrorMode(mode);
+        return s;
+    };
+    if (dt == DataType::FLOAT32) return configure(p.addStage<SZpStage<float>>());
+    if (dt == DataType::FLOAT64) return configure(p.addStage<SZpStage<double>>());
+    throw std::runtime_error("loadConfig: unsupported SZp data_type (use float32/float64)");
+}
+
+static void saveSZxStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(SZxConfig)] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    SZxConfig cfg;
+    if (sz >= sizeof(cfg)) std::memcpy(&cfg, buf, sizeof(cfg));
+    out << "data_type = \""       << dataTypeToString(cfg.data_type) << "\"\n";
+    out << "block_size = "        << static_cast<int64_t>(cfg.block_size) << "\n";
+    out << "error_bound = "       << cfg.error_bound << "\n";
+    out << "error_bound_mode = \"" << (cfg.eb_mode == 2 ? "NOA" : "ABS") << "\"\n";
+}
+
+static void saveSZpStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(SZpConfig)] = {};
+    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
+    SZpConfig cfg;
+    if (sz >= sizeof(cfg)) std::memcpy(&cfg, buf, sizeof(cfg));
+    out << "data_type = \""       << dataTypeToString(cfg.data_type) << "\"\n";
+    out << "block_size = "        << static_cast<int64_t>(cfg.block_size) << "\n";
+    out << "error_bound = "       << cfg.error_bound << "\n";
+    out << "error_bound_mode = \"" << (cfg.eb_mode == 2 ? "NOA" : "ABS") << "\"\n";
 }
 
 static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
@@ -1140,6 +1206,8 @@ static const StageEntry kStageRegistry[] = {
     { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage,  "modules/fused/bitplane_rze" },
     { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage, "modules/coders/adaptive_bitpack" },
     { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage, "modules/predictors/tiled_lorenzo" },
+    { "SZx",          StageType::SZX,          addSZxStage,          saveSZxStage,          "modules/fused/szx" },
+    { "SZp",          StageType::SZP,          addSZpStage,          saveSZpStage,          "modules/fused/szp" },
 };
 
 // Declared in include/pipeline/config.h.  Deliberately derived from the registry

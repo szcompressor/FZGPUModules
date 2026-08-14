@@ -1,0 +1,19 @@
+[pipeline]
+# SZx — ultrafast error-bounded lossy compressor (native fused stage).
+#
+# One stage, whole compressor: per-block constant/non-constant classification +
+# fixed-length residual coding, no entropy stage. From-the-paper reimplementation
+# (Yu, Di, et al.). Not byte-compatible with the reference SZx container.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/szx.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "szx"
+type = "SZx"
+data_type = "float32"
+block_size = 128
+error_bound = 1e-3
+error_bound_mode = "ABS"

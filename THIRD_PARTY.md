@@ -347,6 +347,85 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 ---
 
+## SZp / fZ-light
+
+**Repository:** https://github.com/szcompressor/SZp
+
+**Used by:** `SZpStage` (`modules/fused/szp/`)
+
+**Relationship:** **GPU reimplementation** of the SZp forward/inverse. The
+upstream SZp is a CPU/OpenMP compressor (published as *fZ-light*, SC '24) and is
+vendored for reference/validation at `compressors/SZp`; `SZpStage` reimplements
+its inner loop — linear error-bounded quantization, block-reset 1-D Lorenzo
+delta, and per-block fixed-length (zigzag) residual packing with no entropy
+coder — as a single fused CUDA stage. No source is copied: the CPU reference is
+OpenMP host code, so the device kernels, the one-thread-per-block layout, the CUB
+`DeviceScan` per-block offsets, the FZM archive layout, and all `MemoryPool`
+scaffolding are FZGPUModules code. The archive **is not byte-compatible** with
+the reference SZp container. hZCCL's compressed-domain collectives are not
+implemented (see `docs/szp_homomorphic_collectives.md`). The MIT copyright notice
+is reproduced verbatim below.
+
+**Papers:**
+- Jiajun Huang, Sheng Di, Xiaodong Yu, Yuanjian Liu, Zizhe Jian, Franck
+  Cappello, et al., "SZp/fZ-light: An Ultra-fast Error-bounded Lossy Compressor"
+  (SC '24). See also the hZCCL companion, "hZCCL: Accelerating Collective
+  Communication with Co-Designed Homomorphic Compression" (SC '24).
+
+**License:**
+
+```
+MIT License
+
+Copyright (c) 2024 Argonne National Laboratory (ANL)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## SZx
+
+**Repository:** https://github.com/szcompressor/SZx
+
+**Used by:** `SZxStage` (`modules/fused/szx/`)
+
+**Relationship: algorithmic attribution only — no code was used.** `SZxStage`
+was written from the paper's description alone; no SZx source is vendored or
+consulted. The ideas taken are SZx's **per-block constant/non-constant
+classification** (a block whose range is within `2·eb` collapses to a single
+reference value) and its entropy-coder-free **fixed-length residual coding** of
+non-constant blocks. The device kernels, one-thread-per-block layout, meta/payload
+archive layout, CUB offset scan, and `MemoryPool`/FZM scaffolding are
+FZGPUModules code; the archive is not byte-compatible with the reference SZx
+container. Upstream SZx is BSD-3-Clause; anyone redistributing should consult its
+`LICENSE` if they later vendor its source.
+
+**Citation:**
+```
+Xiaodong Yu, Sheng Di, Kai Zhao, Jiannan Tian, Dingwen Tao, Xin Liang, Franck
+Cappello. "Ultrafast Error-bounded Lossy Compression for Scientific Datasets."
+HPDC '22. Argonne National Laboratory.
+```
+
+---
+
 ## FSZ
 
 **Used by:** `AdaptiveLorenzoStage` (`modules/fused/adaptive_lorenzo/`),

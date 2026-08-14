@@ -6,6 +6,8 @@
 | \subpage stage_adaptive_lorenzo | Per-tile adaptive multi-order Lorenzo + centering (FSZ prediction stage) |
 | \subpage stage_ginterp | Multi-level spline interpolation predictor + quantizer (3-D, cuSZ-Hi port) |
 | \subpage stage_bitplane_rze | Fused bitplane transpose + zero-group RZE — FZ-GPU's lossless encoder |
+| \subpage stage_szx | SZx ultrafast EB compressor — per-block constant/non-constant classification + fixed-length residuals (whole compressor) |
+| \subpage stage_szp | SZp / fZ-light — quantize + 1-D Lorenzo delta + fixed-length bitpack (whole compressor) |
 | \ref stage_diff "DifferenceStage (negabinary-fused)" | First-order difference with inline negabinary encoding (`DifferenceStage<T, TOut>` where `TOut != T`) |
 
 > **Note:** `DifferenceStage` with a `TOut != T` template argument fuses a negabinary

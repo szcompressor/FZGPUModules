@@ -1,0 +1,20 @@
+[pipeline]
+# SZp / fZ-light — extreme-fast error-bounded compressor (native fused stage).
+#
+# One stage, whole compressor: quantize + 1-D Lorenzo delta (block reset) +
+# fixed-length bitpack, no entropy stage. GPU reimplementation of the SZp forward/
+# inverse (Huang, Di, et al., SC'24). Not byte-compatible with the reference SZp
+# container; for a zero-new-code equivalent see szp_composed.toml.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/szp.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "szp"
+type = "SZp"
+data_type = "float32"
+block_size = 128
+error_bound = 1e-3
+error_bound_mode = "ABS"

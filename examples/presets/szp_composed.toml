@@ -1,0 +1,44 @@
+[pipeline]
+# SZp / fZ-light (composed) — Quantizer(linear) → Lorenzo(block) → AdaptiveBitpack
+#
+# SZp's inner loop is 1-D Lorenzo prediction + error-bound quantization +
+# per-block fixed-length residual packing, with NO entropy coder. That is exactly
+# this three-stage chain — the same structure as cuszp.toml, but at SZp's default
+# block size of 128. This preset reproduces SZp *behavior* (an error-bounded,
+# entropy-coder-free, fixed-length-packed archive) with ZERO new code.
+#
+# It is NOT byte-compatible with the reference SZp container (compressors/SZp).
+# For a format-faithful, single-launch port use the fused `SZp` stage
+# (modules/fused/szp) once its kernels are filled in — this preset is the
+# behavioral baseline to validate that stage against.
+#
+# SZp / fZ-light: Huang, Di, et al., SC'24. hZCCL adds compressed-domain
+# collectives on top of this container (not expressible as a preset).
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/szp_composed.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "ABS"
+linear_mode = true
+
+[[stage]]
+name = "lrz"
+type = "Lorenzo"
+data_type = "int32"
+block_size = 128
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "ab"
+type = "AdaptiveBitpack"
+input_type = "int32"
+block_size = 128
+inputs = [{from = "lrz"}]

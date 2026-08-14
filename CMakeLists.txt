@@ -411,6 +411,8 @@ add_library(fzgmod_modules
   modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.cu
     modules/fused/lorenzo_quant/lorenzo_quant.cu
   modules/fused/lorenzo_quant/lorenzo_quant_nd.cu
+  modules/fused/szx/szx_stage.cu
+  modules/fused/szp/szp_stage.cu
   # Huffman (PHF CPU layer + GPU kernels + stage wrapper)
   modules/coders/huffman/phf/hf_buf.cc
   modules/coders/huffman/phf/hf_hl.cc

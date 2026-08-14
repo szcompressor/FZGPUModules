@@ -25,6 +25,8 @@
 #include "shufflers/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
+#include "fused/szx/szx_stage.h"
+#include "fused/szp/szp_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
@@ -508,6 +510,34 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
             else if (dt == DataType::INT32) stage = new TiledLorenzoStage<int32_t>();
             else throw std::runtime_error(
                     "Unsupported TiledLorenzoStage DataType: "
+                    + std::to_string(static_cast<int>(dt)));
+            stage->deserializeHeader(config, config_size);
+            break;
+        }
+
+        case StageType::SZX: {
+            // config[0] holds the DataType of T (FLOAT32 / FLOAT64).
+            DataType dt = (config_size > 0)
+                ? static_cast<DataType>(config[0])
+                : DataType::FLOAT32;
+            if      (dt == DataType::FLOAT32) stage = new SZxStage<float>();
+            else if (dt == DataType::FLOAT64) stage = new SZxStage<double>();
+            else throw std::runtime_error(
+                    "Unsupported SZxStage DataType: "
+                    + std::to_string(static_cast<int>(dt)));
+            stage->deserializeHeader(config, config_size);
+            break;
+        }
+
+        case StageType::SZP: {
+            // config[0] holds the DataType of T (FLOAT32 / FLOAT64).
+            DataType dt = (config_size > 0)
+                ? static_cast<DataType>(config[0])
+                : DataType::FLOAT32;
+            if      (dt == DataType::FLOAT32) stage = new SZpStage<float>();
+            else if (dt == DataType::FLOAT64) stage = new SZpStage<double>();
+            else throw std::runtime_error(
+                    "Unsupported SZpStage DataType: "
                     + std::to_string(static_cast<int>(dt)));
             stage->deserializeHeader(config, config_size);
             break;

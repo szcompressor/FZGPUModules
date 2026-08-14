@@ -293,3 +293,19 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
+
+# ─── SZx stage (ultrafast EB, constant-block classification) ──────────────────
+fz_add_test(
+    NAME    test_szx
+    SOURCES test_szx.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── SZp / fZ-light stage (quantize + 1-D delta + fixed-length bitpack) ────────
+fz_add_test(
+    NAME    test_szp
+    SOURCES test_szp.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)

@@ -46,3 +46,6 @@
 #include "transforms/adm/adm_stage.h"
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
+#include "structural/roibin_split/roibin_split_stage.h"
+#include "fused/szx/szx_stage.h"
+#include "fused/szp/szp_stage.h"

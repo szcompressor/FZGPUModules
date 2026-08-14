@@ -106,6 +106,8 @@ enum class StageType : uint16_t {
     LOG_TRANSFORM = 33, ///< Log-space transform for point-wise relative bounds (Liang et al., CLUSTER'18)
     ADAPTIVE_LORENZO = 34, ///< Per-tile adaptive multi-order Lorenzo + centering (FSZ prediction stage)
     ROIBIN_SPLIT = 35, ///< Region-of-interest / binned-background split (ROIBIN-style dual-error-bound branching)
+    SZX        = 36,   ///< SZx ultrafast EB compressor: per-block constant/non-constant classification + fixed-length residuals (fused, no entropy coder)
+    SZP        = 37,   ///< SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack (fused, no entropy coder)
 };
 
 /**
@@ -340,6 +342,8 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::SPLIT:       return "Split";
         case StageType::MERGE:       return "Merge";
         case StageType::ROIBIN_SPLIT: return "ROIBinSplit";
+        case StageType::SZX: return "SZx";
+        case StageType::SZP: return "SZp";
         case StageType::QUANTIZER:   return "Quantizer";
         case StageType::ZIGZAG:      return "Zigzag";
         case StageType::NEGABINARY:  return "Negabinary";
