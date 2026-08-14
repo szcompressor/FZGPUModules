@@ -50,6 +50,7 @@
 #include <stdexcept>
 #include <string>
 #include <algorithm>
+#include <cstdlib>
 
 namespace fz {
 
@@ -63,6 +64,34 @@ namespace fz {
 //
 // Output: plane p at in-chunk positions  p*(N_chunk/32) .. (p+1)*(N_chunk/32)-1
 // ─────────────────────────────────────────────────────────────────────────────
+
+// The 5-stage register butterfly shared by the scattered and smem-staged 32-bit
+// kernels. Self-inverse (encode and decode apply the identical transform); the
+// only difference between the two directions is the global memory layout.
+__device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane)
+{
+    unsigned q = fz::backend::shflXor(a, 16, 32);
+    a = ((sublane & 16) == 0)
+        ? __byte_perm(a, q, (3u<<12)|(2u<<8)|(7u<<4)|6u)
+        : __byte_perm(a, q, (5u<<12)|(4u<<8)|(1u<<4)|0u);
+    q = fz::backend::shflXor(a, 8, 32);
+    a = ((sublane & 8) == 0)
+        ? __byte_perm(a, q, (3u<<12)|(7u<<8)|(1u<<4)|5u)
+        : __byte_perm(a, q, (6u<<12)|(2u<<8)|(4u<<4)|0u);
+    q = fz::backend::shflXor(a, 4, 32);
+    unsigned mask = 0x0F0F0F0Fu;
+    a = ((sublane & 4) == 0) ? ((a & ~mask) | ((q >> 4) & mask))
+                            : (((q << 4) & ~mask) | (a & mask));
+    q = fz::backend::shflXor(a, 2, 32);
+    mask = 0x33333333u;
+    a = ((sublane & 2) == 0) ? ((a & ~mask) | ((q >> 2) & mask))
+                            : (((q << 2) & ~mask) | (a & mask));
+    q = fz::backend::shflXor(a, 1, 32);
+    mask = 0x55555555u;
+    a = ((sublane & 1) == 0) ? ((a & ~mask) | ((q >> 1) & mask))
+                            : (((q << 1) & ~mask) | (a & mask));
+    return a;
+}
 
 __global__ void bitshuffleEncodeKernel32(
     const uint32_t* __restrict__ in,
@@ -156,6 +185,72 @@ __global__ void bitshuffleDecodeKernel32(
 
         out[out_base + i] = a;
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared-memory-staged 32-bit kernels. The scattered kernels above write each
+// bit-plane word to global at stride npp (512 B for the default chunk) — the 32
+// lanes of a warp hit 32 different sectors, so every store is fully uncoalesced
+// (32 sectors/request, 12.5% byte efficiency, L2-transaction bound at ~9% DRAM;
+// see docs/codebase_notes.md CN-BSHUF-SMEM). These stage the permuted chunk in
+// shared memory so the *global* traffic is contiguous both ways.
+//
+// The smem plane layout is padded to `npp + 1` words per plane: a warp writes
+// s[sublane*pstride + col] with col warp-uniform and sublane = lane, i.e. stride
+// pstride. Since npp is a multiple of 32 (N_chunk is a multiple of 1024), pstride
+// is coprime to 32 → all 32 lanes land in distinct banks, no conflict. Output is
+// byte-identical to the scattered kernels.
+// ─────────────────────────────────────────────────────────────────────────────
+
+__global__ void bitshuffleEncodeKernel32Smem(
+    const uint32_t* __restrict__ in,
+    uint32_t*       __restrict__ out,
+    uint32_t N_chunk)
+{
+    extern __shared__ unsigned s[];
+    const int      tid      = (int)threadIdx.x;
+    const int      sublane  = tid % 32;
+    const uint32_t in_base  = blockIdx.x * N_chunk;
+    const uint32_t out_base = blockIdx.x * N_chunk;
+    const int      npp      = (int)(N_chunk / 32u);   // words per bit-plane
+    const int      pstride  = npp + 1;                // padded plane stride
+
+    // Coalesced read → butterfly → conflict-free smem scatter into plane layout.
+    for (int i = tid; i < (int)N_chunk; i += (int)blockDim.x)
+        s[sublane * pstride + i / 32] = butterfly32(in[in_base + i], sublane);
+    __syncthreads();
+
+    // Coalesced flush: global word j is plane (j/npp), column (j%npp).
+    for (int j = tid; j < (int)N_chunk; j += (int)blockDim.x) {
+        const int p = j / npp;
+        out[out_base + j] = s[p * pstride + (j - p * npp)];
+    }
+}
+
+__global__ void bitshuffleDecodeKernel32Smem(
+    const uint32_t* __restrict__ in,
+    uint32_t*       __restrict__ out,
+    uint32_t N_chunk)
+{
+    extern __shared__ unsigned s[];
+    const int      tid      = (int)threadIdx.x;
+    const int      sublane  = tid % 32;
+    const uint32_t in_base  = blockIdx.x * N_chunk;
+    const uint32_t out_base = blockIdx.x * N_chunk;
+    const int      npp      = (int)(N_chunk / 32u);
+    const int      pstride  = npp + 1;
+
+    // Coalesced load of the plane-organised input into the padded smem layout.
+    for (int j = tid; j < (int)N_chunk; j += (int)blockDim.x) {
+        const int p = j / npp;
+        s[p * pstride + (j - p * npp)] = in[in_base + j];
+    }
+    __syncthreads();
+
+    // s[sublane*pstride + i/32] == in[in_base + i/32 + sublane*npp] (the value the
+    // scattered decode gathered); butterfly is self-inverse → coalesced store.
+    for (int i = tid; i < (int)N_chunk; i += (int)blockDim.x)
+        out[out_base + i] = butterfly32(s[sublane * pstride + i / 32], sublane);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -350,8 +445,35 @@ __global__ void bitshuffleDecodeKernelBallot(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BitshuffleStage::execute
+// Shared-memory staging control for the 32-bit path.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Device opt-in shared-memory ceiling (H100 ~227 KB), queried once.
+static int bitshufMaxSmem() {
+    static int v = [] {
+        int dev = 0; cudaGetDevice(&dev);
+        int s = 48 * 1024;
+        cudaDeviceGetAttribute(&s, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        return s;
+    }();
+    return v;
+}
+
+// Staged 32-bit path on by default; FZ_BITSHUF_SMEM=0 forces the scattered kernel
+// (kept for A/B measurement — see CN-BSHUF-SMEM).
+static bool bitshufUseSmem() {
+    static bool v = [] {
+        const char* e = std::getenv("FZ_BITSHUF_SMEM");
+        return !(e && e[0] == '0');
+    }();
+    return v;
+}
+
+// Padded smem footprint for a 32-plane chunk of npp = N_chunk/32 words per plane.
+static size_t bitshuf32SmemBytes(size_t N_chunk) {
+    const size_t npp = N_chunk / 32u;
+    return 32u * (npp + 1u) * sizeof(uint32_t);
+}
 
 void BitshuffleStage::execute(
     cudaStream_t stream,
@@ -395,13 +517,26 @@ void BitshuffleStage::execute(
                         static_cast<uint32_t>(N_chunk));
                     break;
                 }
-                case 4:
-                    bitshuffleEncodeKernel32
-                        <<<grid, 1024, 0, stream>>>(
-                        static_cast<const uint32_t*>(inputs[0]),
-                        static_cast<uint32_t*>(outputs[0]),
-                        static_cast<uint32_t>(N_chunk));
+                case 4: {
+                    const size_t smem = bitshuf32SmemBytes(N_chunk);
+                    if (bitshufUseSmem() && smem <= (size_t)bitshufMaxSmem()) {
+                        if (smem > 48u * 1024u)
+                            cudaFuncSetAttribute(bitshuffleEncodeKernel32Smem,
+                                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+                        bitshuffleEncodeKernel32Smem
+                            <<<grid, 1024, smem, stream>>>(
+                            static_cast<const uint32_t*>(inputs[0]),
+                            static_cast<uint32_t*>(outputs[0]),
+                            static_cast<uint32_t>(N_chunk));
+                    } else {
+                        bitshuffleEncodeKernel32
+                            <<<grid, 1024, 0, stream>>>(
+                            static_cast<const uint32_t*>(inputs[0]),
+                            static_cast<uint32_t*>(outputs[0]),
+                            static_cast<uint32_t>(N_chunk));
+                    }
                     break;
+                }
                 case 8:
                     bitshuffleEncodeKernel64
                         <<<grid, 1024, 0, stream>>>(
@@ -432,13 +567,26 @@ void BitshuffleStage::execute(
                         static_cast<uint32_t>(N_chunk));
                     break;
                 }
-                case 4:
-                    bitshuffleDecodeKernel32
-                        <<<grid, 1024, 0, stream>>>(
-                        static_cast<const uint32_t*>(inputs[0]),
-                        static_cast<uint32_t*>(outputs[0]),
-                        static_cast<uint32_t>(N_chunk));
+                case 4: {
+                    const size_t smem = bitshuf32SmemBytes(N_chunk);
+                    if (bitshufUseSmem() && smem <= (size_t)bitshufMaxSmem()) {
+                        if (smem > 48u * 1024u)
+                            cudaFuncSetAttribute(bitshuffleDecodeKernel32Smem,
+                                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+                        bitshuffleDecodeKernel32Smem
+                            <<<grid, 1024, smem, stream>>>(
+                            static_cast<const uint32_t*>(inputs[0]),
+                            static_cast<uint32_t*>(outputs[0]),
+                            static_cast<uint32_t>(N_chunk));
+                    } else {
+                        bitshuffleDecodeKernel32
+                            <<<grid, 1024, 0, stream>>>(
+                            static_cast<const uint32_t*>(inputs[0]),
+                            static_cast<uint32_t*>(outputs[0]),
+                            static_cast<uint32_t>(N_chunk));
+                    }
                     break;
+                }
                 case 8:
                     bitshuffleDecodeKernel64
                         <<<grid, 1024, 0, stream>>>(

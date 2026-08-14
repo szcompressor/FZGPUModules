@@ -634,3 +634,47 @@ padding) and compute-sanitizer clean: `tests/pipeline/test_fusion_planner.cpp`
 (`Cuszp3*`). fzgpu is a different family (BitplaneRZE coder, radius/zigzag quant with
 its own outliers) — deferred; the natural next step is NVRTC codegen keyed by the
 stage-chain fingerprint.
+
+## CN-BSHUF-SMEM — shared-memory staging fixes the bitshuffle uncoalesced-store bug
+
+**Source:** `modules/shufflers/bitshuffle/bitshuffle_stage.cu` — `bitshuffle{Encode,Decode}Kernel32Smem`, `butterfly32`, `FZ_BITSHUF_SMEM`.
+
+The 32-bit butterfly bitshuffle (`bitshuffleEncodeKernel32`) writes each bit-plane
+word to global at stride `npp = N_chunk/32` (512 B for the default 16 KB chunk):
+`out[i/32 + sublane*npp]`. The 32 lanes of a warp share `i/32` and differ only in
+`sublane`, so a warp's stores hit 32 addresses 512 B apart — **fully uncoalesced**.
+
+Measured (PFPL on CLDHGH 3600x1800, eb=1e-4 NOA, H100, ncu):
+
+| | scattered | smem-staged |
+|---|---|---|
+| store sectors/request | **32** (max) | **4** (coalesced) |
+| store byte efficiency | 12.5% | — |
+| Compute (SM) | 10% | — |
+| DRAM throughput | **9%** | **31%** |
+| L2 pipeline | 79% (bound) | — |
+| kernel time (steady) | 122 µs | **33 µs** (3.7x) |
+
+The kernel was neither compute-bound (10% SM) nor DRAM-bound (9%) — it was
+**L2-transaction bound**: the scattered stores generated 8x the necessary sectors.
+Because it is one CTA per 16 KB chunk, the fix stages the permuted chunk in shared
+memory and flushes it coalesced: coalesced global read → register butterfly →
+**conflict-free smem scatter** → `__syncthreads()` → **coalesced global flush**.
+The smem plane layout is padded to `npp + 1` words per plane; a warp writes
+`s[sublane*pstride + col]` with `col` warp-uniform, so stride `pstride = npp+1`
+(coprime to 32, since `npp` is a multiple of 32) puts all 32 lanes in distinct
+banks. Decode is the mirror (coalesced load into padded smem → butterfly → coalesced
+store); `s[sublane*pstride + i/32]` is exactly the value the scattered decode
+gathered, so the butterfly (self-inverse) is unchanged and the output byte-identical.
+
+Whole PFPL DAG **0.302 → 0.214 ms (1.41x)** from this one kernel; PSNR unchanged
+(84.7564 dB), 16 bitshuffle stage tests + 35 stage tests pass, compute-sanitizer
+clean. Default on; `FZ_BITSHUF_SMEM=0` forces the scattered kernel for A/B. Dynamic
+smem is opt-in raised past 48 KB via `cudaFuncAttributeMaxDynamicSharedMemorySize`,
+with a fallback to the scattered kernel if a chunk's `32*(npp+1)*4` bytes exceed the
+device ceiling. Only the 4-byte (primary) path is staged; 1/2/8-byte are unchanged.
+
+This is the "optimize the bottleneck before fusing" result from the PFPL roofline
+study: bitshuffle was 38% of PFPL runtime and looked compute-bound from the stage
+timing, but was actually a coalescing bug. It also validates the chunk-cooperative
+(CTA-per-chunk, smem-resident) kernel shape a flexible fusion framework would target.
