@@ -716,3 +716,47 @@ perf bonus, not a bottleneck fix. The RZE stage remains dominated by the
 compute-bound encode (42 µs) and the memory-bound pack (13 µs); shrinking it
 further means a faster compaction algorithm or fusing encode+pack, not trimming
 helpers. Contrast CN-BSHUF-SMEM, where the bottleneck really was addressable.
+
+## CN-PFPL-FUSE — chunk-cooperative fused PFPL proof (the ~2.2× ceiling holds)
+
+**Source:** `profiling/pfpl_fuse_proof.cu` (`fzgmod-profile-pfplfuse`). Go/no-go for
+the *second* fusion strategy — chunk-cooperative (one CTA per chunk, intermediates
+in shared memory), the LC-style counterpart to the warp-register driver (CN-FUSE-*).
+
+PFPL = `Quantizer(NOA,zigzag) → Difference(1-D chunk, negabinary) → Bitshuffle(ew4)
+→ RZE(w1)`. The three post-quant stages all chunk at 16384 B = 4096 int32 = one
+CTA, so one kernel does quant → diff+negabinary → bitshuffle → RZE-encode per chunk
+with every intermediate in smem; the cross-chunk `scan + pack` tail is kept (RZE
+offsets depend on all chunks). Device functions are reused verbatim
+(`Zigzag/Negabinary::encode`, `butterfly32` copied, `lc_detail::d_RZE`), and the
+quantizer's `ebx2_r` is matched via a forced `value_base`, so the fused archive is
+**byte-identical** to a manually-run staged 4-stage forward.
+
+Measured (CLDHGH, n truncated to 1582 full chunks, eb=1e-4 NOA, H100):
+
+| | staged (4-stage) | fused |
+|---|---|---|
+| archive / ratio | 4.458 MB / 5.54x | 4.458 MB / 5.54x (**byte-identical**) |
+| compress wall | 0.208 ms | **0.103 ms (2.01x)** |
+| compress DAG | 0.172 ms | — (fused path 0.103 wall) |
+| fused encode kernel | — | 70.5 µs, **47% SM**, 11% DRAM |
+| **achieved occupancy** | — | **92.6% warps active** |
+| smem / block | — | **36 KB (= RZE-encode alone)** |
+
+**The occupancy worry was unfounded.** The fused kernel reuses RZE's own two 16 KB
+buffers (codes→bitshuffled in one, negabinary→RZE-`s_out` in the other) plus its
+4 KB temp, so its footprint equals `rzeEncodeKernel` alone — 4 blocks/SM, 92.6%
+achieved occupancy, no collapse. The roofline prediction (~2.2×, from CN reassessment
+after the bitshuffle fix) holds up at ~2× measured; the fused encode is now
+compute-bound (47% SM — the RZE compaction + quant, the irreducible floor), DRAM
+down to 11% (the three intermediate round-trips are gone). compute-sanitizer clean.
+
+**Why this matters for the framework:** it is the first working chunk-cooperative
+fusion, and it confirms the general recipe — a fusable chunk-aligned chain
+`predict/transform* → variable-length coder` collapses into `[CTA-per-chunk fused
+kernel] + [scan + pack tail]`, reusing the coder's smem budget for free. Prototype
+limits (not blockers): outlier-free quant fast path (verified `outlier_count==0` for
+this data/config via the byte compare), whole-chunk only (n truncated to a multiple
+of 4096; the partial-tail chunk needs the staged path's guard), and the fused-path
+timing still pays a per-call CUB-temp `cudaMalloc` a persistent buffer would remove.
+Future-paper context: `/home/exouser/paper_organizer/ideas/roofline_guided_fusion.md`.

@@ -106,6 +106,14 @@ if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-fuse PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
+# ── Chunk-cooperative fused PFPL go/no-go proof ──────────────────────────────
+add_executable(fzgmod-profile-pfplfuse pfpl_fuse_proof.cu)
+target_link_libraries(fzgmod-profile-pfplfuse PRIVATE fzgmod)
+target_include_directories(fzgmod-profile-pfplfuse PRIVATE
+    ${CMAKE_SOURCE_DIR}/modules ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(fzgmod-profile-pfplfuse PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+
 # ── cuSZp3 nsys / NVTX3 harness ──────────────────────────────────────────────
 # Pipeline: Quantizer(linear,ABS) → TiledLorenzo(8x8) → AdaptiveBitpack(64,outlier)
 # Matches examples/presets/cuszp3_outlier.toml.
