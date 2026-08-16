@@ -391,6 +391,7 @@ add_library(FZGMOD::utils ALIAS fzgmod_utils)
 #### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
 add_library(fzgmod_modules
   modules/fused/fused_block/fused_block.cu
+  modules/fused/chunk_fusion/chunk_fusion.cu
   modules/predictors/diff/diff.cu
   modules/predictors/lorenzo/lorenzo_stage.cu
   modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu

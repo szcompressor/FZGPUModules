@@ -760,3 +760,43 @@ this data/config via the byte compare), whole-chunk only (n truncated to a multi
 of 4096; the partial-tail chunk needs the staged path's guard), and the fused-path
 timing still pays a per-call CUB-temp `cudaMalloc` a persistent buffer would remove.
 Future-paper context: `/home/exouser/paper_organizer/ideas/roofline_guided_fusion.md`.
+
+## CN-CHUNK-FUSE — composable device-op harness for chunk-cooperative fusion
+
+**Source:** `modules/fused/chunk_fusion/chunk_fusion.cuh` (harness + ops),
+`chunk_fusion.cu` (launcher), proof `profiling/pfpl_fuse_proof.cu`.
+
+Generalizes the hand-coded PFPL fused kernel (CN-PFPL-FUSE) into a *composable*
+mechanism — the first step toward automatic, pipeline-agnostic fusion (goal: a
+future NVRTC path that generates the glue for any compatible chain).
+
+**The taxonomy it encodes.** Fusion has two orthogonal axes:
+- *Strategy* (execution template): **warp-register** (cuSZp — warp=block, registers,
+  shuffles, no barriers; `fused_block/`) vs **chunk-cooperative** (LC/PFPL — CTA=chunk,
+  shared memory, `__syncthreads`; this file). Determines the harness.
+- *Role* (access pattern = `FusionAccess`): Map (quant), stencil/block-local (diff,
+  lorenzo), fixed cooperative (bitshuffle), variable-length coder / sink (RZE, RRE,
+  AdaptiveBitpack), unfusable. Determines how a stage's device-op slots in.
+
+**The mechanism.** Each stage contributes a small `__device__` OP — `QuantInplaceZigzag`
+(Map: global floats → codes), `DiffNegabinary` / `Bitshuffle32` (transforms:
+smem→smem, ping-ponged), `RZECoder` / `RRECoder` (the swappable sink, uniform LC
+signature `d_XXX(csize, in[CS], out[CS], temp[CS])`). The **harness** `chunk_fused_kernel
+<QuantOp, Coder, Transforms...>` is stage-agnostic glue: load chunk → `Chain<Transforms...>`
+ping-pongs the ops through two 16 KB smem buffers with the right syncs → coder sink →
+emit per-chunk bytes+size. The cross-chunk scan+pack tail (RZEStage-format archive)
+lives in the launcher. **Swapping the coder or transform set re-composes with no new
+glue** — that is the whole point, and what an NVRTC path would later emit as source
+(the ops stay hand-written headers; only the harness is generated).
+
+**Generalization proven (CLDHGH, 1582 chunks, eb=1e-4 NOA, H100):** the *same* harness,
+given `RZECoder` vs `RRECoder`, fuses PFPL-with-RZE and PFPL-with-RRE, each
+**byte-identical** to its staged pipeline (RZE 4.458 MB @ 243 GB/s; RRE 4.695 MB @
+239 GB/s — different ratio, correctly a different coder), compute-sanitizer clean.
+Requires inplace-outlier quant (single "codes" port) so the chain is strictly linear;
+the op encodes out-of-radius values as raw float bits inline. Partial-tail chunk is
+handled (`Bitshuffle32` copies the sub-chunk through, matching the staged bitshuffle's
+tail memcpy). Not yet wired to the planner/registry — that (chunk-cooperative group
+detection + mapping a matched chain to the harness instantiation) is the next step,
+then NVRTC codegen. Future-paper context:
+`/home/exouser/paper_organizer/ideas/roofline_guided_fusion.md`.
