@@ -800,3 +800,43 @@ tail memcpy). Not yet wired to the planner/registry — that (chunk-cooperative 
 detection + mapping a matched chain to the harness instantiation) is the next step,
 then NVRTC codegen. Future-paper context:
 `/home/exouser/paper_organizer/ideas/roofline_guided_fusion.md`.
+
+## CN-CHUNK-WIRE — wiring chunk-cooperative fusion into the planner/registry
+
+**Source:** `getFusionSpec()` on Quantizer(inplace)/Difference/Bitshuffle/RZE/RRE,
+`matchesPfpl`/`runPfpl` in `src/pipeline/fusion_registry.cpp`, `QuantizerStage::
+primeComputedAbsEb`, `RZEStage/RREStage::setFusedResult`.
+
+Turns the chunk-fusion harness (CN-CHUNK-FUSE) into automatic fusion via
+`FusionPolicy::Auto` — PFPL now fuses inside a real `Pipeline`, byte-identical and
+round-trip-correct, for both RZE and RRE (`tests/pipeline/test_fusion_planner.cpp`
+`Pfpl*`, 10/10 fusion tests, sanitizer clean, 16/16 pipeline + 35/35 stages).
+
+Reuses the existing four-layer machinery (FusionSpec → planFusionGroups → registry
+→ execution substitution; see CN-FUSE-EXEC). New pieces specific to the
+chunk-cooperative strategy:
+- **FusionSpec roles, block_size in BYTES.** Quantizer(inplace+zigzag, ABS/NOA) is
+  `Map`; Difference(negabinary chunk) and Bitshuffle(ew4) are `BlockLocal{16384}`;
+  RZE/RRE are `Cooperative{16384}` (the sink — bitshuffle must NOT report Cooperative
+  or the planner terminates before the coder). The planner unifies block_size at
+  16384 (bytes), a different unit from cuSZp's element counts (32/64) — fine because
+  the registry `dynamic_cast` disambiguates the strategy.
+- **NOA priming.** The fused runner bypasses `Quantizer::execute()`, so it calls
+  `primeComputedAbsEb()` (runs the value-range scan, sets `computed_abs_eb_`/
+  `computed_value_base_`) — the fused kernel's `ebx2_r` and the reused inverse/header
+  both need it. (ABS-only `primeAbsEbForFusion` was the cuSZp version.)
+- **Coder axis in the runner.** `runPfpl` detects RZE vs RRE by `dynamic_cast` and
+  passes the matching `ChunkCoderKind` — the same registry entry fuses either.
+
+**The decompress-sizing gotcha (cost an hour; general to any fused variable-length
+coder).** `RZEStage::estimateOutputSizes()` in the inverse falls back to the
+*compressed* input size when `cached_orig_bytes_ == 0`, and the fused runner had
+skipped the forward `execute()` that normally sets it — so the inverse RZE output
+buffer was sized to the compressed length (~393 KB) and the decode wrote the full
+4 MB one byte past, a heap overflow only compute-sanitizer caught (the sticky CUDA
+error surfaced two kernels later as a bogus "DifferenceStage launch: invalid
+argument"). Fix: `setFusedResult(archive_bytes, orig_bytes)` also sets
+`cached_orig_bytes_`. **General rule (extends CN-FUSE-EXEC's "prime forward state the
+inverse needs"): a fused coder runner must set every field the *inverse* stage reads
+to size its output, not just the forward output size.** Next: NVRTC codegen to emit
+the harness for arbitrary compatible chains.

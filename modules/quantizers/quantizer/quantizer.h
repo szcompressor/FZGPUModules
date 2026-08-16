@@ -239,22 +239,35 @@ public:
     void setInverse(bool inverse) override { is_inverse_ = inverse; }
     bool isInverse() const override        { return is_inverse_; }
 
-    /// Fusable as a pure Map only in linear/no-outlier forward mode: the outlier
-    /// and in-place paths write side buffers / do scatter, which is not a map.
+    /// Fusable as a pure single-"codes"-port Map in either single-output forward
+    /// mode: linear/no-outlier (cuSZp, warp-register strategy) or in-place outlier
+    /// + zigzag under ABS/NOA (PFPL, chunk-cooperative strategy). The default
+    /// 3-port outlier mode scatters to side buffers and is not a map.
     FusionSpec getFusionSpec() const override {
-        if (is_inverse_ || !isLinearMode()) return {};
-        return FusionSpec{FusionAccess::Map, 0};
+        if (is_inverse_) return {};
+        if (isLinearMode()) return FusionSpec{FusionAccess::Map, 0};
+        if (isInplaceMode() && config_.zigzag_codes &&
+            (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
+            return FusionSpec{FusionAccess::Map, 0};
+        return {};
     }
 
     /// Establish the forward-computed absolute error bound for a fused runner
     /// that bypasses execute(). The inverse quant reconstructs with
     /// computed_abs_eb_, normally set during forward execute(); a fused pipeline
-    /// reuses this stage object for decompress, so it must be primed. Only ABS
-    /// mode is supported (fusion requires it — see QuantizerStage getFusionSpec).
+    /// reuses this stage object for decompress, so it must be primed. ABS only.
     void primeAbsEbForFusion() {
         if (config_.eb_mode == ErrorBoundMode::ABS)
             computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
     }
+
+    /// Resolve computed_abs_eb_ (and value_base) for a fused runner, covering NOA:
+    /// runs the value-range scan (or uses the precomputed base) exactly as
+    /// execute() does, so both the fused kernel's scale and the inverse/serialized
+    /// header see the right bound. `scan_n` is the logical element count.
+    void primeComputedAbsEb(const void* d_in, size_t scan_n,
+                            MemoryPool* pool, fz::stream_t stream);
+    TInput getComputedAbsEb() const { return computed_abs_eb_; }
 
     /// Store the logical grid so the NOA value-range scan can exclude the
     /// LC-chunk zero-padding tail of the input buffer (E16 over-loosening on

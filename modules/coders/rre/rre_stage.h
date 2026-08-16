@@ -83,6 +83,21 @@ public:
     size_t getChunkSize()       const { return chunk_size_; }
     size_t getRequiredInputAlignment() const override { return chunk_size_; }
     int    getWordSize()        const { return static_cast<int>(word_size_); }
+
+    // Variable-length coder = the sink of a chunk-cooperative fused chain. Only the
+    // byte-word 16 KB shape fuses (matches the fused RRECoder op).
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
+        return FusionSpec{FusionAccess::Cooperative, chunk_size_};
+    }
+    /// Set by a fused runner that produced this coder's archive without execute().
+    /// Also sets cached_orig_bytes_ (uncompressed input size) — the inverse output
+    /// buffer is sized from it (else it defaults to the compressed size → OOB).
+    void setFusedResult(size_t archive_bytes, size_t orig_bytes) {
+        actual_output_size_    = archive_bytes;
+        cached_orig_bytes_     = static_cast<uint32_t>(orig_bytes);
+        tail_readback_pending_ = false;
+    }
     uint32_t getCachedOrigBytes() const { return cached_orig_bytes_; }
 
     // ── Execution ──────────────────────────────────────────────────────────

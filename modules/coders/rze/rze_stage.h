@@ -85,6 +85,23 @@ public:
     int    getWordSize()        const { return static_cast<int>(word_size_); }
     uint32_t getCachedOrigBytes() const { return cached_orig_bytes_; }
 
+    // Variable-length coder = the sink that terminates a chunk-cooperative fused
+    // chain. block_size is the chunk in bytes; only the byte-word 16 KB shape fuses.
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
+        return FusionSpec{FusionAccess::Cooperative, chunk_size_};
+    }
+    /// Set by a fused runner that produced this coder's archive without execute():
+    /// the fused kernel wrote the identical archive blob. Sets the forward output
+    /// size AND `cached_orig_bytes_` (the uncompressed input size) — the inverse
+    /// output buffer is sized from the latter (else it defaults to the compressed
+    /// size and the decode writes out of bounds).
+    void setFusedResult(size_t archive_bytes, size_t orig_bytes) {
+        actual_output_size_    = archive_bytes;
+        cached_orig_bytes_     = static_cast<uint32_t>(orig_bytes);
+        tail_readback_pending_ = false;
+    }
+
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
         fz::stream_t stream,

@@ -51,6 +51,13 @@ public:
 
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
+
+    // Fixed-length cooperative transform, block-local at the chunk granularity.
+    // The fused Bitshuffle32 op covers only the primary 4-byte / 16384-byte shape.
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || element_width_ != 4 || block_size_ != 16384u) return {};
+        return FusionSpec{FusionAccess::BlockLocal, block_size_};
+    }
     bool isInverse() const override    { return is_inverse_; }
 
     void setBlockSize(size_t bytes)   { block_size_    = static_cast<uint32_t>(bytes); }

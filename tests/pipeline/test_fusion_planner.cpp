@@ -158,6 +158,98 @@ TEST(FusionPlanner, EndToEndFusedMatchesStaged) {
     cudaFree(d_in);
 }
 
+// PFPL (chunk-cooperative): Quantizer(NOA,inplace,zigzag) -> Difference(negabinary)
+// -> Bitshuffle(ew4) -> {RZE|RRE}. The coder is a build-time choice; the SAME
+// registry entry / harness fuses either. useRre swaps the coder.
+static void buildPfpl(Pipeline& p, size_t n, bool useRre) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(16384);
+    p.connect(b, d);
+    if (useRre) { auto* c = p.addStage<RREStage>(); c->setWordSize(1); c->setChunkSize(16384); p.connect(c, b); }
+    else        { auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(16384); p.connect(c, b); }
+}
+
+// The PFPL chain fuses into one 4-stage chunk-cooperative group ending in the coder.
+TEST(FusionPlanner, PfplChainIsOneGroup) {
+    Pipeline p(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildPfpl(p, 4096, /*useRre=*/false);
+    p.finalize();
+    auto groups = planFusionGroups(*p.getDAG());
+    ASSERT_EQ(groups.size(), 1u);
+    EXPECT_EQ(groups[0].stages.size(), 4u);
+    EXPECT_EQ(groups[0].block_size, 16384u);
+    EXPECT_TRUE(groups[0].has_coder);
+}
+
+// End-to-end: Auto must be byte-identical to staged and round-trip within bound —
+// run for BOTH coders through the same registry entry (the generalization gate).
+static void pfplEndToEnd(bool useRre) {
+    const size_t n = 1u << 20;   // 1 Mi elems = whole 16 KB chunks
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    double lo = 1e30, hi = -1e30;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 0.6f*std::sin(i*0.001f) + 0.3f*std::cos(i*0.017f) + 0.05f*std::sin(i*0.13f);
+        lo = std::min(lo, (double)h[i]); hi = std::max(hi, (double)h[i]);
+    }
+    const double bound = eb * (hi - lo) * 1.001;   // NOA
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildPfpl(p, n, useRre);
+        p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        cudaDeviceSynchronize();
+        out.resize(sz);
+        EXPECT_EQ(cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost), cudaSuccess);
+        return sz;
+    };
+    std::vector<uint8_t> staged, fused;
+    size_t ss = compressCopy(FusionPolicy::Off, staged);
+    size_t sf = compressCopy(FusionPolicy::Auto, fused);
+    ASSERT_EQ(ss, sf) << "fused archive size differs from staged";
+    EXPECT_EQ(staged, fused) << "fused archive not byte-identical to staged";
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildPfpl(p, n, useRre);
+        p.finalize();
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off, rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rs), bound) << "staged baseline exceeds bound";
+    EXPECT_LE(maxErr(rf), bound) << "fused round-trip exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged";
+    cudaFree(d_in);
+}
+
+TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/false); }
+TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/true); }
+
 // The cuszp3 front (Quantizer -> TiledLorenzo(8x8) -> AdaptiveBitpack(64)) is one
 // block-local fusable group with block_size = tile_elems = 64.
 TEST(FusionPlanner, Cuszp3ChainIsOneGroup) {

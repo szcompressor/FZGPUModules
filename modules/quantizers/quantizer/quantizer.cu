@@ -1147,6 +1147,35 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
 // =============================================================================
 // Explicit instantiations
 // =============================================================================
+// Resolve computed_abs_eb_ for a fused runner that bypasses execute() — mirrors
+// the ABS/NOA/PREL resolution block in execute(). See getFusionSpec.
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::primeComputedAbsEb(
+    const void* d_in, size_t scan_n, MemoryPool* pool, fz::stream_t stream)
+{
+    if (config_.eb_mode == ErrorBoundMode::ABS) {
+        computed_abs_eb_     = static_cast<TInput>(config_.error_bound);
+        computed_value_base_ = static_cast<TInput>(0);
+        return;
+    }
+    if (config_.eb_mode == ErrorBoundMode::REL) {
+        computed_abs_eb_     = static_cast<TInput>(0);
+        computed_value_base_ = static_cast<TInput>(0);
+        return;
+    }
+    // NOA / PREL: value_range (or precomputed base), then abs_eb = eb * value_base.
+    TInput value_base = static_cast<TInput>(config_.precomputed_value_base);
+    if (value_base <= TInput(0)) {
+        TInput data_abs_max = TInput(0);
+        value_base = computeValueBase<TInput>(
+            static_cast<const TInput*>(d_in), scan_n, config_.eb_mode, stream, pool, &data_abs_max);
+    }
+    computed_value_base_ = value_base;
+    computed_abs_eb_ = (value_base <= TInput(0))
+        ? static_cast<TInput>(config_.error_bound)
+        : static_cast<TInput>(config_.error_bound) * value_base;
+}
+
 template class QuantizerStage<float,  uint16_t>;
 template class QuantizerStage<float,  uint32_t>;
 template class QuantizerStage<double, uint16_t>;

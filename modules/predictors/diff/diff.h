@@ -95,6 +95,17 @@ public:
         return chunk_size_ > 0 ? chunk_size_ : 1;
     }
 
+    // Block-local (chunk-cooperative) when chunking a signed->unsigned negabinary
+    // difference — the fused DiffNegabinary op reproduces exactly this. block_size
+    // is the chunk in BYTES (the granularity the whole chunk chain shares).
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || chunk_size_ == 0) return {};
+        if constexpr (!std::is_same_v<T, TOut> && Mode == FusionMode::NEGABINARY)
+            return FusionSpec{FusionAccess::BlockLocal, static_cast<uint32_t>(chunk_size_)};
+        else
+            return {};
+    }
+
     void execute(
         fz::stream_t stream,
         MemoryPool* pool,

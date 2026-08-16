@@ -4,9 +4,15 @@
 #include "quantizers/quantizer/quantizer.h"
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
+#include "predictors/diff/diff.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
+#include "coders/rze/rze_stage.h"
+#include "coders/rre/rre_stage.h"
 #include "fused/fused_block/fused_block.h"
+#include "fused/chunk_fusion/chunk_fusion.h"
 
+#include <cmath>
 #include <vector>
 
 namespace fz {
@@ -89,9 +95,57 @@ size_t runCuszp3(const FusedRunContext& ctx) {
     return archive_bytes;
 }
 
+// ── PFPL (chunk-cooperative): Quantizer(inplace,zigzag,ABS/NOA) + Difference
+//    (int32->uint32, negabinary, chunk 16 KB) + Bitshuffle(ew4,16 KB) + {RZE|RRE}.
+//    The coder is swappable — the same fused harness composes either.
+bool matchesPfpl(const std::vector<Stage*>& g) {
+    if (g.size() != 4) return false;
+    auto* q = dynamic_cast<QuantizerStage<float, uint32_t>*>(g[0]);
+    auto* d = dynamic_cast<DifferenceStage<int32_t, uint32_t>*>(g[1]);
+    auto* b = dynamic_cast<BitshuffleStage*>(g[2]);
+    if (!q || !d || !b) return false;
+    if (!q->getFusionSpec().fusable() || !q->getInplaceOutliers() || !q->getZigzagCodes())
+        return false;
+    const auto em = q->getErrorBoundMode();
+    if (em != ErrorBoundMode::ABS && em != ErrorBoundMode::NOA) return false;
+    if (!d->getFusionSpec().fusable() || !b->getFusionSpec().fusable()) return false;
+    auto* rze = dynamic_cast<RZEStage*>(g[3]);
+    auto* rre = dynamic_cast<RREStage*>(g[3]);
+    if (rze) return rze->getFusionSpec().fusable();
+    if (rre) return rre->getFusionSpec().fusable();
+    return false;
+}
+
+size_t runPfpl(const FusedRunContext& ctx) {
+    const auto& g = *ctx.stages;
+    auto* q   = static_cast<QuantizerStage<float, uint32_t>*>(g[0]);
+    auto* rze = dynamic_cast<RZEStage*>(g[3]);
+    auto* rre = dynamic_cast<RREStage*>(g[3]);
+    const size_t n = ctx.input_bytes / sizeof(float);
+
+    // Prime the quant's forward-computed abs bound (covers the NOA value-range
+    // scan) so the fused kernel's scale AND the reused inverse/header agree.
+    q->primeComputedAbsEb(ctx.d_input, n, ctx.pool, static_cast<fz::stream_t>(ctx.stream));
+    const float ebx2_r    = 1.0f / (2.0f * static_cast<float>(q->getComputedAbsEb()));
+    const uint32_t radius = static_cast<uint32_t>(q->getQuantRadius());
+    const float threshold = q->getOutlierThreshold();
+
+    const auto coder = rze ? fused::ChunkCoderKind::RZE : fused::ChunkCoderKind::RRE;
+    const size_t archive_bytes = fused::launchFusedChunkPfpl(
+        coder, static_cast<const float*>(ctx.d_input), n, ebx2_r, radius, threshold,
+        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream));
+
+    // Original (uncompressed) coder input = the bitshuffle output = n*4 bytes; the
+    // inverse sizes its output from this.
+    if (rze) rze->setFusedResult(archive_bytes, ctx.input_bytes);
+    else     rre->setFusedResult(archive_bytes, ctx.input_bytes);
+    return archive_bytes;
+}
+
 const FusedImpl kBuiltins[] = {
     { "cuszp2", &matchesCuszp2, &runCuszp2 },
     { "cuszp3", &matchesCuszp3, &runCuszp3 },
+    { "pfpl",   &matchesPfpl,   &runPfpl   },
 };
 
 } // namespace
