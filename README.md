@@ -6,6 +6,11 @@
 
 GPU-accelerated graph composable compression pipeline builder for analytical workflows.
 
+The CUDA backend is supported. The AMD HIP/ROCm backend is currently
+**experimental**: most stages build and run, but backend coverage, CI, and
+installed-package compatibility are still being completed, and unsupported stages
+are rejected explicitly.
+
 ## Overview
 
 FZGPUModules is a CUDA library for building composable, high-throughput compression pipelines. Each pipeline is a directed acyclic graph (DAG) of stages - coders, predictors, quantizers, shufflers, transforms, fused stages, and external stages - connected and executed entirely on the GPU with stream-ordered memory management.

@@ -46,8 +46,8 @@
     {
       "name": "hip",
       "inherits": "base",
-      "displayName": "HIP (AMD ROCm)",
-      "description": "Release build against the HIP backend. Defaults to gfx908 (MI100); override with -DCMAKE_HIP_ARCHITECTURES=. Requires the ROCm root on CMAKE_PREFIX_PATH, e.g. export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH",
+      "displayName": "HIP (AMD ROCm, experimental)",
+      "description": "Experimental release build against the HIP backend. Defaults to gfx908 (MI100); override with -DCMAKE_HIP_ARCHITECTURES=. Requires the ROCm root on CMAKE_PREFIX_PATH, e.g. export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "FZGMOD_BACKEND":   "HIP"
@@ -98,7 +98,7 @@
     {
       "name": "hip",
       "configurePreset": "hip",
-      "displayName": "Build HIP (AMD ROCm)"
+      "displayName": "Build HIP (AMD ROCm, experimental)"
     },
     {
       "name": "cuda-h200",
@@ -142,8 +142,8 @@
     {
       "name": "hip",
       "configurePreset": "hip",
-      "displayName": "All tests (HIP)",
-      "description": "Run the full test suite against the HIP build. ANSStage is excluded on HIP (see Stage::isSupportedOnBackend).",
+      "displayName": "All tests (HIP, experimental)",
+      "description": "Run the full test suite against the experimental HIP build. ANSStage is excluded on HIP (see Stage::isSupportedOnBackend).",
       "output": { "outputOnFailure": true }
     },
 

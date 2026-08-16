@@ -45,3 +45,8 @@ jobs:
       # resolves to a note.
       - name: Codebase note references
         run: python3 scripts/check_note_refs.py --verbose
+
+      # A stage is integrated through several deliberately hand-written surfaces.
+      # Keep those surfaces consistent without coupling them to fusion internals.
+      - name: Stage integration surfaces
+        run: python3 scripts/check_stage_integration.py

@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -12,6 +14,9 @@ concurrency:
 jobs:
   build-and-test:
     name: Build & Test (GPU)
+    # Never execute untrusted fork code on the persistent self-hosted GPU runner.
+    # Branch PRs within this repository are gated; fork PRs retain CPU-only checks.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     # Requires a self-hosted runner with CUDA, GPU, and the label 'gpu'
     runs-on: [self-hosted, gpu, linux]
 
@@ -93,6 +98,9 @@ jobs:
   # ── ASan + UBSan ────────────────────────────────────────────────────────────
   sanitizers:
     name: Sanitizers (ASan + UBSan)
+    # Keep the complete sanitizer pass on main/manual runs; pull requests get
+    # the full Release GPU suite above without doubling scarce runner time.
+    if: github.event_name != 'pull_request'
     runs-on: [self-hosted, gpu, linux]
     needs: build-and-test
 
