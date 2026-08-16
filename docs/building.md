@@ -10,6 +10,7 @@ configuring with CMake, running tests, installing, and integrating into your own
 | Requirement | Minimum |
 |---|---|
 | CUDA Toolkit | 11.2+ (stream-ordered allocator) |
+| AMD backend (experimental) | ROCm 6.4 tested; HIP, hipCUB, and rocThrust packages required |
 | C++ Standard | C++17 |
 | CMake | 3.24+ |
 | Compiler | GCC 9+ or Clang 10+ |
@@ -59,6 +60,7 @@ cmake --build build/release -j$(nproc)
 | `debug` | Debug | Unoptimized build with `-Wall` |
 | `asan` | Debug | AddressSanitizer + UndefinedBehaviorSanitizer |
 | `compute-san` | RelWithDebInfo | CUDA Compute Sanitizer (auto-wraps ctest with memcheck) |
+| `hip` | Release | Experimental AMD HIP/ROCm build |
 
 Configure and build any preset:
 
@@ -79,6 +81,7 @@ cmake --build --preset <preset> -j$(nproc)
 | `BUILD_EXAMPLES` | `OFF` | Build example executables |
 | `BUILD_PROFILING` | `OFF` | Build profiling targets (requires Nsight Systems / NVTX3) |
 | `BUILD_CLI` | `ON` | Build the `fzgmod-cli` command-line tool |
+| `FZGMOD_BACKEND` | `CUDA` | Backend: supported `CUDA`, experimental `HIP`, or unimplemented `SYCL` |
 | `USE_SANITIZER` | — | Sanitizer mode: `ASanUbsan`, `TSan`, or `Compute` |
 | `COMPUTE_SANITIZER_DEVICE_DEBUG` | `OFF` | Add `-G` to CUDA builds for source-level Compute Sanitizer (much slower) |
 | `CMAKE_CUDA_ARCHITECTURES` | — | CUDA compute capability (e.g., `75`, `80`, `90`); comma-separated for multiple |
@@ -87,6 +90,26 @@ cmake --build --preset <preset> -j$(nproc)
 ---
 
 ## Common Build Examples
+
+### Experimental HIP/ROCm backend
+
+HIP support is experimental: it does not yet have the same CI and stage coverage as
+CUDA, and some CUDA-specific stages such as ANS are unavailable. Configure ROCm's
+package root and select the GPU architecture explicitly when the `gfx908` preset
+default is not appropriate:
+
+```bash
+export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH
+cmake --preset hip -DCMAKE_HIP_ARCHITECTURES=gfx90a
+cmake --build --preset hip -j$(nproc)
+ctest --preset hip
+```
+
+An installed HIP build records its backend in `FZGPUModulesConfig.cmake`; downstream
+`find_package(FZGPUModules)` calls resolve ROCm dependencies rather than requiring a
+CUDA Toolkit.
+
+### CUDA examples
 
 **Development build** (with tests, profiling, examples, and sanitizer support):
 

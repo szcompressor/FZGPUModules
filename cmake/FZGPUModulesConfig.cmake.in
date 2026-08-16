@@ -2,7 +2,22 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(CUDAToolkit REQUIRED)
+set(FZGPUModules_BACKEND "@FZGMOD_BACKEND@")
+
+if(FZGPUModules_BACKEND STREQUAL "CUDA")
+  find_dependency(CUDAToolkit REQUIRED)
+elseif(FZGPUModules_BACKEND STREQUAL "HIP")
+  # HIP support is experimental. These packages provide the runtime target and
+  # public headers referenced by the exported FZGPUModules targets.
+  find_dependency(hip CONFIG REQUIRED)
+  find_dependency(hipcub CONFIG REQUIRED)
+  find_dependency(rocthrust CONFIG REQUIRED)
+else()
+  set(FZGPUModules_FOUND FALSE)
+  set(FZGPUModules_NOT_FOUND_MESSAGE
+      "This FZGPUModules package was built with unknown backend '${FZGPUModules_BACKEND}'.")
+  return()
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/FZGPUModulesTargets.cmake")
 
