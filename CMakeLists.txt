@@ -392,6 +392,7 @@ add_library(FZGMOD::utils ALIAS fzgmod_utils)
 add_library(fzgmod_modules
   modules/fused/fused_block/fused_block.cu
   modules/fused/chunk_fusion/chunk_fusion.cu
+  modules/fused/chunk_fusion/nvrtc_chunk_fusion.cpp
   modules/predictors/diff/diff.cu
   modules/predictors/lorenzo/lorenzo_stage.cu
   modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
@@ -453,6 +454,18 @@ target_include_directories(fzgmod_modules
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/coders/ans/dietgpu
 )
 fzgmod_set_gpu_source_language(fzgmod_modules)
+
+# NVRTC chunk-fusion codegen (CUDA backend only): links NVRTC + the CUDA driver
+# API, and needs the source-tree include roots so NVRTC can resolve the op
+# headers at runtime (a prototype constraint — see CN-NVRTC-FUSE).
+if(NOT FZGMOD_BACKEND STREQUAL "HIP")
+  target_link_libraries(fzgmod_modules PRIVATE CUDA::nvrtc CUDA::cuda_driver)
+  set_source_files_properties(
+    modules/fused/chunk_fusion/nvrtc_chunk_fusion.cpp
+    TARGET_DIRECTORY fzgmod_modules
+    PROPERTIES COMPILE_DEFINITIONS
+      "FZGMOD_NVRTC_INC_INCLUDE=\"${CMAKE_CURRENT_SOURCE_DIR}/include\";FZGMOD_NVRTC_INC_MODULES=\"${CMAKE_CURRENT_SOURCE_DIR}/modules\"")
+endif()
 
 # The vendored dietgpu ANS tree uses inline NVPTX lanemask assembly and a
 # hardcoded 32-lane warp model with no HIP translation (see

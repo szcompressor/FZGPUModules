@@ -26,6 +26,7 @@
  * generated. Template composition here is the compile-time precursor.
  */
 
+#include "fused/chunk_fusion/chunk_geometry.h"   // chunk geometry constants (no host deps)
 #include "coders/lc_common/lc_chunk_components.cuh"
 #include "transforms/negabinary/negabinary.h"
 #include <cstdint>
@@ -35,12 +36,6 @@ namespace fused {
 namespace chunk {
 
 using byte = uint8_t;
-
-constexpr int CHUNK_BYTES = 16384;             // one chunk (bytes)
-constexpr int NELEM       = CHUNK_BYTES / 4;   // 4096 uint32 codes
-constexpr int NPP         = NELEM / 32;        // 128 bitshuffle words per plane
-constexpr int TEMP_BYTES  = 4096;              // LC coder scratch (RZE/RRE both 4096)
-constexpr int TPB         = 512;               // = LC coder TPB
 
 // 5-stage register butterfly (copy of bitshuffle_stage.cu butterfly32).
 __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
@@ -73,7 +68,7 @@ struct QuantInplaceZigzag {
             if (q > -(int)p.radius && q < (int)p.radius && fabsf(x) < p.threshold)
                 c = (uint32_t)((q << 1) ^ (q >> 31));
             else
-                __builtin_memcpy(&c, &x, 4);
+                c = __float_as_uint(x);   // raw IEEE-754 bits (NVRTC-portable bit-cast)
             s[i] = c;
         }
     }
@@ -132,14 +127,17 @@ template<class T, class... R> struct Chain<T, R...> {
     }
 };
 
-// ── Harness: one CTA per chunk. Quant (Map) -> Transforms... -> Coder (sink).
-// Stage-agnostic: it composes whatever ops it is given. This is the code an
-// NVRTC path would generate for an arbitrary compatible chain. ───────────────
+// ── Harness body: one CTA per chunk. Quant (Map) -> Transforms... -> Coder (sink).
+// Stage-agnostic: it composes whatever ops it is given. Factored out of the
+// __global__ entry so the NVRTC codegen path can wrap it in an `extern "C"`
+// kernel (a __global__ cannot call another __global__). Both the compile-time
+// template kernel below and the runtime-generated kernel call this same body —
+// the ops stay single-sourced; only the composing glue differs. ──────────────
 template<class QuantOp, class Coder, class... Transforms>
-__global__ void __launch_bounds__(TPB)
-chunk_fused_kernel(const float* __restrict__ in, size_t n,
-                   typename QuantOp::Params qp,
-                   byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
+__device__ __forceinline__ void
+chunk_fused_body(const float* __restrict__ in, size_t n,
+                 typename QuantOp::Params qp,
+                 byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
     __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
@@ -175,6 +173,16 @@ chunk_fused_kernel(const float* __restrict__ in, size_t n,
         for (int i = threadIdx.x; i < in_size; i += TPB) out[i] = reinterpret_cast<byte*>(cur)[i];
         if (threadIdx.x == 0) sizes[cid] = (1u << 31) | (uint32_t)in_size;
     }
+}
+
+// Compile-time template entry (the FZ_FUSION path without NVRTC). The NVRTC path
+// generates an equivalent `extern "C"` kernel over the same body.
+template<class QuantOp, class Coder, class... Transforms>
+__global__ void __launch_bounds__(TPB)
+chunk_fused_kernel(const float* __restrict__ in, size_t n,
+                   typename QuantOp::Params qp,
+                   byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
+    chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, qp, scratch, sizes);
 }
 
 } // namespace chunk

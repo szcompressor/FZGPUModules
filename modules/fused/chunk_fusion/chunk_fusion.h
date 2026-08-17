@@ -12,6 +12,7 @@
  * archive length). See docs/codebase_notes.md CN-CHUNK-FUSE.
  */
 
+#include "fused/chunk_fusion/chunk_geometry.h"   // chunk geometry constants
 #include "backend/types.h"
 #include <cstddef>
 #include <cstdint>

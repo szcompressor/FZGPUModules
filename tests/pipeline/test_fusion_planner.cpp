@@ -3,6 +3,7 @@
 
 #include "fzgpumodules.h"
 #include "pipeline/fusion_planner.h"
+#include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -249,6 +250,33 @@ static void pfplEndToEnd(bool useRre) {
 
 TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/false); }
 TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/true); }
+
+// ── NVRTC codegen contract (host-only): the stage-chain fingerprint composes
+// into the "connecting code" that wraps chunk_fused_body<QuantOp,Coder,Trs...>.
+// The end-to-end byte-identity of the generated kernel is covered by running the
+// two PFPL tests above under FZ_FUSION_NVRTC=1; here we just lock the mapping
+// from a ChunkFusionSpec to its template-argument list.
+TEST(FusionPlanner, NvrtcCodegenComposesSpecOps) {
+    fused::ChunkFusionSpec spec;   // PFPL defaults
+    const std::string src = fused::generateChunkFusionSource(spec);
+    // The generated glue names every op from the spec, in order, as template args.
+    EXPECT_NE(src.find("chunk_fused_body< QuantInplaceZigzag, RZECoder, "
+                       "DiffNegabinary, Bitshuffle32 >"), std::string::npos);
+    EXPECT_NE(src.find("extern \"C\" __global__ void"), std::string::npos);
+    EXPECT_NE(src.find("#include \"fused/chunk_fusion/chunk_fusion.cuh\""),
+              std::string::npos);
+
+    // Swapping the coder (the swappable sink) is a data change — no new C++.
+    spec.coder = fused::chunkCoderOpName(fused::ChunkCoderKind::RRE);
+    EXPECT_NE(fused::generateChunkFusionSource(spec).find("RRECoder"),
+              std::string::npos);
+
+    // Dropping a transform re-composes a shorter chain from the same generator.
+    spec.transforms = {"DiffNegabinary"};
+    const std::string shorter = fused::generateChunkFusionSource(spec);
+    EXPECT_NE(shorter.find("RRECoder, DiffNegabinary >"), std::string::npos);
+    EXPECT_EQ(shorter.find("Bitshuffle32"), std::string::npos);
+}
 
 // The cuszp3 front (Quantizer -> TiledLorenzo(8x8) -> AdaptiveBitpack(64)) is one
 // block-local fusable group with block_size = tile_elems = 64.

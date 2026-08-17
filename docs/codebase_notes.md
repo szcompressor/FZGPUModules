@@ -839,4 +839,55 @@ argument"). Fix: `setFusedResult(archive_bytes, orig_bytes)` also sets
 `cached_orig_bytes_`. **General rule (extends CN-FUSE-EXEC's "prime forward state the
 inverse needs"): a fused coder runner must set every field the *inverse* stage reads
 to size its output, not just the forward output size.** Next: NVRTC codegen to emit
-the harness for arbitrary compatible chains.
+the harness for arbitrary compatible chains (done — CN-NVRTC-FUSE).
+
+## CN-NVRTC-FUSE — runtime codegen of the chunk-cooperative harness (NVRTC)
+
+**Source:** `modules/fused/chunk_fusion/nvrtc_chunk_fusion.{h,cpp}`,
+`chunk_geometry.h`, the `chunk_fused_body` split in `chunk_fusion.cuh`, the
+`FZ_FUSION_NVRTC` toggle + shared `packChunks` tail in `chunk_fusion.cu`.
+
+Replaces the *compile-time* template instantiation of the fused kernel
+(CN-CHUNK-FUSE picks `chunk_fused_kernel<Quant, Coder, Transforms...>` in C++) with
+a *runtime* one: a `ChunkFusionSpec` (the stage-chain fingerprint — quant op,
+transform ops, coder op, all by device-op **type name**) is turned into CUDA source
+that wraps `chunk_fused_body<...>`, compiled with NVRTC, JIT-loaded via the CUDA
+driver API, cached by (source, arch), and launched with `cuLaunchKernel`. Swapping
+the coder or adding/removing a transform is now a **data change to the spec** — no
+new template instantiation, no registry glue. The per-stage `__device__` ops stay
+hand-written in `chunk_fusion.cuh`; only the composing glue is generated. Selected
+by env `FZ_FUSION_NVRTC=1` inside `launchFusedChunkPfpl()` (off by default; the
+template path is the fallback). Both paths share `packChunks` (the cross-chunk
+scan/pack tail), so only the encode-kernel launch differs.
+
+**Validated:** byte-identical archives to the template path for RZE **and** RRE
+(`test_fusion_planner` `Pfpl*` under `FZ_FUSION_NVRTC=1`, 11/11), compute-sanitizer
+clean on the JIT'd kernel, throughput parity (242 vs 248 GB/s RZE, 231 vs 240 GB/s
+RRE — within run-to-run noise), 52/52 ctest unregressed on the default path. The
+codegen contract (spec → template-arg list) is locked host-only by
+`NvrtcCodegenComposesSpecOps`.
+
+**What it took to make the op stack NVRTC-compilable (the real work):**
+- **`backend/api.h` no-ops under `__CUDACC_RTC__`** — NVRTC compiles device code
+  only and provides the intrinsics itself; pulling in the host `<cuda_runtime.h>`
+  would fail. `atomics.h`/`warp.h` then reduce to plain `atomicAdd_block`/
+  `__shfl_*_sync`/`__ballot_sync`, all NVRTC-native.
+- **Split `chunk_geometry.h` out of `chunk_fusion.h`.** The device path must not pull
+  `backend/types.h` (it names `cudaStream_t`/`cudaMemPool_t`, host-only). The geometry
+  constants (CHUNK_BYTES/NELEM/TPB…) now live in a dependency-free header shared by the
+  device harness, the host launcher, and the NVRTC codegen.
+- **Minimal in-memory stdlib stubs.** NVRTC ships no `<cstdint>`/`<type_traits>`/
+  `<cstddef>` on an include path; the op headers use only a tiny surface
+  (`is_integral`/`is_signed`/`is_unsigned`/`make_unsigned` + the int aliases + `size_t`),
+  supplied as three `nvrtcCreateProgram` headers. `assert` is an NVRTC builtin, so
+  `<cassert>` is an empty shim.
+- **`__builtin_memcpy` → `__float_as_uint`** in the quant op's outlier bit-cast — the
+  former is not an NVRTC builtin; the latter is native to both nvcc and NVRTC and is
+  bit-identical.
+
+**Prototype constraints (future work).** NVRTC resolves the op headers from the source
+tree via `-I` paths baked in at configure time (`FZGMOD_NVRTC_INC_*`); a shipped build
+would embed the headers instead. The kernel param ABI is fixed to PFPL's
+`{ebx2_r, radius, threshold}`; a general quant op would need its `Params` emitted by
+the codegen too. The registry `matchesPfpl` still hardcodes the 4-stage shape — the
+codegen dissolves the *kernel* per-shape glue, not yet the *matcher*.

@@ -4,6 +4,7 @@
 
 #include "fused/chunk_fusion/chunk_fusion.h"
 #include "fused/chunk_fusion/chunk_fusion.cuh"
+#include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 
@@ -11,6 +12,8 @@
 #include "backend/algorithms.h"
 #include <cub/device/device_scan.cuh>
 #include <thrust/iterator/transform_iterator.h>
+
+#include <cstdlib>   // getenv — FZ_FUSION_NVRTC toggle
 
 namespace fz {
 namespace fused {
@@ -31,22 +34,19 @@ __global__ void chunk_pack(const byte* __restrict__ scratch, byte* __restrict__ 
 
 struct StripFlag { __host__ __device__ uint32_t operator()(uint32_t x) const { return x & 0x7FFFFFFFu; } };
 
-// Encode kernel + header + exclusive-scan offsets + pack. Templated on the coder;
-// the transform chain (Diff -> Bitshuffle) is the PFPL body. A different pipeline
-// shape maps to a different Chain<...> / QuantOp here (that mapping is the registry).
-template<class Coder>
-size_t runChunkPfpl(const float* d_in, size_t n, QuantInplaceZigzag::Params qp,
-                    uint8_t* d_out, MemoryPool* pool, cudaStream_t stream) {
-    const size_t   nc     = (n + NELEM - 1) / NELEM;
+bool useNvrtcFusion() {
+    const char* e = std::getenv("FZ_FUSION_NVRTC");
+    return e && e[0] == '1';
+}
+
+// Cross-chunk tail: header + exclusive-scan offsets + pack + 4-byte rounding.
+// Shared by the template and NVRTC encode paths — given filled d_scratch +
+// d_sizes it produces the byte-identical LC archive in d_out. Frees scratch/sizes.
+size_t packChunks(const float* /*d_in*/, size_t n, size_t nc,
+                  byte* d_scratch, uint32_t* d_sizes,
+                  uint8_t* d_out, MemoryPool* pool, cudaStream_t stream) {
     const uint32_t header = 8u + 4u * (uint32_t)nc;
-
-    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
-    auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
-    auto* d_off     = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_off"));
-
-    chunk_fused_kernel<QuantInplaceZigzag, Coder, DiffNegabinary, Bitshuffle32>
-        <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, qp, d_scratch, d_sizes);
-    FZ_CUDA_CHECK(cudaGetLastError());
+    auto* d_off = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_off"));
 
     const uint32_t hdr[2] = { (uint32_t)(n * 4), (uint32_t)nc };
     FZ_CUDA_CHECK(cudaMemcpyAsync(d_out, hdr, 8, cudaMemcpyHostToDevice, stream));
@@ -77,6 +77,26 @@ size_t runChunkPfpl(const float* d_in, size_t n, QuantInplaceZigzag::Params qp,
     return padded;
 }
 
+// Compile-time template encode (the default, non-NVRTC path). Picks the kernel
+// instantiation for the coder; the transform chain (Diff -> Bitshuffle) is the
+// PFPL body. A different pipeline shape maps to a different Chain<...> / QuantOp.
+void encodeTemplate(ChunkCoderKind coder, const float* d_in, size_t n,
+                    QuantInplaceZigzag::Params qp, byte* d_scratch, uint32_t* d_sizes,
+                    size_t nc, cudaStream_t stream) {
+    switch (coder) {
+        case ChunkCoderKind::RRE:
+            chunk_fused_kernel<QuantInplaceZigzag, RRECoder, DiffNegabinary, Bitshuffle32>
+                <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, qp, d_scratch, d_sizes);
+            break;
+        case ChunkCoderKind::RZE:
+        default:
+            chunk_fused_kernel<QuantInplaceZigzag, RZECoder, DiffNegabinary, Bitshuffle32>
+                <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, qp, d_scratch, d_sizes);
+            break;
+    }
+    FZ_CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
 
 size_t launchFusedChunkPfpl(
@@ -84,12 +104,25 @@ size_t launchFusedChunkPfpl(
     uint32_t radius, float threshold, uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
 {
     if (n == 0) return 0;
-    QuantInplaceZigzag::Params qp{ ebx2_r, radius, threshold };
-    switch (coder) {
-        case ChunkCoderKind::RRE: return runChunkPfpl<RRECoder>(d_in, n, qp, d_out, pool, stream);
-        case ChunkCoderKind::RZE:
-        default:                  return runChunkPfpl<RZECoder>(d_in, n, qp, d_out, pool, stream);
+    const size_t nc = (n + NELEM - 1) / NELEM;
+
+    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
+    auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
+
+    // Encode: the compile-time template kernel, or — when FZ_FUSION_NVRTC=1 — the
+    // same harness body generated + JIT-compiled at runtime from a spec. Both
+    // fill d_scratch/d_sizes identically; the tail below is shared.
+    if (useNvrtcFusion()) {
+        ChunkFusionSpec spec;                     // PFPL op names (defaults) + coder
+        spec.coder = chunkCoderOpName(coder);
+        launchNvrtcChunkFusedEncode(spec, d_in, n, ebx2_r, radius, threshold,
+                                    d_scratch, d_sizes, (unsigned)nc, stream);
+    } else {
+        QuantInplaceZigzag::Params qp{ ebx2_r, radius, threshold };
+        encodeTemplate(coder, d_in, n, qp, d_scratch, d_sizes, nc, stream);
     }
+
+    return packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
 }
 
 } // namespace fused
