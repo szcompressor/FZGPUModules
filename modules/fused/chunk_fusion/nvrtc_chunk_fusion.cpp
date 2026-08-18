@@ -92,12 +92,17 @@ CUcontext ensureContext() {
     return ctx;
 }
 
+// Real device arch (sm_XX, not compute_XX) so we compile straight to a CUBIN for
+// the running GPU. Loading a cubin needs no driver-side PTX JIT — which is what
+// failed as CUDA_ERROR_UNSUPPORTED_PTX_VERSION when the runner's driver was older
+// than the toolkit's NVRTC (PTX ISA too new for the driver to JIT). SASS for the
+// device's own SM always loads on the driver that is already running that SM.
 std::string deviceArch() {
     int dev = 0; cudaGetDevice(&dev);
     int major = 9, minor = 0;
     cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
     cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
-    return "compute_" + std::to_string(major) + std::to_string(minor);
+    return "sm_" + std::to_string(major) + std::to_string(minor);
 }
 
 // Compiled + loaded kernel, cached by (source, arch). CUmodule is context-bound;
@@ -140,13 +145,15 @@ CUfunction compileAndLoad(const std::string& src, const std::string& arch) {
         throw std::runtime_error(std::string("NVRTC-fusion: compile failed:\n") + log);
     }
 
-    size_t ptxSize = 0; nvrtcGetPTXSize(prog, &ptxSize);
-    std::string ptx(ptxSize, '\0'); nvrtcGetPTX(prog, &ptx[0]);
+    // Emit a CUBIN for the device SM (see deviceArch) rather than PTX — no driver
+    // JIT, so no PTX-version dependence on the driver.
+    size_t cubinSize = 0; nvrtcGetCUBINSize(prog, &cubinSize);
+    std::string cubin(cubinSize, '\0'); nvrtcGetCUBIN(prog, &cubin[0]);
     nvrtcDestroyProgram(&prog);
 
     ensureContext();
     CUmodule module = nullptr;
-    CU_CHECK(cuModuleLoadData(&module, ptx.c_str()));
+    CU_CHECK(cuModuleLoadData(&module, cubin.data()));
     CUfunction func = nullptr;
     CU_CHECK(cuModuleGetFunction(&func, module, "fz_fused_chunk"));
 

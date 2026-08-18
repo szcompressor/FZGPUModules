@@ -458,8 +458,14 @@ fzgmod_set_gpu_source_language(fzgmod_modules)
 # NVRTC chunk-fusion codegen (CUDA backend only): links NVRTC + the CUDA driver
 # API, and needs the source-tree include roots so NVRTC can resolve the op
 # headers at runtime (a prototype constraint — see CN-NVRTC-FUSE).
+# CUDA::cuda_driver is PUBLIC (not PRIVATE): fzgmod_modules is a shared lib, so its
+# driver-API symbols (cuModuleLoadData, cuLaunchKernel, ...) stay undefined in the
+# .so and must be resolved on each consumer's link line. Propagating the driver
+# (the stub libcuda in a GPU-less build container) lets fzgmod-cli / tests link;
+# PRIVATE left them unresolved (undefined reference to cuModuleLoadData). NVRTC is
+# a real library present at build time, so it resolves fine as PRIVATE.
 if(NOT FZGMOD_BACKEND STREQUAL "HIP")
-  target_link_libraries(fzgmod_modules PRIVATE CUDA::nvrtc CUDA::cuda_driver)
+  target_link_libraries(fzgmod_modules PRIVATE CUDA::nvrtc PUBLIC CUDA::cuda_driver)
   set_source_files_properties(
     modules/fused/chunk_fusion/nvrtc_chunk_fusion.cpp
     TARGET_DIRECTORY fzgmod_modules
