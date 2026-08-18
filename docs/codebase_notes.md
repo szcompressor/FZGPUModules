@@ -885,9 +885,17 @@ codegen contract (spec → template-arg list) is locked host-only by
   former is not an NVRTC builtin; the latter is native to both nvcc and NVRTC and is
   bit-identical.
 
+**Params ABI (Phase B, generalized).** The generated kernel takes one packed
+`const uint8_t* params` blob — each op declares a POD `Params` (stateless ops use
+`EmptyParams` → 0 bytes), `chunk_fused_body` hands each op its slice at a compile-time
+offset (`OpParamBytes`/`SumParamBytes`), and the host packs the blob. So the codegen no
+longer bakes in a per-pipeline param shape; any op set with any params composes. The
+one canonical `chunk_fused_body` still backs both the template and NVRTC paths (no
+drift). Interim: `launchFusedChunkPfpl` hardcodes PFPL's quant `Params` when packing;
+the generic runner (Phase C) assembles the blob from each stage's `getFusedOp().params`.
+
 **Prototype constraints (future work).** NVRTC resolves the op headers from the source
 tree via `-I` paths baked in at configure time (`FZGMOD_NVRTC_INC_*`); a shipped build
-would embed the headers instead. The kernel param ABI is fixed to PFPL's
-`{ebx2_r, radius, threshold}`; a general quant op would need its `Params` emitted by
-the codegen too. The registry `matchesPfpl` still hardcodes the 4-stage shape — the
-codegen dissolves the *kernel* per-shape glue, not yet the *matcher*.
+would embed the headers instead. The registry `matchesPfpl` still hardcodes the 4-stage
+shape — the codegen dissolves the *kernel* per-shape glue, not yet the *matcher*
+(Phase C: route by declared `FusionStrategy`, assemble the chain from `getFusedOp()`).

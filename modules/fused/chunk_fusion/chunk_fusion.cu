@@ -81,17 +81,17 @@ size_t packChunks(const float* /*d_in*/, size_t n, size_t nc,
 // instantiation for the coder; the transform chain (Diff -> Bitshuffle) is the
 // PFPL body. A different pipeline shape maps to a different Chain<...> / QuantOp.
 void encodeTemplate(ChunkCoderKind coder, const float* d_in, size_t n,
-                    QuantInplaceZigzag::Params qp, byte* d_scratch, uint32_t* d_sizes,
+                    const byte* d_params, byte* d_scratch, uint32_t* d_sizes,
                     size_t nc, cudaStream_t stream) {
     switch (coder) {
         case ChunkCoderKind::RRE:
             chunk_fused_kernel<QuantInplaceZigzag, RRECoder, DiffNegabinary, Bitshuffle32>
-                <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, qp, d_scratch, d_sizes);
+                <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, d_params, d_scratch, d_sizes);
             break;
         case ChunkCoderKind::RZE:
         default:
             chunk_fused_kernel<QuantInplaceZigzag, RZECoder, DiffNegabinary, Bitshuffle32>
-                <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, qp, d_scratch, d_sizes);
+                <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, d_params, d_scratch, d_sizes);
             break;
     }
     FZ_CUDA_CHECK(cudaGetLastError());
@@ -109,20 +109,29 @@ size_t launchFusedChunkPfpl(
     auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
     auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
 
+    // Build the packed params blob on device. For PFPL only the quant Map op is
+    // parametric, so the blob is exactly its Params; the stateless diff/bitshuffle/
+    // coder ops contribute nothing. (The generic runner of Phase C will assemble
+    // this blob from each stage's getFusedOp().params instead of hardcoding it.)
+    QuantInplaceZigzagParams qp{ ebx2_r, radius, threshold };
+    auto* d_params = static_cast<byte*>(pool->allocate(sizeof(qp), stream, "chunk_params"));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(d_params, &qp, sizeof(qp), cudaMemcpyHostToDevice, stream));
+
     // Encode: the compile-time template kernel, or — when FZ_FUSION_NVRTC=1 — the
     // same harness body generated + JIT-compiled at runtime from a spec. Both
-    // fill d_scratch/d_sizes identically; the tail below is shared.
+    // fill d_scratch/d_sizes identically from the same blob; the tail is shared.
     if (useNvrtcFusion()) {
         ChunkFusionSpec spec;                     // PFPL op names (defaults) + coder
         spec.coder = chunkCoderOpName(coder);
-        launchNvrtcChunkFusedEncode(spec, d_in, n, ebx2_r, radius, threshold,
-                                    d_scratch, d_sizes, (unsigned)nc, stream);
+        launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
+                                    (unsigned)nc, stream);
     } else {
-        QuantInplaceZigzag::Params qp{ ebx2_r, radius, threshold };
-        encodeTemplate(coder, d_in, n, qp, d_scratch, d_sizes, nc, stream);
+        encodeTemplate(coder, d_in, n, d_params, d_scratch, d_sizes, nc, stream);
     }
 
-    return packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
+    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
+    pool->free(d_params, stream);
+    return out_bytes;
 }
 
 } // namespace fused

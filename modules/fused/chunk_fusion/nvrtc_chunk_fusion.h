@@ -54,13 +54,14 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec);
 
 /**
  * Compile (once, then cached) and launch the fused encode kernel for `spec`,
- * filling `d_scratch` (nc * CHUNK_BYTES) and `d_sizes` (nc). Mirrors the launch
- * of chunk_fused_kernel<...>; the cross-chunk scan/pack tail is shared with the
- * template path in chunk_fusion.cu. Throws std::runtime_error on compile failure.
+ * filling `d_scratch` (nc * CHUNK_BYTES) and `d_sizes` (nc). `d_params` is the
+ * device-resident packed per-op Params blob (ops in execution order); the kernel
+ * hands each op its slice. Mirrors the launch of chunk_fused_kernel<...>; the
+ * cross-chunk scan/pack tail is shared with the template path in chunk_fusion.cu.
+ * Throws std::runtime_error on compile failure.
  */
 void launchNvrtcChunkFusedEncode(
-    const ChunkFusionSpec& spec, const float* d_in, size_t n,
-    float ebx2_r, uint32_t radius, float threshold,
+    const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
     uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream);
 
 } // namespace fused

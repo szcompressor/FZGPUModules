@@ -60,8 +60,13 @@ __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
 // values are stored as raw IEEE-754 bits (matches quantizer_abs_fwd_inplace_kernel).
 struct QuantInplaceZigzag {
     using Params = QuantInplaceZigzagParams;   // shared POD (chunk_op_params.h)
+    // Every op takes a `const void* pp` pointing at its slice of the packed params
+    // blob; parametric ops cast it, stateless ops (below) ignore it. The blob is
+    // exactly-sized, so a stateless tail op may be handed a one-past-end pointer —
+    // legal to form and pass because it is never dereferenced.
     __device__ static void load(const float* __restrict__ in, size_t base, int cnt,
-                                uint32_t* __restrict__ s, Params p) {
+                                uint32_t* __restrict__ s, const void* pp) {
+        const Params p = *static_cast<const Params*>(pp);
         for (int i = threadIdx.x; i < cnt; i += TPB) {
             const float x = in[base + i];
             const int   q = __float2int_rn(x * p.ebx2_r);
@@ -77,8 +82,9 @@ struct QuantInplaceZigzag {
 
 // ── Stencil op: chunk-local difference (boundary = elem 0) + negabinary. ─────
 struct DiffNegabinary {
+    using Params = EmptyParams;   // stateless → 0 params bytes
     __device__ static void apply(const uint32_t* __restrict__ s_in, uint32_t* __restrict__ s_out,
-                                 int cnt, bool /*full*/) {
+                                 int cnt, bool /*full*/, const void* /*pp*/) {
         for (int i = threadIdx.x; i < cnt; i += TPB) {
             const int ci = (int)s_in[i];
             const int d  = (i == 0) ? ci : (ci - (int)s_in[i-1]);
@@ -90,8 +96,9 @@ struct DiffNegabinary {
 // ── Fixed-length cooperative op: 32-bit bitshuffle. The partial tail chunk is
 // copied through (the staged bitshuffle memcpys its sub-chunk tail). ─────────
 struct Bitshuffle32 {
+    using Params = EmptyParams;
     __device__ static void apply(const uint32_t* __restrict__ s_in, uint32_t* __restrict__ s_out,
-                                 int cnt, bool full) {
+                                 int cnt, bool full, const void* /*pp*/) {
         if (full) {
             const int lane = threadIdx.x & 31;
             for (int i = threadIdx.x; i < NELEM; i += TPB)
@@ -104,27 +111,43 @@ struct Bitshuffle32 {
 
 // ── Coder ops: the swappable variable-length sink. Uniform LC signature. ─────
 struct RZECoder {
-    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp) {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
         return lc_detail::d_RZE<byte, CHUNK_BYTES>(csize, in, out, temp);
     }
 };
 struct RRECoder {
-    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp) {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
         return lc_detail::d_RRE<byte, CHUNK_BYTES>(csize, in, out, temp);
     }
 };
 
-// ── Transform chain: apply ops in order, ping-ponging a<->b, return the final
+// ── Packed-params-blob offset arithmetic. Each op contributes sizeof(Params),
+// or 0 if stateless (EmptyParams). The blob is ops in execution order:
+// [QuantOp][Transforms...][Coder]. Offsets are resolved at compile time. ─────
+template<class Op> struct OpParamBytes {
+    static constexpr int value =
+        FzSame<typename Op::Params, EmptyParams>::value ? 0 : (int)sizeof(typename Op::Params);
+};
+template<class...> struct SumParamBytes { static constexpr int value = 0; };
+template<class T, class... R> struct SumParamBytes<T, R...> {
+    static constexpr int value = OpParamBytes<T>::value + SumParamBytes<R...>::value;
+};
+
+// ── Transform chain: apply ops in order, ping-ponging a<->b, threading each op
+// its params slice (running byte offset into the blob). Returns the final
 // buffer. Ops must be size-preserving (diff, bitshuffle are). ────────────────
 template<class... Ts> struct Chain;
 template<> struct Chain<> {
-    __device__ static uint32_t* apply(uint32_t* a, uint32_t*, int, bool) { return a; }
+    __device__ static uint32_t* apply(uint32_t* a, uint32_t*, int, bool, const byte*, int) { return a; }
 };
 template<class T, class... R> struct Chain<T, R...> {
-    __device__ static uint32_t* apply(uint32_t* a, uint32_t* b, int cnt, bool full) {
-        T::apply(a, b, cnt, full);
+    __device__ static uint32_t* apply(uint32_t* a, uint32_t* b, int cnt, bool full,
+                                      const byte* params, int off) {
+        T::apply(a, b, cnt, full, params + off);
         __syncthreads();
-        return Chain<R...>::apply(b, a, cnt, full);
+        return Chain<R...>::apply(b, a, cnt, full, params, off + OpParamBytes<T>::value);
     }
 };
 
@@ -134,10 +157,13 @@ template<class T, class... R> struct Chain<T, R...> {
 // kernel (a __global__ cannot call another __global__). Both the compile-time
 // template kernel below and the runtime-generated kernel call this same body —
 // the ops stay single-sourced; only the composing glue differs. ──────────────
+// `params` is the packed per-op Params blob, ops in execution order
+// ([QuantOp][Transforms...][Coder]); each op is handed its slice at a
+// compile-time offset. Stateless ops ignore it.
 template<class QuantOp, class Coder, class... Transforms>
 __device__ __forceinline__ void
 chunk_fused_body(const float* __restrict__ in, size_t n,
-                 typename QuantOp::Params qp,
+                 const byte* __restrict__ params,
                  byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
@@ -148,10 +174,11 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
     const int      cnt  = (int)min((size_t)NELEM, n - base);
     const bool     full = (cnt == NELEM);
 
-    QuantOp::load(in, base, cnt, sA, qp);
+    QuantOp::load(in, base, cnt, sA, params /* + 0: quant is first in the blob */);
     __syncthreads();
 
-    uint32_t* cur = Chain<Transforms...>::apply(sA, sB, cnt, full);
+    constexpr int kTransOff = OpParamBytes<QuantOp>::value;
+    uint32_t* cur = Chain<Transforms...>::apply(sA, sB, cnt, full, params, kTransOff);
     uint32_t* alt = (cur == sA) ? sB : sA;
 
     const int in_size = full ? CHUNK_BYTES : cnt * 4;
@@ -161,9 +188,10 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
         __syncthreads();
     }
 
+    constexpr int kCoderOff = OpParamBytes<QuantOp>::value + SumParamBytes<Transforms...>::value;
     int  csize = in_size;
     bool good  = Coder::encode(csize, reinterpret_cast<byte*>(cur),
-                               reinterpret_cast<byte*>(alt), sTemp);
+                               reinterpret_cast<byte*>(alt), sTemp, params + kCoderOff);
     __syncthreads();
 
     byte* out = scratch + (size_t)cid * CHUNK_BYTES;
@@ -181,9 +209,9 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
 template<class QuantOp, class Coder, class... Transforms>
 __global__ void __launch_bounds__(TPB)
 chunk_fused_kernel(const float* __restrict__ in, size_t n,
-                   typename QuantOp::Params qp,
+                   const byte* __restrict__ params,
                    byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
-    chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, qp, scratch, sizes);
+    chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, params, scratch, sizes);
 }
 
 } // namespace chunk
