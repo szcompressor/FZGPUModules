@@ -134,5 +134,32 @@ size_t launchFusedChunkPfpl(
     return out_bytes;
 }
 
+size_t launchGenericChunkFusion(
+    const ChunkFusionSpec& spec, const float* d_in, size_t n,
+    const uint8_t* host_params, size_t params_bytes,
+    uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
+{
+    if (n == 0) return 0;
+    const size_t nc = (n + NELEM - 1) / NELEM;
+
+    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
+    auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
+
+    // Upload the caller-assembled params blob (already ordered [Map][Trs...][Coder]).
+    // Allocate >=1 byte so the device pointer is valid even with no parametric op.
+    const size_t pbytes = params_bytes ? params_bytes : 1;
+    auto* d_params = static_cast<byte*>(pool->allocate(pbytes, stream, "chunk_params"));
+    if (params_bytes)
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_params, host_params, params_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+
+    // Compose + launch the fused encode from the spec (NVRTC), then the shared tail.
+    launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
+                                (unsigned)nc, stream);
+    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
+    pool->free(d_params, stream);
+    return out_bytes;
+}
+
 } // namespace fused
 } // namespace fz

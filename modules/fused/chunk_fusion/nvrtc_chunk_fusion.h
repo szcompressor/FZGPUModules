@@ -64,5 +64,20 @@ void launchNvrtcChunkFusedEncode(
     const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
     uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream);
 
+/**
+ * Generic chunk-cooperative fused compress — the entry the generic registry runner
+ * uses, with no per-pipeline shape. NVRTC-composes `spec` (any linear
+ * Map -> Transform* -> Coder chain of ChunkCooperative ops), uploads the packed
+ * per-op params blob (`host_params`/`params_bytes`, ops in execution order), runs
+ * the encode kernel plus the shared cross-chunk scan/pack tail, and returns the
+ * archive byte length. Always uses NVRTC — the only way to compose an arbitrary
+ * runtime op list — but the compiled module is cached by (source, arch), so only
+ * the first compress of a given chain pays the JIT cost.
+ */
+size_t launchGenericChunkFusion(
+    const ChunkFusionSpec& spec, const float* d_in, size_t n,
+    const uint8_t* host_params, size_t params_bytes,
+    uint8_t* d_out, MemoryPool* pool, fz::stream_t stream);
+
 } // namespace fused
 } // namespace fz

@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 using namespace fz;
@@ -190,7 +191,10 @@ TEST(FusionPlanner, PfplChainIsOneGroup) {
 
 // End-to-end: Auto must be byte-identical to staged and round-trip within bound —
 // run for BOTH coders through the same registry entry (the generalization gate).
-static void pfplEndToEnd(bool useRre) {
+// Generic chunk-fusion end-to-end check: fused (Auto) must be byte-identical to
+// staged (Off) and round-trip identically. `build` assembles the chain — reused
+// for PFPL and for novel shapes the registry has no hand-written entry for.
+static void chunkFusionEndToEnd(const std::function<void(Pipeline&, size_t)>& build) {
     const size_t n = 1u << 20;   // 1 Mi elems = whole 16 KB chunks
     const float  eb = 1e-3f;
     std::vector<float> h(n);
@@ -207,7 +211,7 @@ static void pfplEndToEnd(bool useRre) {
     auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
         Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
         p.setFusionPolicy(pol);
-        buildPfpl(p, n, useRre);
+        build(p, n);
         p.finalize();
         EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
         void* d_comp = nullptr; size_t sz = 0;
@@ -226,7 +230,7 @@ static void pfplEndToEnd(bool useRre) {
     auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
         Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
         p.setFusionPolicy(pol);
-        buildPfpl(p, n, useRre);
+        build(p, n);
         p.finalize();
         void* d_comp = nullptr; size_t sz = 0;
         p.compress(d_in, bytes, &d_comp, &sz, 0);
@@ -249,8 +253,40 @@ static void pfplEndToEnd(bool useRre) {
     cudaFree(d_in);
 }
 
-TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/false); }
-TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/true); }
+TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) {
+    chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/false); });
+}
+TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) {
+    chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/true); });
+}
+
+// A chain the registry has NO hand-written entry for: Quantizer(inplace,zigzag) ->
+// Difference(negabinary) -> RRE, with the Bitshuffle stage dropped. It fuses only
+// because the generic runner assembles the kernel from the stages' getFusedOp()
+// declarations — the payoff of Phase C (a novel composition, zero new registry code).
+static void buildNoBitshuffle(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* c = p.addStage<RREStage>(); c->setWordSize(1); c->setChunkSize(16384);
+    p.connect(c, d);
+}
+
+TEST(FusionPlanner, GenericRunnerFusesNovelShapeNoRegistryEntry) {
+    // First confirm the planner groups the 3-stage chain and it has no bitshuffle.
+    Pipeline pg(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildNoBitshuffle(pg, 4096);
+    pg.finalize();
+    auto groups = planFusionGroups(*pg.getDAG());
+    ASSERT_EQ(groups.size(), 1u);
+    EXPECT_EQ(groups[0].stages.size(), 3u);   // Quant -> Diff -> RRE (no Bitshuffle)
+
+    // Then the generic runner must fuse it byte-identically + round-trip.
+    chunkFusionEndToEnd(buildNoBitshuffle);
+}
 
 // ── Phase A: each PFPL stage declares its fused device-op via getFusedOp(), so a
 // generic runner can assemble the chain from the stages themselves (no per-shape
