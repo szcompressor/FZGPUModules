@@ -1,8 +1,14 @@
 #pragma once
 
+#include "backend/types.h"   // fz::stream_t
+#include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace fz {
+
+class MemoryPool;
 
 /**
  * @brief How a stage accesses its input — the property that decides whether it
@@ -47,6 +53,59 @@ struct FusionSpec {
     uint32_t block_size = 0;
 
     bool fusable() const { return access != FusionAccess::Unfusable; }
+};
+
+/**
+ * @brief Which fused-kernel execution model a stage's device-op belongs to.
+ *
+ * A fused group is composed of ops that all share one strategy — the generic
+ * runner routes by this, and the codegen has a per-strategy backend. The two are
+ * deliberately different execution models (see the two-axis taxonomy):
+ *  - `ChunkCooperative` one CTA owns a fixed byte-chunk, intermediates in shared
+ *    memory, `__syncthreads` between ops (LC/PFPL-style).
+ *  - `WarpRegister`     one warp owns a ≤64-element block, intermediates in
+ *    registers and shuffles, no barriers (cuSZp-style).
+ */
+enum class FusionStrategy : uint8_t { ChunkCooperative, WarpRegister };
+
+/**
+ * @brief A stage's contribution to a generated fused kernel — the device-op it
+ *        maps to, where its source lives, and its runtime parameter bytes.
+ *
+ * The generic runner collects one `FusedOpDecl` per stage in a fused group (after
+ * priming), packs the `params` blobs in group order, and hands the ordered
+ * op-name list to the codegen. This is how a stage declares its fused identity
+ * without the runner hard-coding any pipeline shape. Default-constructed (empty
+ * `op_name`) means "not a fused op" — the stage does not participate.
+ *
+ * `params` is the raw bytes of the op's POD `Params` struct; the generated kernel
+ * `reinterpret_cast`s the packed blob to that type, so the host-packed layout MUST
+ * match the device struct exactly (share the POD definition — see
+ * modules/fused/chunk_fusion/chunk_op_params.h). Stateless ops leave it empty.
+ */
+struct FusedOpDecl {
+    FusionStrategy       strategy = FusionStrategy::ChunkCooperative;
+    std::string          op_name;         ///< device-op type name, e.g. "DiffNegabinary"
+    std::string          include_header;  ///< header that defines it (for the codegen #include)
+    std::vector<uint8_t> params;          ///< POD Params bytes; empty for stateless ops
+
+    bool valid() const { return !op_name.empty(); }
+};
+
+/**
+ * @brief Minimal context a fused runner hands a stage so it can establish the
+ *        forward-computed state its OWN inverse will later read.
+ *
+ * A fused pipeline reuses the same stage objects for decompress but bypasses their
+ * forward `execute()`, so any state normally computed there (e.g. a quantizer's
+ * resolved error bound from a value-range scan) must be primed explicitly, or the
+ * inverse reconstructs with defaults. See `Stage::primeFusedForwardState`.
+ */
+struct FusedPrimeContext {
+    const void*  d_input     = nullptr;  ///< device input buffer
+    size_t       input_bytes = 0;        ///< its size in bytes
+    MemoryPool*  pool        = nullptr;  ///< scratch pool
+    fz::stream_t stream      = nullptr;  ///< stream to prime on
 };
 
 } // namespace fz

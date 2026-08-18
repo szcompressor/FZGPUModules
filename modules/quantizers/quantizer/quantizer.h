@@ -8,6 +8,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"  // for ErrorBoundMode
+#include "fused/chunk_fusion/chunk_op_params.h" // shared fused-op Params (host packs)
 #include "backend/types.h"
 #include <array>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <cstring>
 #include <limits>
+#include <type_traits>
 
 namespace fz {
 
@@ -268,6 +270,33 @@ public:
     void primeComputedAbsEb(const void* d_in, size_t scan_n,
                             MemoryPool* pool, fz::stream_t stream);
     TInput getComputedAbsEb() const { return computed_abs_eb_; }
+
+    /// Fused-op identity for the chunk-cooperative harness: the inplace+zigzag
+    /// ABS/NOA float quant maps to the `QuantInplaceZigzag` Map op. Params are
+    /// packed from the primed bound (`primeFusedForwardState` must run first).
+    FusedOpDecl getFusedOp() const override {
+        if (!std::is_same<TInput, float>::value) return {};   // device op reads float
+        if (is_inverse_ || !isInplaceMode() || !config_.zigzag_codes) return {};
+        if (config_.eb_mode != ErrorBoundMode::ABS && config_.eb_mode != ErrorBoundMode::NOA)
+            return {};
+        fused::chunk::QuantInplaceZigzagParams p;
+        p.ebx2_r    = 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
+        p.radius    = static_cast<uint32_t>(config_.quant_radius);
+        p.threshold = config_.outlier_threshold;
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::ChunkCooperative;
+        d.op_name        = "QuantInplaceZigzag";
+        d.include_header = "fused/chunk_fusion/chunk_fusion.cuh";
+        d.params.resize(sizeof(p));
+        std::memcpy(d.params.data(), &p, sizeof(p));
+        return d;
+    }
+
+    /// The fused runner bypasses forward execute(); prime the value-range scan so
+    /// the fused kernel's scale and the reused inverse/header agree (covers NOA).
+    void primeFusedForwardState(const FusedPrimeContext& c) override {
+        primeComputedAbsEb(c.d_input, c.input_bytes / sizeof(TInput), c.pool, c.stream);
+    }
 
     /// Store the logical grid so the NOA value-range scan can exclude the
     /// LC-chunk zero-padding tail of the input buffer (E16 over-loosening on

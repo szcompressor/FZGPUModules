@@ -106,6 +106,14 @@ public:
             return {};
     }
 
+    /// Chunk-cooperative stencil op: chunk-local difference + negabinary. Stateless
+    /// (no params). Fusable only in the same shape getFusionSpec() accepts.
+    FusedOpDecl getFusedOp() const override {
+        if (!getFusionSpec().fusable()) return {};
+        return FusedOpDecl{FusionStrategy::ChunkCooperative, "DiffNegabinary",
+                           "fused/chunk_fusion/chunk_fusion.cuh", {}};
+    }
+
     void execute(
         fz::stream_t stream,
         MemoryPool* pool,

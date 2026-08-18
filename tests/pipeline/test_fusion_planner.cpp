@@ -4,6 +4,7 @@
 #include "fzgpumodules.h"
 #include "pipeline/fusion_planner.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
+#include "fused/chunk_fusion/chunk_op_params.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -250,6 +251,40 @@ static void pfplEndToEnd(bool useRre) {
 
 TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/false); }
 TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) { pfplEndToEnd(/*useRre=*/true); }
+
+// ── Phase A: each PFPL stage declares its fused device-op via getFusedOp(), so a
+// generic runner can assemble the chain from the stages themselves (no per-shape
+// registry). Locks the op names / strategy / params sizes the codegen consumes.
+TEST(FusionPlanner, PfplStagesDeclareFusedOps) {
+    Pipeline p(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildPfpl(p, 4096, /*useRre=*/false);
+    p.finalize();
+    auto groups = planFusionGroups(*p.getDAG());
+    ASSERT_EQ(groups.size(), 1u);
+    ASSERT_EQ(groups[0].stages.size(), 4u);
+
+    const char* kNames[] = {"QuantInplaceZigzag", "DiffNegabinary", "Bitshuffle32", "RZECoder"};
+    for (size_t i = 0; i < 4; ++i) {
+        FusedOpDecl op = groups[0].stages[i]->getFusedOp();
+        EXPECT_TRUE(op.valid()) << "stage " << i << " declares no fused op";
+        EXPECT_EQ(op.strategy, FusionStrategy::ChunkCooperative);
+        EXPECT_EQ(op.op_name, kNames[i]);
+        EXPECT_FALSE(op.include_header.empty());
+    }
+    // Only the Map (quant) op is parametric; its params match the shared POD.
+    EXPECT_EQ(groups[0].stages[0]->getFusedOp().params.size(),
+              sizeof(fused::chunk::QuantInplaceZigzagParams));
+    EXPECT_TRUE(groups[0].stages[1]->getFusedOp().params.empty());
+    EXPECT_TRUE(groups[0].stages[3]->getFusedOp().params.empty());
+
+    // RRE tail declares its own coder op name (the swappable sink).
+    Pipeline pr(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildPfpl(pr, 4096, /*useRre=*/true);
+    pr.finalize();
+    auto gr = planFusionGroups(*pr.getDAG());
+    ASSERT_EQ(gr.size(), 1u);
+    EXPECT_EQ(gr[0].stages[3]->getFusedOp().op_name, "RRECoder");
+}
 
 // ── NVRTC codegen contract (host-only): the stage-chain fingerprint composes
 // into the "connecting code" that wraps chunk_fused_body<QuantOp,Coder,Trs...>.

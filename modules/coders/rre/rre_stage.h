@@ -90,6 +90,17 @@ public:
         if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
         return FusionSpec{FusionAccess::Cooperative, chunk_size_};
     }
+
+    /// Chunk-cooperative coder op (the swappable variable-length sink). Stateless.
+    FusedOpDecl getFusedOp() const override {
+        if (!getFusionSpec().fusable()) return {};
+        return FusedOpDecl{FusionStrategy::ChunkCooperative, "RRECoder",
+                           "fused/chunk_fusion/chunk_fusion.cuh", {}};
+    }
+    /// Base-class tail hook → the existing coder result setter (archive, orig).
+    void setFusedArchiveResult(size_t archive_bytes, size_t orig_bytes) override {
+        setFusedResult(archive_bytes, orig_bytes);
+    }
     /// Set by a fused runner that produced this coder's archive without execute().
     /// Also sets cached_orig_bytes_ (uncompressed input size) — the inverse output
     /// buffer is sized from it (else it defaults to the compressed size → OOB).

@@ -291,6 +291,36 @@ public:
      * Forward-mode only; an inverse stage should report `Unfusable`.
      */
     virtual FusionSpec getFusionSpec() const { return {}; }
+
+    /**
+     * Fused-kernel identity: the device-op this stage maps to, plus its runtime
+     * parameter bytes. The generic fused runner collects these across a fused
+     * group (after priming) and hands the ordered op list to the codegen, so no
+     * per-pipeline shape is hard-coded. Default (empty `op_name`) = not a fused
+     * op. Must agree with `getFusionSpec()` (a stage returning a fusable spec but
+     * no op cannot actually be composed). See include/stage/fusion.h and
+     * docs/codebase_notes.md CN-NVRTC-FUSE.
+     */
+    virtual FusedOpDecl getFusedOp() const { return {}; }
+
+    /**
+     * Establish forward-computed state this stage's own INVERSE will read, for a
+     * fused runner that bypasses forward `execute()`. Default no-op; a quantizer
+     * overrides it to run its value-range scan. Called once per fused group member
+     * before the fused kernel is generated (op params are read afterwards, so any
+     * param derived from primed state is valid).
+     */
+    virtual void primeFusedForwardState(const FusedPrimeContext& /*ctx*/) {}
+
+    /**
+     * Tail-coder hook: a fused runner that produced this stage's archive without
+     * calling `execute()` reports the archive size and the ORIGINAL (uncompressed)
+     * input size, so the stage's inverse can size its output buffer. Without it a
+     * variable-length coder's inverse falls back to the compressed size and its
+     * decode overruns (see CN-CHUNK-WIRE). Distinct from any `setFusedResult`
+     * overload to avoid colliding with unrelated `(size_t,size_t)` signatures.
+     */
+    virtual void setFusedArchiveResult(size_t /*archive_bytes*/, size_t /*orig_bytes*/) {}
 };
 
 } // namespace fz

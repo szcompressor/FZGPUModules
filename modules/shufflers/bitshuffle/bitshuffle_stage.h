@@ -58,6 +58,13 @@ public:
         if (is_inverse_ || element_width_ != 4 || block_size_ != 16384u) return {};
         return FusionSpec{FusionAccess::BlockLocal, block_size_};
     }
+
+    /// Chunk-cooperative fixed-length op: 32-bit bitshuffle. Stateless (no params).
+    FusedOpDecl getFusedOp() const override {
+        if (!getFusionSpec().fusable()) return {};
+        return FusedOpDecl{FusionStrategy::ChunkCooperative, "Bitshuffle32",
+                           "fused/chunk_fusion/chunk_fusion.cuh", {}};
+    }
     bool isInverse() const override    { return is_inverse_; }
 
     void setBlockSize(size_t bytes)   { block_size_    = static_cast<uint32_t>(bytes); }

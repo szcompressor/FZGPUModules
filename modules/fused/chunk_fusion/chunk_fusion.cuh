@@ -27,6 +27,7 @@
  */
 
 #include "fused/chunk_fusion/chunk_geometry.h"   // chunk geometry constants (no host deps)
+#include "fused/chunk_fusion/chunk_op_params.h"  // shared POD op Params (host/device agree)
 #include "coders/lc_common/lc_chunk_components.cuh"
 #include "transforms/negabinary/negabinary.h"
 #include <cstdint>
@@ -58,7 +59,7 @@ __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
 // Loads global floats and writes codes to smem. Out-of-radius / over-threshold
 // values are stored as raw IEEE-754 bits (matches quantizer_abs_fwd_inplace_kernel).
 struct QuantInplaceZigzag {
-    struct Params { float ebx2_r; uint32_t radius; float threshold; };
+    using Params = QuantInplaceZigzagParams;   // shared POD (chunk_op_params.h)
     __device__ static void load(const float* __restrict__ in, size_t base, int cnt,
                                 uint32_t* __restrict__ s, Params p) {
         for (int i = threadIdx.x; i < cnt; i += TPB) {
