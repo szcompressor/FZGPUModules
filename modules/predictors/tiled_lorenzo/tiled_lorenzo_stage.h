@@ -163,6 +163,14 @@ public:
         return FusionSpec{FusionAccess::BlockLocal, t[0] * t[1]};
     }
 
+    /// Warp-register predictor op (cuSZp3). Only the 2-D, tile-elems-64 (EPL=2)
+    /// shape fuses; the registry runner reads dims/tile as typed args.
+    FusedOpDecl getFusedOp() const override {
+        const auto t = effectiveTile();
+        if (is_inverse_ || t[2] != 1u || t[0] * t[1] != 64u) return {};
+        return FusedOpDecl{FusionStrategy::WarpRegister, "TiledLorenzo2DPredictor", "", {}};
+    }
+
     std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const override {

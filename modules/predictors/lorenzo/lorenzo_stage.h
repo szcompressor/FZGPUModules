@@ -120,6 +120,13 @@ public:
         return FusionSpec{FusionAccess::BlockLocal, block_size_};
     }
 
+    /// Warp-register predictor op (cuSZp2). The op name selects the fused driver
+    /// instantiation in the registry runner; only the block-32 (EPL=1) shape fuses.
+    FusedOpDecl getFusedOp() const override {
+        if (isInverse() || block_size_ != 32u) return {};
+        return FusedOpDecl{FusionStrategy::WarpRegister, "Lorenzo1DPredictor", "", {}};
+    }
+
     /**
      * Enable per-block mean centering (FSZ-style adaptive centering).
      *

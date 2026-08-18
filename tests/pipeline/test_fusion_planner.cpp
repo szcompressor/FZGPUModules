@@ -348,6 +348,33 @@ TEST(FusionPlanner, PfplStagesDeclareFusedOps) {
     EXPECT_EQ(gr[0].stages[3]->getFusedOp().op_name, "RRECoder");
 }
 
+// Phase E: the warp-register (cuSZp) stages declare WarpRegister fused-ops too, so
+// cuszp2 and cuszp3 route through ONE generic registry entry that dispatches on the
+// predictor op name — no per-shape matcher/runner.
+TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
+    Pipeline p(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildCuszp2(p, 4096);
+    p.finalize();
+    auto g = planFusionGroups(*p.getDAG());
+    ASSERT_EQ(g.size(), 1u);
+    ASSERT_EQ(g[0].stages.size(), 3u);
+    const char* kNames[] = {"LinearQuant", "Lorenzo1DPredictor", "AdaptiveBitpack"};
+    for (size_t i = 0; i < 3; ++i) {
+        FusedOpDecl op = g[0].stages[i]->getFusedOp();
+        EXPECT_TRUE(op.valid()) << "warp stage " << i << " declares no fused op";
+        EXPECT_EQ(op.strategy, FusionStrategy::WarpRegister);
+        EXPECT_EQ(op.op_name, kNames[i]);
+    }
+    // cuSZp3 shares the strategy with a different predictor op — same generic entry.
+    Pipeline p3(300 * 180 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildCuszp3(p3, 300, 180);
+    p3.finalize();
+    auto g3 = planFusionGroups(*p3.getDAG());
+    ASSERT_EQ(g3.size(), 1u);
+    EXPECT_EQ(g3[0].stages[1]->getFusedOp().strategy, FusionStrategy::WarpRegister);
+    EXPECT_EQ(g3[0].stages[1]->getFusedOp().op_name, "TiledLorenzo2DPredictor");
+}
+
 // ── NVRTC codegen contract (host-only): the stage-chain fingerprint composes
 // into the "connecting code" that wraps chunk_fused_body<QuantOp,Coder,Trs...>.
 // The end-to-end byte-identity of the generated kernel is covered by running the

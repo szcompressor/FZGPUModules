@@ -109,6 +109,13 @@ public:
         return FusionSpec{FusionAccess::Cooperative, block_size_};
     }
 
+    /// Warp-register coder op (the fixed-rate sink for the cuSZp driver). Only the
+    /// outlier block-32/64 shape fuses (matches the fused rate/pack kernels).
+    FusedOpDecl getFusedOp() const override {
+        if (!getFusionSpec().fusable() || !outlier_selection_) return {};
+        return FusedOpDecl{FusionStrategy::WarpRegister, "AdaptiveBitpack", "", {}};
+    }
+
     /// Set by a fused runner that produced this stage's archive without calling
     /// execute() (the fused kernel wrote the identical [meta|payload] blob). Lets
     /// buildHeader()'s num_elements and the DAG's output sizing see a normal

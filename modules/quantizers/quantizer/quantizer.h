@@ -275,21 +275,27 @@ public:
     /// ABS/NOA float quant maps to the `QuantInplaceZigzag` Map op. Params are
     /// packed from the primed bound (`primeFusedForwardState` must run first).
     FusedOpDecl getFusedOp() const override {
-        if (!std::is_same<TInput, float>::value) return {};   // device op reads float
-        if (is_inverse_ || !isInplaceMode() || !config_.zigzag_codes) return {};
-        if (config_.eb_mode != ErrorBoundMode::ABS && config_.eb_mode != ErrorBoundMode::NOA)
-            return {};
-        fused::chunk::QuantInplaceZigzagParams p;
-        p.ebx2_r    = 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
-        p.radius    = static_cast<uint32_t>(config_.quant_radius);
-        p.threshold = config_.outlier_threshold;
-        FusedOpDecl d;
-        d.strategy       = FusionStrategy::ChunkCooperative;
-        d.op_name        = "QuantInplaceZigzag";
-        d.include_header = "fused/chunk_fusion/chunk_fusion.cuh";
-        d.params.resize(sizeof(p));
-        std::memcpy(d.params.data(), &p, sizeof(p));
-        return d;
+        if (!std::is_same<TInput, float>::value || is_inverse_) return {};  // device ops read float
+        // Warp-register (cuSZp): linear-ABS float quant is the Map loader. The fused
+        // driver takes the bound as a typed arg, so this op carries no params blob.
+        if (isLinearMode() && config_.eb_mode == ErrorBoundMode::ABS)
+            return FusedOpDecl{FusionStrategy::WarpRegister, "LinearQuant", "", {}};
+        // Chunk-cooperative (PFPL): inplace+zigzag ABS/NOA float quant.
+        if (isInplaceMode() && config_.zigzag_codes &&
+            (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA)) {
+            fused::chunk::QuantInplaceZigzagParams p;
+            p.ebx2_r    = 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
+            p.radius    = static_cast<uint32_t>(config_.quant_radius);
+            p.threshold = config_.outlier_threshold;
+            FusedOpDecl d;
+            d.strategy       = FusionStrategy::ChunkCooperative;
+            d.op_name        = "QuantInplaceZigzag";
+            d.include_header = "fused/chunk_fusion/chunk_fusion.cuh";
+            d.params.resize(sizeof(p));
+            std::memcpy(d.params.data(), &p, sizeof(p));
+            return d;
+        }
+        return {};
     }
 
     /// The fused runner bypasses forward execute(); prime the value-range scan so
