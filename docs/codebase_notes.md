@@ -884,6 +884,11 @@ codegen contract (spec → template-arg list) is locked host-only by
 - **`__builtin_memcpy` → `__float_as_uint`** in the quant op's outlier bit-cast — the
   former is not an NVRTC builtin; the latter is native to both nvcc and NVRTC and is
   bit-identical.
+- **`__builtin_clz{,ll}` → guarded `FZ_CLZ32/64`** in `d_PRencode` (RARE/RAZE): under
+  `__CUDACC_RTC__` use the `__clz`/`__clzll` device intrinsics NVRTC provides, else keep
+  `__builtin_*` (which nvcc accepts in host+device passes). Bit-identical for the
+  non-zero inputs used, so a fused RARE/RAZE chain matches the staged kernel. Same class
+  of fix — surfaced when the RARE/RAZE coders became fusable (Phase D).
 
 **Params ABI (Phase B, generalized).** The generated kernel takes one packed
 `const uint8_t* params` blob — each op declares a POD `Params` (stateless ops use

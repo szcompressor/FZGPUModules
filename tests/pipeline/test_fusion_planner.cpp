@@ -288,6 +288,32 @@ TEST(FusionPlanner, GenericRunnerFusesNovelShapeNoRegistryEntry) {
     chunkFusionEndToEnd(buildNoBitshuffle);
 }
 
+// New coder, zero registry glue: PFPL-shaped chain terminated by a coder the
+// registry has NEVER hand-matched (RARE / RAZE, the auto-k generalizations of
+// RRE/RZE). Fuses only because RAREStage/RAZEStage now declare getFusedOp() and
+// the generic runner composes them — "add a coder op once, it composes into any
+// chain." (Phase D payoff.)
+template <class Coder>
+static void buildPfplCoder(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(16384);
+    p.connect(b, d);
+    auto* c = p.addStage<Coder>(); c->setWordSize(1); c->setChunkSize(16384);
+    p.connect(c, b);
+}
+
+TEST(FusionPlanner, GenericRunnerFusesRareCoderNoRegistryEntry) {
+    chunkFusionEndToEnd(buildPfplCoder<RAREStage>);
+}
+TEST(FusionPlanner, GenericRunnerFusesRazeCoderNoRegistryEntry) {
+    chunkFusionEndToEnd(buildPfplCoder<RAZEStage>);
+}
+
 // ── Phase A: each PFPL stage declares its fused device-op via getFusedOp(), so a
 // generic runner can assemble the chain from the stages themselves (no per-shape
 // registry). Locks the op names / strategy / params sizes the codegen consumes.

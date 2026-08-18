@@ -49,6 +49,19 @@
 #define TPB 512           // threads per block (power of two, >= 128)
 #define WS  32            // warp size
 
+// Count-leading-zeros for the RARE/RAZE partial-reduce histogram. nvcc's host+device
+// passes both accept __builtin_clz*, but NVRTC (the generic-fusion codegen path) does
+// not — it provides the __clz/__clzll device intrinsics instead. Both agree bit-for-bit
+// for the non-zero inputs used here, so the fused RARE/RAZE output stays byte-identical
+// to the staged kernel. #undef'd with CS/TPB/WS below.
+#if defined(__CUDACC_RTC__)
+#  define FZ_CLZ32(x) __clz((int)(x))
+#  define FZ_CLZ64(x) __clzll((long long)(x))
+#else
+#  define FZ_CLZ32(x) __builtin_clz((unsigned int)(x))
+#  define FZ_CLZ64(x) __builtin_clzll((unsigned long long)(x))
+#endif
+
 namespace fz {
 namespace lc_detail {
 
@@ -1887,9 +1900,9 @@ static __device__ inline bool d_PRencode(int& csize, byte in [ChunkBytes], byte 
     if (predicate != 0) allmatch = false;
     int keep;
     if constexpr (sizeof(T) == 8) {
-      keep = (predicate == 0) ? 0 : (64 - __builtin_clzll((unsigned long long)predicate));
+      keep = (predicate == 0) ? 0 : (64 - FZ_CLZ64(predicate));
     } else {
-      keep = (predicate == 0) ? 0 : (32 - __builtin_clz((unsigned int)predicate));
+      keep = (predicate == 0) ? 0 : (32 - FZ_CLZ32(predicate));
     }
     fz::backend::atomicAddBlock(&count[keep], 1);
   }
@@ -2350,3 +2363,5 @@ static __device__ inline void d_iRAZE(int& csize, byte in [ChunkBytes], byte out
 #undef CS
 #undef TPB
 #undef WS
+#undef FZ_CLZ32
+#undef FZ_CLZ64

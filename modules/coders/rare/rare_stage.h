@@ -94,6 +94,29 @@ public:
     int    getWordSize()        const { return static_cast<int>(word_size_); }
     uint32_t getCachedOrigBytes() const { return cached_orig_bytes_; }
 
+    // Chunk-cooperative variable-length coder (the swappable sink) — identical
+    // machinery to RZE/RRE. Only the byte-word 16 KB shape fuses (matches the
+    // fused RARECoder device op).
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
+        return FusionSpec{FusionAccess::Cooperative, chunk_size_};
+    }
+    FusedOpDecl getFusedOp() const override {
+        if (!getFusionSpec().fusable()) return {};
+        return FusedOpDecl{FusionStrategy::ChunkCooperative, "RARECoder",
+                           "fused/chunk_fusion/chunk_fusion.cuh", {}};
+    }
+    /// Set by a fused runner that produced this coder's archive without execute();
+    /// also sets cached_orig_bytes_ so the inverse sizes its output (CN-CHUNK-WIRE).
+    void setFusedResult(size_t archive_bytes, size_t orig_bytes) {
+        actual_output_size_    = archive_bytes;
+        cached_orig_bytes_     = static_cast<uint32_t>(orig_bytes);
+        tail_readback_pending_ = false;
+    }
+    void setFusedArchiveResult(size_t archive_bytes, size_t orig_bytes) override {
+        setFusedResult(archive_bytes, orig_bytes);
+    }
+
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
         cudaStream_t stream,

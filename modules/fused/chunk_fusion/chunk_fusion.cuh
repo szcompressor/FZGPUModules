@@ -122,6 +122,21 @@ struct RRECoder {
         return lc_detail::d_RRE<byte, CHUNK_BYTES>(csize, in, out, temp);
     }
 };
+// RARE/RAZE (auto-k generalizations of RRE/RZE) — same uniform LC signature, so they
+// drop into the harness as coder ops with no new glue. Their stages just declare
+// getFusedOp() and any Map->Transform*->{RARE|RAZE} chain fuses via the generic runner.
+struct RARECoder {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
+        return lc_detail::d_RARE<byte, CHUNK_BYTES>(csize, in, out, temp);
+    }
+};
+struct RAZECoder {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
+        return lc_detail::d_RAZE<byte, CHUNK_BYTES>(csize, in, out, temp);
+    }
+};
 
 // ── Packed-params-blob offset arithmetic. Each op contributes sizeof(Params),
 // or 0 if stateless (EmptyParams). The blob is ops in execution order:
