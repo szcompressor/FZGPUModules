@@ -143,7 +143,7 @@ def main():
     keys_by_type = {t: parse_loader_keys(src, fn) for t, fn in registry.items()}
 
     files = sorted(glob.glob(os.path.join(REPO, "docs", "**", "*.md"), recursive=True))
-    files += [os.path.join(REPO, f) for f in ("README.md", "CLAUDE.md", "CONTRIBUTING.md")]
+    files += [os.path.join(REPO, f) for f in ("README.md", "AGENTS.md", "CONTRIBUTING.md")]
 
     errors, n = [], 0
     for path in files:

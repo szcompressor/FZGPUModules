@@ -227,7 +227,7 @@ def main():
     ]
 
     files = sorted(glob.glob(os.path.join(REPO, "docs", "**", "*.md"), recursive=True))
-    files += [os.path.join(REPO, f) for f in ("README.md", "CLAUDE.md", "CONTRIBUTING.md")]
+    files += [os.path.join(REPO, f) for f in ("README.md", "AGENTS.md", "CONTRIBUTING.md")]
 
     jobs, skipped = [], 0
     for path in files:

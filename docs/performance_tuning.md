@@ -31,7 +31,7 @@ guessing — treat those rows as open questions, not settled defaults.
 | Strategy | Behavior | Effect (measured) |
 |---|---|---|
 | `MemoryStrategy::MINIMAL` | Allocate on demand, free at last consumer | Lowest peak memory. Not yet quantified against PREALLOCATE. |
-| `MemoryStrategy::PREALLOCATE` | Allocate everything at `finalize()`, enables buffer coloring | Required for CUDA Graph capture (`MINIMAL` throws — see `CLAUDE.md`). Not yet quantified. |
+| `MemoryStrategy::PREALLOCATE` | Allocate everything at `finalize()`, enables buffer coloring | Required for CUDA Graph capture (`MINIMAL` throws — see `AGENTS.md`). Not yet quantified. |
 
 `pool_multiplier` (third `Pipeline` constructor argument, default `3.0f`) sizes the
 memory pool as `input_size × multiplier`. Too low risks a mid-run pool growth

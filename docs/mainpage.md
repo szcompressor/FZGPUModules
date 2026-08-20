@@ -271,8 +271,8 @@ at startup; do not change log level or callback while pipelines are running on o
 
 ## Coding with AI agents
 
-If you're using Claude Code (or another agent-driven IDE assistant), point it at
-[`CLAUDE.md`](https://github.com/szcompressor/FZGPUModules/blob/main/CLAUDE.md) at the
+If you're using an agent-driven IDE assistant, point it at
+[`AGENTS.md`](https://github.com/szcompressor/FZGPUModules/blob/main/AGENTS.md) at the
 repo root for an LLM-tailored overview of the pipeline model, the stage catalog, build/test
 recipes, and the ownership rules and gotchas that are easy to get wrong from source alone.
 
