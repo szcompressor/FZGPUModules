@@ -75,7 +75,14 @@ jobs:
             module purge
             module load nvhpc/23.11/nvhpc-hpcx-cuda12
           fi
-          cmake --build build/ci --parallel
+          # nvc++ emits large LLVM intermediates. An unbounded parallel build can
+          # exhaust the runner's small root filesystem through /tmp, leaving
+          # truncated .ll files and misleading follow-on LLVM parse errors.
+          compiler_tmp=$(mktemp -d "${RUNNER_TEMP:?}/fzgmod-nvcxx.XXXXXX")
+          trap 'rm -rf -- "$compiler_tmp"' EXIT
+          export TMPDIR="$compiler_tmp"
+          df -h /tmp "$TMPDIR"
+          cmake --build build/ci --parallel 4
 
       - name: Run tests
         shell: bash
@@ -130,7 +137,13 @@ jobs:
           CC=gcc CXX=g++ cmake --preset asan
 
       - name: Build
-        run: cmake --build --preset asan --parallel
+        shell: bash
+        run: |
+          compiler_tmp=$(mktemp -d "${RUNNER_TEMP:?}/fzgmod-asan.XXXXXX")
+          trap 'rm -rf -- "$compiler_tmp"' EXIT
+          export TMPDIR="$compiler_tmp"
+          df -h /tmp "$TMPDIR"
+          cmake --build --preset asan --parallel 4
 
       - name: Run tests (ASan)
         run: |
