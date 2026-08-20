@@ -45,7 +45,11 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
 
     auto* q = static_cast<QuantizerStage<float, uint32_t>*>(g[0]);
     auto* a = static_cast<AdaptiveBitpackStage<int32_t>*>(g[2]);
-    const float eb = static_cast<float>(q->getErrorBound());
+    // Resolved absolute bound after priming — ABS: = error_bound; NOA: = eb*range
+    // (padding-excluded, see primeComputedAbsEb). The fused kernel quantizes with this
+    // and the reused inverse reconstructs with the same computed_abs_eb_, so ABS and
+    // NOA share one uniform-step fused path.
+    const float eb = static_cast<float>(q->getComputedAbsEb());
 
     // Dispatch on the declared predictor op → the matching fused driver. The
     // driver is a compile-time <EPL, Predictor> template, so this maps the op name

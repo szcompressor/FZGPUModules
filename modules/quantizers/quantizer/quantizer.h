@@ -276,9 +276,12 @@ public:
     /// packed from the primed bound (`primeFusedForwardState` must run first).
     FusedOpDecl getFusedOp() const override {
         if (!std::is_same<TInput, float>::value || is_inverse_) return {};  // device ops read float
-        // Warp-register (cuSZp): linear-ABS float quant is the Map loader. The fused
-        // driver takes the bound as a typed arg, so this op carries no params blob.
-        if (isLinearMode() && config_.eb_mode == ErrorBoundMode::ABS)
+        // Warp-register (cuSZp): linear float quant is the Map loader, for ABS or NOA
+        // (both resolve to one uniform-step absolute bound — the runner primes the NOA
+        // range scan and passes the resolved abs_eb). REL is excluded: it is log-domain
+        // per-value quant, not a single abs_eb, so it can't ride the fused kernel.
+        if (isLinearMode() &&
+            (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
             return FusedOpDecl{FusionStrategy::WarpRegister, "LinearQuant", "", {}};
         // Chunk-cooperative (PFPL): inplace+zigzag ABS/NOA float quant.
         if (isInplaceMode() && config_.zigzag_codes &&

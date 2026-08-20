@@ -161,6 +161,75 @@ TEST(FusionPlanner, EndToEndFusedMatchesStaged) {
     cudaFree(d_in);
 }
 
+// Warp-register fusion under NOA (not just ABS): cuszp2 with a range-relative bound
+// must fuse, stay byte-identical to staged, and satisfy the bound — the runner primes
+// the NOA range scan and passes the resolved abs_eb into the uniform-step fused kernel.
+// Positive data + non-32-aligned tail also exercises the padding-exclusion fix.
+TEST(FusionPlanner, Cuszp2NoaEndToEndFusedMatchesStaged) {
+    const size_t n  = (1u << 20) + 777;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    double lo = 1e30, hi = -1e30;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 1.0f + 0.5f*std::sin(i*0.001f) + 0.2f*std::cos(i*0.017f);   // strictly > 0
+        lo = std::min(lo, (double)h[i]); hi = std::max(hi, (double)h[i]);
+    }
+    const double bound = eb * (hi - lo) * 1.001;
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto build = [&](Pipeline& p) {
+        p.setDims(n, 1, 1);
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(eb); q->setErrorBoundMode(ErrorBoundMode::NOA); q->setLinearMode(true);
+        auto* l = p.addStage<LorenzoStage<int32_t>>(); l->setBlockSize(32);
+        p.connect(l, q, "codes");
+        auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        a->setBlockSize(32); a->setOutlierSelection(true);
+        p.connect(a, l);
+    };
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol); build(p); p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        cudaDeviceSynchronize();
+        out.resize(sz);
+        cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost);
+        return sz;
+    };
+    std::vector<uint8_t> staged, fused;
+    size_t ss = compressCopy(FusionPolicy::Off,  staged);
+    size_t sf = compressCopy(FusionPolicy::Auto, fused);
+    ASSERT_EQ(ss, sf) << "NOA fused archive size differs from staged";
+    EXPECT_EQ(staged, fused) << "NOA fused archive not byte-identical to staged";
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& r) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol); build(p); p.finalize();
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        r.assign(n, 0.0f);
+        cudaMemcpy(r.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off,  rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rs), bound) << "staged NOA exceeds bound";
+    EXPECT_LE(maxErr(rf), bound) << "fused NOA exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused NOA reconstruction differs from staged";
+    cudaFree(d_in);
+}
+
 // PFPL (chunk-cooperative): Quantizer(NOA,inplace,zigzag) -> Difference(negabinary)
 // -> Bitshuffle(ew4) -> {RZE|RRE}. The coder is a build-time choice; the SAME
 // registry entry / harness fuses either. useRre swaps the coder.
