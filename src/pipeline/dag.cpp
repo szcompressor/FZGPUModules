@@ -412,14 +412,36 @@ void CompressionDAG::execute(cudaStream_t stream) {
                     FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
 
                 const BufferInfo& in_buf  = buffers_.at(node->input_buffer_ids[0]);
-                BufferInfo&       out_buf = buffers_.at(fg.tail->output_buffer_ids[0]);
+                const int   main_out_id = fg.tail->output_buffer_ids[0];
+                BufferInfo& out_buf     = buffers_.at(main_out_id);
+
+                // Collect the group's escaping side outputs: any member output-port
+                // buffer with no consumers (a pipeline leaf) that is not the main
+                // archive. The runner writes these (e.g. an outlier list) and reports
+                // their sizes; the pipeline auto-concatenates them. Empty for the
+                // common single-output case, so those runners are unaffected.
+                std::vector<FusedSideOutput> side;
+                std::vector<int>             side_ids;
+                for (DAGNode* m : fg.members) {
+                    for (const auto& kv : m->output_index_to_buffer_id) {
+                        const int buf_id = kv.second;
+                        if (buf_id == main_out_id) continue;
+                        BufferInfo& b = buffers_.at(buf_id);
+                        if (!b.consumer_stage_ids.empty()) continue;   // internal to the group
+                        side.push_back(FusedSideOutput{
+                            m->stage, kv.first, b.d_ptr, b.allocated_size, 0});
+                        side_ids.push_back(buf_id);
+                    }
+                }
+
                 FusedRunContext ctx;
-                ctx.stages      = &fg.stages;
-                ctx.d_input     = in_buf.d_ptr;
-                ctx.input_bytes = in_buf.size;
-                ctx.d_output    = out_buf.d_ptr;
-                ctx.pool        = mem_pool_;
-                ctx.stream      = stream;
+                ctx.stages       = &fg.stages;
+                ctx.d_input      = in_buf.d_ptr;
+                ctx.input_bytes  = in_buf.size;
+                ctx.d_output     = out_buf.d_ptr;
+                ctx.pool         = mem_pool_;
+                ctx.stream       = stream;
+                ctx.side_outputs = side.empty() ? nullptr : &side;
                 const size_t archive_bytes = fg.impl->run(ctx);
                 out_buf.size = archive_bytes;
                 if (out_buf.allocated_size != 0 && archive_bytes > out_buf.allocated_size)
@@ -427,6 +449,13 @@ void CompressionDAG::execute(cudaStream_t stream) {
                         "Fused group '" + std::string(fg.impl->name) + "' wrote " +
                         std::to_string(archive_bytes) + " bytes into a " +
                         std::to_string(out_buf.allocated_size) + "-byte buffer");
+                for (size_t k = 0; k < side.size(); ++k) {
+                    if (side[k].capacity != 0 && side[k].size > side[k].capacity)
+                        throw std::runtime_error(
+                            "Fused group '" + std::string(fg.impl->name) +
+                            "' side output overflowed its buffer");
+                    buffers_.at(side_ids[k]).size = side[k].size;
+                }
                 for (DAGNode* m : fg.members)
                     FZ_CUDA_CHECK(cudaEventRecord(m->completion_event, stream));
                 continue;
