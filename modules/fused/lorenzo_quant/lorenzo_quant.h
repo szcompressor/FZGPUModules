@@ -333,7 +333,7 @@ public:
         config.value_base_f64  = static_cast<double>(computed_value_base_);
         config.zigzag_codes  = config_.zigzag_codes ? uint8_t{1} : uint8_t{0};
         config.centering     = config_.centering ? uint8_t{1} : uint8_t{0};
-        config.reserved[0]   = 0; config.reserved[1] = 0; config.reserved[2] = 0;
+        config.reserved[0]   = 0; config.reserved[1] = 0;
 
         std::memcpy(header_buffer, &config, sizeof(LorenzoQuantConfig));
         return sizeof(LorenzoQuantConfig);
