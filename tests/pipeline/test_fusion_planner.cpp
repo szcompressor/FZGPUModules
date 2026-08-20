@@ -314,6 +314,53 @@ TEST(FusionPlanner, GenericRunnerFusesRazeCoderNoRegistryEntry) {
     chunkFusionEndToEnd(buildPfplCoder<RAZEStage>);
 }
 
+// Regression: the fused NOA range scan must exclude the chunk-aligned zero-padding
+// tail. If it scans the padding, those zeros lower the min and inflate the range →
+// too-large abs_eb → the fused path quantizes too loosely and violates the bound on
+// real data (found on CESM CLDHGH; fixed via the logical-grid clamp in
+// primeComputedAbsEb). Needs BOTH a partial final 16 KB chunk (non-aligned n) AND
+// all-positive data so padding-0 shifts the min — which is why the aligned,
+// zero-centred end-to-end tests above never caught it.
+TEST(FusionPlanner, PfplNoaPartialChunkExcludesPadding) {
+    const size_t n  = (1u << 20) + 777;   // partial final chunk (not a 4096 multiple)
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    double lo = 1e30, hi = -1e30;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 1.0f + 0.4f*std::sin(i*0.001f) + 0.1f*std::cos(i*0.017f);   // strictly > 0
+        lo = std::min(lo, (double)h[i]); hi = std::max(hi, (double)h[i]);
+    }
+    const double bound = eb * (hi - lo) * 1.001;   // NOA over REAL data (padding excluded)
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildPfpl(p, n, /*useRre=*/false);   // inplace-zigzag NOA quant + Diff + Bitshuffle + RZE
+        p.finalize();
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off,  rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rs), bound) << "staged baseline exceeds bound";
+    EXPECT_LE(maxErr(rf), bound) << "fused exceeds bound — padding inflated the NOA range";
+    EXPECT_EQ(rs, rf) << "fused real-data reconstruction diverges from staged";
+    cudaFree(d_in);
+}
+
 // ── Phase A: each PFPL stage declares its fused device-op via getFusedOp(), so a
 // generic runner can assemble the chain from the stages themselves (no per-shape
 // registry). Locks the op names / strategy / params sizes the codegen consumes.

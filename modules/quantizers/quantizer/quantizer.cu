@@ -1164,11 +1164,19 @@ void QuantizerStage<TInput, TCode>::primeComputedAbsEb(
         return;
     }
     // NOA / PREL: value_range (or precomputed base), then abs_eb = eb * value_base.
+    // The fused runner hands us the *padded* element count (the group input is
+    // chunk-aligned with a zero-padded tail); scanning those zeros lowers the min
+    // and inflates the range → too-large abs_eb → a real-data bound violation.
+    // Clamp to the logical grid exactly as execute() does (the E16 fix), so the
+    // fused NOA scan covers only real elements. See docs/codebase_notes.md.
+    size_t scan_N = dims_[0] * dims_[1] * dims_[2];
+    if (scan_N == 0 || scan_N > scan_n) scan_N = scan_n;
+
     TInput value_base = static_cast<TInput>(config_.precomputed_value_base);
     if (value_base <= TInput(0)) {
         TInput data_abs_max = TInput(0);
         value_base = computeValueBase<TInput>(
-            static_cast<const TInput*>(d_in), scan_n, config_.eb_mode, stream, pool, &data_abs_max);
+            static_cast<const TInput*>(d_in), scan_N, config_.eb_mode, stream, pool, &data_abs_max);
     }
     computed_value_base_ = value_base;
     computed_abs_eb_ = (value_base <= TInput(0))
