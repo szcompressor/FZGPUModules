@@ -592,25 +592,113 @@ TEST(FusionPlanner, WarpNvrtcCodegenComposesSpecOps) {
     const std::string src2 = fused::generateWarpFusionSource(s2);
     EXPECT_NE(src2.find("Lorenzo1DPredictor pred = Lorenzo1DPredictor::fromParams"),
               std::string::npos);
-    EXPECT_NE(src2.find("fused_rate_body<1, AdaptiveBitpackCoder>"), std::string::npos);
-    EXPECT_NE(src2.find("fused_pack_body<1, AdaptiveBitpackCoder>"), std::string::npos);
+    EXPECT_NE(src2.find("fused_rate_body<1, AdaptiveBitpackCoder, Lorenzo1DPredictor>"), std::string::npos);
+    EXPECT_NE(src2.find("fused_pack_body<1, AdaptiveBitpackCoder, Lorenzo1DPredictor>"), std::string::npos);
     EXPECT_NE(src2.find("#include \"fused/fused_block/warp_fusion.cuh\""), std::string::npos);
     EXPECT_NE(src2.find("fz_fused_warp_rate"), std::string::npos);
     EXPECT_NE(src2.find("fz_fused_warp_pack"), std::string::npos);
 
     // Swapping the predictor + EPL is a data change — no new C++.
-    fused::WarpFusionSpec s3{"TiledLorenzo2DPredictor", "AdaptiveBitpackCoder", 2};
+    fused::WarpFusionSpec s3;
+    s3.predictor = "TiledLorenzo2DPredictor"; s3.coder = "AdaptiveBitpackCoder"; s3.elems_per_lane = 2;
     const std::string src3 = fused::generateWarpFusionSource(s3);
     EXPECT_NE(src3.find("TiledLorenzo2DPredictor::fromParams"), std::string::npos);
-    EXPECT_NE(src3.find("fused_rate_body<2, AdaptiveBitpackCoder>"), std::string::npos);
+    EXPECT_NE(src3.find("fused_rate_body<2, AdaptiveBitpackCoder, TiledLorenzo2DPredictor>"),
+              std::string::npos);
     EXPECT_EQ(src3.find("Lorenzo1DPredictor"), std::string::npos);
 
     // Swapping the CODER is likewise a data change — the whole point of this update.
-    fused::WarpFusionSpec s4{"Lorenzo1DPredictor", "PlainBitpackCoder", 1};
+    fused::WarpFusionSpec s4;
+    s4.predictor = "Lorenzo1DPredictor"; s4.coder = "PlainBitpackCoder"; s4.elems_per_lane = 1;
     const std::string src4 = fused::generateWarpFusionSource(s4);
-    EXPECT_NE(src4.find("fused_rate_body<1, PlainBitpackCoder>"), std::string::npos);
-    EXPECT_NE(src4.find("fused_pack_body<1, PlainBitpackCoder>"), std::string::npos);
+    EXPECT_NE(src4.find("fused_rate_body<1, PlainBitpackCoder, Lorenzo1DPredictor>"), std::string::npos);
+    EXPECT_NE(src4.find("fused_pack_body<1, PlainBitpackCoder, Lorenzo1DPredictor>"), std::string::npos);
     EXPECT_EQ(src4.find("AdaptiveBitpackCoder"), std::string::npos);
+
+    // Composing a TRANSFORM between predictor and coder: another data change, no new C++.
+    fused::WarpFusionSpec s5;
+    s5.predictor = "Lorenzo1DPredictor"; s5.transforms = {"ZigzagTransform"};
+    s5.coder = "AdaptiveBitpackCoder"; s5.elems_per_lane = 1;
+    const std::string src5 = fused::generateWarpFusionSource(s5);
+    EXPECT_NE(src5.find("fused_rate_body<1, AdaptiveBitpackCoder, Lorenzo1DPredictor, ZigzagTransform>"),
+              std::string::npos);
+}
+
+// Warp transform chain: a register→register op (Zigzag/TCMS) composed BETWEEN the
+// predictor and the coder — proving the warp path fuses more than a fixed 3-stage
+// shape (Quant→Predictor→Transform*→Coder), like the chunk path. The staged pipeline
+// (Quant→Lorenzo→Zigzag→AdaptiveBitpack) is the byte-identity oracle: the fused kernel
+// applies the same zigzag to the deltas before packing. Zigzag runs byte-transparent so
+// its uint32 output feeds AdaptiveBitpack<int32> unchecked (the LC "TCMS" role).
+TEST(FusionPlanner, WarpTransformChainZigzagFusesMatchesStaged) {
+    const size_t n = 1u << 20;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i)
+        h[i] = 0.6f*std::sin(i*0.001f) + 0.3f*std::cos(i*0.017f);
+    const double bound = eb * 1.001;   // ABS
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto build = [&](Pipeline& p) {
+        p.setDims(n, 1, 1);
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(eb); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+        auto* l = p.addStage<LorenzoStage<int32_t>>(); l->setBlockSize(32);
+        p.connect(l, q, "codes");
+        auto* z = p.addStage<ZigzagStage<int32_t>>(); z->setByteTransparent(true);
+        p.connect(z, l);
+        auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        a->setBlockSize(32); a->setOutlierSelection(true);
+        p.connect(a, z);
+    };
+
+    // Planner groups the 4-stage chain as one warp group.
+    { Pipeline pg(bytes, MemoryStrategy::PREALLOCATE, 2.0f); build(pg); pg.finalize();
+      auto gr = planFusionGroups(*pg.getDAG());
+      ASSERT_EQ(gr.size(), 1u); EXPECT_EQ(gr[0].stages.size(), 4u); }
+
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        build(p); p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        cudaDeviceSynchronize();
+        out.resize(sz);
+        cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost);
+        return sz;
+    };
+    std::vector<uint8_t> staged, fused;
+    const size_t ss = compressCopy(FusionPolicy::Off, staged);
+    const size_t sf = compressCopy(FusionPolicy::Auto, fused);
+    ASSERT_EQ(ss, sf) << "fused archive size differs from staged";
+    EXPECT_EQ(staged, fused) << "fused (with transform) archive not byte-identical to staged";
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        build(p); p.finalize();
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_dec = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_dec, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_dec, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off,  rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rf), bound) << "fused transform-chain round-trip exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged";
+    cudaFree(d_in);
 }
 
 // The swappable-coder payoff: fuse the SAME warp chain with a different Cooperative

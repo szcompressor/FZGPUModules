@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace fz {
 class MemoryPool;
@@ -25,12 +26,14 @@ class MemoryPool;
 namespace fused {
 
 /// The warp-chain fingerprint the codegen composes: the predictor device-policy type
-/// name (defined in warp_fusion.cuh) and ElemsPerLane (= block_size / 32, a
-/// compile-time template arg of the kernels). Defaults spell cuSZp2.
+/// name (defined in warp_fusion.cuh), any register→register transform policies between
+/// predictor and coder, the coder policy (the variable-length sink), and ElemsPerLane
+/// (= block_size / 32, a compile-time template arg of the kernels). Defaults spell cuSZp2.
 struct WarpFusionSpec {
-    std::string predictor      = "Lorenzo1DPredictor";
-    std::string coder          = "AdaptiveBitpackCoder";   // the swappable Cooperative sink
-    int         elems_per_lane = 1;
+    std::string              predictor      = "Lorenzo1DPredictor";
+    std::vector<std::string> transforms;                        // optional, in execution order
+    std::string              coder          = "AdaptiveBitpackCoder";   // swappable sink
+    int                      elems_per_lane = 1;
 };
 
 /// The CUDA source the codegen emits for `spec` (exposed for tests/inspection).

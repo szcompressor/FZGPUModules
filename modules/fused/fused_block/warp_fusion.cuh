@@ -92,6 +92,34 @@ struct TiledLorenzo2DPredictor {
     }
 };
 
+// ── Transform ops (optional, between predictor and coder) ────────────────────
+// A warp transform is a size-preserving register→register map on the per-lane delta
+// array `d[EPL]`, applied after the predictor and before the coder (the register
+// analogue of a chunk transform). Element-wise transforms ignore `lane`; ones that
+// need neighbours use warp shuffles. Its staged counterpart must invert it on decode
+// (decompress is not fused), so the fused op must match the staged transform exactly.
+
+// Zigzag (TCMS): signed → unsigned interleave, per element. Matches ZigzagStage<int32_t>.
+struct ZigzagTransform {
+    template<int EPL>
+    __device__ static void apply(int (&d)[EPL], uint32_t /*lane*/) {
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const uint32_t z = (static_cast<uint32_t>(d[m]) << 1) ^ static_cast<uint32_t>(d[m] >> 31);
+            d[m] = static_cast<int>(z);
+        }
+    }
+};
+
+// Apply a transform pack to d[] in order (no-op for the empty chain).
+template<int EPL>
+__device__ __forceinline__ void applyTransforms(int (&)[EPL], uint32_t) {}
+template<int EPL, class T, class... R>
+__device__ __forceinline__ void applyTransforms(int (&d)[EPL], uint32_t lane) {
+    T::template apply<EPL>(d, lane);
+    applyTransforms<EPL, R...>(d, lane);
+}
+
 // ── Coder policies (the swappable Cooperative sink) ──────────────────────────
 // A warp coder is the variable-length tail of the register chain. Its two halves
 // mirror the two-pass driver: `cost()` (called by ALL lanes — it warp-reduces the
@@ -257,7 +285,7 @@ struct PlainBitpackCoder {
 // deltas (cheaper than spilling them to DRAM — the reason warp fusion is fast).
 // Template order `<EPL, Coder, Pred>` lets the codegen name EPL+Coder explicitly and
 // deduce Pred from the argument.
-template<int ElemsPerLane, class Coder, class Pred>
+template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
 __device__ __forceinline__ void fused_rate_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint32_t* __restrict__ cost)
@@ -275,11 +303,12 @@ __device__ __forceinline__ void fused_rate_body(
     int d[ElemsPerLane];
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
+    applyTransforms<ElemsPerLane, Transforms...>(d, lane);
     Coder::template cost<ElemsPerLane>(d, lane, word_bytes, count,
                                        meta + Coder::meta_bytes * b, &cost[b]);
 }
 
-template<int ElemsPerLane, class Coder, class Pred>
+template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
 __device__ __forceinline__ void fused_pack_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
@@ -298,27 +327,28 @@ __device__ __forceinline__ void fused_pack_body(
     int d[ElemsPerLane];
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
+    applyTransforms<ElemsPerLane, Transforms...>(d, lane);
     Coder::template pack<ElemsPerLane>(d, lane, word_bytes, count,
                                        meta + Coder::meta_bytes * b, payload + offset[b]);
 }
 
 // ── Compile-time template kernels (the non-NVRTC path). The NVRTC path generates
 // equivalent extern "C" kernels over the same bodies. ────────────────────────
-template<int ElemsPerLane, class Coder, class Pred>
+template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
 __global__ void fused_rate_kernel(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint32_t* __restrict__ cost)
 {
-    fused_rate_body<ElemsPerLane, Coder, Pred>(pred, n, word_bytes, num_blocks, meta, cost);
+    fused_rate_body<ElemsPerLane, Coder, Pred, Transforms...>(pred, n, word_bytes, num_blocks, meta, cost);
 }
 
-template<int ElemsPerLane, class Coder, class Pred>
+template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
 __global__ void fused_pack_kernel(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
     uint8_t* __restrict__ payload)
 {
-    fused_pack_body<ElemsPerLane, Coder, Pred>(pred, n, word_bytes, num_blocks, meta, offset, payload);
+    fused_pack_body<ElemsPerLane, Coder, Pred, Transforms...>(pred, n, word_bytes, num_blocks, meta, offset, payload);
 }
 
 } // namespace warp

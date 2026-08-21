@@ -25,17 +25,25 @@ namespace {
 //    stage declares its device-policy op + packed params + shape (elems_per_lane,
 //    n_ab) via getFusedOp(), and the generic runner builds a WarpFusionSpec and
 //    calls one launcher — no per-predictor dispatch or pre-instantiated launcher.
-//    Adding a predictor = write its policy in warp_fusion.cuh + declare it on the
-//    stage. The coder is always AdaptiveBitpack (the fixed-rate sink of this family).
+//    Adding a predictor, a transform, or a coder = write its policy in warp_fusion.cuh
+//    + declare it on the stage. The chain is Quant(Map) -> Predictor(BlockLocal) ->
+//    {Map|BlockLocal transforms}* -> Coder(Cooperative), all WarpRegister — the register
+//    analogue of the chunk chain.
 bool matchesWarpRegister(const std::vector<Stage*>& g) {
-    if (g.size() != 3) return false;               // Quant -> Predictor -> AdaptiveBitpack
+    if (g.size() < 3) return false;                // Quant -> Predictor -> ... -> Coder
     for (Stage* s : g) {
         const FusedOpDecl op = s->getFusedOp();
         if (!op.valid() || op.strategy != FusionStrategy::WarpRegister) return false;
     }
-    return g[0]->getFusionSpec().access == FusionAccess::Map &&
-           g[1]->getFusionSpec().access == FusionAccess::BlockLocal &&
-           g[2]->getFusionSpec().access == FusionAccess::Cooperative;
+    if (g.front()->getFusionSpec().access != FusionAccess::Map)          return false; // quant
+    if (g[1]->getFusionSpec().access      != FusionAccess::BlockLocal)   return false; // predictor
+    if (g.back()->getFusionSpec().access  != FusionAccess::Cooperative)  return false; // coder
+    // Interior stages (between predictor and coder) are register→register transforms.
+    for (size_t i = 2; i + 1 < g.size(); ++i) {
+        const FusionAccess a = g[i]->getFusionSpec().access;
+        if (a != FusionAccess::Map && a != FusionAccess::BlockLocal) return false;
+    }
+    return true;
 }
 
 size_t runWarpRegister(const FusedRunContext& ctx) {
@@ -46,8 +54,8 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
                                 static_cast<fz::stream_t>(ctx.stream) };
     for (Stage* s : g) s->primeFusedForwardState(pc);
 
-    auto* q = static_cast<QuantizerStage<float, uint32_t>*>(g[0]);
-    auto* a = static_cast<AdaptiveBitpackStage<int32_t>*>(g[2]);
+    auto* q = static_cast<QuantizerStage<float, uint32_t>*>(g.front());
+    auto* a = static_cast<AdaptiveBitpackStage<int32_t>*>(g.back());
     // Resolved absolute bound after priming — ABS: = error_bound; NOA: = eb*range
     // (padding-excluded, see primeComputedAbsEb). The fused kernel quantizes with this
     // and the reused inverse reconstructs with the same computed_abs_eb_, so ABS and
@@ -55,14 +63,18 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     const float eb     = static_cast<float>(q->getComputedAbsEb());
     const float inv2eb = 1.0f / (2.0f * eb);
 
-    // Build the warp spec + params blob from the predictor's own declaration — no
-    // per-predictor dispatch. The predictor packs its geometry with a leading inv2eb
-    // slot (offset 0) it cannot fill (the quantizer owns the bound); patch it here.
+    // Build the warp spec + params blob from the stages' own declarations — no
+    // per-predictor dispatch. Chain positions: g[0] quant (absorbed into the predictor
+    // policy), g[1] predictor, g[2..n-2] transforms, g[n-1] coder. The predictor packs
+    // its geometry with a leading inv2eb slot (offset 0) it cannot fill (the quantizer
+    // owns the bound); patch it here.
     const FusedOpDecl decl = g[1]->getFusedOp();
     fused::WarpFusionSpec spec;
     spec.predictor      = decl.op_name;
-    spec.coder          = g[2]->getFusedOp().op_name;   // swappable Cooperative sink
+    spec.coder          = g.back()->getFusedOp().op_name;   // swappable Cooperative sink
     spec.elems_per_lane = static_cast<int>(decl.elems_per_lane);
+    for (size_t i = 2; i + 1 < g.size(); ++i)              // register→register transforms
+        spec.transforms.push_back(g[i]->getFusedOp().op_name);
     std::vector<uint8_t> blob = decl.params;
     if (blob.size() >= sizeof(float)) std::memcpy(blob.data(), &inv2eb, sizeof(float));
 
