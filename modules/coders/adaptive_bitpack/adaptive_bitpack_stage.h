@@ -109,12 +109,27 @@ public:
         return FusionSpec{FusionAccess::Cooperative, block_size_};
     }
 
-    /// Warp-register coder op (the fixed-rate sink for the cuSZp driver). Only the
-    /// outlier block-32/64 shape fuses (matches the fused rate/pack kernels).
+    /// Warp-register coder op (the fixed-rate Cooperative sink of the warp chain). The
+    /// op name is the device coder policy the fused kernel composes — the runner reads
+    /// it and the codegen instantiates the rate/pack bodies with it, so the coder is
+    /// swappable (see setFusedCoder). Only the outlier block-32/64 shape fuses (the
+    /// warp block format the coders emit).
     FusedOpDecl getFusedOp() const override {
         if (!getFusionSpec().fusable() || !outlier_selection_) return {};
-        return FusedOpDecl{FusionStrategy::WarpRegister, "AdaptiveBitpack", "", {}};
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::WarpRegister;
+        d.op_name        = fused_coder_;
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        return d;
     }
+
+    /// Choose the warp coder policy the fused path composes (default
+    /// "AdaptiveBitpackCoder"). Any policy in warp_fusion.cuh that emits an
+    /// AdaptiveBitpack-decodable archive works — e.g. "PlainBitpackCoder" for an
+    /// A/B baseline. Affects only the fused forward; the staged path and the inverse
+    /// are unchanged.
+    void setFusedCoder(std::string name) { fused_coder_ = std::move(name); }
+    const std::string& getFusedCoder() const { return fused_coder_; }
 
     /// Set by a fused runner that produced this stage's archive without calling
     /// execute() (the fused kernel wrote the identical [meta|payload] blob). Lets
@@ -231,6 +246,12 @@ private:
     bool     outlier_selection_  = false;
     size_t   num_elements_       = 0;
     size_t   actual_output_size_ = 0;
+    /// Which warp coder policy the fused (NVRTC) path composes for this stage. The
+    /// default reproduces this stage's own adaptive packing byte-for-byte; a caller
+    /// may swap in another Cooperative coder (e.g. "PlainBitpackCoder") — every coder
+    /// still emits an AdaptiveBitpack-decodable archive, so the staged inverse is
+    /// unchanged. Runtime-only (not serialized): decode never consults it.
+    std::string fused_coder_ = "AdaptiveBitpackCoder";
 
     // Forward-path persistent scratch (kept alive across execute() so the
     // compressed-size readback can be deferred to postStreamSync(), and so no

@@ -38,6 +38,7 @@ std::string generateWarpFusionSource(const WarpFusionSpec& spec) {
     // compile-time template arg). Both kernels reconstruct the policy from the params
     // blob + the launch-time input via the predictor's own `fromParams` factory.
     const std::string P   = spec.predictor;
+    const std::string C   = spec.coder;
     const std::string EPL = std::to_string(spec.elems_per_lane);
     std::string src;
     src += "#include \"fused/fused_block/warp_fusion.cuh\"\n";
@@ -47,14 +48,14 @@ std::string generateWarpFusionSource(const WarpFusionSpec& spec) {
     src += "    unsigned word_bytes, unsigned long long num_blocks,\n";
     src += "    unsigned char* meta, unsigned* cost) {\n";
     src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp);\n";
-    src += "  fused_rate_body<" + EPL + ">(pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, cost);\n";
+    src += "  fused_rate_body<" + EPL + ", " + C + ">(pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, cost);\n";
     src += "}\n";
     src += "extern \"C\" __global__ void fz_fused_warp_pack(\n";
     src += "    const float* in, unsigned long long n, const unsigned char* pp,\n";
     src += "    unsigned word_bytes, unsigned long long num_blocks,\n";
     src += "    const unsigned char* meta, const unsigned* offset, unsigned char* payload) {\n";
     src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp);\n";
-    src += "  fused_pack_body<" + EPL + ">(pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, offset, payload);\n";
+    src += "  fused_pack_body<" + EPL + ", " + C + ">(pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, offset, payload);\n";
     src += "}\n";
     return src;
 }

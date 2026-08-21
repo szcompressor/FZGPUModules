@@ -29,6 +29,7 @@ namespace fused {
 /// compile-time template arg of the kernels). Defaults spell cuSZp2.
 struct WarpFusionSpec {
     std::string predictor      = "Lorenzo1DPredictor";
+    std::string coder          = "AdaptiveBitpackCoder";   // the swappable Cooperative sink
     int         elems_per_lane = 1;
 };
 

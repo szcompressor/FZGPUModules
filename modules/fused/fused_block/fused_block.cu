@@ -54,7 +54,9 @@ static size_t launchFusedBlockCore(
     uint8_t* d_meta    = d_out;
     uint8_t* d_payload = d_out + meta_region;
 
-    warp::fused_rate_kernel<ElemsPerLane, Pred><<<grid, THREADS, 0, stream>>>(
+    // The compile-time reference uses the AdaptiveBitpack coder (the byte-identity
+    // oracle for cuszp2/3); the NVRTC path composes whichever coder the chain names.
+    warp::fused_rate_kernel<ElemsPerLane, warp::AdaptiveBitpackCoder, Pred><<<grid, THREADS, 0, stream>>>(
         pred, n_ab, word_bytes, num_blocks, d_meta, d_cost);
     FZ_CUDA_CHECK(cudaGetLastError());
 
@@ -63,7 +65,7 @@ static size_t launchFusedBlockCore(
             cub::DeviceScan::ExclusiveSum(tmp, bytes, d_cost, d_offset, num_blocks, stream);
         });
 
-    warp::fused_pack_kernel<ElemsPerLane, Pred><<<grid, THREADS, 0, stream>>>(
+    warp::fused_pack_kernel<ElemsPerLane, warp::AdaptiveBitpackCoder, Pred><<<grid, THREADS, 0, stream>>>(
         pred, n_ab, word_bytes, num_blocks, d_meta, d_offset, d_payload);
     FZ_CUDA_CHECK(cudaGetLastError());
 

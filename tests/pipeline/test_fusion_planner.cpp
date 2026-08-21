@@ -553,7 +553,7 @@ TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
     auto g = planFusionGroups(*p.getDAG());
     ASSERT_EQ(g.size(), 1u);
     ASSERT_EQ(g[0].stages.size(), 3u);
-    const char* kNames[] = {"LinearQuant", "Lorenzo1DPredictor", "AdaptiveBitpack"};
+    const char* kNames[] = {"LinearQuant", "Lorenzo1DPredictor", "AdaptiveBitpackCoder"};
     for (size_t i = 0; i < 3; ++i) {
         FusedOpDecl op = g[0].stages[i]->getFusedOp();
         EXPECT_TRUE(op.valid()) << "warp stage " << i << " declares no fused op";
@@ -588,22 +588,81 @@ TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
 // cuszp2/cuszp3 tests; here we lock the spec → source mapping (adding a predictor is a
 // data change to the spec, no new launcher/dispatch).
 TEST(FusionPlanner, WarpNvrtcCodegenComposesSpecOps) {
-    fused::WarpFusionSpec s2;   // cuSZp2 defaults: Lorenzo1DPredictor, EPL=1
+    fused::WarpFusionSpec s2;   // cuSZp2 defaults: Lorenzo1DPredictor, AdaptiveBitpackCoder, EPL=1
     const std::string src2 = fused::generateWarpFusionSource(s2);
     EXPECT_NE(src2.find("Lorenzo1DPredictor pred = Lorenzo1DPredictor::fromParams"),
               std::string::npos);
-    EXPECT_NE(src2.find("fused_rate_body<1>"), std::string::npos);
-    EXPECT_NE(src2.find("fused_pack_body<1>"), std::string::npos);
+    EXPECT_NE(src2.find("fused_rate_body<1, AdaptiveBitpackCoder>"), std::string::npos);
+    EXPECT_NE(src2.find("fused_pack_body<1, AdaptiveBitpackCoder>"), std::string::npos);
     EXPECT_NE(src2.find("#include \"fused/fused_block/warp_fusion.cuh\""), std::string::npos);
     EXPECT_NE(src2.find("fz_fused_warp_rate"), std::string::npos);
     EXPECT_NE(src2.find("fz_fused_warp_pack"), std::string::npos);
 
     // Swapping the predictor + EPL is a data change — no new C++.
-    fused::WarpFusionSpec s3{"TiledLorenzo2DPredictor", 2};
+    fused::WarpFusionSpec s3{"TiledLorenzo2DPredictor", "AdaptiveBitpackCoder", 2};
     const std::string src3 = fused::generateWarpFusionSource(s3);
     EXPECT_NE(src3.find("TiledLorenzo2DPredictor::fromParams"), std::string::npos);
-    EXPECT_NE(src3.find("fused_rate_body<2>"), std::string::npos);
+    EXPECT_NE(src3.find("fused_rate_body<2, AdaptiveBitpackCoder>"), std::string::npos);
     EXPECT_EQ(src3.find("Lorenzo1DPredictor"), std::string::npos);
+
+    // Swapping the CODER is likewise a data change — the whole point of this update.
+    fused::WarpFusionSpec s4{"Lorenzo1DPredictor", "PlainBitpackCoder", 1};
+    const std::string src4 = fused::generateWarpFusionSource(s4);
+    EXPECT_NE(src4.find("fused_rate_body<1, PlainBitpackCoder>"), std::string::npos);
+    EXPECT_NE(src4.find("fused_pack_body<1, PlainBitpackCoder>"), std::string::npos);
+    EXPECT_EQ(src4.find("AdaptiveBitpackCoder"), std::string::npos);
+}
+
+// The swappable-coder payoff: fuse the SAME warp chain with a different Cooperative
+// sink (PlainBitpackCoder) composed in by a data change — no new launcher/dispatch,
+// mirroring how RARE/RAZE proved chunk generality. PlainBitpack emits an
+// AdaptiveBitpack-decodable archive (all blocks plain-mode), so the existing inverse
+// round-trips it; it never beats AdaptiveBitpack on size (AB picks the per-block min).
+TEST(FusionPlanner, WarpSwappableCoderPlainBitpack) {
+    const size_t n = 1u << 20;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i)
+        h[i] = 0.6f*std::sin(i*0.001f) + 0.3f*std::cos(i*0.017f) + 0.05f*std::sin(i*0.13f);
+    const double bound = eb * 1.001;   // ABS
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto run = [&](const char* coder, std::vector<float>& recon) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(FusionPolicy::Auto);
+        p.setDims(n, 1, 1);
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(eb); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+        auto* l = p.addStage<LorenzoStage<int32_t>>(); l->setBlockSize(32);
+        p.connect(l, q, "codes");
+        auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        a->setBlockSize(32); a->setOutlierSelection(true);
+        a->setFusedCoder(coder);
+        p.connect(a, l);
+        p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), 1u) << "chain must fuse with coder " << coder;
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_dec = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_dec, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_dec, bytes, cudaMemcpyDeviceToHost);
+        return sz;
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rAB, rPlain;
+    const size_t szAB    = run("AdaptiveBitpackCoder", rAB);
+    const size_t szPlain = run("PlainBitpackCoder",    rPlain);
+    EXPECT_LE(maxErr(rAB),    bound) << "adaptive-coder fused round-trip exceeds bound";
+    EXPECT_LE(maxErr(rPlain), bound) << "plain-coder fused round-trip exceeds bound";
+    EXPECT_GE(szPlain, szAB) << "plain must never beat adaptive (AB picks the per-block min)";
+    cudaFree(d_in);
 }
 
 // ── NVRTC codegen contract (host-only): the stage-chain fingerprint composes

@@ -61,6 +61,7 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     const FusedOpDecl decl = g[1]->getFusedOp();
     fused::WarpFusionSpec spec;
     spec.predictor      = decl.op_name;
+    spec.coder          = g[2]->getFusedOp().op_name;   // swappable Cooperative sink
     spec.elems_per_lane = static_cast<int>(decl.elems_per_lane);
     std::vector<uint8_t> blob = decl.params;
     if (blob.size() >= sizeof(float)) std::memcpy(blob.data(), &inv2eb, sizeof(float));

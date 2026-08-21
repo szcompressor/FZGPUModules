@@ -92,10 +92,172 @@ struct TiledLorenzo2DPredictor {
     }
 };
 
-// ── Harness bodies (predictor-agnostic) ──────────────────────────────────────
+// ── Coder policies (the swappable Cooperative sink) ──────────────────────────
+// A warp coder is the variable-length tail of the register chain. Its two halves
+// mirror the two-pass driver: `cost()` (called by ALL lanes — it warp-reduces the
+// per-lane deltas) writes the block's `meta` + byte `cost`; `pack()` writes the
+// block's payload at `base` given that meta. `meta_bytes` is the per-block meta the
+// driver reserves. Both take the per-lane delta array `d[EPL]` the predictor produced
+// — quant/predict stay in the predictor, the coder only consumes deltas, so swapping
+// the coder re-composes the kernel with no other change (the LC-of the chunk coders).
+
+// AdaptiveBitpack: per block, pick the cheaper of a plain fixed-rate bit-plane pack
+// (rate over ALL elements) and an "outlier" pack (element 0 stored raw, rate over the
+// rest). meta = [rate][selector]; selector bit0 = outlier, bits1-2 = ob_bytes-1.
+struct AdaptiveBitpackCoder {
+    static constexpr uint32_t meta_bytes = 2;
+
+    template<int EPL>
+    __device__ static void cost(const int (&d)[EPL], uint32_t lane, uint32_t word_bytes,
+                                size_t count, uint8_t* __restrict__ meta_b,
+                                uint32_t* __restrict__ cost_b) {
+        uint32_t acc_all = 0, acc_rest = 0;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            const uint32_t av = (idx < count) ? absU_i32(d[m]) : 0u;
+            acc_all |= av;
+            if (idx > 0) acc_rest |= av;
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc_all  |= __shfl_xor_sync(0xffffffffu, acc_all, off);
+            acc_rest |= __shfl_xor_sync(0xffffffffu, acc_rest, off);
+        }
+        if (lane == 0) {
+            const uint32_t mag0 = (count > 0) ? absU_i32(d[0]) : 0u;
+            const int fr_all = bitWidth32(acc_all), fr_rest = bitWidth32(acc_rest);
+            const uint32_t ob_bytes = static_cast<uint32_t>((bitWidth32(mag0) + 7) / 8);
+            const uint32_t cost_plain = (fr_all > 0) ? word_bytes * (fr_all + 1u) : 0u;
+            const uint32_t cost_out   = ob_bytes + ((fr_rest > 0) ? word_bytes * (fr_rest + 1u) : word_bytes);
+            if (cost_plain <= cost_out) { meta_b[0]=fr_all;  meta_b[1]=0; *cost_b=cost_plain; }
+            else { meta_b[0]=fr_rest; meta_b[1]=static_cast<uint8_t>(1u|((ob_bytes-1u)<<1)); *cost_b=cost_out; }
+        }
+    }
+
+    template<int EPL>
+    __device__ static void pack(const int (&d)[EPL], uint32_t lane, uint32_t word_bytes,
+                                size_t count, const uint8_t* __restrict__ meta_b,
+                                uint8_t* __restrict__ base) {
+        const int r = meta_b[0]; const uint8_t sel = meta_b[1];
+        const bool is_out = (sel & 1u) != 0;
+        uint32_t av[EPL]; bool active[EPL];
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            active[m] = idx < count;
+            av[m]     = active[m] ? absU_i32(d[m]) : 0u;
+        }
+        if (!is_out) {
+            if (r == 0) return;
+            #pragma unroll
+            for (int m = 0; m < EPL; ++m) {
+                const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
+                if (lane < 4) base[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
+            }
+            for (int p = 0; p < r; ++p) {
+                #pragma unroll
+                for (int m = 0; m < EPL; ++m) {
+                    const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+                    if (lane < 4)
+                        base[word_bytes*(1u+p) + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
+                }
+            }
+            return;
+        }
+        // Outlier block: [ob_bytes elem0 magnitude LE][sign region][r planes for elems 1..].
+        const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+        if (lane == 0) {
+            const uint32_t mag0 = absU_i32(d[0]);
+            for (uint32_t k = 0; k < ob_bytes; ++k)
+                base[k] = static_cast<uint8_t>((mag0 >> (8u*k)) & 0xffu);
+        }
+        uint8_t* sign   = base + ob_bytes;
+        uint8_t* planes = base + ob_bytes + word_bytes;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
+            if (lane < 4) sign[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
+        }
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < EPL; ++m) {
+                const bool plane_active = active[m] && (static_cast<size_t>(lane) + 32u*m) > 0;
+                const uint32_t pm = __ballot_sync(0xffffffffu, plane_active && ((av[m] >> p) & 1u));
+                if (lane < 4)
+                    planes[word_bytes*p + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
+            }
+        }
+    }
+};
+
+// PlainBitpack: AdaptiveBitpack with the outlier mode disabled — every block is packed
+// plain (fixed rate over ALL elements, no raw element-0 escape). Its output is exactly
+// an AdaptiveBitpack archive whose blocks all select plain mode (selector byte 0), so
+// the existing AdaptiveBitpack inverse decodes it unchanged. It never beats
+// AdaptiveBitpack on size (AB picks the per-block min), which makes it the honest
+// baseline coder for A/B-ing the swappable-coder path. The demonstrator for "swap more
+// than the predictor": a different Cooperative op composed into the same warp chain.
+struct PlainBitpackCoder {
+    static constexpr uint32_t meta_bytes = 2;   // [rate][0] — always plain, AB-decodable
+
+    template<int EPL>
+    __device__ static void cost(const int (&d)[EPL], uint32_t lane, uint32_t word_bytes,
+                                size_t count, uint8_t* __restrict__ meta_b,
+                                uint32_t* __restrict__ cost_b) {
+        uint32_t acc_all = 0;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            acc_all |= (idx < count) ? absU_i32(d[m]) : 0u;
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            acc_all |= __shfl_xor_sync(0xffffffffu, acc_all, off);
+        if (lane == 0) {
+            const int fr = bitWidth32(acc_all);
+            meta_b[0] = static_cast<uint8_t>(fr); meta_b[1] = 0;
+            *cost_b = (fr > 0) ? word_bytes * (fr + 1u) : 0u;
+        }
+    }
+
+    template<int EPL>
+    __device__ static void pack(const int (&d)[EPL], uint32_t lane, uint32_t word_bytes,
+                                size_t count, const uint8_t* __restrict__ meta_b,
+                                uint8_t* __restrict__ base) {
+        const int r = meta_b[0];
+        if (r == 0) return;
+        uint32_t av[EPL]; bool active[EPL];
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            active[m] = idx < count;
+            av[m]     = active[m] ? absU_i32(d[m]) : 0u;
+        }
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
+            if (lane < 4) base[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
+        }
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < EPL; ++m) {
+                const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+                if (lane < 4)
+                    base[word_bytes*(1u+p) + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
+            }
+        }
+    }
+};
+
+// ── Harness bodies (predictor- AND coder-agnostic) ───────────────────────────
 // Factored out of the __global__ entries so the NVRTC path can wrap them in an
-// extern "C" kernel; the template path below calls them too.
-template<int ElemsPerLane, class Pred>
+// extern "C" kernel; the template path below calls them too. The predictor produces
+// the per-lane deltas `d[EPL]`; the coder consumes them. Both passes recompute the
+// deltas (cheaper than spilling them to DRAM — the reason warp fusion is fast).
+// Template order `<EPL, Coder, Pred>` lets the codegen name EPL+Coder explicitly and
+// deduce Pred from the argument.
+template<int ElemsPerLane, class Coder, class Pred>
 __device__ __forceinline__ void fused_rate_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint32_t* __restrict__ cost)
@@ -111,32 +273,13 @@ __device__ __forceinline__ void fused_rate_body(
     const size_t count = min(static_cast<size_t>(block_size), n - start);
 
     int d[ElemsPerLane];
-    uint32_t acc_all = 0, acc_rest = 0;
     #pragma unroll
-    for (int m = 0; m < ElemsPerLane; ++m) {
-        const size_t idx = static_cast<size_t>(lane) + 32u * m;
-        d[m] = pred.delta(lane, b, m);
-        const uint32_t av = (idx < count) ? absU_i32(d[m]) : 0u;
-        acc_all |= av;
-        if (idx > 0) acc_rest |= av;
-    }
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-        acc_all  |= __shfl_xor_sync(0xffffffffu, acc_all, off);
-        acc_rest |= __shfl_xor_sync(0xffffffffu, acc_rest, off);
-    }
-    if (lane == 0) {
-        const uint32_t mag0 = (count > 0) ? absU_i32(d[0]) : 0u;
-        const int fr_all = bitWidth32(acc_all), fr_rest = bitWidth32(acc_rest);
-        const uint32_t ob_bytes = static_cast<uint32_t>((bitWidth32(mag0) + 7) / 8);
-        const uint32_t cost_plain = (fr_all > 0) ? word_bytes * (fr_all + 1u) : 0u;
-        const uint32_t cost_out   = ob_bytes + ((fr_rest > 0) ? word_bytes * (fr_rest + 1u) : word_bytes);
-        if (cost_plain <= cost_out) { meta[2*b]=fr_all;  meta[2*b+1]=0; cost[b]=cost_plain; }
-        else { meta[2*b]=fr_rest; meta[2*b+1]=static_cast<uint8_t>(1u|((ob_bytes-1u)<<1)); cost[b]=cost_out; }
-    }
+    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
+    Coder::template cost<ElemsPerLane>(d, lane, word_bytes, count,
+                                       meta + Coder::meta_bytes * b, &cost[b]);
 }
 
-template<int ElemsPerLane, class Pred>
+template<int ElemsPerLane, class Coder, class Pred>
 __device__ __forceinline__ void fused_pack_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
@@ -148,84 +291,34 @@ __device__ __forceinline__ void fused_pack_body(
     const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
     if (b >= num_blocks) return;
 
-    const int r = meta[2*b]; const uint8_t sel = meta[2*b+1];
-    const bool is_out = (sel & 1u) != 0;
     constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
     const size_t start = b * block_size;
     const size_t count = min(static_cast<size_t>(block_size), n - start);
-    uint8_t* base = payload + offset[b];
 
     int d[ElemsPerLane];
-    uint32_t av[ElemsPerLane];
-    bool active[ElemsPerLane];
     #pragma unroll
-    for (int m = 0; m < ElemsPerLane; ++m) {
-        const size_t idx = static_cast<size_t>(lane) + 32u * m;
-        d[m]      = pred.delta(lane, b, m);
-        active[m] = idx < count;
-        av[m]     = active[m] ? absU_i32(d[m]) : 0u;
-    }
-
-    if (!is_out) {
-        if (r == 0) return;
-        #pragma unroll
-        for (int m = 0; m < ElemsPerLane; ++m) {
-            const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
-            if (lane < 4) base[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
-        }
-        for (int p = 0; p < r; ++p) {
-            #pragma unroll
-            for (int m = 0; m < ElemsPerLane; ++m) {
-                const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
-                if (lane < 4)
-                    base[word_bytes*(1u+p) + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
-            }
-        }
-        return;
-    }
-
-    // Outlier block: [ob_bytes elem0 magnitude LE][sign region][r planes for elems 1..].
-    const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
-    if (lane == 0) {
-        const uint32_t mag0 = absU_i32(d[0]);
-        for (uint32_t k = 0; k < ob_bytes; ++k)
-            base[k] = static_cast<uint8_t>((mag0 >> (8u*k)) & 0xffu);
-    }
-    uint8_t* sign   = base + ob_bytes;
-    uint8_t* planes = base + ob_bytes + word_bytes;
-    #pragma unroll
-    for (int m = 0; m < ElemsPerLane; ++m) {
-        const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
-        if (lane < 4) sign[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
-    }
-    for (int p = 0; p < r; ++p) {
-        #pragma unroll
-        for (int m = 0; m < ElemsPerLane; ++m) {
-            const bool plane_active = active[m] && (static_cast<size_t>(lane) + 32u*m) > 0;
-            const uint32_t pm = __ballot_sync(0xffffffffu, plane_active && ((av[m] >> p) & 1u));
-            if (lane < 4)
-                planes[word_bytes*p + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
-        }
-    }
+    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
+    Coder::template pack<ElemsPerLane>(d, lane, word_bytes, count,
+                                       meta + Coder::meta_bytes * b, payload + offset[b]);
 }
 
 // ── Compile-time template kernels (the non-NVRTC path). The NVRTC path generates
 // equivalent extern "C" kernels over the same bodies. ────────────────────────
-template<int ElemsPerLane, class Pred>
+template<int ElemsPerLane, class Coder, class Pred>
 __global__ void fused_rate_kernel(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint32_t* __restrict__ cost)
 {
-    fused_rate_body<ElemsPerLane, Pred>(pred, n, word_bytes, num_blocks, meta, cost);
+    fused_rate_body<ElemsPerLane, Coder, Pred>(pred, n, word_bytes, num_blocks, meta, cost);
 }
 
-template<int ElemsPerLane, class Pred>
+template<int ElemsPerLane, class Coder, class Pred>
 __global__ void fused_pack_kernel(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
     uint8_t* __restrict__ payload)
 {
-    fused_pack_body<ElemsPerLane, Pred>(pred, n, word_bytes, num_blocks, meta, offset, payload);
+    fused_pack_body<ElemsPerLane, Coder, Pred>(pred, n, word_bytes, num_blocks, meta, offset, payload);
 }
 
 } // namespace warp
