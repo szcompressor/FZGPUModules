@@ -19,8 +19,7 @@ namespace cli {
  * bitrate, throughput, median/min/max) so the harness and the JSON never
  * disagree.  Raw counts are always emitted so the harness can recompute.
  *
- * Schema is documented in memory/report_json_spec.md.  Optional blocks are
- * omitted entirely (not emitted as null) when their `has_*`/non-empty guard is
+ * Optional blocks are omitted entirely (not emitted as null) when their `has_*`/non-empty guard is
  * false, except `error_message` which is `null` on success.
  */
 

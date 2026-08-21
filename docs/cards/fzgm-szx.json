@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-szx", "stage": "SZxStage", "name": "SZx Ultrafast Compressor",
+  "zhubModule": "szx", "isNewGeneralModule": true, "category": "fused", "algorithm": "szx",
+  "description": "Independent GPU implementation of SZx block classification and fixed-length residual packing; no upstream source is copied and the FZM payload is not byte-compatible with the upstream container.",
+  "lossy": true, "hardware": "gpu", "io": { "inputDtypes": ["f32", "f64"], "outputDtypes": ["u8"] },
+  "config": [
+    { "name": "blockSize", "type": "int", "default": 128, "min": 1, "max": 4096, "description": "Elements per independently classified block." },
+    { "name": "errorBound", "type": "float", "default": 0.001, "description": "Error-bound value." },
+    { "name": "errorMode", "type": "enum", "values": ["ABS", "NOA"], "default": "ABS", "description": "Absolute or value-range-relative error mode." }
+  ],
+  "provenance": { "sourceProject": "SZx", "sourceUrl": "https://github.com/szcompressor/SZx", "relationship": "reimplementation", "license": "Argonne OPEN SOURCE LICENSE SF-16-105" },
+  "docs": "stage_szx.html", "sourcePath": "modules/fused/szx", "versionAdded": "2.0"
+}

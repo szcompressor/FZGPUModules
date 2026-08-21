@@ -49,9 +49,10 @@ static_assert(sizeof(LogTransformConfig) == 20,
  * **absolute** bound, so an ordinary ABS quantizer downstream delivers the
  * relative guarantee.
  *
- * @note **Prior work:** the transformation scheme, the IEEE-754 exponent
- *       shortcut for `log2`, and the near-zero threshold follow Liang et al.,
- *       IEEE CLUSTER 2018. See `THIRD_PARTY.md`.
+ * @note **Prior work:** the standard logarithmic transformation and its
+ *       near-zero handling follow Liang et al., IEEE CLUSTER 2018. This is an
+ *       independent implementation; no third-party source was copied. See
+ *       `docs/acknowledgements.md`.
  *
  * ### The identity
  *

@@ -728,7 +728,8 @@ PFPL = `Quantizer(NOA,zigzag) → Difference(1-D chunk, negabinary) → Bitshuff
 CTA, so one kernel does quant → diff+negabinary → bitshuffle → RZE-encode per chunk
 with every intermediate in smem; the cross-chunk `scan + pack` tail is kept (RZE
 offsets depend on all chunks). Device functions are reused verbatim
-(`Zigzag/Negabinary::encode`, `butterfly32` copied, `lc_detail::d_RZE`), and the
+(`Zigzag::encode`, `Negabinary::encode`, `butterfly32` copied, and
+`lc_detail::d_RZE`), and the
 quantizer's `ebx2_r` is matched via a forced `value_base`, so the fused archive is
 **byte-identical** to a manually-run staged 4-stage forward.
 
@@ -759,7 +760,6 @@ limits (not blockers): outlier-free quant fast path (verified `outlier_count==0`
 this data/config via the byte compare), whole-chunk only (n truncated to a multiple
 of 4096; the partial-tail chunk needs the staged path's guard), and the fused-path
 timing still pays a per-call CUB-temp `cudaMalloc` a persistent buffer would remove.
-Future-paper context: `/home/exouser/paper_organizer/ideas/roofline_guided_fusion.md`.
 
 ## CN-CHUNK-FUSE — composable device-op harness for chunk-cooperative fusion
 
@@ -798,14 +798,14 @@ the op encodes out-of-radius values as raw float bits inline. Partial-tail chunk
 handled (`Bitshuffle32` copies the sub-chunk through, matching the staged bitshuffle's
 tail memcpy). Not yet wired to the planner/registry — that (chunk-cooperative group
 detection + mapping a matched chain to the harness instantiation) is the next step,
-then NVRTC codegen. Future-paper context:
-`/home/exouser/paper_organizer/ideas/roofline_guided_fusion.md`.
+then NVRTC codegen.
 
 ## CN-CHUNK-WIRE — wiring chunk-cooperative fusion into the planner/registry
 
 **Source:** `getFusionSpec()` on Quantizer(inplace)/Difference/Bitshuffle/RZE/RRE,
-`matchesPfpl`/`runPfpl` in `src/pipeline/fusion_registry.cpp`, `QuantizerStage::
-primeComputedAbsEb`, `RZEStage/RREStage::setFusedResult`.
+`matchesPfpl`/`runPfpl` in `src/pipeline/fusion_registry.cpp`,
+`QuantizerStage::primeComputedAbsEb`, `RZEStage::setFusedResult`, and
+`RREStage::setFusedResult`.
 
 Turns the chunk-fusion harness (CN-CHUNK-FUSE) into automatic fusion via
 `FusionPolicy::Auto` — PFPL now fuses inside a real `Pipeline`, byte-identical and

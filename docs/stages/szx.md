@@ -121,4 +121,8 @@ field. The reconstruction max-abs-error equals the bound in both.
 The block-classification / fixed-length residual scheme is SZx (Xiaodong Yu,
 Sheng Di, et al.). This stage is an algorithm-faithful reimplementation — no SZx
 source is vendored — with the FZM archive layout, CUB offset scan, and
-MemoryPool scaffolding being FZGPUModules code. See `THIRD_PARTY.md`.
+MemoryPool scaffolding being FZGPUModules code. The upstream implementation is
+at https://github.com/szcompressor/SZx under the Argonne OPEN SOURCE LICENSE
+SF-16-105 (four-condition BSD style); because no source was copied, that license
+is recorded for provenance rather than applied to this implementation. See
+`THIRD_PARTY.md`.

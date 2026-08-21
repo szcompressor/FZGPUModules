@@ -113,3 +113,11 @@ type = "RLE"
 data_type = "uint16"
 chunk_size = 8192      # 0 (default) = whole-array mode
 ```
+
+---
+
+## Acknowledgements
+
+Run-length encoding is a standard lossless coding technique. This stage and its
+archive layout are original FZGPUModules code; no third-party implementation was
+copied. It is distributed under the repository's BSD-3-Clause license.

@@ -29,7 +29,7 @@ allows `ANSStage` to accept any upstream output as raw bytes — most commonly t
 
 ---
 
-## Stage settings
+## Stage settings {#ans_stage_settings}
 
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
@@ -168,7 +168,7 @@ header peek inside `estimateOutputSizes()`.
 
 ## Limitations {#ans-limitations}
 
-**Only `prob_bits=10` is supported.** See [Stage settings](#stage-settings).
+**Only `prob_bits=10` is supported.** See \ref ans_stage_settings "Stage settings".
 
 **Not CUDA Graph compatible.** One device-to-host synchronization point exists in
 every forward call (to read the `ANSCoalescedHeader` for the compressed size) and

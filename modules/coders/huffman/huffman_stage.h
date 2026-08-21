@@ -117,11 +117,13 @@ struct HuffmanBookSpec {
  */
 template <typename T>
 class HuffmanStage : public Stage {
+    /// @cond INTERNAL
     static_assert(
         std::is_same_v<T, uint8_t>  ||
         std::is_same_v<T, uint16_t> ||
         std::is_same_v<T, uint32_t>,
         "HuffmanStage: T must be uint8_t, uint16_t, or uint32_t.");
+    /// @endcond
 
 public:
     // __host__-only: HIP's clang infers __host__ __device__ for defaulted

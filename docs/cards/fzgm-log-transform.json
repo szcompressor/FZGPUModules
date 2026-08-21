@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-log-transform", "stage": "LogTransformStage", "name": "Point-Wise Relative Log Transform",
+  "zhubModule": "log-transform", "isNewGeneralModule": true, "category": "transform", "algorithm": "log-transform",
+  "description": "Independent implementation of a logarithmic transform that converts a point-wise relative-error target into an absolute bound for a downstream predictor and quantizer.",
+  "lossy": true, "hardware": "gpu", "io": { "inputDtypes": ["f32"], "outputDtypes": ["f32", "u8", "u32"] },
+  "config": [
+    { "name": "errorBound", "type": "float", "default": 0.001, "description": "Requested point-wise relative error bound." },
+    { "name": "threshold", "type": "float", "default": 0, "description": "Magnitudes below this value are stored as outliers." },
+    { "name": "outlierCapacity", "type": "float", "default": 0.05, "min": 0, "max": 1, "description": "Fraction of elements reserved for outlier storage." }
+  ],
+  "provenance": {
+    "relationship": "reimplementation", "license": "N/A (paper only; no source copied)",
+    "paper": { "title": "An efficient transformation scheme for lossy data compression with point-wise relative error bound", "doi": "10.1109/CLUSTER.2018.00052", "authors": "Xin Liang, Sheng Di, Dingwen Tao, Zizhong Chen, Franck Cappello", "year": 2018 }
+  },
+  "docs": "stage_log_transform.html", "sourcePath": "modules/transforms/log_transform", "versionAdded": "2.0"
+}

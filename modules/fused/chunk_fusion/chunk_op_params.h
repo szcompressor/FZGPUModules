@@ -51,7 +51,8 @@ struct ChunkSideCtx {
 /// zero bytes to the packed params blob (see OpParamBytes in chunk_fusion.cuh).
 struct EmptyParams {};
 
-/// Dependency-free type-equality (no <type_traits> — must compile under NVRTC, whose
+/// Dependency-free type-equality (without the C++ type-traits header; this must
+/// compile under NVRTC, whose
 /// stdlib is stubbed). Used to size a stateless op's params blob contribution to 0.
 template <class A, class B> struct FzSame { static constexpr bool value = false; };
 template <class A>          struct FzSame<A, A> { static constexpr bool value = true; };

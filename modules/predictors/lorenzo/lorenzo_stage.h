@@ -49,6 +49,10 @@ static_assert(sizeof(LorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
  * Forward (compression): compute per-element delta from its neighbor(s).
  * Inverse (decompression): prefix sum to reconstruct original values.
  *
+ * @note The optional block centering follows the FSZ centered-prediction
+ *       component. This implementation was written independently from the FSZ
+ *       paper; no FSZ source was copied. See `THIRD_PARTY.md`.
+ *
  * @tparam T  Signed integer element type: int8_t, int16_t, int32_t, int64_t.
  */
 template<typename T>

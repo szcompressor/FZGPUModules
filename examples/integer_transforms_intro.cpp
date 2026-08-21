@@ -41,7 +41,7 @@
  * "TCMS": `out = (data << 1) ^ (signed(data) >> (bits-1))`, byte-for-byte
  * the zigzag formula above, applied at 1/2/4/8-byte word granularity. So
  * `ZigzagStage::setByteTransparent(true)` (see modules/transforms/zigzag/
- * zigzag_stage.h and memory/lc_lossless_stages.md) really is a bit-exact
+ * zigzag_stage.h) really is a bit-exact
  * port of LC's TCMS component -- confirmed against the vendored source, not
  * a naming bug. The "sign-magnitude" transform in this example is a
  * genuinely different, non-LC scheme; it does not need a stage of its own

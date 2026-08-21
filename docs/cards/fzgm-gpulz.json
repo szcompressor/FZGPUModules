@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-gpulz", "stage": "GPULZStage", "name": "GPU LZ77 Encoder",
+  "zhubModule": "lz77", "isNewGeneralModule": true, "category": "coder", "algorithm": "gpulz",
+  "description": "Chunk-parallel GPU LZ77 coder with an optional four-port split representation. The upstream repository contains a copyright notice but declares no software license; redistribution permission must be established separately.",
+  "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
+  "config": [
+    { "name": "chunkSize", "type": "int", "values": [1024, 2048, 4096], "default": 2048, "description": "Independent chunk size in bytes." },
+    { "name": "wordSize", "type": "int", "values": [1, 2, 4, 8], "default": 4, "description": "Match word width in bytes." },
+    { "name": "matchLevel", "type": "int", "values": [0, 1], "default": 1, "description": "Match-search effort." },
+    { "name": "splitMode", "type": "bool", "default": false, "description": "Emit literals, lengths, offsets, and metadata on separate ports." }
+  ],
+  "provenance": {
+    "sourceProject": "ICS23-GPULZ", "sourceUrl": "https://github.com/hpdps-group/ICS23-GPULZ", "relationship": "direct-port", "license": "NO-LICENSE-DECLARED"
+  },
+  "docs": "stage_gpulz.html", "sourcePath": "modules/coders/gpulz", "versionAdded": "2.0"
+}

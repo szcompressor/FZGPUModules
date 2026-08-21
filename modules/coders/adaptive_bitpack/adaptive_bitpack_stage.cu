@@ -4,8 +4,7 @@
 // back-end (Yafan Huang et al., SC'23/SC'24, BSD-3-Clause). The stage wrapper,
 // byte-granular layout, and CUB offset scan are FZGPUModules code. The cuSZp
 // decoupled look-back scan is intentionally replaced by a plain device-wide
-// exclusive scan — fusion is a downstream-compiler concern. See THIRD_PARTY.md
-// and memory/cuszp_stages.md.
+// exclusive scan — fusion is a downstream-compiler concern. See THIRD_PARTY.md.
 
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_kernels.h"

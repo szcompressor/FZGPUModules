@@ -1,6 +1,8 @@
-# Third-Party Licenses
+# Third-Party Licenses {#third_party_notices}
 
-FZGPUModules incorporates code from the following open-source projects.
+FZGPUModules incorporates or builds on code and algorithms from the following
+third-party projects. Some research artifacts named below do not publish a
+software license; those exceptions are called out explicitly.
 Each section names the affected modules, states the relationship to the
 upstream code (direct port, algorithm-faithful reimplementation, or
 vendored with modification), and reproduces the required copyright notice
@@ -32,13 +34,18 @@ Swany, Dingwen Tao, Franck Cappello.
 Paper: "GPULZ: Optimizing LZSS Lossless Compression for Multi-byte Data on
 Modern GPUs", ICS '23.
 
+The upstream README contains this copyright notice, but no accompanying grant
+of rights:
+
+```
+(C) 2023 by Indiana University and Argonne National Laboratory.
+```
+
 **License:** the upstream repository does not include a `LICENSE` file or
-declare a license (GitHub reports `license: null` as of this writing). No
-license terms are reproduced here because none are published upstream — this
-differs from every other entry in this document, which vendor code under an
-explicit permissive license. Anyone redistributing FZGPUModules (including
-`GPULZStage`) should contact the GPULZ authors to confirm terms before
-relying on this component outside of research/internal use.
+declare a license (GitHub reports `license: null` as of this writing). A
+copyright notice is not a software license and does not grant redistribution
+permission. Anyone redistributing FZGPUModules with `GPULZStage` should obtain
+permission or licensing terms from the GPULZ copyright holders first.
 
 ---
 
@@ -161,7 +168,7 @@ under contract DE-SC0022223.
 
 ---
 
-## cuSZ / PHF
+## cuSZ / PHF {#third_party_cusz}
 
 **Used by:** `LorenzoQuantStage`, `HuffmanStage`
 
@@ -242,11 +249,8 @@ Contact: SZ Team (szlossycompressor@gmail.com)
   Xin Liang, Dingwen Tao, Franck Cappello, "FZ-GPU: A Fast and High-Ratio
   Lossy Compressor for Scientific Computing Applications on GPUs", HPDC '23.
 
-**Reference copy** of the upstream files (unmodified) is in
-`memory/references/dictionary/` for cross-checking.
-
 **License:** vendored from the cuSZ repository — same OPEN SOURCE LICENSE as
-the [cuSZ / PHF](#cusz--phf) section above.
+the \ref third_party_cusz "cuSZ / PHF" section above.
 
 ---
 
@@ -292,9 +296,6 @@ parts. Mapping our pieces to the papers:
   stages above it yields all three modes (1-D delta is `LorenzoStage`'s block
   mode). cuSZp3's **memory-efficient compression** and **selective decompression**
   features are **not ported** (they don't map cleanly onto the staged pipeline).
-
-The reference codebases live at `compressors/cuSZp2/` and `compressors/cuSZp3/`;
-design notes are in `memory/cuszp_stages.md`.
 
 **Papers** (all Argonne National Laboratory / University of Iowa):
 - Yafan Huang, Sheng Di, Xiaodong Yu, Guanpeng Li, Franck Cappello, "cuSZp: An
@@ -354,8 +355,8 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 **Used by:** `SZpStage` (`modules/fused/szp/`)
 
 **Relationship:** **GPU reimplementation** of the SZp forward/inverse. The
-upstream SZp is a CPU/OpenMP compressor (published as *fZ-light*, SC '24) and is
-vendored for reference/validation at `compressors/SZp`; `SZpStage` reimplements
+upstream SZp is a CPU/OpenMP compressor (published as *fZ-light*, SC '24);
+`SZpStage` reimplements
 its inner loop — linear error-bounded quantization, block-reset 1-D Lorenzo
 delta, and per-block fixed-length (zigzag) residual packing with no entropy
 coder — as a single fused CUDA stage. No source is copied: the CPU reference is
@@ -414,8 +415,11 @@ reference value) and its entropy-coder-free **fixed-length residual coding** of
 non-constant blocks. The device kernels, one-thread-per-block layout, meta/payload
 archive layout, CUB offset scan, and `MemoryPool`/FZM scaffolding are
 FZGPUModules code; the archive is not byte-compatible with the reference SZx
-container. Upstream SZx is BSD-3-Clause; anyone redistributing should consult its
-`LICENSE` if they later vendor its source.
+container. The upstream repository calls its terms an OPEN SOURCE LICENSE and
+uses the SZ/Argonne four-condition BSD-style license (license SF-16-105),
+including a required product acknowledgement. Because no SZx source is copied,
+that source-code license is recorded for provenance rather than applied to the
+FZGPUModules implementation.
 
 **Citation:**
 ```
@@ -423,6 +427,25 @@ Xiaodong Yu, Sheng Di, Kai Zhao, Jiannan Tian, Dingwen Tao, Xin Liang, Franck
 Cappello. "Ultrafast Error-bounded Lossy Compression for Scientific Datasets."
 HPDC '22. Argonne National Laboratory.
 ```
+
+**Upstream copyright and required acknowledgement:**
+
+```
+Copyright © 2022-, UChicago Argonne, LLC
+All Rights Reserved
+[SZx, Version 1.0]
+Sheng Di
+Xiaodong Yu
+Kai Zhao
+Franck Cappello
+Argonne National Laboratory
+
+This product includes software produced by UChicago Argonne, LLC under
+Contract No. DE-AC02-06CH11357 with the Department of Energy.
+```
+
+The full upstream license is at
+https://github.com/szcompressor/SZx/blob/main/copyright-and-BSD-license.txt.
 
 ---
 
@@ -468,6 +491,36 @@ University of South Florida, Tampa, FL, USA.
 
 ---
 
+## ROIBIN-SZ
+
+**Repositories:**
+- SZ2 integration and examples: https://github.com/szcompressor/SZ2/tree/master/example/roibin_example
+- LibPressio ROI/binning components: https://github.com/robertu94/libpressio
+
+**Used by:** `ROIBinSplitStage` (`modules/structural/roibin_split/`)
+
+**Relationship: algorithmic attribution only — no source was copied.** The
+stage independently implements ROIBIN-SZ's separation of supplied Bragg-peak
+regions from an optionally binned detector background. The CUDA kernels,
+fixed-size FZROI1 peak-table format, three-port DAG layout, edge handling,
+archive integration, and inverse scatter are FZGPUModules code. The public
+ROIBIN-SZ integration is distributed with SZ2 after version 2.1.11.1; the
+corresponding composable ROI and binning operations also live in LibPressio.
+
+**Paper:** Robert Underwood, Chun Hong Yoon, Ali Murat Gok, Sheng Di, and
+Franck Cappello, "ROIBIN-SZ: Fast and Science-Preserving Compression for
+Serial Crystallography," *Synchrotron Radiation News* 36(4), 17–22, 2023.
+https://doi.org/10.1080/08940886.2023.2245722
+Preprint: https://arxiv.org/abs/2206.11297
+
+**License:** The published SZ2 implementation is covered by SZ2's Argonne
+OPEN SOURCE LICENSE (license SF-16-105), a four-condition BSD-style license.
+No SZ2 or LibPressio source is copied into this stage, so this is recorded for
+provenance; the FZGPUModules implementation remains under this repository's
+license.
+
+---
+
 ## cuSZ-Hi
 
 **Used by:** `GInterpStage` (`modules/fused/ginterp/`)
@@ -494,11 +547,7 @@ slot. The host-side analysis loop `for(level=3; level<LEVEL; ++level)
 errors[level*6-9 .. level*6-4]` expects level=5 (level_id=0) at
 `errors[21..26]`, so our copy uses `errors + 16 + BIY`. The fix is
 documented in the adapter-changes comment block at the top of
-`ginterp_md.inl` and in [docs/stages/ginterp.md](docs/stages/ginterp.md).
-
-**Reference copy** of the upstream kernels (unmodified) is in
-`memory/references/spline_cuszhi/` (`spline3.cu`, `spline3_md.inl`,
-`type.h`) for cross-checking against the patched local copy.
+`ginterp_md.inl` and in \ref stage_ginterp "GInterpStage documentation".
 
 **Paper:**
 - Shixun Wu, Jinwen Pan, Jinyang Liu, Jiannan Tian, Ziwei Qiu, Jiajun Huang,
@@ -510,24 +559,22 @@ documented in the adapter-changes comment block at the top of
 **License:**
 
 ```
-BSD 3-Clause License
+Copyright © 2020, UChicago Argonne, LLC and Washington State University
 
-Copyright (c) 2024-2025, Indiana University and UChicago Argonne, LLC
-All rights reserved.
+All Rights Reserved
+
+Software Name: cuSZ: CUDA-Based Error-Bounded Lossy Compressor for Scientific Data
+
+By: Argonne National Laboratory, Washington State University, Clemson University
+
+OPEN SOURCE LICENSE
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
+1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE

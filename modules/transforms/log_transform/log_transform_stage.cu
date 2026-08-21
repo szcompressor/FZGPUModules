@@ -1,6 +1,8 @@
-// Transformation scheme adapted from X. Liang, S. Di, D. Tao, Z. Chen and
+// Independent implementation of the scheme described by X. Liang, S. Di,
+// D. Tao, Z. Chen and
 // F. Cappello, "An efficient transformation scheme for lossy data compression
-// with point-wise relative error bound", IEEE CLUSTER 2018 — see THIRD_PARTY.md.
+// with point-wise relative error bound", IEEE CLUSTER 2018. No source was copied;
+// see docs/acknowledgements.md.
 #include "transforms/log_transform/log_transform_stage.h"
 #include "predictors/predictor_utils.cuh"   // scatter_assign_kernel
 #include "backend/api.h"

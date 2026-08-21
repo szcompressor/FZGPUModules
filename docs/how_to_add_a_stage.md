@@ -398,8 +398,9 @@ and OR-writes the same flag).
 - Add the `.cu` to the **unconditional** source list in `CMakeLists.txt` (Step 6) — the
   only per-backend exclusion today is dietgpu ANS, and it is a documented stopgap.
 
-The full audit recipe (grep commands, the `api.h` symbol cross-check, and the HIP build
-and test invocation) lives in `memory/hip_compliance.md`.
+Before submitting, search the stage for raw CUDA runtime types and intrinsics,
+cross-check every device primitive against `backend/api.h`, and validate with the
+HIP configure/build preset described in \ref building_from_source "Building from Source".
 
 ---
 

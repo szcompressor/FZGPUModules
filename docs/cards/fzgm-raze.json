@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-raze", "stage": "RAZEStage", "name": "Recursive All-Zero Encoder",
+  "zhubModule": "zero-elimination", "isNewGeneralModule": false, "category": "coder", "algorithm": "raze",
+  "description": "Lossless LC-framework RAZE port that recursively removes zero words within independent chunks.",
+  "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
+  "config": [
+    { "name": "chunkSize", "type": "int", "values": [4096, 8192, 16384], "default": 16384, "description": "Independent chunk size in bytes." },
+    { "name": "wordSize", "type": "int", "values": [1, 2, 4, 8], "default": 1, "description": "Input word width in bytes." }
+  ],
+  "provenance": { "sourceProject": "LC-framework", "sourceUrl": "https://github.com/burtscher/LC-framework", "relationship": "direct-port", "license": "BSD-3-Clause" },
+  "docs": "stage_raze.html", "sourcePath": "modules/coders/raze", "versionAdded": "2.0"
+}

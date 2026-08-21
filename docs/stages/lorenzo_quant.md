@@ -238,3 +238,12 @@ The fused predictor+quantizer kernels and multi-output design in
 > https://github.com/szcompressor/cuSZ
 
 See `THIRD_PARTY.md` for the full license text.
+
+The optional per-tile mean-centering component follows the FSZ design:
+
+> Jiajun Huang. *FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy
+> Compression.* SC '26, arXiv:2607.15413.
+
+Centering was implemented from the paper before the FSZ source release; no FSZ
+source was copied. The fused cuSZ attribution above continues to apply to the
+predictor/quantizer kernels themselves.

@@ -3,8 +3,7 @@
  * @brief Spline interpolation kernels (encode / decode + helpers + profiling).
  *
  * Ported from cuSZ-Hi (https://github.com/shixun404/cuSZ-Hi),
- * `src/kernel/detail/spline3_md.inl` — see `memory/references/spline_cuszhi/`
- * for the unmodified source. Original authors: Jinyang Liu, Shixun Wu,
+ * `src/kernel/detail/spline3_md.inl` in the cuSZ-Hi repository. Original authors: Jinyang Liu, Shixun Wu,
  * Jiannan Tian. License: BSD-3-Clause (see `THIRD_PARTY.md`).
  *
  * Local adaptations relative to upstream:

@@ -17,3 +17,4 @@ scripts/
 
 # Misc
 *.md
+!THIRD_PARTY.md

@@ -67,3 +67,11 @@ p.connect(nb,  diff);
 p.connect(bsh, nb);
 p.finalize();
 ```
+
+---
+
+## Acknowledgements
+
+Negabinary is a standard signed-number representation. This stage is original
+FZGPUModules code; no third-party implementation was copied. It is distributed
+under the repository's BSD-3-Clause license.

@@ -162,4 +162,4 @@ byte-granular layout and a CUB `DeviceScan` for per-block offsets (in place of
 cuSZp's fused decoupled look-back scan); `MemoryPool` integration and FZM
 scaffolding are FZGPUModules code. cuSZp is BSD-3-Clause (copyright reproduced
 verbatim in `THIRD_PARTY.md`). Repo: https://github.com/szcompressor/cuSZp.
-See `THIRD_PARTY.md` and `memory/cuszp_stages.md`.
+See `THIRD_PARTY.md` for the full upstream notice and relationship details.

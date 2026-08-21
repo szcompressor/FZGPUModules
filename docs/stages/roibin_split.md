@@ -174,3 +174,20 @@ inputs = [{from = "split", port = "roi"}]   # or "bg", or "peaks"
 ```
 22 bytes. Peak *values* travel on the `peaks` port, not here — the 128-byte stage
 config slot cannot hold a few thousand records.
+
+## Acknowledgements
+
+The separation of supplied Bragg-peak regions from a spatially binned
+background follows ROIBIN-SZ:
+
+> Robert Underwood, Chun Hong Yoon, Ali Murat Gok, Sheng Di, and Franck
+> Cappello. *ROIBIN-SZ: Fast and Science-Preserving Compression for Serial
+> Crystallography.* Synchrotron Radiation News 36(4), 17–22, 2023.
+> https://doi.org/10.1080/08940886.2023.2245722
+
+The public ROIBIN-SZ integration and examples are distributed with
+[SZ2](https://github.com/szcompressor/SZ2/tree/master/example/roibin_example).
+This stage is an independent GPU/DAG implementation: no SZ2 or LibPressio
+source was copied. Its CUDA kernels, FZROI1 peak-table format, fixed-output
+geometry, three named ports, archive integration, and inverse scatter are
+FZGPUModules code. See `THIRD_PARTY.md` for the provenance and license record.

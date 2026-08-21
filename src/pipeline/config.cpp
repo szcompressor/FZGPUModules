@@ -672,8 +672,8 @@ static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
 }
 
 // ANSStage (vendored dietgpu) is excluded on HIP: inline NVPTX lanemask
-// assembly with no translation, out of scope for Phase 1 (see
-// memory/hip_sycl_backend_plan.md). p.addStage<ANSStage>() itself throws a
+// assembly with no translation, out of scope for the current HIP backend.
+// p.addStage<ANSStage>() itself throws a
 // clear runtime_error on an unsupported backend without ever referencing
 // ANSStage's constructor (see Stage::isSupportedOnBackend()'s doc comment),
 // so this needs no guard of its own.

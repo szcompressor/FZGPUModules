@@ -182,3 +182,16 @@ outlier_capacity = 0.05
 - \subpage stage_quantizer — `ErrorBoundMode::REL`, the exact-but-uncompressed alternative
 - \subpage stage_lorenzo_quant — `ErrorBoundMode::PREL`, and why it is not a relative bound
 - `examples/eb_mode_analysis.cpp` — measures all of the above on your own data
+
+## Acknowledgements
+
+The log-space transformation follows:
+
+> Xin Liang, Sheng Di, Dingwen Tao, Zizhong Chen, and Franck Cappello.
+> *An efficient transformation scheme for lossy data compression with
+> point-wise relative error bound.* IEEE CLUSTER 2018, pp. 179–189.
+
+This is an independent implementation of the paper's mathematical transform.
+No reference implementation was vendored or copied; the sign plane, outlier
+handling, round-trip verification, and DAG integration are FZGPUModules code.
+See `docs/acknowledgements.md` for the provenance summary.

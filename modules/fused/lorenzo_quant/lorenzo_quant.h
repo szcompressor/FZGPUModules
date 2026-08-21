@@ -119,6 +119,8 @@ static_assert(sizeof(LorenzoQuantConfig) <= FZM_STAGE_CONFIG_SIZE, "LorenzoQuant
  * @note **Prior work:** fused predictor+quantizer kernels and the multi-output
  *       design follow the cuSZ Lorenzo implementation (`lrz_c.cuhip.inl`,
  *       `lrz_x.cuhip.inl`) by the cuSZ team (BSD-3-Clause). See `THIRD_PARTY.md`.
+ *       The optional block-centering component follows FSZ and was implemented
+ *       independently from its paper; no FSZ source was copied.
  *
  * Forward outputs (compression):
  * - [0] codes         — quantization codes for all elements (`TCode`)
@@ -489,8 +491,8 @@ void launchLorenzoKernel(
     size_t max_outliers, int grid_size,
     bool zigzag_codes,
     fz::stream_t stream,
-    /// Per-tile means output (one per 1024-element tile), or nullptr to disable
-    /// adaptive centering.
+    // Per-tile means output (one per 1024-element tile), or nullptr to disable
+    // adaptive centering.
     TInput* d_means = nullptr
 );
 
@@ -504,7 +506,7 @@ void launchLorenzoInverseKernel(
     TInput* d_output,
     bool zigzag_codes,
     fz::stream_t stream, MemoryPool* pool,
-    /// Per-tile means from the forward pass, or nullptr if centering is off.
+    // Per-tile means from the forward pass, or nullptr if centering is off.
     const TInput* d_means = nullptr
 );
 

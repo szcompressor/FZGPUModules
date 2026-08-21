@@ -127,3 +127,11 @@ Input order must match `segments` order.
 [1 .. 4N]  uint32  segment_size × N   (LE, connection order)
 [4N+1 ..]  name table: per segment [uint8 len][len bytes]
 ```
+
+---
+
+## Acknowledgements
+
+This structural stage and its serialized layout are original FZGPUModules
+code; no third-party implementation was copied. It is distributed under the
+repository's BSD-3-Clause license.

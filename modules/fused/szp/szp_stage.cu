@@ -1,7 +1,8 @@
 // SZp / fZ-light — extreme-fast error-bounded compressor, as a fused stage.
 //
-// GPU reimplementation of the SZp forward/inverse (vendored CPU reference at
-// compressors/SZp). Inner loop, per block of block_size elements:
+// Independent GPU reimplementation of the SZp forward/inverse. The upstream
+// CPU/OpenMP reference is https://github.com/szcompressor/SZp (MIT); no upstream
+// source is vendored or copied. Inner loop, per block of block_size elements:
 //   quantize  q_i   = round(x_i / (2*eb))            (linear, signed)
 //   predict   d_i   = q_i - q_{i-1}   (d_0 = q_0)    (1-D Lorenzo, block reset)
 //   pack      zigzag(d_i) at the block's fixed bit width

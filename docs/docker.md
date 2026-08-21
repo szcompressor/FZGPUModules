@@ -189,5 +189,5 @@ If the image build fails during the `cmake --install` step:
 
 ## See Also
 
-- [Building FZGPUModules](building.md) — General build instructions
-- [Architecture Guide](architecture.md) — Project structure and design
+- \ref building_from_source "Building FZGPUModules" — General build instructions
+- \ref architecture "Architecture Guide" — Project structure and design

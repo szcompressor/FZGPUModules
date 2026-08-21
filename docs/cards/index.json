@@ -9,7 +9,11 @@
   "fzgm-rre.json",
   "fzgm-bitpack.json",
   "fzgm-adaptive-bitpack.json",
+  "fzgm-adaptive-lorenzo.json",
   "fzgm-ans.json",
+  "fzgm-clog.json",
+  "fzgm-hclog.json",
+  "fzgm-gpulz.json",
   "fzgm-bitshuffle.json",
   "fzgm-bitplane-rze.json",
   "fzgm-zigzag.json",
@@ -18,5 +22,11 @@
   "fzgm-ginterp.json",
   "fzgm-lorenzo-quant.json",
   "fzgm-merge.json",
-  "fzgm-roibin-split.json"
+  "fzgm-rare.json",
+  "fzgm-raze.json",
+  "fzgm-roibin-split.json",
+  "fzgm-log-transform.json",
+  "fzgm-szp.json",
+  "fzgm-szx.json",
+  "fzgm-tupl.json"
 ]
