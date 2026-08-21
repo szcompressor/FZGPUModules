@@ -16,18 +16,16 @@ verbatim to satisfy BSD-3-Clause condition 2 (binary redistribution).
 
 **Used by:** `GPULZStage` (`modules/coders/gpulz/`)
 
-**Relationship:** `GPULZStage`'s encode/decode kernels are a direct port of
-`compressKernelI` / `decompressKernel` from the upstream `gpulz.cu` reference
-implementation: the per-chunk sliding-window match search (shared-memory
-lookahead buffer + window, Blelloch prefix sum over per-item byte sizes,
-literal/match flag-bitmap construction) is preserved verbatim, retargeted from
-a fixed `BLOCK_SIZE`/`WINDOW_SIZE`/`INPUT_TYPE` macro configuration to
-compile-time template parameters (`T`, `CS`) dispatched at runtime. The
-per-chunk container format (raw-fallback flag, CUB exclusive-scan packing
-offsets, deferred tail-size readback via `postStreamSync()`) is FZGM's own,
-following the same pattern as `RREStage`/`RZEStage`; `compressKernelIII`
-(upstream's separate flag/data pack-out step) is folded into FZGM's own
-`gpulzPackKernel`.
+**Relationship:** substantially rewritten derivative of the upstream `gpulz.cu`.
+`GPULZStage` retains `compressKernelI`'s per-chunk flag-bitmap/token stream grammar
+and its sequential literal/match parse. The current match search (exact near-window
+plus optional hashed candidates), block prefix sum, staged/coalesced writes, and
+block-parallel decoder are FZGM implementations; the decoder no longer follows
+upstream's single-thread `decompressKernel`. The per-chunk container format
+(raw-fallback flag, CUB exclusive-scan packing offsets, deferred tail-size readback
+via `postStreamSync()`) is also FZGM's own, following the same pattern as
+`RREStage`/`RZEStage`; upstream's separate `compressKernelIII` pack-out step is
+folded into FZGM's `gpulzPackKernel`.
 
 Original authors: Boyuan Zhang, Jiannan Tian, Sheng Di, Xiaodong Yu, Martin
 Swany, Dingwen Tao, Franck Cappello.
@@ -168,7 +166,7 @@ under contract DE-SC0022223.
 
 ---
 
-## cuSZ / PHF {#third_party_cusz}
+## cuSZ {#third_party_cusz}
 
 **Used by:** `LorenzoQuantStage`, `HuffmanStage`
 
@@ -176,10 +174,10 @@ under contract DE-SC0022223.
 - `LorenzoQuantStage` (`modules/fused/lorenzo_quant/`) — GPU kernels and
   the fused predictor+quantizer design follow the cuSZ Lorenzo implementation
   (`lrz_c.cuhip.inl`, `lrz_x.cuhip.inl`).
-- `HuffmanStage` (`modules/coders/huffman/`) — the PHF source files
-  (`hf.h`, `hf_bk*.cc`, `hf_buf.cc`, `hf_canon.cc`, `hf_hl.cc`,
+- `HuffmanStage` (`modules/coders/huffman/`) — cuSZ's Huffman source files
+  (internally named `phf` by cuSZ: `hf.h`, `hf_bk*.cc`, `hf_buf.cc`, `hf_canon.cc`,
   `hf_kernels.cu`, `hf_impl.hh`) are vendored copies adapted from
-  `origin/v1.1.0_dev` of the PHF codec in the cuSZ repository, with
+  `origin/v1.1.0_dev` of the Huffman codec in the cuSZ repository, with
   modifications documented at the top of each file.
 
 **License:**
@@ -250,7 +248,7 @@ Contact: SZ Team (szlossycompressor@gmail.com)
   Lossy Compressor for Scientific Computing Applications on GPUs", HPDC '23.
 
 **License:** vendored from the cuSZ repository — same OPEN SOURCE LICENSE as
-the \ref third_party_cusz "cuSZ / PHF" section above.
+the \ref third_party_cusz "cuSZ" section above.
 
 ---
 

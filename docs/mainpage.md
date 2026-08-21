@@ -98,19 +98,19 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_adm "ADMStage"                         | `modules/transforms/adm/adm_stage.h`               | Adaptive data mapping — uint16/32 → 8-bit symbol domain (MANS port) |
 | \ref stage_bitshuffle "BitshuffleStage"                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
 | \ref stage_tupl "TUPLStage"                       | `modules/shufflers/tupl/tupl_stage.h`              | Tuple deinterleave / AoS-to-SoA transpose (LC component) |
-| \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Recursive zero-byte elimination                |
-| \ref stage_rre "RREStage"                         | `modules/coders/rre/rre_stage.h`                   | Repetition-reduction encoding (LC component)   |
-| \ref stage_rare "RAREStage"                       | `modules/coders/rare/rare_stage.h`                 | Repetition-adaptive reduction encoding (LC component, auto-k RRE) |
-| \ref stage_raze "RAZEStage"                       | `modules/coders/raze/raze_stage.h`                 | Zero-adaptive reduction encoding (LC component, auto-k RZE) |
-| \ref stage_clog "CLOGStage"                       | `modules/coders/clog/clog_stage.h`                 | Compressed-Logarithm adaptive bit-width coding (LC component) |
-| \ref stage_hclog "HCLOGStage"                     | `modules/coders/hclog/hclog_stage.h`               | Compressed-Logarithm coding with per-subchunk TCMS fallback (LC component) |
-| \ref stage_gpulz "GPULZStage"                     | `modules/coders/gpulz/gpulz_stage.h`               | GPU LZSS dictionary coder (GPULZ port; upstream has no declared license) |
+| \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Zero-word bitmap reducer with recursive bitmap compression (LC component) |
+| \ref stage_rre "RREStage"                         | `modules/coders/rre/rre_stage.h`                   | Repeated-word bitmap reducer with recursive bitmap compression (LC component) |
+| \ref stage_rare "RAREStage"                       | `modules/coders/rare/rare_stage.h`                 | Adaptive top-bit matching generalization of RRE (LC component) |
+| \ref stage_raze "RAZEStage"                       | `modules/coders/raze/raze_stage.h`                 | Adaptive leading-zero-bit generalization of RZE (LC component) |
+| \ref stage_clog "CLOGStage"                       | `modules/coders/clog/clog_stage.h`                 | Per-subchunk leading-zero compression and bit packing (LC component) |
+| \ref stage_hclog "HCLOGStage"                     | `modules/coders/hclog/hclog_stage.h`               | CLOG bit packing with per-subchunk TCMS selection (LC component) |
+| \ref stage_gpulz "GPULZStage"                     | `modules/coders/gpulz/gpulz_stage.h`               | GPU LZSS dictionary coder (GPULZ-derived rewrite; upstream has no declared license) |
 | \ref stage_zigzag "ZigzagStage<TIn, TOut>"           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | \ref stage_negabinary "NegabinaryStage<TIn, TOut>"       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
 | \ref stage_log_transform "LogTransformStage<T>"    | `modules/transforms/log_transform/log_transform_stage.h` | Log-space transform for point-wise relative bounds |
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
 | \ref stage_adaptive_bitpack "AdaptiveBitpackStage<T>" | `modules/coders/adaptive_bitpack/adaptive_bitpack_stage.h` | Per-block adaptive fixed-rate bit-plane coding (cuSZp/cuSZp2 port) |
-| \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF, cuSZ port)    |
+| \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (cuSZ port)         |
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | \ref stage_szx "SZxStage<T>"                      | `modules/fused/szx/szx_stage.h`                    | SZx constant-block / fixed-residual whole compressor |

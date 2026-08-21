@@ -107,18 +107,18 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `RLEStage<T>` | Run-length encoding |
 | `BitshuffleStage` | GPU bit-matrix transpose |
 | `TUPLStage` | AoS <-> SoA tuple transpose — regroups interleaved `dim`-field records by field (LC `TUPLk` port) |
-| `RZEStage` | Recursive zero-byte elimination |
-| `RREStage` | Repetition-reduction encoding (LC framework lossless component) |
-| `RAZEStage` | Auto-`k` RZE — picks the elimination depth per chunk instead of taking it as a parameter (LC port) |
-| `RAREStage` | Auto-`k` RRE — picks the repetition depth per chunk instead of taking it as a parameter (LC port) |
+| `RZEStage` | LC zero-word bitmap reducer with recursive bitmap compression |
+| `RREStage` | LC repeated-word bitmap reducer with recursive bitmap compression |
+| `RAZEStage` | Applies RZE to an automatically selected number of upper bits per chunk; stores lower bits verbatim (LC port) |
+| `RAREStage` | Applies RRE to an automatically selected number of upper bits per chunk; stores lower bits verbatim (LC port) |
 | `CLOGStage` | Per-subchunk adaptive bit-width coding, 32 subchunks per chunk (LC port) |
 | `HCLOGStage` | CLOG plus a per-subchunk TCMS/zigzag reinterpretation fallback (LC port) |
-| `GPULZStage` | GPU LZSS dictionary coder (ICS'23 port); optional split mode emits literals/lengths/offsets/meta as four ports for a GPU-ZSTD-style chain |
+| `GPULZStage` | GPU LZSS dictionary coder derived from GPULZ (substantially rewritten kernels); optional split mode emits literals/lengths/offsets/meta as four ports for a GPU-ZSTD-style chain |
 | `ZigzagStage<TIn, TOut>` | Zigzag encode/decode |
 | `NegabinaryStage<TIn, TOut>` | Negabinary encode/decode |
 | `BitpackStage<T>` | Pack/unpack power-of-two value streams |
 | `AdaptiveBitpackStage<T>` | Per-block adaptive fixed-rate bit-plane coding (cuSZp/cuSZp2 port) |
-| `HuffmanStage<T>` | GPU Huffman entropy coding (PHF, cuSZ port) |
+| `HuffmanStage<T>` | GPU Huffman entropy coding (cuSZ port) |
 | `ANSStage` | GPU rANS entropy coding (dietGPU port) |
 | `BitplaneRZEStage` | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | `SZxStage<T>` | SZx constant-block classification + fixed-length residual whole compressor |
@@ -185,7 +185,7 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 | Project | Stages |
 |---|---|
 | [LC framework](https://github.com/burtscher/LC-framework) — Burtscher et al., Texas State University | `RZEStage`, `RREStage`, `RAZEStage`, `RAREStage`, `CLOGStage`, `HCLOGStage`, `TUPLStage`, `BitshuffleStage`, `DifferenceStage`, `QuantizerStage` |
-| [cuSZ / PHF](https://github.com/szcompressor/cuSZ) — Argonne NL, Indiana U, et al. | `LorenzoQuantStage`, `HuffmanStage` |
+| [cuSZ](https://github.com/szcompressor/cuSZ) — Argonne NL, Indiana U, et al. | `LorenzoQuantStage`, `HuffmanStage` |
 | [FZ-GPU](https://github.com/szcompressor/cuSZ) — Zhang, Tian et al. (via cuSZ repo) | `BitplaneRZEStage` |
 | [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) — Indiana U, Argonne NL | `GInterpStage` |
 | [cuSZp / cuSZp2 / cuSZp3](https://github.com/szcompressor/cuSZp) — Huang, Di et al., Argonne NL | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
