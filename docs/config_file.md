@@ -532,6 +532,45 @@ Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port).
 
 No tunable keys -- the configuration is derived from the input length.
 
+### SZx
+
+SZx whole-compressor stage: per-block constant/non-constant classification
+followed by fixed-length residual packing. Input is `float32` or `float64`; the
+single output is an opaque byte archive.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "float32" | Input type: "float32" or "float64". |
+| block_size | integer | 128 | Elements per block. Must be in [1, 4096]. |
+| error_bound | float | 1e-3 | Error-bound value; must be positive. |
+| error_bound_mode | string | "ABS" | "ABS" or value-range-relative "NOA". |
+
+### SZp
+
+SZp/fZ-light whole-compressor stage: linear quantization, block-reset 1-D
+Lorenzo delta, and fixed-length residual packing. Input is `float32` or
+`float64`; the single output is an opaque byte archive.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "float32" | Input type: "float32" or "float64". |
+| block_size | integer | 128 | Elements per block. Must be in [1, 4096]. |
+| error_bound | float | 1e-3 | Error-bound value; must be positive. |
+| error_bound_mode | string | "ABS" | "ABS" or value-range-relative "NOA". |
+
+### ROIBinSplit
+
+Structural detector-field split inspired by ROIBIN-SZ. It emits full-resolution
+ROI boxes, an optionally binned background, and the peak table as three named
+ports. Pipeline dimensions must be set before the stage is added.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "float32" | Field type: "float32" or "float64". |
+| roi_half_width | integer | 4 | ROI box half-width; the box is `(2*hw+1)^2`. |
+| bin_factor | integer | 1 | Background binning factor. `1` disables binning; values above 1 are a resolution reduction, not an error bound. |
+| peaks_file | string | required when compressing | Path to the compress-side FZROI1 peak table. The table is embedded in the archive. |
+
 ---
 
 ## Complete Examples

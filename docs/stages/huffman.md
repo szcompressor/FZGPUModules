@@ -437,7 +437,7 @@ in `[0, bklen)` for any `bklen < 65536`.
 **Not CUDA Graph compatible in any configuration.**  Two device-to-host
 synchronization points exist in every forward call (histogram D2H for codebook
 construction; partition metadata D2H for prefix-sum computation).
-`HuffmanBookSource::Adaptive` / `::Fixed` removes the first, but the second and the
+The adaptive or fixed codebook setting removes the first, but the second and the
 encoded-size round trip in `encode()` remain.  The stage cannot be included in a
 graph-captured pipeline.
 

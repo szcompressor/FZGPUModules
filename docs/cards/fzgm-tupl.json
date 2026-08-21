@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-tupl", "stage": "TUPLStage", "name": "Tuple Deinterleave Transform",
+  "zhubModule": "tuple-transpose", "isNewGeneralModule": false, "category": "shuffler", "algorithm": "tupl",
+  "description": "Lossless LC-framework tuple transform that converts array-of-structures data to field-major order within fixed-size blocks.",
+  "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
+  "config": [
+    { "name": "blockSize", "type": "int", "default": 16384, "description": "Transform block size in bytes." },
+    { "name": "wordSize", "type": "int", "values": [1, 2, 4, 8], "default": 1, "description": "Field width in bytes." },
+    { "name": "dim", "type": "int", "default": 2, "min": 2, "description": "Fields per tuple." }
+  ],
+  "provenance": { "sourceProject": "LC-framework", "sourceUrl": "https://github.com/burtscher/LC-framework", "relationship": "direct-port", "license": "BSD-3-Clause" },
+  "docs": "stage_tupl.html", "sourcePath": "modules/shufflers/tupl", "versionAdded": "2.0"
+}

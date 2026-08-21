@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-rare", "stage": "RAREStage", "name": "Recursive All-Repetition Encoder",
+  "zhubModule": "repeat-elimination", "isNewGeneralModule": false, "category": "coder", "algorithm": "rare",
+  "description": "Lossless LC-framework RARE port that recursively encodes repeated words within independent chunks.",
+  "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
+  "config": [
+    { "name": "chunkSize", "type": "int", "values": [4096, 8192, 16384], "default": 16384, "description": "Independent chunk size in bytes." },
+    { "name": "wordSize", "type": "int", "values": [1, 2, 4, 8], "default": 1, "description": "Input word width in bytes." }
+  ],
+  "provenance": { "sourceProject": "LC-framework", "sourceUrl": "https://github.com/burtscher/LC-framework", "relationship": "direct-port", "license": "BSD-3-Clause" },
+  "docs": "stage_rare.html", "sourcePath": "modules/coders/rare", "versionAdded": "2.0"
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0",
+  "id": "fzgm-adaptive-lorenzo",
+  "stage": "AdaptiveLorenzoStage",
+  "name": "Per-Tile Adaptive Lorenzo Predictor",
+  "zhubModule": "lorenzo-predictor",
+  "isNewGeneralModule": true,
+  "category": "fused",
+  "algorithm": "adaptive-lorenzo",
+  "description": "Lossless per-tile predictor that selects first- or second-order Lorenzo residuals, optionally after integer mean centering, using the exact AdaptiveBitpack byte cost.",
+  "lossy": false,
+  "hardware": "gpu",
+  "io": { "inputDtypes": ["i16", "i32"], "outputDtypes": ["i16", "i32", "u8"] },
+  "config": [
+    { "name": "coderBlockSize", "type": "int", "default": 32, "description": "Coder block size; currently must be 32." },
+    { "name": "blocksPerTile", "type": "int", "default": 8, "min": 1, "max": 32, "description": "Coder blocks in each adaptive tile." },
+    { "name": "enableOrder2", "type": "bool", "default": true, "description": "Include second-order prediction candidates." },
+    { "name": "enableCentering", "type": "bool", "default": true, "description": "Include centered prediction candidates." }
+  ],
+  "provenance": {
+    "sourceProject": "FSZ",
+    "sourceUrl": "https://github.com/JiajunHuang1999/FSZ",
+    "relationship": "reimplementation",
+    "license": "BSD-3-Clause",
+    "paper": { "title": "FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy Compression", "authors": "Jiajun Huang", "year": 2026 }
+  },
+  "docs": "stage_adaptive_lorenzo.html",
+  "sourcePath": "modules/fused/adaptive_lorenzo",
+  "versionAdded": "2.0"
+}

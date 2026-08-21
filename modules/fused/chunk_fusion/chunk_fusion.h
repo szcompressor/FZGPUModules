@@ -5,7 +5,7 @@
  * @brief Public launcher for chunk-cooperative fused compress (see chunk_fusion.cuh).
  *
  * Runs the composable CTA-per-chunk harness for a PFPL-shaped chain
- * (Quantizer(inplace,zigzag) -> Difference(negabinary) -> Bitshuffle -> <Coder>)
+ * (Quantizer(inplace,zigzag) -> Difference(negabinary) -> Bitshuffle -> Coder)
  * plus the cross-chunk scan+pack tail, producing a raw LC-coder archive that is
  * byte-identical to the staged pipeline. The coder is selected at call time — the
  * same harness composes RZE, RRE, etc. Not graph-capturable (reads back the

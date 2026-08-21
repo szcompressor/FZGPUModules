@@ -25,9 +25,16 @@
   },
 
   "provenance": {
-    "relationship": "inspired-by",
-    "reference": "Underwood et al., ROIBIN-SZ: Fast and Science-Preserving Compression for Serial Crystallography",
-    "license": "BSD-3-Clause"
+    "sourceProject": "ROIBIN-SZ example in SZ2",
+    "sourceUrl": "https://github.com/szcompressor/SZ2/tree/master/example/roibin_example",
+    "relationship": "reimplementation",
+    "license": "SZ2 Argonne OPEN SOURCE LICENSE SF-16-105 (no source copied)",
+    "paper": {
+      "title": "ROIBIN-SZ: Fast and Science-Preserving Compression for Serial Crystallography",
+      "doi": "10.1080/08940886.2023.2245722",
+      "authors": "Robert Underwood, Chun Hong Yoon, Ali Murat Gok, Sheng Di, Franck Cappello",
+      "year": 2023
+    }
   },
 
   "docs": "stage_roibin_split.html",

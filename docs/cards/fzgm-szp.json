@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "1.0", "id": "fzgm-szp", "stage": "SZpStage", "name": "SZp / fZ-light Compressor",
+  "zhubModule": "szp", "isNewGeneralModule": true, "category": "fused", "algorithm": "szp",
+  "description": "Independent GPU implementation of the SZp block-local predict, quantize, and fixed-width pack pipeline; its FZM payload is not byte-compatible with the upstream container.",
+  "lossy": true, "hardware": "gpu", "io": { "inputDtypes": ["f32", "f64"], "outputDtypes": ["u8"] },
+  "config": [
+    { "name": "blockSize", "type": "int", "default": 128, "min": 1, "max": 4096, "description": "Elements per independently encoded block." },
+    { "name": "errorBound", "type": "float", "default": 0.001, "description": "Error-bound value." },
+    { "name": "errorMode", "type": "enum", "values": ["ABS", "NOA"], "default": "ABS", "description": "Absolute or value-range-relative error mode." }
+  ],
+  "provenance": {
+    "sourceProject": "SZp", "sourceUrl": "https://github.com/szcompressor/SZp", "relationship": "reimplementation", "license": "MIT",
+    "paper": { "title": "fZ-light: A Fast and Light Scientific Lossy Compression Framework toward Optimizing High-Performance Computing Applications", "authors": "Jiajun Huang, Sheng Di, et al.", "year": 2024 }
+  },
+  "docs": "stage_szp.html", "sourcePath": "modules/fused/szp", "versionAdded": "2.0"
+}

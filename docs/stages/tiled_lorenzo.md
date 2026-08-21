@@ -144,5 +144,5 @@ predictor with a tile-major output reshape; the tile-major decomposition, FZM
 header, and `MemoryPool` integration are FZGPUModules code. cuSZp3 is
 BSD-3-Clause (copyright reproduced verbatim in `THIRD_PARTY.md`); its
 memory-efficient compression and selective decompression features are not ported.
-Repo: https://github.com/szcompressor/cuSZp. See `THIRD_PARTY.md` and
-`memory/cuszp_stages.md` (Part 8).
+Repo: https://github.com/szcompressor/cuSZp. See `THIRD_PARTY.md` for the full
+upstream notice and relationship details.

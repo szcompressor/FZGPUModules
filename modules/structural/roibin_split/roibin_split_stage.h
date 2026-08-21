@@ -15,6 +15,12 @@
  * at full resolution, and a background that is spatially binned; the two parts
  * are then compressed separately.
  *
+ * @note **Prior work:** this is an independent GPU/DAG implementation of the
+ *       ROIBIN-SZ algorithm described by Underwood et al., Synchrotron Radiation
+ *       News 36(4), 2023, DOI 10.1080/08940886.2023.2245722. Public reference
+ *       integration is in the SZ2 `example/roibin_example` directory; no SZ2 or
+ *       LibPressio source was copied. See `THIRD_PARTY.md`.
+ *
  * FZGM's DAG can express that split directly: this stage is `1 → 3` forward and
  * `3 → 1` inverse, so the two data streams become two independent branches that
  * can each carry their **own error bound** and their own coder chain, converging

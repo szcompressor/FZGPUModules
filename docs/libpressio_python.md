@@ -587,7 +587,7 @@ type   = "RLE"
 inputs = [{ from = "lorenzo", port = "codes" }]
 ```
 
-See [config_file.md](config_file.md) for the full TOML format reference and stage type names.
+See \ref config_file_overview "Config file reference" for the full TOML format and stage type names.
 
 Per-stage outlier count metrics (`fzgpumodules:sN:outlier_count`) are not available in config-file mode.
 

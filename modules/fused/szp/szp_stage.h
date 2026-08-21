@@ -5,17 +5,17 @@
  * @brief SZp (a.k.a. fZ-light) — extreme-fast error-bounded compressor, as a
  *        fused stage.
  *
- * Reference: SZp / fZ-light (Huang, Di, et al., SC'24), BSD-licensed; the
- * homomorphic-collectives variant is hZCCL. The vendored copy at
- * `compressors/SZp` is the CPU/OpenMP reference — this stage is a GPU
- * reimplementation of its forward/inverse; attribution belongs in THIRD_PARTY.md.
+ * Reference: SZp / fZ-light (Huang, Di, et al., SC'24). The upstream CPU/OpenMP
+ * reference at https://github.com/szcompressor/SZp is MIT-licensed; this stage
+ * independently reimplements its forward/inverse and copies no upstream source.
+ * The homomorphic-collectives variant is hZCCL. See `THIRD_PARTY.md`.
  *
  * SZp's inner loop is a *whole compressor* that decomposes almost exactly into
  * the FZGM chain `Quantizer(linear,ABS) → 1-D Lorenzo/diff → AdaptiveBitpack`
  * (its per-block fixed-length residual packing IS AdaptiveBitpack's plain mode).
  * This stage exists for (a) SZp byte-format parity and (b) single-launch
  * throughput. For a pure-composition equivalent that needs NO new code, see
- * `configs/szp_composed.toml`.
+ * `examples/presets/szp_composed.toml`.
  *
  * Forward:  float[]/double[] → uint8[] archive
  * Inverse:  uint8[] archive  → float[]/double[]  (error-bounded approximation)

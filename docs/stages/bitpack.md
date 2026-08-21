@@ -211,3 +211,12 @@ p.finalize();
 p.compress(d_in, n_bytes, stream);
 // bpack->getBase() / getShift() / getNBits() now hold the detected values
 ```
+
+---
+
+## Acknowledgements
+
+Fixed-width bit packing is a standard lossless representation. This stage, its
+adaptive parameter selection, and its archive layout are original
+FZGPUModules code; no third-party implementation was copied. It is distributed
+under the repository's BSD-3-Clause license.

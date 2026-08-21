@@ -58,8 +58,8 @@ is:
 Per-block byte offsets are a device-wide exclusive scan of the per-block cost,
 recomputed from the width meta on decode (no offset table stored). The layout
 round-trips against itself but is **not byte-compatible with the reference SZp
-container** (`compressors/SZp` is the CPU/OpenMP reference; this stage is a GPU
-reimplementation of its forward/inverse).
+container**. This stage is a GPU reimplementation of the upstream CPU/OpenMP
+compressor's forward/inverse.
 
 ## Error bounds
 
@@ -115,7 +115,9 @@ transform). See the future-work scoping note
 
 ## Prior work
 
-SZp / fZ-light: Jiajun Huang, Sheng Di, et al., SC '24. The vendored CPU
-reference is at `compressors/SZp`; this stage is a GPU reimplementation of its
-predict-quantize-pack forward/inverse. The FZM archive layout, CUB offset scan,
-and MemoryPool scaffolding are FZGPUModules code. See `THIRD_PARTY.md`.
+SZp / fZ-light: Jiajun Huang, Sheng Di, et al., SC '24. The upstream CPU/OpenMP
+reference is available at https://github.com/szcompressor/SZp under the MIT
+license. This stage is a GPU reimplementation of its predict-quantize-pack
+forward/inverse; no upstream source was copied. The FZM archive layout, CUB
+offset scan, and MemoryPool scaffolding are FZGPUModules code. See
+`THIRD_PARTY.md`.

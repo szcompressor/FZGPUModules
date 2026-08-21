@@ -28,7 +28,8 @@ INPUT                  = include/ \
                          docs/fzm_format.md \
                          docs/docker.md \
                          docs/libpressio_python.md \
-                         docs/acknowledgements.md
+                         docs/acknowledgements.md \
+                         THIRD_PARTY.md
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md

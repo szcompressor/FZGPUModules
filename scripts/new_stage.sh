@@ -122,7 +122,7 @@ cat > "${MODULE_DIR}/${LOWER}_stage.h" << HEADER
 
 #include "stage/stage.h"
 #include "fzm_format.h"
-#include "backend/types.h"   // NOT <cuda_runtime.h> — see memory/hip_compliance.md
+#include "backend/types.h"   // Use backend-neutral runtime types.
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -239,7 +239,7 @@ cat > "${MODULE_DIR}/${LOWER}_stage.cu" << IMPL
 #include "${CATEGORY}/${LOWER}/${LOWER}_stage.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
-#include "backend/api.h"     // NOT <cuda_runtime.h> — see memory/hip_compliance.md
+#include "backend/api.h"     // Use backend-neutral device/runtime wrappers.
 #include <stdexcept>
 #include <string>
 

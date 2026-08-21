@@ -86,7 +86,7 @@ enum class FusionStrategy : uint8_t { ChunkCooperative, WarpRegister };
 struct FusedOpDecl {
     FusionStrategy       strategy = FusionStrategy::ChunkCooperative;
     std::string          op_name;         ///< device-op type name, e.g. "DiffNegabinary"
-    std::string          include_header;  ///< header that defines it (for the codegen #include)
+    std::string          include_header;  ///< header used by the generated source
     std::vector<uint8_t> params;          ///< POD Params bytes; empty for stateless ops
 
     bool valid() const { return !op_name.empty(); }

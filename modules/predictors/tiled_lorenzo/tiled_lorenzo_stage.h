@@ -62,7 +62,7 @@ static_assert(sizeof(TiledLorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
  *       of the cuSZp3 delta kernel logic** (cuSZp_kernels_{2D,3D}_f32.cu); the
  *       tile-major modular decomposition, FZM header, and MemoryPool integration
  *       are FZGPUModules code. The cuSZp BSD-3-Clause copyright is reproduced in
- *       `THIRD_PARTY.md`. See also `memory/cuszp_stages.md` (Part 8).
+ *       `THIRD_PARTY.md`.
  *
  * @tparam T  Signed element type: `int16_t` or `int32_t`.
  */

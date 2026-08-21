@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 # GPU backend selection. Exactly one backend is compiled into any given build
 # (a compile-time choice, not a runtime switch) — see include/backend/types.h
 # for the corresponding C++-side type aliases. CUDA is supported, HIP is
-# experimental, and SYCL is planned (see memory/hip_sycl_backend_plan.md).
+# experimental, and SYCL is planned.
 set(FZGMOD_BACKEND "CUDA" CACHE STRING "GPU backend to build against: CUDA, HIP, or SYCL")
 set_property(CACHE FZGMOD_BACKEND PROPERTY STRINGS CUDA HIP SYCL)
 
@@ -267,8 +267,7 @@ elseif (USE_SANITIZER STREQUAL "Compute")
   if(NOT FZGMOD_BACKEND STREQUAL "CUDA")
     message(FATAL_ERROR
       "USE_SANITIZER=Compute requires the CUDA backend (compute-sanitizer is an "
-      "NVIDIA tool). Sanitizer parity for HIP is out of scope for now — see "
-      "memory/hip_sycl_backend_plan.md, Phase 1.5.")
+      "NVIDIA tool). Sanitizer parity for HIP is not implemented.")
   endif()
   message(STATUS "Configuring for Compute Sanitizer")
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo -Xcompiler -rdynamic")
@@ -474,8 +473,7 @@ if(NOT FZGMOD_BACKEND STREQUAL "HIP")
 endif()
 
 # The vendored dietgpu ANS tree uses inline NVPTX lanemask assembly and a
-# hardcoded 32-lane warp model with no HIP translation (see
-# memory/hip_sycl_backend_plan.md, Phase 1.4) -- excluded from compilation
+# hardcoded 32-lane warp model with no HIP translation, so it is excluded from compilation
 # entirely on HIP rather than ported. This is a build-level stopgap:
 # ANSStage's symbols are simply absent from the HIP library. The intended
 # runtime mechanism (Stage::isSupportedOnBackend() + a clear error from
@@ -644,6 +642,15 @@ install(FILES
   "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesConfig.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/FZGPUModulesConfigVersion.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZGPUModules
+)
+
+# Ship both the project's own license and the notices required by incorporated
+# third-party code.  Keeping THIRD_PARTY.md only in the source tree is
+# insufficient for binary/install-tree redistribution.
+install(FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+  "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY.md"
+  DESTINATION ${CMAKE_INSTALL_DOCDIR}
 )
 
 # Export build-tree targets so find_package(FZGPUModules) works without installing

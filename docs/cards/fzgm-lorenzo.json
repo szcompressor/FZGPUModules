@@ -10,7 +10,7 @@
 
   "category": "predictor",
   "algorithm": "lorenzo",
-  "description": "Plain integer N-D Lorenzo predictor (delta coding / prefix sum). Forward: computes per-element delta from neighbor(s) using 1-D, 2-D, or 3-D inclusion-exclusion. Inverse: prefix sum to reconstruct. Lossless; output is the same signed type as input. Optional block-local reset period (setBlockSize) enables parallel decompression and mirrors the cuSZp 1-D block design (independent reimplementation).",
+  "description": "Plain integer N-D Lorenzo predictor (delta coding / prefix sum). Forward: computes per-element delta from neighbor(s) using 1-D, 2-D, or 3-D inclusion-exclusion. Inverse: prefix sum to reconstruct. Lossless; output is the same signed type as input. Optional block-local reset mirrors the cuSZp 1-D block design; optional second-order and mean-centering modes follow FSZ. Both relationships are independent algorithmic reimplementations.",
   "variantLabel": "integer N-D",
 
   "lossy": false,
@@ -30,11 +30,26 @@
       "description": "Block-local reset period (elements). 0 = default N-D behavior (full-array delta). >0 forces the 1-D path, restarting the prediction chain every n elements. cuSZp uses n=32. Must be in [1, 1024] when non-zero.",
       "min": 0,
       "max": 1024
+    },
+    {
+      "name": "centering",
+      "type": "bool",
+      "default": false,
+      "description": "Subtract a per-block integer mean before prediction. Requires blockSize > 0 and adds a means output port. Follows the FSZ centered-prediction design."
+    },
+    {
+      "name": "order",
+      "type": "int",
+      "values": [1, 2],
+      "default": 1,
+      "description": "First- or second-order prediction. Order 2 requires blockSize > 0 and follows FSZ's LZ2 design."
     }
   ],
 
   "provenance": {
-    "relationship": "original",
+    "sourceProject": "cuSZp and FSZ",
+    "sourceUrl": "https://github.com/JiajunHuang1999/FSZ",
+    "relationship": "reimplementation",
     "license": "BSD-3-Clause"
   },
 

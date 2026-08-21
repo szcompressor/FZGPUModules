@@ -67,7 +67,7 @@ static_assert(sizeof(AdaptiveBitpackConfig) <= FZM_STAGE_CONFIG_SIZE,
  *       stage is a **direct port of the cuSZp encode/decode kernel logic**; the
  *       byte-granular layout, CUB offset scan, and FZM/MemoryPool scaffolding are
  *       FZGPUModules code. The cuSZp BSD-3-Clause copyright is reproduced in
- *       `THIRD_PARTY.md`. See also `memory/cuszp_stages.md`.
+ *       `THIRD_PARTY.md`.
  *
  * @tparam T  Signed element type: `int16_t` or `int32_t`.
  */

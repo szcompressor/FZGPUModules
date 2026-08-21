@@ -64,11 +64,13 @@ namespace fz {
  */
 template<typename T>
 class BitpackStage : public Stage {
+    /// @cond INTERNAL
     static_assert(
         std::is_same_v<T, uint8_t> ||
         std::is_same_v<T, uint16_t> ||
         std::is_same_v<T, uint32_t>,
         "BitpackStage: T must be uint8_t, uint16_t, or uint32_t.");
+    /// @endcond
 
 public:
     BitpackStage() = default;

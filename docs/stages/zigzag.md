@@ -64,3 +64,11 @@ auto* rle = p.addStage<RLEStage<uint32_t>>();
 p.connect(rle, zz);
 p.finalize();
 ```
+
+---
+
+## Acknowledgements
+
+Zigzag signed-to-unsigned mapping is a standard integer representation. This
+stage is original FZGPUModules code; no third-party implementation was copied.
+It is distributed under the repository's BSD-3-Clause license.

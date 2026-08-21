@@ -12,7 +12,7 @@
  * header from public stage headers.
  *
  * Source: cuSZ-Hi (https://github.com/shixun404/cuSZ-Hi), BSD-3-Clause.
- * See `memory/references/spline_cuszhi/type.h` for the full upstream file.
+ * See the cuSZ-Hi repository and `THIRD_PARTY.md` for the upstream source.
  */
 
 #include <cstdint>

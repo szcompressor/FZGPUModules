@@ -2,26 +2,6 @@
 
 Guidance for AI coding agents working in this repository.
 
-## Shared agent context
-
-This repository is developed with multiple agentic coding tools. Treat their context as
-shared rather than maintaining tool-specific sources of truth.
-
-Before working in this repository:
-
-1. Read `memory/MEMORY.md` when the task may depend on project history, prior decisions,
-   known bugs, plans, user feedback, or ongoing work. Follow its links selectively as
-   relevant to the task.
-2. Reuse and update the existing shared files (`AGENTS.md`, `memory/`, documentation,
-   plans, and task artifacts) rather than creating parallel tool-specific context.
-3. Preserve context written by other agents. Do not rewrite or remove it unless the task
-   requires that change and the new information supersedes it.
-4. When durable project knowledge emerges, put it in the existing appropriate shared
-   file and update `memory/MEMORY.md` when adding a new memory document.
-
-These rules apply regardless of whether the repository is opened locally through WSL or
-remotely through VS Code SSH.
-
 ## What is FZGPUModules
 
 FZGPUModules is a **CUDA library for building composable, high-throughput error-bounded
@@ -89,24 +69,19 @@ ctest --preset asan               # full suite, ASan + UBSan     — see note be
 ctest --preset compute-san        # full suite, compute-sanitizer — see note below
 ```
 
-**Both sanitizer presets need environment setup, and both fail misleadingly without
-it** — `compute-san` reports every test as `Not Run` behind a single "Unable to find
-executable: compute-sanitizer" line, and `asan` aborts all 48 at startup with "ASan
-runtime does not come first in initial library list". Neither looks like a missing
-tool. On the JetStream2 H100 box, `source ~/load-env` puts `compute-sanitizer` on
-PATH and defines `fz-asan`:
+Both sanitizer modes require their runtime tools: Compute Sanitizer must be on `PATH`,
+and the ASan run needs GCC's `libasan`. Prefer the checked-in wrapper, which manages the
+sanitizer builds, `LD_PRELOAD`, and CUDA-compatible sanitizer options:
 
 ```bash
-source ~/load-env
-ctest --preset compute-san        # works once compute-sanitizer is on PATH
-fz-asan ctest --preset asan       # wraps with LD_PRELOAD=libasan + ASAN_OPTIONS
+./scripts/run_sanitizers.sh                  # full sanitizer matrix
+./scripts/run_sanitizers.sh --mode compute   # Compute Sanitizer only
+./scripts/run_sanitizers.sh --mode asan      # ASan + UBSan only
 ```
 
 `LD_PRELOAD` must not be exported globally — it would inject ASan into `nvcc` and
-every other process. `ASAN_OPTIONS=protect_shadow_gap=0` is required under CUDA, and
-`detect_leaks=0` because the CUDA runtime holds allocations for process lifetime by
-design. Run `compute-san` on any change to device code: it catches out-of-bounds
-device writes that land in pool slack, which a normal test run reports as passing.
+every other process. Run Compute Sanitizer on any change to device code: it catches
+out-of-bounds device writes that land in pool slack, which a normal test run can miss.
 
 `tests/` layout: `stages/` (per-stage unit tests), `pipeline/` (integration tests),
 `golden/` (reference data), `helpers/`.
@@ -121,7 +96,6 @@ examples/            example programs (-DBUILD_EXAMPLES=ON)
 profiling/           profiling programs (-DBUILD_PROFILING=ON)
 tests/               test suite (-DBUILD_TESTING=ON)
 docs/                doxygen-driven documentation site (mainpage, architecture, stages/, api_reference)
-memory/              local working documents and release notes — gitignored, not part of the shipped repo
 scripts/             helper scripts
 ```
 

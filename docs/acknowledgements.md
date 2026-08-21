@@ -5,7 +5,7 @@ compression projects. This page documents what we took from each, how we adapted
 and the associated licenses and citations.
 
 For full verbatim copyright notices required by BSD-3-Clause binary redistribution,
-see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
+see \ref third_party_notices "Third-party notices".
 
 ---
 
@@ -13,21 +13,24 @@ see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
 
 | Project | License | Relationship | Stages |
 |---|---|---|---|
-| [LC framework](#lc-framework) | BSD-3-Clause | Direct port / algorithm-faithful reimpl | `RZEStage`, `RREStage`, `RAREStage`, `RAZEStage`, `CLOGStage`, `HCLOGStage`, `BitshuffleStage`, `TUPLStage`, `DifferenceStage`, `QuantizerStage` |
-| [cuSZ / PHF](#cusz--phf) | BSD-3-Clause | Algorithm follow / vendored PHF headers | `LorenzoQuantStage`, `HuffmanStage` |
-| [FZ-GPU](#fz-gpu) | BSD-3-Clause | Direct port of fused kernels | `BitplaneRZEStage` |
-| [cuSZ-Hi](#cusz-hi) | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
-| [cuSZp / cuSZp2 / cuSZp3](#cuszp--cuszp2--cuszp3) | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
-| [MANS](#mans) | BSD-3-Clause | Direct port of kernels | `ADMStage` |
-| [dietGPU](#dietgpu) | MIT | Vendored headers | `ANSStage` |
-| [GPULZ](#gpulz) | **None declared upstream** | Direct port of encode/decode kernels | `GPULZStage` |
-| [AIZ_VLDB26](#aiz_vldb26) | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
-| [FSZ](#fsz) | BSD-3-Clause | **Algorithmic attribution only; no code used** (written from the paper before FSZ 1.0.0 was released) | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
-| [Point-wise relative transform](#point-wise-relative-error-transform) | n/a — paper only | **Algorithmic attribution only; no code used** | `LogTransformStage` |
+| \ref ack_lc "LC framework" | BSD-3-Clause | Direct port / algorithm-faithful reimpl | `RZEStage`, `RREStage`, `RAREStage`, `RAZEStage`, `CLOGStage`, `HCLOGStage`, `BitshuffleStage`, `TUPLStage`, `DifferenceStage`, `QuantizerStage` |
+| \ref ack_cusz "cuSZ / PHF" | BSD-3-Clause | Algorithm follow / vendored PHF headers | `LorenzoQuantStage`, `HuffmanStage` |
+| \ref ack_fzgpu "FZ-GPU" | BSD-3-Clause | Direct port of fused kernels | `BitplaneRZEStage` |
+| \ref ack_cusz_hi "cuSZ-Hi" | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
+| \ref ack_cuszp "cuSZp / cuSZp2 / cuSZp3" | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
+| \ref ack_mans "MANS" | BSD-3-Clause | Direct port of kernels | `ADMStage` |
+| \ref ack_dietgpu "dietGPU" | MIT | Vendored headers | `ANSStage` |
+| \ref ack_gpulz "GPULZ" | **None declared upstream** | Direct port of encode/decode kernels | `GPULZStage` |
+| \ref ack_aiz "AIZ_VLDB26" | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
+| \ref ack_fsz "FSZ" | BSD-3-Clause | **Algorithmic attribution only; no code used** (written from the paper before FSZ 1.0.0 was released) | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
+| \ref ack_log_transform "Point-wise relative transform" | n/a — paper only | **Algorithmic attribution only; no code used** | `LogTransformStage` |
+| \ref ack_roibin "ROIBIN-SZ" | SZ2 BSD-style license; no code copied | **Algorithmic attribution only; independent GPU/DAG implementation** | `ROIBinSplitStage` |
+| \ref ack_szp "SZp / fZ-light" | MIT | GPU reimplementation; no source copied | `SZpStage` |
+| \ref ack_szx "SZx" | Argonne BSD-style license; no code copied | **Algorithmic attribution only; paper-derived** | `SZxStage` |
 
 ---
 
-## LC Framework
+## LC Framework {#ack_lc}
 
 **Repository:** https://github.com/burtscher/LC-framework  
 **License:** BSD-3-Clause  
@@ -68,7 +71,7 @@ Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher (Texas State Un
 
 ---
 
-## cuSZ / PHF
+## cuSZ / PHF {#ack_cusz}
 
 **Repository:** https://github.com/szcompressor/cuSZ  
 **License:** BSD-3-Clause  
@@ -95,7 +98,7 @@ SC '21. https://doi.org/10.1145/3458817.3476173
 
 ---
 
-## FZ-GPU
+## FZ-GPU {#ack_fzgpu}
 
 **Repository:** https://github.com/szcompressor/cuSZ (vendored under `modules/codec/fzg/`)  
 **License:** BSD-3-Clause (same as cuSZ)  
@@ -122,11 +125,11 @@ HPDC '23. https://doi.org/10.1145/3588195.3592994
 
 ---
 
-## cuSZ-Hi
+## cuSZ-Hi {#ack_cusz_hi}
 
 **Repository:** https://github.com/shixun404/cuSZ-Hi  
 **License:** BSD-3-Clause  
-**Authors/Affiliations:** Indiana University and UChicago Argonne LLC
+**Upstream copyright holder:** UChicago Argonne, LLC and Washington State University
 
 **Stages:**
 
@@ -144,10 +147,7 @@ HPDC '23. https://doi.org/10.1145/3588195.3592994
   **Bug fix patched locally:** `pa_spline_infprecis_data`'s SPLINE_DIM==2 level==0 atomic
   offset corrected from `errors + 15 + BIY` (upstream) to `errors + 16 + BIY` to avoid a
   slot collision with the level==1 BIY=4 write. Full analysis is in
-  [docs/stages/ginterp.md](stages/ginterp.md).
-
-  An unmodified reference copy of the upstream kernels lives in
-  `memory/references/spline_cuszhi/` for cross-checking.
+  \ref stage_ginterp "GInterpStage documentation".
 
 **Citation:**
 
@@ -159,7 +159,7 @@ SC '25. https://doi.org/10.1145/3712285.3759798
 
 ---
 
-## cuSZp / cuSZp2 / cuSZp3
+## cuSZp / cuSZp2 / cuSZp3 {#ack_cuszp}
 
 **Repository:** https://github.com/szcompressor/cuSZp  
 **License:** BSD-3-Clause (verbatim copyright reproduced in `THIRD_PARTY.md`)  
@@ -209,7 +209,7 @@ SC '25. https://doi.org/10.1145/3712285.3759817
 
 ---
 
-## MANS
+## MANS {#ack_mans}
 
 **Repository:** https://github.com/hpdps-group/MANS  
 **License:** BSD-3-Clause  
@@ -230,7 +230,7 @@ Advisors: Dingwen Tao, Guangming Tan
 
 ---
 
-## dietGPU
+## dietGPU {#ack_dietgpu}
 
 **Repository:** https://github.com/facebookresearch/dietgpu  
 **License:** MIT  
@@ -250,10 +250,11 @@ Advisors: Dingwen Tao, Guangming Tan
 
 ---
 
-## GPULZ
+## GPULZ {#ack_gpulz}
 
 **Repository:** https://github.com/hpdps-group/ICS23-GPULZ
 **License:** **none declared upstream** — see the caveat below
+**Copyright notice:** `(C) 2023 by Indiana University and Argonne National Laboratory.`
 **Authors:** Boyuan Zhang, Jiannan Tian, Sheng Di, Xiaodong Yu, Martin Swany,
 Dingwen Tao, Franck Cappello
 **Paper:** "GPULZ: Optimizing LZSS Lossless Compression for Multi-byte Data on Modern
@@ -277,14 +278,13 @@ GPUs", ICS '23
   ports) has no upstream counterpart.
 
   **License caveat:** the upstream repository publishes no `LICENSE` file and declares no
-  license. No terms are reproduced here because none exist upstream — this differs from
-  every other entry on this page. Anyone redistributing FZGPUModules including
-  `GPULZStage` should contact the GPULZ authors to confirm terms before relying on this
-  component outside research or internal use.
+  license. Its README copyright notice does not grant redistribution permission. Anyone
+  redistributing FZGPUModules with `GPULZStage` should obtain permission or licensing
+  terms from the GPULZ copyright holders first.
 
 ---
 
-## AIZ_VLDB26
+## AIZ_VLDB26 {#ack_aiz}
 
 **Repository:** https://github.com/boyuanzhang62/AIZ_VLDB26
 **License:** **none declared upstream** — same situation as GPULZ above
@@ -305,7 +305,7 @@ GPUs", ICS '23
 
 ---
 
-## FSZ
+## FSZ {#ack_fsz}
 
 **License:** BSD-3-Clause (FSZ 1.0.0, released 2026-08).
 **Repository:** https://github.com/JiajunHuang1999/FSZ
@@ -353,7 +353,7 @@ and all host-side plumbing are FZGPUModules code.
 
 ---
 
-## Point-wise relative error transform
+## Point-wise relative error transform {#ack_log_transform}
 
 **License:** not applicable — **algorithmic attribution only**; the stage was written from
 the paper's description, no reference implementation was used.
@@ -368,3 +368,50 @@ relative error bound", IEEE CLUSTER 2018, pp. 179–189
   bound becomes a plain *absolute* bound, letting an ordinary ABS quantizer downstream
   deliver the relative guarantee. Kernel implementation, the sign/zero/near-zero outlier
   handling, and the DAG stage plumbing are FZGPUModules code.
+
+---
+
+## ROIBIN-SZ {#ack_roibin}
+
+**Paper:** Robert Underwood, Chun Hong Yoon, Ali Murat Gok, Sheng Di, and Franck
+Cappello, “ROIBIN-SZ: Fast and Science-Preserving Compression for Serial
+Crystallography,” *Synchrotron Radiation News* 36(4), 17–22, 2023.
+https://doi.org/10.1080/08940886.2023.2245722
+
+**Public implementation:**
+https://github.com/szcompressor/SZ2/tree/master/example/roibin_example
+
+**Relationship:** `ROIBinSplitStage` is an independent GPU/DAG implementation
+of the published ROI/background separation design. No SZ2 or LibPressio source
+is copied. The kernels, FZROI1 peak-table format, fixed-output geometry,
+three-port layout, and inverse scatter are FZGPUModules code.
+
+---
+
+## SZp / fZ-light {#ack_szp}
+
+**Repository:** https://github.com/szcompressor/SZp
+
+**License:** MIT
+
+**Relationship:** `SZpStage` is a GPU reimplementation of the published
+predict-quantize-pack algorithm. No upstream source is copied and the FZGM
+archive is not byte-compatible with the upstream container.
+
+Jiajun Huang, Sheng Di, et al. *SZp/fZ-light: An Ultra-fast Error-bounded
+Lossy Compressor*, SC '24.
+
+---
+
+## SZx {#ack_szx}
+
+**Repository:** https://github.com/szcompressor/SZx
+
+**License:** Argonne OPEN SOURCE LICENSE SF-16-105 (four-condition BSD style)
+
+**Relationship:** `SZxStage` was implemented from the paper; no SZx source was
+copied and the FZGM archive is not byte-compatible with the upstream format.
+
+Xiaodong Yu, Sheng Di, Kai Zhao, Jiannan Tian, Dingwen Tao, Xin Liang, and
+Franck Cappello. *Ultrafast Error-bounded Lossy Compression for Scientific
+Datasets*, HPDC '22.

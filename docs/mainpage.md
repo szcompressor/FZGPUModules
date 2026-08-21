@@ -91,6 +91,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_lorenzo "LorenzoStage<T>"                  | `modules/predictors/lorenzo/lorenzo_stage.h`       | Plain integer Lorenzo predictor (lossless)     |
 | \ref stage_tiled_lorenzo "TiledLorenzoStage<T>"       | `modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.h` | Dimension-aware (tiled separable) Lorenzo predictor (lossless, 2D/3D, cuSZp3 delta) |
 | \ref stage_ginterp "GInterpStage<TInput, TCode>"      | `modules/fused/ginterp/ginterp_stage.h`       | Multi-level spline interpolation predictor + quantizer (lossy, 3D, cuSZ-Hi port) |
+| \ref stage_adaptive_lorenzo "AdaptiveLorenzoStage<T>" | `modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.h` | Per-tile adaptive multi-order Lorenzo + centering (FSZ design) |
 | \ref stage_quantizer "QuantizerStage<TInput, TCode>"    | `modules/quantizers/quantizer/quantizer.h`         | Direct-value quantizer (ABS/REL/NOA)           |
 | \ref stage_rle "RLEStage<T>"                      | `modules/coders/rle/rle.h`                         | Run-length encoding                            |
 | \ref stage_diff "DifferenceStage<T, TOut>"         | `modules/predictors/diff/diff.h`                   | First-order difference / cumulative-sum coding |
@@ -103,13 +104,17 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_raze "RAZEStage"                       | `modules/coders/raze/raze_stage.h`                 | Zero-adaptive reduction encoding (LC component, auto-k RZE) |
 | \ref stage_clog "CLOGStage"                       | `modules/coders/clog/clog_stage.h`                 | Compressed-Logarithm adaptive bit-width coding (LC component) |
 | \ref stage_hclog "HCLOGStage"                     | `modules/coders/hclog/hclog_stage.h`               | Compressed-Logarithm coding with per-subchunk TCMS fallback (LC component) |
+| \ref stage_gpulz "GPULZStage"                     | `modules/coders/gpulz/gpulz_stage.h`               | GPU LZSS dictionary coder (GPULZ port; upstream has no declared license) |
 | \ref stage_zigzag "ZigzagStage<TIn, TOut>"           | `modules/transforms/zigzag/zigzag_stage.h`         | Zigzag encode/decode                           |
 | \ref stage_negabinary "NegabinaryStage<TIn, TOut>"       | `modules/transforms/negabinary/negabinary_stage.h` | Negabinary encode/decode                       |
+| \ref stage_log_transform "LogTransformStage<T>"    | `modules/transforms/log_transform/log_transform_stage.h` | Log-space transform for point-wise relative bounds |
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
 | \ref stage_adaptive_bitpack "AdaptiveBitpackStage<T>" | `modules/coders/adaptive_bitpack/adaptive_bitpack_stage.h` | Per-block adaptive fixed-rate bit-plane coding (cuSZp/cuSZp2 port) |
 | \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (PHF, cuSZ port)    |
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
+| \ref stage_szx "SZxStage<T>"                      | `modules/fused/szx/szx_stage.h`                    | SZx constant-block / fixed-residual whole compressor |
+| \ref stage_szp "SZpStage<T>"                      | `modules/fused/szp/szp_stage.h`                    | SZp/fZ-light quantize + delta + fixed-rate whole compressor |
 | \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
 | \ref stage_roibin_split "ROIBinSplitStage"        | `modules/structural/roibin_split/roibin_split_stage.h` | Split a field into ROI boxes + binned background for dual-error-bound branches (structural) |
 

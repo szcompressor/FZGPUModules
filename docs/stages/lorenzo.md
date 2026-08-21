@@ -187,3 +187,16 @@ centering is the best of the four variants on 6 of 8 fields (CESM `FICE` 1.75x,
 
 Because the right choice flips with both the field and the error bound, prefer
 \ref stage_adaptive_lorenzo "AdaptiveLorenzoStage", which makes it per tile.
+
+## Acknowledgements
+
+The block-local first-order Lorenzo predictor is an independent implementation
+of a standard finite-difference predictor; its `setBlockSize` mode composes the
+same block-reset step used by cuSZp. The cross-block prediction state,
+second-order option, and mean-centering variants follow the FSZ design:
+
+> Jiajun Huang. *FSZ: Breaking the Prediction-Throughput Trade-off in GPU Lossy
+> Compression.* SC '26, arXiv:2607.15413.
+
+These FSZ-derived modes were implemented from the paper before the FSZ source
+release; no FSZ source was copied. See `THIRD_PARTY.md`.

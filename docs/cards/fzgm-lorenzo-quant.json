@@ -11,7 +11,7 @@
 
   "category": "fused",
   "algorithm": "lorenzo",
-  "description": "Fused Lorenzo predictor + error-bounded quantizer (TInput = f32/f64, TCode = u8/u16/u32). 1D/2D/3D. Lossy. Supports ABS, NOA, and REL error-bound modes. Three forward outputs: codes, outlier_errors, outlier_indices.",
+  "description": "Fused Lorenzo predictor + error-bounded quantizer (TInput = f32/f64, TCode = u8/u16/u32). 1D/2D/3D. Lossy. Supports ABS, NOA, and REL error-bound modes. Three forward outputs: codes, outlier_errors, outlier_indices. Optional 1-D tile centering follows the FSZ design and adds a means output.",
   "variantLabel": "fused (cuSZ-style)",
 
   "lossy": true,
@@ -56,6 +56,12 @@
       "type": "bool",
       "default": false,
       "description": "Zigzag-encode codes before storage to improve compressibility when codes cluster near zero."
+    },
+    {
+      "name": "centering",
+      "type": "bool",
+      "default": false,
+      "description": "Enable FSZ-style per-tile mean centering in 1-D; adds a means output port. Independently implemented from the paper."
     }
   ],
 

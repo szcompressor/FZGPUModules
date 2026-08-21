@@ -112,4 +112,4 @@ symbol count) so a cold decompress can size its output buffer.
 The encode/decode kernels are the FZ-GPU lossless codec (Boyuan Zhang, Jiannan
 Tian, et al., "FZ-GPU", HPDC '23), BSD-3-Clause, as vendored in the cuSZ
 repository. The stage wrapper, memory-pool integration, and padded-input
-handling are FZGPUModules code. See [THIRD_PARTY.md](../../THIRD_PARTY.md).
+handling are FZGPUModules code. See \ref third_party_notices "Third-party notices".
