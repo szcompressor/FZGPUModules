@@ -5,6 +5,8 @@
 #include "pipeline/fusion_planner.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 #include "fused/chunk_fusion/chunk_op_params.h"
+#include "fused/fused_block/nvrtc_warp_fusion.h"
+#include "fused/fused_block/warp_op_params.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -161,6 +163,75 @@ TEST(FusionPlanner, EndToEndFusedMatchesStaged) {
     cudaFree(d_in);
 }
 
+// Warp-register fusion under NOA (not just ABS): cuszp2 with a range-relative bound
+// must fuse, stay byte-identical to staged, and satisfy the bound — the runner primes
+// the NOA range scan and passes the resolved abs_eb into the uniform-step fused kernel.
+// Positive data + non-32-aligned tail also exercises the padding-exclusion fix.
+TEST(FusionPlanner, Cuszp2NoaEndToEndFusedMatchesStaged) {
+    const size_t n  = (1u << 20) + 777;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    double lo = 1e30, hi = -1e30;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 1.0f + 0.5f*std::sin(i*0.001f) + 0.2f*std::cos(i*0.017f);   // strictly > 0
+        lo = std::min(lo, (double)h[i]); hi = std::max(hi, (double)h[i]);
+    }
+    const double bound = eb * (hi - lo) * 1.001;
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto build = [&](Pipeline& p) {
+        p.setDims(n, 1, 1);
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(eb); q->setErrorBoundMode(ErrorBoundMode::NOA); q->setLinearMode(true);
+        auto* l = p.addStage<LorenzoStage<int32_t>>(); l->setBlockSize(32);
+        p.connect(l, q, "codes");
+        auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        a->setBlockSize(32); a->setOutlierSelection(true);
+        p.connect(a, l);
+    };
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol); build(p); p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        cudaDeviceSynchronize();
+        out.resize(sz);
+        cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost);
+        return sz;
+    };
+    std::vector<uint8_t> staged, fused;
+    size_t ss = compressCopy(FusionPolicy::Off,  staged);
+    size_t sf = compressCopy(FusionPolicy::Auto, fused);
+    ASSERT_EQ(ss, sf) << "NOA fused archive size differs from staged";
+    EXPECT_EQ(staged, fused) << "NOA fused archive not byte-identical to staged";
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& r) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol); build(p); p.finalize();
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        r.assign(n, 0.0f);
+        cudaMemcpy(r.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off,  rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rs), bound) << "staged NOA exceeds bound";
+    EXPECT_LE(maxErr(rf), bound) << "fused NOA exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused NOA reconstruction differs from staged";
+    cudaFree(d_in);
+}
+
 // PFPL (chunk-cooperative): Quantizer(NOA,inplace,zigzag) -> Difference(negabinary)
 // -> Bitshuffle(ew4) -> {RZE|RRE}. The coder is a build-time choice; the SAME
 // registry entry / harness fuses either. useRre swaps the coder.
@@ -314,6 +385,83 @@ TEST(FusionPlanner, GenericRunnerFusesRazeCoderNoRegistryEntry) {
     chunkFusionEndToEnd(buildPfplCoder<RAZEStage>);
 }
 
+// PFPL with SPLIT outliers (3-port): Quantizer(ABS,zigzag, inplace=OFF) -> Difference
+// -> Bitshuffle -> RZE. The quant Map now emits a clean codes stream (0 at outlier
+// positions) plus an escaping (index,value) outlier list — the `QuantSplitOutlier`
+// fused op that consumes the multi-output plumbing. Unlike the inplace/single-output
+// chains, the archive is NOT byte-identical to staged: the outlier list is filled by a
+// global atomicAdd, so its order is nondeterministic (true of the staged path too).
+// What must hold is that fusion engages, the codes-side survives, and the fused
+// round-trip reconstructs identically to staged and within bound (the outlier SCATTER
+// is order-independent). Data: small representable base with sparse forced-outlier
+// spikes (|x| >= threshold), ~0.2% outliers, well under the 5% capacity.
+static void buildPfplSplit(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::ABS);
+    q->setQuantRadius(32768); q->setZigzagCodes(true);
+    q->setInplaceOutliers(false);                 // 3-port split outliers
+    q->setOutlierThreshold(1.0f);                 // |x| >= 1 forced to the side list
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(16384);
+    p.connect(b, d);
+    auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(16384);
+    p.connect(c, b);
+}
+
+TEST(FusionPlanner, PfplSplitOutlierFusesAndRoundTrips) {
+    const size_t n  = 1u << 20;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    size_t n_out = 0;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 0.2f * std::sin(i * 0.001f);       // representable (|x| < 1)
+        if (i % 512 == 0) { h[i] = 5.0f; ++n_out; }  // forced outlier (|x| >= threshold)
+    }
+    ASSERT_GT(n_out, 0u);
+    const double bound = eb * 1.001;              // ABS
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Confirm the chain fuses into one group (the split quant is still a Map head).
+    { Pipeline pg(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+      buildPfplSplit(pg, n); pg.finalize();
+      auto groups = planFusionGroups(*pg.getDAG());
+      ASSERT_EQ(groups.size(), 1u);
+      EXPECT_EQ(groups[0].stages.size(), 4u); }
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildPfplSplit(p, n);
+        p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off,  rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rs), bound) << "staged split-outlier baseline exceeds bound";
+    EXPECT_LE(maxErr(rf), bound) << "fused split-outlier round-trip exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused split-outlier reconstruction differs from staged";
+    // The outlier scatter must have restored the spikes exactly (they are lossless).
+    for (size_t i = 0; i < n; i += 512)
+        EXPECT_FLOAT_EQ(rf[i], 5.0f) << "outlier at " << i << " not restored";
+    cudaFree(d_in);
+}
+
 // Regression: the fused NOA range scan must exclude the chunk-aligned zero-padding
 // tail. If it scans the padding, those zeros lower the min and inflate the range →
 // too-large abs_eb → the fused path quantizes too loosely and violates the bound on
@@ -412,14 +560,50 @@ TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
         EXPECT_EQ(op.strategy, FusionStrategy::WarpRegister);
         EXPECT_EQ(op.op_name, kNames[i]);
     }
+    // The predictor stage carries the shape the generic NVRTC runner needs (EPL +
+    // packed params with a leading inv2eb slot) so the runner does not downcast it.
+    const FusedOpDecl pred2 = g[0].stages[1]->getFusedOp();
+    EXPECT_EQ(pred2.elems_per_lane, 1u);
+    EXPECT_EQ(pred2.params.size(), sizeof(fused::warp::Lorenzo1DParams));
+    EXPECT_EQ(pred2.include_header, "fused/fused_block/warp_fusion.cuh");
+
     // cuSZp3 shares the strategy with a different predictor op — same generic entry.
     Pipeline p3(300 * 180 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
     buildCuszp3(p3, 300, 180);
     p3.finalize();
     auto g3 = planFusionGroups(*p3.getDAG());
     ASSERT_EQ(g3.size(), 1u);
-    EXPECT_EQ(g3[0].stages[1]->getFusedOp().strategy, FusionStrategy::WarpRegister);
-    EXPECT_EQ(g3[0].stages[1]->getFusedOp().op_name, "TiledLorenzo2DPredictor");
+    const FusedOpDecl pred3 = g3[0].stages[1]->getFusedOp();
+    EXPECT_EQ(pred3.strategy, FusionStrategy::WarpRegister);
+    EXPECT_EQ(pred3.op_name, "TiledLorenzo2DPredictor");
+    EXPECT_EQ(pred3.elems_per_lane, 2u);
+    EXPECT_EQ(pred3.params.size(), sizeof(fused::warp::TiledLorenzo2DParams));
+    // n_ab = padded tile-major count: ceil(300/8)*8 * ceil(180/8)*8 = 304 * 184.
+    EXPECT_EQ(pred3.n_ab, size_t{304} * 184);
+}
+
+// Warp NVRTC codegen contract (host-only): the WarpFusionSpec composes into the two
+// extern-C kernels wrapping fused_rate_body/fused_pack_body, parameterised on the
+// predictor policy type and ElemsPerLane. End-to-end byte-identity is covered by the
+// cuszp2/cuszp3 tests; here we lock the spec → source mapping (adding a predictor is a
+// data change to the spec, no new launcher/dispatch).
+TEST(FusionPlanner, WarpNvrtcCodegenComposesSpecOps) {
+    fused::WarpFusionSpec s2;   // cuSZp2 defaults: Lorenzo1DPredictor, EPL=1
+    const std::string src2 = fused::generateWarpFusionSource(s2);
+    EXPECT_NE(src2.find("Lorenzo1DPredictor pred = Lorenzo1DPredictor::fromParams"),
+              std::string::npos);
+    EXPECT_NE(src2.find("fused_rate_body<1>"), std::string::npos);
+    EXPECT_NE(src2.find("fused_pack_body<1>"), std::string::npos);
+    EXPECT_NE(src2.find("#include \"fused/fused_block/warp_fusion.cuh\""), std::string::npos);
+    EXPECT_NE(src2.find("fz_fused_warp_rate"), std::string::npos);
+    EXPECT_NE(src2.find("fz_fused_warp_pack"), std::string::npos);
+
+    // Swapping the predictor + EPL is a data change — no new C++.
+    fused::WarpFusionSpec s3{"TiledLorenzo2DPredictor", 2};
+    const std::string src3 = fused::generateWarpFusionSource(s3);
+    EXPECT_NE(src3.find("TiledLorenzo2DPredictor::fromParams"), std::string::npos);
+    EXPECT_NE(src3.find("fused_rate_body<2>"), std::string::npos);
+    EXPECT_EQ(src3.find("Lorenzo1DPredictor"), std::string::npos);
 }
 
 // ── NVRTC codegen contract (host-only): the stage-chain fingerprint composes

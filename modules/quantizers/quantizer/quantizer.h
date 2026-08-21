@@ -251,6 +251,11 @@ public:
         if (isInplaceMode() && config_.zigzag_codes &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
             return FusionSpec{FusionAccess::Map, 0};
+        // Split-outlier (3-port) ABS/NOA zigzag quant is a Map too: codes flow to the
+        // next stage (port 0), outlier_vals/idxs (ports 1,2) escape as pipeline leaves
+        // that the fused runner fills and the pipeline auto-concatenates. Dither is
+        // excluded (the fused op has no per-element dither path).
+        if (isSplitOutlierFusable()) return FusionSpec{FusionAccess::Map, 0};
         return {};
     }
 
@@ -276,9 +281,12 @@ public:
     /// packed from the primed bound (`primeFusedForwardState` must run first).
     FusedOpDecl getFusedOp() const override {
         if (!std::is_same<TInput, float>::value || is_inverse_) return {};  // device ops read float
-        // Warp-register (cuSZp): linear-ABS float quant is the Map loader. The fused
-        // driver takes the bound as a typed arg, so this op carries no params blob.
-        if (isLinearMode() && config_.eb_mode == ErrorBoundMode::ABS)
+        // Warp-register (cuSZp): linear float quant is the Map loader, for ABS or NOA
+        // (both resolve to one uniform-step absolute bound — the runner primes the NOA
+        // range scan and passes the resolved abs_eb). REL is excluded: it is log-domain
+        // per-value quant, not a single abs_eb, so it can't ride the fused kernel.
+        if (isLinearMode() &&
+            (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
             return FusedOpDecl{FusionStrategy::WarpRegister, "LinearQuant", "", {}};
         // Chunk-cooperative (PFPL): inplace+zigzag ABS/NOA float quant.
         if (isInplaceMode() && config_.zigzag_codes &&
@@ -295,13 +303,48 @@ public:
             std::memcpy(d.params.data(), &p, sizeof(p));
             return d;
         }
+        // Chunk-cooperative (3-port): split-outlier ABS/NOA zigzag float quant. Same
+        // uniform-step params as inplace; the op appends outliers to side buffers
+        // instead of inlining raw bits (see QuantSplitOutlier in chunk_fusion.cuh).
+        if (isSplitOutlierFusable()) {
+            fused::chunk::QuantSplitOutlierParams p;
+            p.ebx2_r    = 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
+            p.radius    = static_cast<uint32_t>(config_.quant_radius);
+            p.threshold = config_.outlier_threshold;
+            FusedOpDecl d;
+            d.strategy       = FusionStrategy::ChunkCooperative;
+            d.op_name        = "QuantSplitOutlier";
+            d.include_header = "fused/chunk_fusion/chunk_fusion.cuh";
+            d.params.resize(sizeof(p));
+            std::memcpy(d.params.data(), &p, sizeof(p));
+            return d;
+        }
         return {};
     }
 
     /// The fused runner bypasses forward execute(); prime the value-range scan so
     /// the fused kernel's scale and the reused inverse/header agree (covers NOA).
     void primeFusedForwardState(const FusedPrimeContext& c) override {
+        fused_outlier_count_set_ = false;   // reset per fused compress; set by setFusedSideOutput
         primeComputedAbsEb(c.d_input, c.input_bytes / sizeof(TInput), c.pool, c.stream);
+    }
+
+    /// The fused split-outlier runner fills the outlier ports (1 = vals TInput,
+    /// 2 = idxs uint32) but bypasses execute()/postStreamSync, so `actual_outlier_count_`
+    /// — which serializeHeader writes so the inverse knows how many outliers to scatter
+    /// — is never set. Recover it from the byte count the runner reports. Both ports
+    /// encode the same count; either sets it, and both set the matching output size.
+    void setFusedSideOutput(int output_index, size_t bytes) override {
+        if (actual_output_sizes_.size() < 3) actual_output_sizes_.resize(3, 0);
+        if (output_index == 1) {
+            actual_outlier_count_   = static_cast<uint32_t>(bytes / sizeof(TInput));
+            actual_output_sizes_[1] = bytes;
+            fused_outlier_count_set_ = true;
+        } else if (output_index == 2) {
+            actual_outlier_count_   = static_cast<uint32_t>(bytes / sizeof(uint32_t));
+            actual_output_sizes_[2] = bytes;
+            fused_outlier_count_set_ = true;
+        }
     }
 
     /// Store the logical grid so the NOA value-range scan can exclude the
@@ -397,6 +440,11 @@ private:
     size_t   saved_num_elements_  = 0;
     uint32_t actual_outlier_count_= 0;
     uint32_t saved_actual_outlier_count_ = 0;
+    /// Set when a fused split-outlier runner reported the count via setFusedSideOutput.
+    /// The fused kernel appends into its OWN counter, not this stage's scratch, so
+    /// postStreamSync must not read the (untouched) scratch and clobber the count.
+    /// Reset at the start of each fused compress (primeFusedForwardState).
+    bool     fused_outlier_count_set_ = false;
     bool     is_inverse_          = false;
     TInput   computed_abs_eb_     = static_cast<TInput>(1e-4);
     TInput   saved_computed_abs_eb_ = static_cast<TInput>(1e-4);
@@ -431,6 +479,18 @@ private:
     }
 
     bool isLinearMode() const { return config_.linear_mode; }
+
+    /// True when this stage is a fusable 3-port split-outlier Map: standard outlier
+    /// mode (not inplace, not linear), zigzag codes, ABS or NOA (uniform step), no
+    /// dither. Its codes stream matches quantizer_abs_fwd_kernel<...,Zigzag=true> and
+    /// the outliers become escaping side outputs. Forward only (device op reads float).
+    bool isSplitOutlierFusable() const {
+        return std::is_same<TInput, float>::value && !is_inverse_
+            && !isInplaceMode() && !isLinearMode()
+            && config_.zigzag_codes && !config_.dither
+            && (config_.eb_mode == ErrorBoundMode::ABS ||
+                config_.eb_mode == ErrorBoundMode::NOA);
+    }
 
     /// Signed DataType corresponding to an unsigned code type (UINT16→INT16, etc.).
     /// Linear-mode codes are two's-complement signed values stored in an unsigned TCode.

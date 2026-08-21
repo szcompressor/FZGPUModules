@@ -19,6 +19,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "backend/types.h"
+#include "fused/fused_block/warp_op_params.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -163,12 +164,29 @@ public:
         return FusionSpec{FusionAccess::BlockLocal, t[0] * t[1]};
     }
 
-    /// Warp-register predictor op (cuSZp3). Only the 2-D, tile-elems-64 (EPL=2)
-    /// shape fuses; the registry runner reads dims/tile as typed args.
+    /// Warp-register predictor op (cuSZp3): 2-D separable tiled Lorenzo, EPL=2 (tile
+    /// elems == 64). Declares the device policy type + its packed geometry (dims, tile,
+    /// tiles-along-x) and the padded tile-major count `n_ab`, so the generic NVRTC warp
+    /// runner composes the kernel with no per-predictor code. `inv2eb` is left 0 — the
+    /// runner fills it from the resolved quantizer bound (see warp_op_params.h).
     FusedOpDecl getFusedOp() const override {
         const auto t = effectiveTile();
         if (is_inverse_ || t[2] != 1u || t[0] * t[1] != 64u) return {};
-        return FusedOpDecl{FusionStrategy::WarpRegister, "TiledLorenzo2DPredictor", "", {}};
+        const uint32_t dx = static_cast<uint32_t>(dims_[0]);
+        const uint32_t dy = static_cast<uint32_t>(dims_[1]);
+        const uint32_t tx = t[0], ty = t[1];
+        const uint32_t ntx = (dx + tx - 1u) / tx;
+        const uint32_t nty = (dy + ty - 1u) / ty;
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::WarpRegister;
+        d.op_name        = "TiledLorenzo2DPredictor";
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        d.elems_per_lane = 2;
+        d.n_ab           = static_cast<size_t>(ntx) * nty * tx * ty;
+        fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
+        d.params.resize(sizeof(p));
+        std::memcpy(d.params.data(), &p, sizeof(p));
+        return d;
     }
 
     std::vector<size_t> estimateOutputSizes(

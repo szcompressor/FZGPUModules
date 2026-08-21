@@ -331,6 +331,16 @@ public:
      * overload to avoid colliding with unrelated `(size_t,size_t)` signatures.
      */
     virtual void setFusedArchiveResult(size_t /*archive_bytes*/, size_t /*orig_bytes*/) {}
+
+    /**
+     * Side-output hook: a fused runner that filled one of this stage's escaping
+     * output ports (a pipeline leaf, e.g. an outlier list) without calling
+     * `execute()` reports how many BYTES it wrote to port `output_index`. The stage
+     * updates whatever forward-computed state its `serializeHeader` depends on (e.g.
+     * the quantizer's outlier count) so the archive matches the fused result. Default
+     * no-op — single-output stages and stages the runner didn't feed ignore it.
+     */
+    virtual void setFusedSideOutput(int /*output_index*/, size_t /*bytes*/) {}
 };
 
 } // namespace fz
