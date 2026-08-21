@@ -180,10 +180,13 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec) {
     src += "extern \"C\" __global__ void __launch_bounds__(" +
            std::to_string(chunk::TPB) + ") fz_fused_chunk(\n";
     src += "    const float* in, unsigned long long n, const unsigned char* params,\n";
-    src += "    unsigned char* scratch, unsigned int* sizes) {\n";
+    src += "    unsigned char* scratch, unsigned int* sizes,\n";
+    src += "    unsigned int* side_idxs, float* side_vals, unsigned int* side_count,\n";
+    src += "    unsigned int side_max) {\n";
     src += "  using namespace fz::fused::chunk;\n";
     src += "  chunk_fused_body< " + targs + " >(\n";
-    src += "      in, (size_t)n, params, scratch, sizes);\n";
+    src += "      in, (size_t)n, params, scratch, sizes,\n";
+    src += "      ChunkSideCtx{side_idxs, side_vals, side_count, side_max});\n";
     src += "}\n";
     return src;
 }
@@ -195,14 +198,17 @@ bool nvrtcChunkFusionAvailable() {
 
 void launchNvrtcChunkFusedEncode(
     const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
-    uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream)
+    uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream,
+    uint32_t* d_side_idxs, float* d_side_vals, uint32_t* d_side_count, uint32_t side_max)
 {
     const std::string src  = generateChunkFusionSource(spec);
     CUfunction        func = compileAndLoad(src, deviceArch());
 
     unsigned long long n_arg = n;
     void* args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
-                     (void*)&d_scratch, (void*)&d_sizes };
+                     (void*)&d_scratch, (void*)&d_sizes,
+                     (void*)&d_side_idxs, (void*)&d_side_vals,
+                     (void*)&d_side_count, (void*)&side_max };
 
     CU_CHECK(cuLaunchKernel(func,
                             nc, 1, 1,               // grid  = one CTA per chunk

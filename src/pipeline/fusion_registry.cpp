@@ -138,13 +138,51 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
         blob.insert(blob.end(), op.params.begin(), op.params.end());
     }
 
-    // 3. NVRTC-compose + launch + shared scan/pack tail.
+    // 3. Split-outlier producer? The quant Map declares "QuantSplitOutlier" and its
+    //    outlier ports arrive as escaping side outputs (vals=port 1, idxs=port 2, the
+    //    quant stage's getOutputNames() order). Hand the pre-allocated buffers to the
+    //    launcher; it fills them and reports the outlier count. Absent side outputs
+    //    (the common single-output chain), these stay null and the launcher no-ops it.
+    FusedSideOutput* so_idxs = nullptr;
+    FusedSideOutput* so_vals = nullptr;
+    if (ctx.side_outputs) {
+        for (auto& so : *ctx.side_outputs) {
+            if (so.output_index == 1)      so_vals = &so;
+            else if (so.output_index == 2) so_idxs = &so;
+        }
+    }
+    uint32_t* d_side_idxs = nullptr;
+    float*    d_side_vals = nullptr;
+    uint32_t  side_max    = 0;
+    if (so_idxs && so_vals) {
+        d_side_idxs = static_cast<uint32_t*>(so_idxs->d_ptr);
+        d_side_vals = static_cast<float*>(so_vals->d_ptr);
+        const uint32_t cap_i = static_cast<uint32_t>(so_idxs->capacity / sizeof(uint32_t));
+        const uint32_t cap_v = static_cast<uint32_t>(so_vals->capacity / sizeof(float));
+        side_max = cap_i < cap_v ? cap_i : cap_v;   // both hold `max` elements
+    }
+
+    // 4. NVRTC-compose + launch + shared scan/pack tail (fills side buffers if any).
     const size_t n = ctx.input_bytes / sizeof(float);
+    uint32_t outlier_count = 0;
     const size_t archive_bytes = fused::launchGenericChunkFusion(
         spec, static_cast<const float*>(ctx.d_input), n, blob.data(), blob.size(),
-        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream));
+        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream),
+        d_side_idxs, d_side_vals, side_max, &outlier_count);
 
-    // 4. Tail coder: prime its inverse output sizing (see CN-CHUNK-WIRE). Original
+    // 5. Size the outlier side buffers from the readback count (clamped to capacity —
+    //    overflow past `side_max` is dropped, same as the staged max_outliers path) and
+    //    report the byte counts back to the producer, so its serializeHeader records the
+    //    outlier count the reused inverse will scatter (execute() was bypassed).
+    if (so_idxs && so_vals) {
+        const uint32_t written = outlier_count < side_max ? outlier_count : side_max;
+        so_idxs->size = static_cast<size_t>(written) * sizeof(uint32_t);
+        so_vals->size = static_cast<size_t>(written) * sizeof(float);
+        so_idxs->producer->setFusedSideOutput(so_idxs->output_index, so_idxs->size);
+        so_vals->producer->setFusedSideOutput(so_vals->output_index, so_vals->size);
+    }
+
+    // 6. Tail coder: prime its inverse output sizing (see CN-CHUNK-WIRE). Original
     //    (uncompressed) coder input = n*4 bytes = ctx.input_bytes.
     if (coder) coder->setFusedArchiveResult(archive_bytes, ctx.input_bytes);
     return archive_bytes;

@@ -137,9 +137,13 @@ size_t launchFusedChunkPfpl(
 size_t launchGenericChunkFusion(
     const ChunkFusionSpec& spec, const float* d_in, size_t n,
     const uint8_t* host_params, size_t params_bytes,
-    uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
+    uint8_t* d_out, MemoryPool* pool, cudaStream_t stream,
+    uint32_t* d_side_idxs, float* d_side_vals, uint32_t side_max, uint32_t* out_side_count)
 {
-    if (n == 0) return 0;
+    if (n == 0) {
+        if (out_side_count) *out_side_count = 0;
+        return 0;
+    }
     const size_t nc = (n + NELEM - 1) / NELEM;
 
     auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
@@ -153,10 +157,34 @@ size_t launchGenericChunkFusion(
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_params, host_params, params_bytes,
                                       cudaMemcpyHostToDevice, stream));
 
+    // Split-outlier producer: a device append-counter, zeroed so the Map op's
+    // atomicAdd starts at 0. The counter is GLOBAL across all chunk CTAs (the
+    // outlier list is one pipeline output spanning every chunk).
+    const bool side = (d_side_idxs != nullptr && d_side_vals != nullptr);
+    uint32_t* d_side_count = nullptr;
+    if (side) {
+        d_side_count = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t), stream, "chunk_outlier_count"));
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_side_count, 0, sizeof(uint32_t), stream));
+    }
+
     // Compose + launch the fused encode from the spec (NVRTC), then the shared tail.
     launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
-                                (unsigned)nc, stream);
+                                (unsigned)nc, stream,
+                                d_side_idxs, d_side_vals, d_side_count, side_max);
     const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
+
+    // Read back the outlier count (data-dependent, known only after the kernel). Sync
+    // so the caller can size the side buffers from it immediately on return.
+    if (side) {
+        uint32_t count = 0;
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&count, d_side_count, sizeof(uint32_t),
+                                      cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (out_side_count) *out_side_count = count;
+        pool->free(d_side_count, stream);
+    } else if (out_side_count) {
+        *out_side_count = 0;
+    }
     pool->free(d_params, stream);
     return out_bytes;
 }

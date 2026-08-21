@@ -60,12 +60,14 @@ __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
 // values are stored as raw IEEE-754 bits (matches quantizer_abs_fwd_inplace_kernel).
 struct QuantInplaceZigzag {
     using Params = QuantInplaceZigzagParams;   // shared POD (chunk_op_params.h)
-    // Every op takes a `const void* pp` pointing at its slice of the packed params
-    // blob; parametric ops cast it, stateless ops (below) ignore it. The blob is
-    // exactly-sized, so a stateless tail op may be handed a one-past-end pointer —
-    // legal to form and pass because it is never dereferenced.
+    // Every Map op takes a `const void* pp` pointing at its slice of the packed
+    // params blob (parametric ops cast it, stateless ignore it — the blob is
+    // exactly-sized so a tail op may get a one-past-end pointer, never
+    // dereferenced) and a `ChunkSideCtx` for escaping outputs (this variant emits
+    // none — outliers go inline — so it ignores side).
     __device__ static void load(const float* __restrict__ in, size_t base, int cnt,
-                                uint32_t* __restrict__ s, const void* pp) {
+                                uint32_t* __restrict__ s, const void* pp,
+                                const ChunkSideCtx& /*side*/) {
         const Params p = *static_cast<const Params*>(pp);
         for (int i = threadIdx.x; i < cnt; i += TPB) {
             const float x = in[base + i];
@@ -76,6 +78,36 @@ struct QuantInplaceZigzag {
             else
                 c = __float_as_uint(x);   // raw IEEE-754 bits (NVRTC-portable bit-cast)
             s[i] = c;
+        }
+    }
+};
+
+// ── Map op: NOA/ABS quant with SPLIT outliers (3-port). Codes stream stays clean —
+// a `0` sentinel at each outlier position, TCMS(zigzag) elsewhere — and outliers are
+// appended to a side list of (global index, value) pairs via a GLOBAL atomic counter
+// shared across all chunk CTAs. Reproduces quantizer_abs_fwd_kernel<...,Zigzag=true>
+// byte-for-byte in the codes stream, so the staged 3-port inverse decodes it unchanged.
+// The clean codes stream compresses far better than inline raw float bits on
+// outlier-heavy fields, which is the whole point of the split variant.
+struct QuantSplitOutlier {
+    using Params = QuantSplitOutlierParams;   // == QuantInplaceZigzagParams layout
+    __device__ static void load(const float* __restrict__ in, size_t base, int cnt,
+                                uint32_t* __restrict__ s, const void* pp,
+                                const ChunkSideCtx& side) {
+        const Params p = *static_cast<const Params*>(pp);
+        for (int i = threadIdx.x; i < cnt; i += TPB) {
+            const float x = in[base + i];
+            const int   q = __float2int_rn(x * p.ebx2_r);
+            if (q > -(int)p.radius && q < (int)p.radius && fabsf(x) < p.threshold) {
+                s[i] = (uint32_t)((q << 1) ^ (q >> 31));   // zigzag(q)
+            } else {
+                s[i] = 0u;                                  // outlier sentinel
+                const uint32_t slot = atomicAdd(side.out_count, 1u);
+                if (slot < side.max) {
+                    side.out_idxs[slot] = (uint32_t)(base + i);   // global element index
+                    side.out_vals[slot] = x;
+                }
+            }
         }
     }
 };
@@ -175,11 +207,14 @@ template<class T, class... R> struct Chain<T, R...> {
 // `params` is the packed per-op Params blob, ops in execution order
 // ([QuantOp][Transforms...][Coder]); each op is handed its slice at a
 // compile-time offset. Stateless ops ignore it.
+// `side` carries escaping outputs (e.g. an outlier list); the Map op uses it or
+// ignores it. Defaulted so callers that never fuse a side-output op need not pass it.
 template<class QuantOp, class Coder, class... Transforms>
 __device__ __forceinline__ void
 chunk_fused_body(const float* __restrict__ in, size_t n,
                  const byte* __restrict__ params,
-                 byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
+                 byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
+                 ChunkSideCtx side = ChunkSideCtx{}) {
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
     __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
@@ -189,7 +224,7 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
     const int      cnt  = (int)min((size_t)NELEM, n - base);
     const bool     full = (cnt == NELEM);
 
-    QuantOp::load(in, base, cnt, sA, params /* + 0: quant is first in the blob */);
+    QuantOp::load(in, base, cnt, sA, params /* + 0: quant is first in the blob */, side);
     __syncthreads();
 
     constexpr int kTransOff = OpParamBytes<QuantOp>::value;
@@ -225,8 +260,9 @@ template<class QuantOp, class Coder, class... Transforms>
 __global__ void __launch_bounds__(TPB)
 chunk_fused_kernel(const float* __restrict__ in, size_t n,
                    const byte* __restrict__ params,
-                   byte* __restrict__ scratch, uint32_t* __restrict__ sizes) {
-    chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, params, scratch, sizes);
+                   byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
+                   ChunkSideCtx side = ChunkSideCtx{}) {
+    chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, params, scratch, sizes, side);
 }
 
 } // namespace chunk

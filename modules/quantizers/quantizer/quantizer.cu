@@ -984,6 +984,10 @@ template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
     // Inplace mode never allocates the scratch; nothing to read back.
     if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
+    // A fused split-outlier run already reported the authoritative count via
+    // setFusedSideOutput (it appended into its own counter, not this scratch, which
+    // is stale) — reading it here would clobber the count back to 0.
+    if (fused_outlier_count_set_) return;
 
     uint32_t h_count = 0;
     FZ_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_outlier_count_scratch_,

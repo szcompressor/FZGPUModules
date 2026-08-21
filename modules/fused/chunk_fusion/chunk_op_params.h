@@ -30,6 +30,23 @@ struct QuantInplaceZigzagParams {
     float    threshold;
 };
 
+/// Params for the `QuantSplitOutlier` Map op (3-port outlier NOA/ABS quant). Same
+/// uniform-step layout as the inplace variant — the only difference is where the
+/// outliers go (a side list vs. inline raw bits), not how codes are computed.
+using QuantSplitOutlierParams = QuantInplaceZigzagParams;
+
+/// Side-output context threaded to the harness Map op, so a Map that produces
+/// escaping outputs (e.g. `QuantSplitOutlier`) can append them. `out_count` is a
+/// GLOBAL device counter shared across every chunk's CTA (the outlier list is one
+/// pipeline output spanning all chunks); the runner allocates and zeroes it. Ops
+/// that produce no side output ignore this entirely (all fields may be null/0).
+struct ChunkSideCtx {
+    uint32_t* out_idxs  = nullptr;  ///< global element index of each outlier
+    float*    out_vals  = nullptr;  ///< raw value of each outlier
+    uint32_t* out_count = nullptr;  ///< global append counter (device, zeroed pre-launch)
+    uint32_t  max       = 0;        ///< outlier list capacity (elements); appends past it drop
+};
+
 /// Marker Params for stateless ops (Difference, Bitshuffle, the coders). Contributes
 /// zero bytes to the packed params blob (see OpParamBytes in chunk_fusion.cuh).
 struct EmptyParams {};

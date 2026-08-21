@@ -60,9 +60,15 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec);
  * cross-chunk scan/pack tail is shared with the template path in chunk_fusion.cu.
  * Throws std::runtime_error on compile failure.
  */
+/// `side_*` feed the harness Map op's escaping outputs (e.g. an outlier list). Pass
+/// nullptr/0 when the composed op produces none — the generated kernel takes the args
+/// unconditionally (an unused `ChunkSideCtx{}` is harmless). `d_side_count` must be a
+/// device counter the caller has zeroed; the Map op atomically appends into it.
 void launchNvrtcChunkFusedEncode(
     const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
-    uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream);
+    uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream,
+    uint32_t* d_side_idxs = nullptr, float* d_side_vals = nullptr,
+    uint32_t* d_side_count = nullptr, uint32_t side_max = 0);
 
 /**
  * Generic chunk-cooperative fused compress — the entry the generic registry runner
@@ -74,10 +80,17 @@ void launchNvrtcChunkFusedEncode(
  * runtime op list — but the compiled module is cached by (source, arch), so only
  * the first compress of a given chain pays the JIT cost.
  */
+/// When `d_side_idxs`/`d_side_vals` are non-null the composed Map op is a split-outlier
+/// producer: this allocates and zeroes a device append-counter, runs the encode so the
+/// op fills the two side buffers (capacity `side_max` elements each), and writes the
+/// final outlier count back to `*out_side_count` (a stream sync happens before it
+/// returns, so the count and the packed archive are both ready).
 size_t launchGenericChunkFusion(
     const ChunkFusionSpec& spec, const float* d_in, size_t n,
     const uint8_t* host_params, size_t params_bytes,
-    uint8_t* d_out, MemoryPool* pool, fz::stream_t stream);
+    uint8_t* d_out, MemoryPool* pool, fz::stream_t stream,
+    uint32_t* d_side_idxs = nullptr, float* d_side_vals = nullptr,
+    uint32_t side_max = 0, uint32_t* out_side_count = nullptr);
 
 } // namespace fused
 } // namespace fz

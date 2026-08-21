@@ -383,6 +383,83 @@ TEST(FusionPlanner, GenericRunnerFusesRazeCoderNoRegistryEntry) {
     chunkFusionEndToEnd(buildPfplCoder<RAZEStage>);
 }
 
+// PFPL with SPLIT outliers (3-port): Quantizer(ABS,zigzag, inplace=OFF) -> Difference
+// -> Bitshuffle -> RZE. The quant Map now emits a clean codes stream (0 at outlier
+// positions) plus an escaping (index,value) outlier list — the `QuantSplitOutlier`
+// fused op that consumes the multi-output plumbing. Unlike the inplace/single-output
+// chains, the archive is NOT byte-identical to staged: the outlier list is filled by a
+// global atomicAdd, so its order is nondeterministic (true of the staged path too).
+// What must hold is that fusion engages, the codes-side survives, and the fused
+// round-trip reconstructs identically to staged and within bound (the outlier SCATTER
+// is order-independent). Data: small representable base with sparse forced-outlier
+// spikes (|x| >= threshold), ~0.2% outliers, well under the 5% capacity.
+static void buildPfplSplit(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::ABS);
+    q->setQuantRadius(32768); q->setZigzagCodes(true);
+    q->setInplaceOutliers(false);                 // 3-port split outliers
+    q->setOutlierThreshold(1.0f);                 // |x| >= 1 forced to the side list
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(16384);
+    p.connect(b, d);
+    auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(16384);
+    p.connect(c, b);
+}
+
+TEST(FusionPlanner, PfplSplitOutlierFusesAndRoundTrips) {
+    const size_t n  = 1u << 20;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    size_t n_out = 0;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 0.2f * std::sin(i * 0.001f);       // representable (|x| < 1)
+        if (i % 512 == 0) { h[i] = 5.0f; ++n_out; }  // forced outlier (|x| >= threshold)
+    }
+    ASSERT_GT(n_out, 0u);
+    const double bound = eb * 1.001;              // ABS
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    // Confirm the chain fuses into one group (the split quant is still a Map head).
+    { Pipeline pg(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+      buildPfplSplit(pg, n); pg.finalize();
+      auto groups = planFusionGroups(*pg.getDAG());
+      ASSERT_EQ(groups.size(), 1u);
+      EXPECT_EQ(groups[0].stages.size(), 4u); }
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildPfplSplit(p, n);
+        p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, rf;
+    roundtrip(FusionPolicy::Off,  rs);
+    roundtrip(FusionPolicy::Auto, rf);
+    EXPECT_LE(maxErr(rs), bound) << "staged split-outlier baseline exceeds bound";
+    EXPECT_LE(maxErr(rf), bound) << "fused split-outlier round-trip exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused split-outlier reconstruction differs from staged";
+    // The outlier scatter must have restored the spikes exactly (they are lossless).
+    for (size_t i = 0; i < n; i += 512)
+        EXPECT_FLOAT_EQ(rf[i], 5.0f) << "outlier at " << i << " not restored";
+    cudaFree(d_in);
+}
+
 // Regression: the fused NOA range scan must exclude the chunk-aligned zero-padding
 // tail. If it scans the padding, those zeros lower the min and inflate the range →
 // too-large abs_eb → the fused path quantizes too loosely and violates the bound on
