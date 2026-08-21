@@ -291,7 +291,7 @@ Valid `nbits` values: `uint8` → 1/2/4/8; `uint16` → 1/2/4/8/16; `uint32` →
 
 `element_width` must match the actual dtype of the incoming data (e.g. 2 for uint16, 4 for float32).
 
-### Repeated Zero Elimination (RZE)
+### RZE zero-word reducer
 
 ```python
 "fzgpumodules:stages": ["rze"]

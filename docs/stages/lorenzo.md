@@ -17,6 +17,8 @@ Supports 1-D, 2-D, and 3-D layouts.  Typically placed **after** a `QuantizerStag
 in cuSZp-style pipelines (float → quant → Lorenzo → bitpack), where it operates on
 the quantization codes rather than raw floating-point data.
 
+\image html lorenzo.svg "Compression-side Lorenzo prediction in one and two dimensions."
+
 ---
 
 ## Template parameter

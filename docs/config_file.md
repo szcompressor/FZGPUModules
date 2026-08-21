@@ -228,8 +228,9 @@ a compressor on its own.
 
 ### RZE
 
-Zero-Elimination Encoding -- lossless byte-stream compressor (LC framework
-component). Eliminates zero words (the sibling of RRE, which eliminates repeats).
+RZE lossless byte-stream reducer from the LC framework. It represents whether
+each word is non-zero with a bitmap, stores non-zero words, and recursively
+compresses the bitmap.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -238,9 +239,9 @@ component). Eliminates zero words (the sibling of RRE, which eliminates repeats)
 
 ### RRE
 
-Repetition-Reduction Encoding -- lossless byte-stream compressor (LC framework
-component used by cuSZ-Hi's LC pipelines). Eliminates runs of a repeated value
-(the sibling of RZE, which eliminates zeros).
+RRE lossless byte-stream reducer from the LC framework. It represents whether
+each word repeats its predecessor with a bitmap, stores non-repeating words,
+and recursively compresses the bitmap. It is used by cuSZ-Hi's LC pipelines.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -249,11 +250,9 @@ component used by cuSZ-Hi's LC pipelines). Eliminates runs of a repeated value
 
 ### RARE
 
-Repetition-Adaptive Reduction Encoding -- lossless byte-stream compressor (LC
-framework component). The auto-k generalization of RRE: instead of a binary
-repeat-or-drop test, picks one global bit-width `keep` that maximizes savings
-and bit-packs every word whose top bits match its predecessor at that width
-(the sibling of RAZE, which generalizes RZE the same way).
+RARE lossless byte-stream reducer from the LC framework. It generalizes RRE by
+selecting a per-chunk bit width `keep` that maximizes savings, then bit-packs
+the low bits of words whose upper bits match their predecessor.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -262,11 +261,9 @@ and bit-packs every word whose top bits match its predecessor at that width
 
 ### RAZE
 
-Zero-Adaptive Reduction Encoding -- lossless byte-stream compressor (LC
-framework component). The auto-k generalization of RZE: instead of a binary
-zero-or-full test, picks one global bit-width `keep` that maximizes savings
-and bit-packs every word whose top bits are all zero at that width (the
-sibling of RARE, which generalizes RRE the same way).
+RAZE lossless byte-stream reducer from the LC framework. It generalizes RZE by
+selecting a per-chunk bit width `keep` that maximizes savings, then bit-packs
+the low bits of words whose upper bits are all zero.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -275,11 +272,10 @@ sibling of RARE, which generalizes RRE the same way).
 
 ### CLOG
 
-Compressed-Logarithm adaptive bit-width coding -- lossless byte-stream
-compressor (LC framework component). Splits each chunk into a fixed 32
-subchunks; each subchunk is bit-packed to the minimum width needed to
-represent its own max value losslessly. `word_size` selects an unsigned type
-only.
+CLOG lossless byte-stream compressor from the LC framework. Each chunk is
+split into 32 subchunks; common leading zero bits are omitted by packing each
+subchunk at the minimum width required by its values. `word_size` selects an
+unsigned type only.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -288,11 +284,10 @@ only.
 
 ### HCLOG
 
-Compressed-Logarithm coding with a per-subchunk TCMS fallback -- lossless
-byte-stream compressor (LC framework component, the auto-selecting sibling of
-CLOG). For each subchunk, additionally tries a TCMS(zigzag) reinterpretation
-and picks whichever needs fewer bits, recording the choice as one flag bit
-per subchunk. `word_size` selects an unsigned type only.
+HCLOG lossless byte-stream compressor from the LC framework. For each of 32
+subchunks, it chooses between raw unsigned values and a TCMS/zigzag
+representation, then packs using the smaller required width and records the
+choice as one flag bit. `word_size` selects an unsigned type only.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -440,7 +435,7 @@ bytes -- smaller than the input when nbits < 8*sizeof(T). nbits must be a power 
 
 ### Huffman
 
-GPU Huffman entropy coding (PHF coarse-grained). Encodes a flat symbol stream
+GPU Huffman entropy coding using cuSZ's coarse-grained implementation. Encodes a flat symbol stream
 into a variable-length bitstream with an embedded self-describing header.
 
 > [!NOTE]

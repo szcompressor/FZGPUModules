@@ -33,6 +33,7 @@ INPUT                  = include/ \
 RECURSIVE              = YES
 FILE_PATTERNS          = *.h *.md
 USE_MDFILE_AS_MAINPAGE = docs/mainpage.md
+IMAGE_PATH             = docs/images/stages
 
 STRIP_FROM_PATH        = .
 

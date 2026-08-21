@@ -25,11 +25,11 @@ metadata that ties them back together:
 | forward (`1 → 3`) | field → `roi`, `bg`, `peaks` |
 | inverse (`3 → 1`) | `roi`, `bg`, `peaks` → field |
 
-- **`roi`** — the `(2*hw+1)^2` box around every peak, concatenated in peak order,
+- **roi** — the `(2*hw+1)^2` box around every peak, concatenated in peak order,
   at full resolution and the field's element type.
-- **`bg`** — the background, box-averaged by `bin_factor` within each z-slice:
+- **bg** — the background, box-averaged by `bin_factor` within each z-slice:
   `ceil(nx/b) * ceil(ny/b) * nz` values. `b = 1` copies the field through.
-- **`peaks`** — the peak record table, `8 * npeaks` bytes (`UINT8`).
+- **peaks** — the peak record table, `8 * npeaks` bytes (`UINT8`).
 
 On the inverse, the background is un-binned first and the ROI boxes are then
 pasted over it, so the tight-bound values win wherever the two overlap.
@@ -37,9 +37,9 @@ pasted over it, so the tight-bound values win wherever the two overlap.
 ## Why it exists
 
 Serial-crystallography frames are almost all background; the science lives in a
-few hundred Bragg peaks covering well under 1 % of the pixels. A single-bound
+few hundred Bragg peaks covering a small percentage of the pixels. A single-bound
 compressor must apply the tight ROI bound to the entire frame, and pays for the
-other 99 % at that bound.
+other 99% at that bound.
 
 This stage turns that into a graph problem. Because it is `1 → 3`, the two data
 streams become two DAG branches, and each branch can carry **its own Quantizer at
@@ -55,12 +55,6 @@ There is no way to say "compress this part tightly and that part loosely" to a
 monolithic compressor; expressing it is the point. The design follows ROIBIN-SZ
 (Underwood et al.).
 
-Measured contributions of the branch-specific stages (3 EXAFEL frames, eb 10/100):
-`TiledLorenzo` on the background is worth **+9.3 %** (bin=1) / **+13.6 %** (bin=2); a
-1-D predictor on the `roi` branch is worth **+0.4 %**, which is why the ROI branch has
-none. `roi` is a peak-major concatenation of boxes rather than an image, so a *2-D*
-predictor has no meaningful stride over it — a 1-D one is valid but does not pay.
-
 ## Where the peak list comes from
 
 It is **not** derived from the data. It is the output of the experiment's own peak
@@ -74,7 +68,7 @@ The table is then re-emitted on the `peaks` port, so it lands **inside the archi
 and is counted in the compressed size**. The decompressor never needs the `.roi`
 file. At 8 B/peak this is ≈0.01 % of a frame.
 
-### `.roi` file format
+### .roi file format
 
 ```
 magic   char[8]  "FZROI1\0\0"
@@ -85,24 +79,7 @@ npeaks  uint32
 records npeaks x { uint32 z; uint16 x; uint16 y; }   (8 bytes each)
 ```
 
-## Geometry: redundancy instead of stream compaction
-
-Boxes belonging to nearby peaks overlap, and overlapping pixels are stored **more
-than once**. That is deliberate. It makes the output size exactly
-`npeaks * box * sizeof(TData)`, known before the first kernel launch, so
-`estimateOutputSizes()` is exact and PREALLOCATE needs no slack. The alternative —
-a per-pixel mask plus a device-wide exclusive scan — costs a 4-byte offset per
-pixel (1.2 GB on a 130-frame 1480x1552 volume) to remove a redundancy that
-measures well under 1 % of the ROI stream. `getRoiOverlapFraction()` reports the
-measured duplicate fraction.
-
-Duplicates are safe because scatter is **idempotent**: every copy of a source pixel
-takes the same value, passes through the same quantizer, and reconstructs to the
-same number, so write order cannot matter. Edge boxes are **clamped**, not
-truncated, which keeps the box size fixed; a clamped box reads and writes the same
-border pixel several times, which is idempotent for the same reason.
-
-## Binning bounds nothing — read this before quoting a background number
+## Binning can introduce unbounded error
 
 `bin_factor = b > 1` replaces each `b x b` block with its mean. **This is a
 resolution reduction, not an error bound.** The background reconstruction error is
@@ -128,10 +105,6 @@ both cases** — that is the invariant the science depends on.
 | `setBinFactor(b)` | `bin_factor` | 1 | background binning; 1 disables |
 | `setPeaksFile(path)` | `peaks_file` | — | compress-side peak list |
 | — | `data_type` | `float32` | `float32` or `float64` |
-
-Dimensions come from `Pipeline::setDims()`. On the decompress path they are
-recovered from the archive header, and later pipeline dim pushes are ignored —
-`finalize()` pushes `{0,0,1}` on that path and would otherwise erase them.
 
 ## TOML configuration
 

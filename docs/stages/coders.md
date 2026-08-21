@@ -2,15 +2,15 @@
 
 | Stage | Description |
 |---|---|
-| \subpage stage_huffman | GPU Huffman entropy coding (PHF coarse-grained) |
+| \subpage stage_huffman | GPU Huffman entropy coding (cuSZ port) |
 | \subpage stage_ans | GPU rANS entropy coding (dietGPU, byte-level) |
 | \subpage stage_gpulz | GPU LZSS (LZ77 + flag-bitmap) lossless compression (GPULZ) |
 | \subpage stage_rle | Run-length encoding |
-| \subpage stage_rze | Recursive zero-byte elimination |
-| \subpage stage_rre | Repetition-reduction encoding (LC framework lossless component) |
-| \subpage stage_rare | Repetition-adaptive reduction encoding (LC framework, auto-k generalization of RRE) |
-| \subpage stage_raze | Zero-adaptive reduction encoding (LC framework, auto-k generalization of RZE) |
-| \subpage stage_clog | Compressed-Logarithm adaptive bit-width coding (LC framework lossless component) |
-| \subpage stage_hclog | Compressed-Logarithm coding with per-subchunk TCMS fallback (LC framework lossless component) |
+| \subpage stage_rze | Zero-word bitmap reducer with recursive bitmap compression (LC component) |
+| \subpage stage_rre | Repeated-word bitmap reducer with recursive bitmap compression (LC component) |
+| \subpage stage_rare | Adaptive top-bit matching generalization of RRE (LC component) |
+| \subpage stage_raze | Adaptive leading-zero-bit generalization of RZE (LC component) |
+| \subpage stage_clog | Per-subchunk leading-zero compression and adaptive bit packing (LC framework lossless component) |
+| \subpage stage_hclog | CLOG bit packing with per-subchunk TCMS selection (LC framework lossless component) |
 | \subpage stage_bitpack | Dense bit-packing of fixed-width integers |
 | \subpage stage_adaptive_bitpack | Per-block adaptive fixed-rate bit-plane coding (cuSZp plain mode) |

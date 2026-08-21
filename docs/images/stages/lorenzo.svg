@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="430" viewBox="0 0 1040 430" role="img" aria-labelledby="title desc">
+  <title id="title">One- and two-dimensional Lorenzo prediction for compression</title>
+  <desc id="desc">The one-dimensional panel shows first-order differences and block reset boundaries. The two-dimensional panel shows the four-point inclusion-exclusion stencil used to compute one residual.</desc>
+  <defs>
+    <style>
+      .heading { font: 700 22px sans-serif; fill: #172033; }
+      .panel { font: 700 17px sans-serif; fill: #172033; }
+      .label { font: 15px sans-serif; fill: #344054; }
+      .mono { font: 15px monospace; fill: #172033; }
+      .value { fill: #dbeafe; stroke: #2563eb; stroke-width: 1.5; }
+      .target { fill: #ffedd5; stroke: #ea580c; stroke-width: 2; }
+      .neighbor { fill: #dcfce7; stroke: #16a34a; stroke-width: 1.5; }
+      .reset { stroke: #dc2626; stroke-width: 2.5; stroke-dasharray: 6 5; }
+      .arrow { fill: none; stroke: #475467; stroke-width: 2; marker-end: url(#arrow); }
+      .plus { font: 700 18px sans-serif; fill: #15803d; }
+      .minus { font: 700 18px sans-serif; fill: #dc2626; }
+    </style>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#475467"/></marker>
+  </defs>
+
+  <rect width="1040" height="430" rx="14" fill="#ffffff" stroke="#d0d5dd"/>
+  <text x="40" y="45" class="heading">Lorenzo prediction for compression</text>
+
+  <rect x="28" y="68" width="984" height="132" rx="10" fill="#fbfcfe" stroke="#e4e7ec"/>
+  <text x="48" y="98" class="panel">1-D: subtract the preceding value</text>
+  <g transform="translate(48 119)">
+    <rect class="target" x="0" y="0" width="80" height="48"/><text class="mono" x="40" y="29" text-anchor="middle">q0</text>
+    <rect class="value" x="80" y="0" width="80" height="48"/><text class="mono" x="120" y="29" text-anchor="middle">q1</text>
+    <rect class="value" x="160" y="0" width="80" height="48"/><text class="mono" x="200" y="29" text-anchor="middle">q2</text>
+    <rect class="value" x="240" y="0" width="80" height="48"/><text class="mono" x="280" y="29" text-anchor="middle">q3</text>
+    <line class="reset" x1="334" y1="-8" x2="334" y2="57"/>
+    <rect class="target" x="348" y="0" width="80" height="48"/><text class="mono" x="388" y="29" text-anchor="middle">q4</text>
+    <rect class="value" x="428" y="0" width="80" height="48"/><text class="mono" x="468" y="29" text-anchor="middle">q5</text>
+    <rect class="value" x="508" y="0" width="80" height="48"/><text class="mono" x="548" y="29" text-anchor="middle">q6</text>
+    <rect class="value" x="588" y="0" width="80" height="48"/><text class="mono" x="628" y="29" text-anchor="middle">q7</text>
+    <text class="label" x="718" y="18">block seed: e0 = q0</text>
+    <text class="label" x="718" y="43">otherwise: ei = qi - q(i-1)</text>
+    <text class="label" x="334" y="75" text-anchor="middle">reset boundary</text>
+  </g>
+
+  <rect x="28" y="218" width="984" height="184" rx="10" fill="#fbfcfe" stroke="#e4e7ec"/>
+  <text x="48" y="249" class="panel">2-D: combine the west, north, and northwest neighbors</text>
+  <g transform="translate(62 266)">
+    <rect class="neighbor" x="0" y="0" width="74" height="64"/>
+    <rect class="neighbor" x="74" y="0" width="74" height="64"/>
+    <rect class="neighbor" x="0" y="64" width="74" height="64"/>
+    <rect class="target" x="74" y="64" width="74" height="64"/>
+    <text class="mono" x="37" y="38" text-anchor="middle">NW</text><text class="plus" x="56" y="20">+</text>
+    <text class="mono" x="111" y="38" text-anchor="middle">N</text><text class="minus" x="128" y="20">-</text>
+    <text class="mono" x="37" y="102" text-anchor="middle">W</text><text class="minus" x="54" y="84">-</text>
+    <text class="mono" x="111" y="102" text-anchor="middle">q</text>
+    <path class="arrow" d="M71 36 C92 42,102 61,108 80"/>
+    <path class="arrow" d="M54 92 L82 92"/>
+    <path class="arrow" d="M55 50 C70 66,80 78,92 87"/>
+
+    <text class="mono" x="218" y="25">e(x,y) = q(x,y)</text>
+    <text class="mono" x="218" y="57">         - q(x-1,y)</text>
+    <text class="mono" x="218" y="89">         - q(x,y-1)</text>
+    <text class="mono" x="218" y="121">         + q(x-1,y-1)</text>
+
+    <text class="label" x="610" y="42">The target residual stores what its</text>
+    <text class="label" x="610" y="68">three-neighbor stencil did not predict.</text>
+    <rect class="target" x="610" y="88" width="20" height="20"/>
+    <text class="label" x="640" y="104">target</text>
+    <rect class="neighbor" x="724" y="88" width="20" height="20"/>
+    <text class="label" x="754" y="104">predictor input</text>
+  </g>
+</svg>

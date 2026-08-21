@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="520" viewBox="0 0 1040 520" role="img" aria-labelledby="title desc">
+  <title id="title">cuSZp3 three-dimensional tiled separable prediction</title>
+  <desc id="desc">A four-by-four-by-four tile is shown as four z slices. Most values predict from their x predecessor, the leading x column predicts along y, and the leading x-y spine predicts along z. The tile origin predicts from zero. The resulting 64 deltas form one fixed-rate coder block.</desc>
+  <defs>
+    <style>
+      .heading { font: 700 22px sans-serif; fill: #172033; }
+      .panel { font: 700 17px sans-serif; fill: #172033; }
+      .label { font: 14px sans-serif; fill: #344054; }
+      .small { font: 13px sans-serif; fill: #475467; }
+      .mono { font: 14px monospace; fill: #172033; }
+      .grid { fill: #f8fafc; stroke: #98a2b3; stroke-width: 1.2; }
+      .origin { fill: #fee2e2; stroke: #dc2626; stroke-width: 1.8; }
+      .xcell { fill: #dbeafe; stroke: #2563eb; stroke-width: 1.2; }
+      .ycell { fill: #dcfce7; stroke: #16a34a; stroke-width: 1.2; }
+      .spine { fill: #f3e8ff; stroke: #9333ea; stroke-width: 1.5; }
+      .xarrow { fill: none; stroke: #2563eb; stroke-width: 2; marker-end: url(#xarrow); }
+      .yarrow { fill: none; stroke: #16a34a; stroke-width: 2; marker-end: url(#yarrow); }
+      .zarrow { fill: none; stroke: #9333ea; stroke-width: 2; marker-end: url(#zarrow); }
+      .flow { fill: none; stroke: #475467; stroke-width: 2.2; marker-end: url(#flow); }
+    </style>
+    <marker id="xarrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#2563eb"/></marker>
+    <marker id="yarrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#16a34a"/></marker>
+    <marker id="zarrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#9333ea"/></marker>
+    <marker id="flow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#475467"/></marker>
+  </defs>
+
+  <rect width="1040" height="520" rx="14" fill="#ffffff" stroke="#d0d5dd"/>
+  <text x="40" y="45" class="heading">cuSZp3 3-D tiled separable prediction</text>
+
+  <rect x="28" y="68" width="654" height="342" rx="10" fill="#fbfcfe" stroke="#e4e7ec"/>
+  <text x="48" y="99" class="panel">One 4 x 4 x 4 tile, shown as four z slices</text>
+  <text x="48" y="122" class="label">Arrows show the predecessor used to encode each delta.</text>
+
+  <!-- Four z slices. Representative x/y arrows are repeated on every slice. -->
+  <g transform="translate(48 148)">
+    <g transform="translate(0 0)">
+      <text class="mono" x="57" y="-8" text-anchor="middle">z = 0</text>
+      <rect class="origin" x="0" y="0" width="28" height="28"/>
+      <rect class="xcell" x="28" y="0" width="28" height="28"/><rect class="xcell" x="56" y="0" width="28" height="28"/><rect class="xcell" x="84" y="0" width="28" height="28"/>
+      <rect class="ycell" x="0" y="28" width="28" height="28"/><rect class="grid" x="28" y="28" width="28" height="28"/><rect class="grid" x="56" y="28" width="28" height="28"/><rect class="grid" x="84" y="28" width="28" height="28"/>
+      <rect class="ycell" x="0" y="56" width="28" height="28"/><rect class="grid" x="28" y="56" width="28" height="28"/><rect class="grid" x="56" y="56" width="28" height="28"/><rect class="grid" x="84" y="56" width="28" height="28"/>
+      <rect class="ycell" x="0" y="84" width="28" height="28"/><rect class="grid" x="28" y="84" width="28" height="28"/><rect class="grid" x="56" y="84" width="28" height="28"/><rect class="grid" x="84" y="84" width="28" height="28"/>
+      <path class="xarrow" d="M17 70 L39 70"/><path class="xarrow" d="M45 70 L67 70"/><path class="xarrow" d="M73 70 L95 70"/>
+      <path class="yarrow" d="M14 17 L14 39"/><path class="yarrow" d="M14 45 L14 67"/><path class="yarrow" d="M14 73 L14 95"/>
+    </g>
+    <g transform="translate(158 0)">
+      <text class="mono" x="57" y="-8" text-anchor="middle">z = 1</text>
+      <rect class="spine" x="0" y="0" width="28" height="28"/>
+      <rect class="xcell" x="28" y="0" width="28" height="28"/><rect class="xcell" x="56" y="0" width="28" height="28"/><rect class="xcell" x="84" y="0" width="28" height="28"/>
+      <rect class="ycell" x="0" y="28" width="28" height="28"/><rect class="grid" x="28" y="28" width="28" height="28"/><rect class="grid" x="56" y="28" width="28" height="28"/><rect class="grid" x="84" y="28" width="28" height="28"/>
+      <rect class="ycell" x="0" y="56" width="28" height="28"/><rect class="grid" x="28" y="56" width="28" height="28"/><rect class="grid" x="56" y="56" width="28" height="28"/><rect class="grid" x="84" y="56" width="28" height="28"/>
+      <rect class="ycell" x="0" y="84" width="28" height="28"/><rect class="grid" x="28" y="84" width="28" height="28"/><rect class="grid" x="56" y="84" width="28" height="28"/><rect class="grid" x="84" y="84" width="28" height="28"/>
+      <path class="xarrow" d="M17 70 L39 70"/><path class="xarrow" d="M45 70 L67 70"/><path class="xarrow" d="M73 70 L95 70"/>
+      <path class="yarrow" d="M14 17 L14 39"/><path class="yarrow" d="M14 45 L14 67"/><path class="yarrow" d="M14 73 L14 95"/>
+    </g>
+    <g transform="translate(316 0)">
+      <text class="mono" x="57" y="-8" text-anchor="middle">z = 2</text>
+      <rect class="spine" x="0" y="0" width="28" height="28"/>
+      <rect class="xcell" x="28" y="0" width="28" height="28"/><rect class="xcell" x="56" y="0" width="28" height="28"/><rect class="xcell" x="84" y="0" width="28" height="28"/>
+      <rect class="ycell" x="0" y="28" width="28" height="28"/><rect class="grid" x="28" y="28" width="28" height="28"/><rect class="grid" x="56" y="28" width="28" height="28"/><rect class="grid" x="84" y="28" width="28" height="28"/>
+      <rect class="ycell" x="0" y="56" width="28" height="28"/><rect class="grid" x="28" y="56" width="28" height="28"/><rect class="grid" x="56" y="56" width="28" height="28"/><rect class="grid" x="84" y="56" width="28" height="28"/>
+      <rect class="ycell" x="0" y="84" width="28" height="28"/><rect class="grid" x="28" y="84" width="28" height="28"/><rect class="grid" x="56" y="84" width="28" height="28"/><rect class="grid" x="84" y="84" width="28" height="28"/>
+      <path class="xarrow" d="M17 70 L39 70"/><path class="xarrow" d="M45 70 L67 70"/><path class="xarrow" d="M73 70 L95 70"/>
+      <path class="yarrow" d="M14 17 L14 39"/><path class="yarrow" d="M14 45 L14 67"/><path class="yarrow" d="M14 73 L14 95"/>
+    </g>
+    <g transform="translate(474 0)">
+      <text class="mono" x="57" y="-8" text-anchor="middle">z = 3</text>
+      <rect class="spine" x="0" y="0" width="28" height="28"/>
+      <rect class="xcell" x="28" y="0" width="28" height="28"/><rect class="xcell" x="56" y="0" width="28" height="28"/><rect class="xcell" x="84" y="0" width="28" height="28"/>
+      <rect class="ycell" x="0" y="28" width="28" height="28"/><rect class="grid" x="28" y="28" width="28" height="28"/><rect class="grid" x="56" y="28" width="28" height="28"/><rect class="grid" x="84" y="28" width="28" height="28"/>
+      <rect class="ycell" x="0" y="56" width="28" height="28"/><rect class="grid" x="28" y="56" width="28" height="28"/><rect class="grid" x="56" y="56" width="28" height="28"/><rect class="grid" x="84" y="56" width="28" height="28"/>
+      <rect class="ycell" x="0" y="84" width="28" height="28"/><rect class="grid" x="28" y="84" width="28" height="28"/><rect class="grid" x="56" y="84" width="28" height="28"/><rect class="grid" x="84" y="84" width="28" height="28"/>
+      <path class="xarrow" d="M17 70 L39 70"/><path class="xarrow" d="M45 70 L67 70"/><path class="xarrow" d="M73 70 L95 70"/>
+      <path class="yarrow" d="M14 17 L14 39"/><path class="yarrow" d="M14 45 L14 67"/><path class="yarrow" d="M14 73 L14 95"/>
+    </g>
+
+    <text class="label" x="0" y="143">leading spine across z:</text>
+    <rect class="origin" x="158" y="128" width="28" height="28"/><text class="small" x="172" y="147" text-anchor="middle">0</text>
+    <rect class="spine" x="236" y="128" width="28" height="28"/><text class="small" x="250" y="147" text-anchor="middle">1</text>
+    <rect class="spine" x="314" y="128" width="28" height="28"/><text class="small" x="328" y="147" text-anchor="middle">2</text>
+    <rect class="spine" x="392" y="128" width="28" height="28"/><text class="small" x="406" y="147" text-anchor="middle">3</text>
+    <path class="zarrow" d="M188 142 L228 142"/><path class="zarrow" d="M266 142 L306 142"/><path class="zarrow" d="M344 142 L384 142"/>
+
+    <path class="xarrow" d="M10 194 L42 194"/><text class="label" x="51" y="199">x predecessor on every row</text>
+    <path class="yarrow" d="M242 179 L242 207"/><text class="label" x="260" y="199">y predecessor on each leading column</text>
+    <path class="zarrow" d="M10 230 L42 230"/><text class="label" x="51" y="235">z predecessor on the leading spine</text>
+    <rect class="origin" x="314" y="218" width="20" height="20"/><text class="label" x="344" y="234">tile origin predicts from zero</text>
+  </g>
+
+  <rect x="700" y="68" width="312" height="342" rx="10" fill="#fbfcfe" stroke="#e4e7ec"/>
+  <text x="720" y="99" class="panel">Predecessor rule</text>
+  <text x="720" y="129" class="label">For local coordinate (x, y, z):</text>
+
+  <rect class="xcell" x="720" y="150" width="38" height="38" rx="4"/><text class="mono" x="739" y="174" text-anchor="middle">x</text>
+  <text x="772" y="165" class="mono">x &gt; 0</text><text x="772" y="187" class="label">predict from (x-1, y, z)</text>
+
+  <rect class="ycell" x="720" y="210" width="38" height="38" rx="4"/><text class="mono" x="739" y="234" text-anchor="middle">y</text>
+  <text x="772" y="225" class="mono">x = 0, y &gt; 0</text><text x="772" y="247" class="label">predict from (0, y-1, z)</text>
+
+  <rect class="spine" x="720" y="270" width="38" height="38" rx="4"/><text class="mono" x="739" y="294" text-anchor="middle">z</text>
+  <text x="772" y="285" class="mono">x = y = 0, z &gt; 0</text><text x="772" y="307" class="label">predict from (0, 0, z-1)</text>
+
+  <rect class="origin" x="720" y="330" width="38" height="38" rx="4"/><text class="mono" x="739" y="354" text-anchor="middle">0</text>
+  <text x="772" y="345" class="mono">x = y = z = 0</text><text x="772" y="367" class="label">predict from zero</text>
+  <text x="720" y="393" class="small">The chain restarts independently in every tile.</text>
+
+  <rect x="28" y="428" width="984" height="64" rx="10" fill="#fbfcfe" stroke="#e4e7ec"/>
+  <text x="48" y="454" class="panel">Tile-major output</text>
+  <rect x="218" y="443" width="174" height="34" rx="5" fill="#f3e8ff" stroke="#9333ea"/>
+  <text x="305" y="465" class="label" text-anchor="middle">one tile: 64 deltas</text>
+  <path class="flow" d="M402 460 L446 460"/>
+  <rect x="458" y="443" width="250" height="34" rx="5" fill="#dbeafe" stroke="#2563eb"/>
+  <text x="583" y="465" class="label" text-anchor="middle">AdaptiveBitpack block_size = 64</text>
+  <text x="734" y="465" class="label">Edge tiles are zero-padded to the same size.</text>
+</svg>

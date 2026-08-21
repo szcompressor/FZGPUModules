@@ -113,7 +113,7 @@ The two knobs attack opposite ends of the word and compose:
 Both default to `0`, which is the identity: behaviour is unchanged unless you
 opt in.
 
-> **`setShift()` is lossy in general.** The inverse restores
+> `setShift()` is lossy in general. The inverse restores
 > `(packed << shift) + base`, so any low bits you drop are gone — values come
 > back rounded down to a multiple of `1 << shift`. Use `setAutoShift(true)` if
 > you want the largest shift that is *provably* lossless for your data.
@@ -136,18 +136,6 @@ results into the compressed header:
 After `compress()`, `getBase()`, `getShift()`, and `getNBits()` reflect the
 detected values.
 
-Worked example — values of the form `1000 + k*16` for `k` in `[0, 15]`:
-
-| | value | bits needed |
-|---|---|---|
-| raw `uint16_t` | 1000 … 1240 | 16 |
-| after `base = 1000` | 0 … 240 | 8 |
-| after `shift = 4` | 0 … 15 | **4** |
-
-A 4× gain that neither knob delivers on its own. The individual setters are
-still available if you want only one half (e.g. `setAutoBase(true)` with a
-hand-set `nbits`, keeping the shift at 0).
-
 **CUDA Graph incompatibility:** each auto mode needs a device-to-host readback,
 so `isGraphCompatible()` returns `false` while *any* of `setAutoDetect`,
 `setAutoBase`, or `setAutoShift` is on. Hand-set `base`/`shift`/`nbits` stay
@@ -161,7 +149,7 @@ this option decode with `shift = base = 0`.
 
 ## Typical pipeline
 
-### Manual `nbits`
+### Manual nbits
 
 ```cpp
 p.setDims(nx);
@@ -176,7 +164,7 @@ p.connect(bpack, lrz);
 p.finalize();
 ```
 
-### Auto-detect `nbits`
+### Auto-detect nbits
 
 ```cpp
 p.setDims(nx);
@@ -194,7 +182,7 @@ p.compress(d_in, n_bytes, stream);
 // bpack->getNBits() now holds the detected value (e.g. 4 for small deltas)
 ```
 
-### Adaptive `base` + `shift` + `nbits`
+### Adaptive base + shift + nbits
 
 ```cpp
 p.setDims(nx);
