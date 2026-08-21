@@ -21,6 +21,7 @@
  *   GC15 - enableGraphMode() after finalize() throws
  *   GC16 - graph capture works with a Lorenzo -> RLE pipeline
  *   GC17 - profiling-enabled graph replay round-trips (sticky-error regression)
+ *   GC18 - device-resident fixed-book Huffman captures and replays exactly
  */
 
 #include <gtest/gtest.h>
@@ -727,5 +728,55 @@ TEST(GraphCapture, ProfilingEnabledReplayRoundTrips) {
         // The context must be error-free after the profiling/timing pass.
         ASSERT_EQ(cudaGetLastError(), cudaSuccess)
             << "GC17: sticky CUDA error left in context on iter " << it;
+    }
+}
+
+TEST(GraphCapture, DeviceResidentHuffmanRoundTrips) {
+    if (!is_graph_supported()) {
+        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
+    }
+
+    constexpr size_t N = 1 << 15;
+    const size_t in_bytes = N * sizeof(uint16_t);
+    CudaStream stream;
+    CudaBuffer<uint16_t> d_input(N);
+
+    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 8.0f);
+    auto* huf = p.addStage<HuffmanStage<uint16_t>>();
+    huf->setBklen(1024);
+    huf->setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    huf->setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    p.enableGraphMode(true);
+    p.setPoolManagedDecompOutput(false);
+    p.finalize();
+
+    p.warmup(stream.stream);
+    p.captureGraph(stream.stream);
+    ASSERT_TRUE(p.isGraphCaptured());
+
+    for (int iteration = 0; iteration < 3; ++iteration) {
+        std::vector<uint16_t> input(N);
+        for (size_t i = 0; i < N; ++i)
+            input[i] = static_cast<uint16_t>((i * (17 + iteration * 2) + iteration) % 1024);
+        d_input.upload(input, stream.stream);
+        stream.sync();
+
+        void* d_compressed = nullptr;
+        size_t compressed_size = 0;
+        ASSERT_NO_THROW(p.compress(
+            d_input.void_ptr(), in_bytes, &d_compressed, &compressed_size, stream.stream));
+        ASSERT_GT(compressed_size, PHFHEADER_FORCED_ALIGN);
+
+        void* d_decoded = nullptr;
+        size_t decoded_size = 0;
+        ASSERT_NO_THROW(p.decompress(
+            d_compressed, compressed_size, &d_decoded, &decoded_size, stream.stream));
+        ASSERT_EQ(decoded_size, in_bytes);
+
+        std::vector<uint16_t> decoded(N);
+        cudaMemcpy(decoded.data(), d_decoded, in_bytes, cudaMemcpyDeviceToHost);
+        cudaFree(d_decoded);
+        EXPECT_EQ(decoded, input) << "graph replay mismatch at iteration " << iteration;
     }
 }

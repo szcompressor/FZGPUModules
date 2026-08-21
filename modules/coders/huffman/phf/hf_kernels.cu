@@ -6,19 +6,6 @@
 //   - Removed #include "timer.hh".
 //   - Added #include "cuda_check.h"; replaced CHECK_GPU → FZ_CUDA_CHECK.
 //   - Added (void) casts for unused local variables to silence warnings.
-//   - Added explicit template instantiations for the three supported symbol types.
-//   - Added GPU_encode_scan (CUB ExclusiveSum), GPU_encode_finalize_totals (custom
-//     reduce kernel + async D→H), GPU_cub_scan_temp_bytes, and updated GPU_fine_encode
-//     to use them for a fully GPU-async fine encode path (no mid-encode CPU sync).
-//   - Removed break handler from KERNEL_CUHIP_Huffman_ReVISIT_lite: it read
-//     s_book[MaxBkLen] out-of-bounds (one past the end of the MaxBkLen-element array),
-//     aliasing uninitialized s_reduced[0] and corrupting par_ncell.  Fine path is
-//     restricted to max_codelen ≤ 8 by hf_hl.cc::encode(), so the shard accumulator
-//     (ShardSize=4, BITWIDTH=32) never overflows and the handler is unreachable.
-//   - Removed KERNEL_CUHIP_scatter and GPU_scatter: the scatter re-integration step
-//     (second half of break handling) was never called from GPU_fine_encode — dead code.
-//   - Removed break parameters (brval/bridx/brnum) from kernel, GPU_fine_encode_phase1_2,
-//     and GPU_fine_encode.
 //   - Guarded post-symbol bit fetch in KERNEL_CUHIP_HF_decode's
 //     single_thread_inflate (line ~298): when total_bw is a multiple of 32 the
 //     speculative input[idx_byte] read after the last emitted symbol fell one
@@ -27,12 +14,8 @@
 //     i >= total_bw — the outer while loop catches that on the next iteration.
 //     Surfaced by compute-sanitizer as a 4-byte OOB read at address+1B-past-end.
 
-#include "backend/warp.h"
-#include <cstdio>
 #include <numeric>
 #include <stdexcept>
-
-#include "backend/cub.h"
 
 #include "cuda_check.h"
 #include "hf_buf.h"
@@ -141,146 +124,6 @@ __global__ void KERNEL_CUHIP_encode_phase4_concatenate(
 
 }  // namespace phf
 
-// ── ReVISIT-lite (fine encode) kernel ────────────────────────────────────────
-// Requires max Huffman code length ≤ BITWIDTH/ShardSize (8 bits for the default
-// ShardSize=4, BITWIDTH=32).  hf_hl.cc::encode() enforces this before choosing
-// the fine path so the shard accumulator never overflows.
-
-namespace phf {
-
-using Hf = uint32_t;
-
-template <typename E, int ChunkSize = 1024, int ShardSize = 4, int MaxBkLen = 1024>
-__global__ void KERNEL_CUHIP_Huffman_ReVISIT_lite(
-    E* in_data, size_t const len, Hf* hf_book, const uint32_t runtime_bklen,
-    uint32_t* hf_bitstream, uint32_t* hf_bits, uint32_t* hf_cells,
-    const uint32_t nblock)
-{
-    constexpr auto NumThreads = ChunkSize / ShardSize;
-
-    __shared__ E  s_to_encode[ChunkSize];
-    auto const id_base = blockIdx.x * ChunkSize;
-
-#pragma unroll
-    for (auto ix = 0; ix < ShardSize; ix++) {
-        auto id = id_base + threadIdx.x + ix * NumThreads;
-        if (id < len) s_to_encode[threadIdx.x + ix * NumThreads] = in_data[id];
-    }
-    __syncthreads();
-
-    constexpr auto ReduceTimes  = 2u;
-    constexpr auto ShuffleTimes = 8u;
-    constexpr auto BITWIDTH     = 32;
-
-    static_assert(ShardSize  == 1 << ReduceTimes,                   "Wrong reduce times.");
-    static_assert(ChunkSize  == 1 << (ReduceTimes + ShuffleTimes),  "Wrong shuffle times.");
-
-    __shared__ Hf       s_book[MaxBkLen];
-    __shared__ Hf       s_reduced[NumThreads * 2];
-    __shared__ uint32_t s_bitcount[NumThreads * 2];
-
-    auto bitcount_of = [](Hf* _w) { return reinterpret_cast<HuffmanWord<4>*>(_w)->bitcount; };
-    auto entry       = [&]() -> size_t { return ChunkSize * blockIdx.x; };
-    auto allowed_len = [&]() { return min((size_t)ChunkSize, len - entry()); };
-
-    for (auto i = threadIdx.x; i < runtime_bklen; i += NumThreads) s_book[i] = hf_book[i];
-    __syncthreads();
-
-    // reduce-merge
-    {
-        auto p_bits{0u};
-        Hf   p_reduced{0x0};
-
-        // Stop at the chunk's valid length instead of masking only the bit count.
-        //
-        // The staging loop above writes s_to_encode[] only where `id < len`, so on
-        // a trailing partial chunk its tail slots are never initialized. This loop
-        // used to read them anyway and use the value as a CODEBOOK INDEX
-        // (`s_book[p_key]`), with `(idx < allowed_len())` suppressing only the bit
-        // count, not the read. Uninitialized shared memory as an index into a
-        // MaxBkLen array is an out-of-bounds read — observed as a CUDA illegal
-        // memory access, reported at the next sync point rather than here.
-        //
-        // Only reachable when the fine path actually engages, which needs every
-        // code <= 8 bits, which in practice means a degenerate (single-symbol)
-        // block — so it fired on genuinely constant data whose length is not a
-        // multiple of ChunkSize. CESM-2D SFCLDICE and SFCLDLIQ are entirely zero
-        // at 6,480,000 elements and hit it through the default cusz.toml preset.
-        //
-        // `break` rather than masking is also what makes the OUTPUT right: the
-        // masked version still OR-ed the out-of-range symbol's code bits into
-        // p_reduced at the current bit offset, where a later shuffle-merge
-        // atomicOr could preserve them. idx increases with i, so break is exact.
-        const auto valid = allowed_len();
-        for (auto i = 0; i < ShardSize; i++) {
-            auto idx = (threadIdx.x * ShardSize) + i;
-            if (idx >= valid) break;
-
-            auto p_key    = s_to_encode[idx];
-            auto p_val    = s_book[p_key];
-            auto sym_bits = bitcount_of(&p_val);
-
-            p_val <<= (BITWIDTH - sym_bits);
-            p_reduced |= (p_val >> p_bits);
-            p_bits    += sym_bits;
-        }
-
-        s_reduced[threadIdx.x]  = p_reduced;
-        s_bitcount[threadIdx.x] = p_bits;
-    }
-    __syncthreads();
-
-    // shuffle-merge
-    for (auto sf = ShuffleTimes, stride = 1u; sf > 0; sf--, stride *= 2) {
-        auto l = threadIdx.x / (stride * 2) * (stride * 2);
-        auto r = l + stride;
-
-        auto lbc       = s_bitcount[l];
-        uint32_t used__units = lbc / BITWIDTH;
-        uint32_t used___bits = lbc % BITWIDTH;
-        uint32_t unused_bits = BITWIDTH - used___bits;
-
-        auto lend       = (Hf*)(s_reduced + l + used__units);
-        auto this_point = s_reduced[threadIdx.x];
-        auto lsym       = this_point >> used___bits;
-        auto rsym       = this_point << unused_bits;
-
-        if (threadIdx.x >= r && threadIdx.x < r + stride)
-            atomicAnd((Hf*)(s_reduced + threadIdx.x), 0x0);
-        __syncthreads();
-
-        if (threadIdx.x >= r && threadIdx.x < r + stride) {
-            atomicOr(lend + (threadIdx.x - r) + 0, lsym);
-            atomicOr(lend + (threadIdx.x - r) + 1, rsym);
-        }
-        if (threadIdx.x == l) s_bitcount[l] += s_bitcount[r];
-        __syncthreads();
-    }
-
-    // output
-    __shared__ uint32_t s_wunits;
-    unsigned long long  p_wunits;
-
-    static_assert(BITWIDTH == 32, "Wrong bitwidth (!=32).");
-    if (threadIdx.x == 0) {
-        uint32_t p_bc = s_bitcount[0];
-        p_wunits = (p_bc + 31) / 32;
-        hf_bits[blockIdx.x]  = p_bc;
-        hf_cells[blockIdx.x] = p_wunits;
-        s_wunits = p_wunits;
-    }
-    __syncthreads();
-
-    if (threadIdx.x % 32 == 0 && threadIdx.x / 32 > 0) p_wunits = s_wunits;
-    __syncthreads();
-
-    p_wunits = fz::backend::shfl(p_wunits, 0, 32);
-
-    for (auto i = threadIdx.x; i < p_wunits; i += blockDim.x)
-        hf_bitstream[id_base + i] = s_reduced[i];
-}
-
-}  // namespace phf
 
 // ── Decode kernel ─────────────────────────────────────────────────────────────
 
@@ -352,46 +195,70 @@ __global__ void KERNEL_CUHIP_HF_decode(
     }
 }
 
-}  // namespace phf
-
-// ── Fine-path: combined nbit+ncell reduction kernel ───────────────────────────
-// Single-block grid-stride reduction. Accumulates in uint64_t to avoid overflow
-// for inputs where len * bits_per_symbol > 2^32.
-
-namespace phf {
-
-template <typename M>
-__global__ void KERNEL_phase3_reduce(
-    const M* par_nbit, const M* par_ncell, int pardeg,
-    uint64_t* total_nbit, uint64_t* total_ncell)
+template <typename E, typename H, typename M>
+__global__ void KERNEL_CUHIP_HF_decode_device_header(
+    PHF_BYTE* encoded, int revbook_nbyte, E* out)
 {
-    extern __shared__ uint64_t smem[];
-    uint64_t* s_nbit  = smem;
-    uint64_t* s_ncell = smem + blockDim.x;
+    constexpr int CELL_BITWIDTH = sizeof(H) * 8;
+    extern __shared__ uint8_t s_revbook[];
 
-    uint64_t nbit = 0, ncell = 0;
-    for (int i = threadIdx.x; i < pardeg; i += blockDim.x) {
-        nbit  += par_nbit[i];
-        ncell += par_ncell[i];
-    }
-    s_nbit[threadIdx.x]  = nbit;
-    s_ncell[threadIdx.x] = ncell;
+    const auto* header = reinterpret_cast<const phf_header*>(encoded);
+    const auto* revbook = encoded + header->entry[PHFHEADER_REVBK];
+    auto* bitstream = reinterpret_cast<H*>(
+        encoded + header->entry[PHFHEADER_BITSTREAM]);
+    auto* par_nbit = reinterpret_cast<M*>(
+        encoded + header->entry[PHFHEADER_PAR_NBIT]);
+    auto* par_entry = reinterpret_cast<M*>(
+        encoded + header->entry[PHFHEADER_PAR_ENTRY]);
+
+    for (int i = threadIdx.x; i < revbook_nbyte; i += blockDim.x)
+        s_revbook[i] = revbook[i];
     __syncthreads();
 
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (threadIdx.x < s) {
-            s_nbit[threadIdx.x]  += s_nbit[threadIdx.x + s];
-            s_ncell[threadIdx.x] += s_ncell[threadIdx.x + s];
+    auto decode_partition = [&](H* input, E* partition_out, int total_bw) {
+        int next_bit;
+        int idx_bit = 0, idx_byte = 0, idx_out = 0;
+        H bufr = input[idx_byte];
+        auto first = reinterpret_cast<H*>(s_revbook);
+        auto entry = first + CELL_BITWIDTH;
+        auto keys = reinterpret_cast<E*>(s_revbook + sizeof(H) * (2 * CELL_BITWIDTH));
+        H v = (bufr >> (CELL_BITWIDTH - 1)) & 0x1;
+        int l = 1, i = 0;
+
+        while (i < total_bw) {
+            while (v < first[l]) {
+                ++i;
+                idx_byte = i / CELL_BITWIDTH;
+                idx_bit = i % CELL_BITWIDTH;
+                if (idx_bit == 0) bufr = input[idx_byte];
+                next_bit = (bufr >> (CELL_BITWIDTH - 1 - idx_bit)) & 0x1;
+                v = (v << 1) | next_bit;
+                ++l;
+            }
+            partition_out[idx_out++] = keys[entry[l] + v - first[l]];
+            ++i;
+            if (i < total_bw) {
+                idx_byte = i / CELL_BITWIDTH;
+                idx_bit = i % CELL_BITWIDTH;
+                if (idx_bit == 0) bufr = input[idx_byte];
+                next_bit = (bufr >> (CELL_BITWIDTH - 1 - idx_bit)) & 0x1;
+                v = next_bit;
+            }
+            l = 1;
         }
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        *total_nbit  = s_nbit[0];
-        *total_ncell = s_ncell[0];
+    };
+
+    const int stride = blockDim.x * gridDim.x;
+    for (int gid = blockIdx.x * blockDim.x + threadIdx.x;
+         gid < header->pardeg; gid += stride) {
+        decode_partition(
+            bitstream + par_entry[gid], out + static_cast<size_t>(header->sublen) * gid,
+            static_cast<int>(par_nbit[gid]));
     }
 }
 
 }  // namespace phf
+
 
 // ── phf::cuhip::modules<E,H> method definitions ──────────────────────────────
 
@@ -428,18 +295,6 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase2(
         (deflated, data_len, par_nbit, par_ncell, hfpar.sublen, hfpar.pardeg);
 }
 
-PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_fine_encode_phase1_2(
-    E* in, const size_t len, H* book, const uint32_t bklen, H* bitstream,
-    M* par_nbit, M* par_ncell, const uint32_t nblock, void* stream)
-{
-    SETUP_DIV;
-    constexpr int ChunkSize = 1024;
-    constexpr int BlockDim  = 256;
-    auto grid_dim = div(len, ChunkSize);
-    phf::KERNEL_CUHIP_Huffman_ReVISIT_lite<E>
-        <<<grid_dim, BlockDim, 0, (cudaStream_t)stream>>>
-        (in, len, book, bklen, bitstream, par_nbit, par_ncell, nblock);
-}
 
 PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase3_sync(
     phf::par_config hfpar, M* d_par_nbit, M* h_par_nbit,
@@ -493,54 +348,27 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase4(
     //
     // Buf now sizes the bitstream for the worst case the codeword format allows
     // (27 bits/symbol), so this should be unreachable; it stays as the backstop the
-    // old `inlen / 2` sizing never had. total_ncell == 0 means "not yet known" —
-    // the fine path computes its totals on device after this point, and is covered
-    // by the sizing alone.
+    // old `inlen / 2` sizing never had.
     if (total_ncell > max_bitstream_len)
         throw std::runtime_error(
-            "PHF encode: concatenated bitstream needs " + std::to_string(total_ncell) +
+            "cuSZ Huffman encode: concatenated bitstream needs " + std::to_string(total_ncell) +
             " cells but only " + std::to_string(max_bitstream_len) +
             " were allocated. The codebook is a poor enough fit for this data that "
             "the encoding expands past the buffer bound.");
 
+    GPU_coarse_encode_phase4_device(
+        in_buf, par_entry, par_ncell, hfpar, bitstream, stream);
+}
+
+PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase4_device(
+    H* in_buf, M* par_entry, M* par_ncell, phf::par_config hfpar,
+    H* bitstream, void* stream)
+{
     phf::KERNEL_CUHIP_encode_phase4_concatenate<H, M>
         <<<hfpar.pardeg, 128, 0, (cudaStream_t)stream>>>
         (in_buf, par_entry, par_ncell, hfpar.sublen, bitstream);
 }
 
-PHF_MODULE_TPL size_t PHF_MODULE_CLASS::GPU_cub_scan_temp_bytes(size_t pardeg)
-{
-    size_t bytes = 0;
-    cub::DeviceScan::ExclusiveSum(nullptr, bytes, (M*)nullptr, (M*)nullptr, (int)pardeg);
-    return bytes;
-}
-
-PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_encode_scan(
-    M* d_par_ncell, M* d_par_entry, int pardeg,
-    uint8_t* d_cub_temp, size_t cub_temp_bytes, void* stream)
-{
-    cub::DeviceScan::ExclusiveSum(
-        d_cub_temp, cub_temp_bytes, d_par_ncell, d_par_entry, pardeg,
-        (cudaStream_t)stream);
-}
-
-PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_encode_finalize_totals(
-    M* d_par_nbit, M* d_par_ncell, int pardeg,
-    uint64_t* d_total_nbit, uint64_t* d_total_ncell,
-    uint64_t* h_total_nbit, uint64_t* h_total_ncell,
-    void* stream)
-{
-    auto s = (cudaStream_t)stream;
-    constexpr int block = 256;
-    phf::KERNEL_phase3_reduce<M>
-        <<<1, block, 2 * block * sizeof(uint64_t), s>>>
-        (d_par_nbit, d_par_ncell, pardeg, d_total_nbit, d_total_ncell);
-
-    FZ_CUDA_CHECK(cudaMemcpyAsync(
-        h_total_nbit,  d_total_nbit,  sizeof(uint64_t), cudaMemcpyDeviceToHost, s));
-    FZ_CUDA_CHECK(cudaMemcpyAsync(
-        h_total_ncell, d_total_ncell, sizeof(uint64_t), cudaMemcpyDeviceToHost, s));
-}
 
 PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode(
     E* in_data, size_t data_len, H* in_book, uint32_t book_len, int numSMs,
@@ -560,35 +388,6 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode(
         bitstream_max_len, out_total_ncell ? *out_total_ncell : 0, stream);
 }
 
-PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_fine_encode(
-    E* in_data, size_t data_len, H* in_book, uint32_t book_len,
-    phf::par_config hfpar,
-    H* d_scratch4,
-    M* d_par_nbit, M* d_par_ncell, M* d_par_entry,
-    H* d_bitstream4, size_t bitstream_max_len,
-    uint64_t* d_total_nbit, uint64_t* d_total_ncell,
-    uint64_t* h_total_nbit, uint64_t* h_total_ncell,
-    uint8_t* d_cub_temp, size_t cub_temp_bytes, void* stream)
-{
-    // Phase 1+2: ReVISIT-lite single kernel (encode + reduce-merge in shared mem)
-    GPU_fine_encode_phase1_2(
-        in_data, data_len, in_book, book_len, d_scratch4, d_par_nbit, d_par_ncell,
-        hfpar.pardeg, stream);
-
-    // GPU-async scan: d_par_ncell → d_par_entry (partition bitstream offsets)
-    GPU_encode_scan(d_par_ncell, d_par_entry, (int)hfpar.pardeg,
-                    d_cub_temp, cub_temp_bytes, stream);
-
-    // Phase 4: scatter partitions to final bitstream positions using d_par_entry
-    GPU_coarse_encode_phase4(
-        d_scratch4, data_len, d_par_entry, d_par_ncell, hfpar, d_bitstream4,
-        bitstream_max_len, /*total_ncell=*/0, stream);
-
-    // Reduce total nbit+ncell and async-copy to pinned mem; ready after caller's sync
-    GPU_encode_finalize_totals(
-        d_par_nbit, d_par_ncell, (int)hfpar.pardeg,
-        d_total_nbit, d_total_ncell, h_total_nbit, h_total_ncell, stream);
-}
 
 PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode(
     H* in_bitstream, uint8_t* in_revbook, size_t const revbook_len,
@@ -601,6 +400,17 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode(
     phf::KERNEL_CUHIP_HF_decode<E, H, M>
         <<<grid_dim, block_dim, revbook_len, (cudaStream_t)stream>>>
         (in_bitstream, in_revbook, in_par_nbit, in_par_entry, revbook_len, sublen, pardeg, out_decoded);
+}
+
+PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode_device(
+    PHF_BYTE* in_encoded, size_t revbook_len, int numSMs,
+    E* out_decoded, void* stream)
+{
+    constexpr int block_dim = HuffmanHelper::BLOCK_DIM_DEFLATE;
+    const int grid_dim = numSMs > 0 ? 8 * numSMs : 1;
+    phf::KERNEL_CUHIP_HF_decode_device_header<E, H, M>
+        <<<grid_dim, block_dim, revbook_len, (cudaStream_t)stream>>>
+        (in_encoded, static_cast<int>(revbook_len), out_decoded);
 }
 
 #undef PHF_MODULE_TPL

@@ -1,7 +1,7 @@
 /**
  * modules/coders/raze/raze_stage.cu
  *
- * GPU implementation of RAZEStage — Zero-Adaptive Reduction Encoding.
+ * GPU implementation of the LC RAZE adaptive leading-zero-bit reducer.
  *
  * One CUDA block per chunk, blockDim = 512 threads (RAZE_TPB). Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC

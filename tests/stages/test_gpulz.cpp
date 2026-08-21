@@ -2,7 +2,7 @@
  * tests/stages/test_gpulz.cpp
  *
  * GPU unit tests for GPULZStage — GPU LZSS lossless byte-stream compressor
- * (direct port of the GPULZ reference kernels). Each fixed-size chunk is
+ * (derived from the GPULZ stream grammar and parse). Each fixed-size chunk is
  * compressed independently by one CUDA block via a 32-word sliding-window
  * match search; inverse reconstructs exactly. Word granularity is 1/2/4/8
  * bytes; chunk size is 1024/2048/4096 bytes.

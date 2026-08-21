@@ -1,7 +1,7 @@
 {
-  "schemaVersion": "1.0", "id": "fzgm-rare", "stage": "RAREStage", "name": "Recursive All-Repetition Encoder",
+  "schemaVersion": "1.0", "id": "fzgm-rare", "stage": "RAREStage", "name": "RARE Adaptive Top-Bit Matcher",
   "zhubModule": "repeat-elimination", "isNewGeneralModule": false, "category": "coder", "algorithm": "rare",
-  "description": "Lossless LC-framework RARE port that recursively encodes repeated words within independent chunks.",
+  "description": "Lossless port of the LC framework RARE component. Per chunk, it selects the low-bit width that maximizes savings, bit-packs words whose upper bits match their predecessor, stores other words in full, and recursively compresses the selection bitmap. RARE is retained as the upstream identifier without assigning it an expansion.",
   "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
   "config": [
     { "name": "chunkSize", "type": "int", "values": [4096, 8192, 16384], "default": 16384, "description": "Independent chunk size in bytes." },

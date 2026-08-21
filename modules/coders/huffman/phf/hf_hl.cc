@@ -3,12 +3,7 @@
 //   - Replaced #include "hf_hl.hh" with local hf_buf.h.
 //   - Removed #include <iostream> and related using-decls (not needed).
 //   - Dropped float _time_book timing; pass nullptr to phf_CPU_build_canonized_codebook_v2.
-//   - encode() branches on buf->use_HFR: coarse path calls GPU_coarse_encode (CPU-sync
-//     phase 3, stable default); fine path calls GPU_fine_encode (GPU-async phase 3,
-//     ReVISIT-lite kernel) and reads totals from pinned memory after the stream sync.
-//   - Fine path requires max Huffman code length ≤ 8 bits (ShardSize=4, BITWIDTH=32:
-//     four 8-bit codes exactly fill the 32-bit shard accumulator).  encode() scans
-//     h_bk4 after build_book and falls back to GPU_coarse_encode when max_codelen > 8.
+//   - Retains cuSZ's coarse-grained GPU encode path.
 
 #include "hf_buf.h"
 #include "hf_impl.hh"
@@ -66,59 +61,17 @@ int high_level<E>::encode(
         for (auto i = 1; i < PHFHEADER_END + 1; i++) header.entry[i] += header.entry[i - 1];
     };
 
-    // Fine path requires max code length ≤ 8 bits: with ShardSize=4 and BITWIDTH=32,
-    // four 8-bit codes exactly fill the shard accumulator (4×8=32).  Longer codes
-    // would overflow the reduce-merge in the ReVISIT-lite kernel.
-    // HuffmanWord<4> layout: bitcount occupies bits [31:27] → h_bk4[i] >> 27.
-    // Scanned unconditionally (a few thousand host iterations, negligible next to the
-    // kernels) so the max code length is reportable in coarse mode too — it is what
-    // tells a caller whether switching to Fine would actually take the fine path.
-    // Symbols with zero frequency are left as 0xffffffff by build_canonized_codebook
-    // and MUST be skipped: their bitcount field reads as 31, which is above the fine
-    // path's 8-bit limit and would veto the fine path on essentially every real book
-    // (any bklen larger than the number of distinct symbols has such slots).  No real
-    // entry can be 0xffffffff — bitcounts above FIELD_CODE=27 are clamped to
-    // OUTLIER_CUTOFF=28 — so the sentinel is unambiguous.
-    uint8_t max_cl = 0;
-    for (uint16_t i = 0; i < buf->rt_bklen; ++i) {
-        if (buf->h_bk4[i] == 0xffffffffu) continue;
-        uint8_t cl = static_cast<uint8_t>(buf->h_bk4[i] >> 27);
-        if (cl > max_cl) max_cl = cl;
-    }
-    const bool use_fine = buf->use_HFR && (max_cl <= 8);
+    phf_module<E>::GPU_coarse_encode(
+        in, len, buf->d_bk4, buf->rt_bklen, buf->numSMs,
+        {buf->sublen, buf->pardeg},
+        buf->d_scratch4,
+        buf->d_par_nbit,  buf->h_par_nbit,
+        buf->d_par_ncell, buf->h_par_ncell,
+        buf->d_par_entry, buf->h_par_entry,
+        buf->d_bitstream4, buf->bitstream_max_len,
+        &header.total_nbit, &header.total_ncell, stream);
 
-    buf->last_max_codelen = max_cl;
-    buf->last_used_fine   = use_fine;
-
-    if (use_fine) {
-        phf_module<E>::GPU_fine_encode(
-            in, len, buf->d_bk4, buf->rt_bklen,
-            {buf->sublen, buf->pardeg},
-            buf->d_scratch4,
-            buf->d_par_nbit, buf->d_par_ncell, buf->d_par_entry,
-            buf->d_bitstream4, buf->bitstream_max_len,
-            buf->d_total_nbit, buf->d_total_ncell,
-            buf->h_total_nbit, buf->h_total_ncell,
-            buf->d_cub_temp, buf->cub_temp_bytes, stream);
-
-        cudaStreamSynchronize((cudaStream_t)stream);
-
-        header.total_nbit  = *buf->h_total_nbit;
-        header.total_ncell = *buf->h_total_ncell;
-    } else {
-        // Coarse path: used when use_HFR=false OR when max code length > 8 bits.
-        phf_module<E>::GPU_coarse_encode(
-            in, len, buf->d_bk4, buf->rt_bklen, buf->numSMs,
-            {buf->sublen, buf->pardeg},
-            buf->d_scratch4,
-            buf->d_par_nbit,  buf->h_par_nbit,
-            buf->d_par_ncell, buf->h_par_ncell,
-            buf->d_par_entry, buf->h_par_entry,
-            buf->d_bitstream4, buf->bitstream_max_len,
-            &header.total_nbit, &header.total_ncell, stream);
-
-        cudaStreamSynchronize((cudaStream_t)stream);
-    }
+    cudaStreamSynchronize((cudaStream_t)stream);
 
     make_metadata(buf, len, header);
     buf->memcpy_merge(header, stream);

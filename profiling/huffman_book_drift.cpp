@@ -236,7 +236,6 @@ static std::vector<StepResult> run_mode(
     // Huffman consumer; nothing else in the harness is pipeline-specific.
     auto* huf = p.addStage<HuffmanStage<uint16_t>>();
     huf->setBklen(bklen);
-    huf->setEncodeMode(HuffmanEncodeMode::Fine);
     if (mode == Mode::Adaptive) {
         huf->setBookSource(HuffmanBookSource::Adaptive);
         huf->setRefitInterval(o.refit_interval);

@@ -1,7 +1,7 @@
 /**
  * tests/stages/test_rre_stage.cpp
  *
- * GPU unit tests for RZEStage — Repetition-Reduction Encoding (LC component).
+ * GPU unit tests for the LC RZE zero-word bitmap reducer.
  * Compacts non-repeated words (a word differs from its predecessor) + a 1-bit
  * per-word bitmap, then recursively RE-compresses the bitmap.  Inverse
  * reconstructs exactly.  Word granularity is 1/2/4/8 bytes.

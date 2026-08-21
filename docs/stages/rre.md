@@ -14,8 +14,8 @@ rre->setWordSize(1);   // 1, 2, 4, or 8 (default 1)
 
 ## What it does
 
-Repetition-Reduction Encoding — the `RRE` lossless component of the **LC
-framework**, used by cuSZ-Hi's LC pipelines (the speed chain
+`RRE` is the upstream name of this lossless **LC framework** component; LC
+describes its behavior without expanding the token. It is used by cuSZ-Hi's LC pipelines (the speed chain
 `TCMS1 → BIT1 → RRE1` and the compression-ratio chain `RRE4 → TCMS8 → RZE1`).
 
 Operates on a raw byte stream treated as `word_size`-byte words. Each chunk is

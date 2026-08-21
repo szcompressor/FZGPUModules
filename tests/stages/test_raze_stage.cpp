@@ -1,8 +1,8 @@
 /**
  * tests/stages/test_raze_stage.cpp
  *
- * GPU unit tests for RAZEStage — Zero-Adaptive Reduction Encoding (LC
- * component). The auto-k generalization of RZE: histograms how many top bits
+ * GPU unit tests for the LC RAZE adaptive leading-zero-bit reducer. It
+ * generalizes RZE by measuring how many top bits
  * of `word ^ predecessor` match across the chunk, picks one global `keep` cut
  * that maximizes savings, then bit-packs the bottom `keep` bits of every
  * matching word (non-matching words are stored in full, as in RZE). The

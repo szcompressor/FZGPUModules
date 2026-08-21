@@ -8,9 +8,9 @@
  * Operates on a raw byte stream treated as `word_size`-byte words (1, 2, 4, or
  * 8). The stream is split into fixed-size chunks (`chunk_size`, default 2048
  * bytes); each chunk is compressed independently by a single CUDA thread
- * block that keeps the whole chunk resident in shared memory and searches a
- * sliding window (32 words) for repeated word sequences, exactly as in the
- * upstream GPULZ paper/reference implementation.
+ * block that keeps the whole chunk resident in shared memory. It retains
+ * upstream GPULZ's high-level per-chunk LZSS structure and token grammar, with
+ * FZGM's rewritten match search, packing, and decoder.
  *
  * Output stream layout:
  * @code
@@ -45,14 +45,15 @@ namespace fz {
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 4, matching the
  * upstream reference's `uint32_t` default).
  *
- * @note **Prior work:** GPU kernels are a direct port of the compression and
- *       decompression kernels in `gpulz.cu` from **GPULZ**
+ * @note **Prior work:** The per-chunk stream grammar and sequential
+ *       literal/match parse follow `compressKernelI` in `gpulz.cu` from **GPULZ**
  *       (Zhang, Tian, Di, Yu, Swany, Tao, Cappello — ICS '23; upstream
  *       repository declares no explicit license, see `THIRD_PARTY.md`).
  *       Upstream: https://github.com/hpdps-group/ICS23-GPULZ.
- *       The per-chunk container/offset-scan plumbing (raw-fallback flag,
- *       CUB exclusive scan for packing offsets, deferred tail-size readback)
- *       is FZGM's own, following the same pattern as `RREStage`/`RZEStage`.
+ *       The exact/hashed match search, BlockScan prefix sum, staged writes,
+ *       block-parallel decoder, and per-chunk container/offset-scan plumbing are
+ *       FZGM's own. The current kernels are therefore a substantial derivative
+ *       rewrite, not direct ports of the upstream kernels.
  *       The all-zero-chunk fast path (skip encode entirely for chunks that
  *       are entirely zero) is adapted from the "sparse" GPULZ variant in
  *       `boyuanzhang62/AIZ_VLDB26` (`test/gpulz.cuh`'s `notEmptyFlagArr`).

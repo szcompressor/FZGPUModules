@@ -62,24 +62,6 @@ Maximum 16 segments.
 
 ---
 
-## Behaviour notes
-
-- **Byte-transparent:** opts out of `finalize()` type checking on every port —
-  segments are opaque bytes once merged, so any mix of upstream element types
-  concatenates without friction.
-- **Pure concatenation, no in-stream header:** the forward output is exactly the
-  inputs back-to-back (matching cuSZ-Hi's byte layout). The per-segment sizes are
-  data-dependent (outlier counts vary), so they are captured at compress time and
-  carried in the FZM stage config header (like `RZEStage`'s `cached_orig_bytes`),
-  which the inverse path uses to split.
-- **Graph-capturable in both directions:** execution is pure stream-ordered
-  device-to-device `cudaMemcpyAsync` with no host synchronisation.
-- **No new DAG support needed:** the inverse-DAG builder already wires N-input
-  stages by input-position index, so an N-input-forward Merge reverses
-  automatically into an N-output-inverse split.
-
----
-
 ## Typical pipeline (cuSZ-Hi cr-mode merged blob)
 
 ```cpp

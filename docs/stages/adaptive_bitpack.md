@@ -25,9 +25,9 @@ internal header of its own — `block_size` and `num_elements` live in the FZM
 stage header.
 
 Unlike cuSZp's fused single kernel, the offset scan here is an ordinary CUB
-`DeviceScan` rather than the cuSZp decoupled look-back scan: fusing predictor +
-quantizer + coder into one kernel (and lowering the scan to a single pass) is a
-job for the downstream compiler, not the stage.
+`DeviceScan` rather than the cuSZp decoupled look-back scan.
+
+\image html adaptive_bitpack.svg "Plain mode separates signs and magnitude bit-planes, storing only the planes required by each block. Outlier-selection mode is not shown."
 
 ---
 
@@ -95,24 +95,6 @@ Single input → single output.
 |---|---|---|
 | Forward in / inverse out | `"output"` | `T[n]` (signed codes) |
 | Forward out / inverse in | `"output"` | `uint8_t[]` (archive) |
-
----
-
-## Graph compatibility
-
-`isGraphCompatible()` is **true for the forward (compress) path, false for the
-inverse**. The archive length is still data-dependent (cuSZp's `cmpSize`), but
-the host readback of the scanned total payload is deferred to `postStreamSync()`
-— which the pipeline calls after the launch and a full stream sync, outside any
-capture window — so `execute()` enqueues only stream-ordered device work. The
-per-block cost/offset scratch is kept persistent (grown lazily, freed in the
-destructor) so the readback can happen post-sync and no allocation occurs inside
-a captured graph replay. This mirrors `RZEStage`'s forward path. The inverse
-keeps a per-execute layout and is left out of graph capture.
-
-This means the full cuSZp pipelines (`Quantizer(linear) → Lorenzo(block)/TiledLorenzo
-→ AdaptiveBitpack`) can be captured and replayed as a CUDA graph on the compress
-side. See `examples/cuszp_variants.cpp` for a PREALLOCATE-vs-GRAPH benchmark.
 
 ---
 

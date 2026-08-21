@@ -705,3 +705,31 @@ inputs     = [{from = "tl"}]
     EXPECT_LT(err, EB * 1.1f);
     std::remove(path.c_str());
 }
+
+TEST(ConfigSave, DeviceResidentHuffmanModeRoundTrips) {
+    const std::string path = "/tmp/fzgmod_huffman_device_save.toml";
+
+    Pipeline p1(4096 * sizeof(uint16_t), MemoryStrategy::PREALLOCATE, 8.0f);
+    auto* huf = p1.addStage<HuffmanStage<uint16_t>>();
+    huf->setBklen(1024);
+    huf->setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    huf->setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    p1.finalize();
+    ASSERT_NO_THROW(p1.saveConfig(path));
+
+    auto table = toml::parse_file(path);
+    auto* stages = table["stage"].as_array();
+    ASSERT_NE(stages, nullptr);
+    ASSERT_EQ(stages->size(), 1u);
+    auto* stage = (*stages)[0].as_table();
+    ASSERT_NE(stage, nullptr);
+    EXPECT_EQ(
+        (*stage)["execution_mode"].value_or<std::string>(""),
+        "DeviceResident");
+    EXPECT_EQ((*stage)["book_source"].value_or<std::string>(""), "Fixed");
+
+    Pipeline p2;
+    EXPECT_NO_THROW(p2.loadConfig(path));
+    std::remove(path.c_str());
+}

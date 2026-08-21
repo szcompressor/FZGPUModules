@@ -4,12 +4,10 @@
 //   - Replaced #include "err.hh" with cuda_check.h; replaced CHECK_GPU → FZ_CUDA_CHECK.
 //   - All device/host allocations now routed through MemoryPool::allocatePersistentDevice
 //     / allocatePersistentPinned instead of cudaMalloc / cudaMallocHost directly.
-//   - Destructor returns all allocations to the pool via freePersistentDevice /
-//     freePersistentPinned.  Pool is the sole owner of all memory.
+//   - Destructor frees and untracks all allocations through freePersistentDevice /
+//     freePersistentPinned. Pool is the sole owner of all memory.
 //   - Removed MAKE_UNIQUE_DEVICE / MAKE_UNIQUE_HOST macros (no longer needed).
 //   - Removed .get() calls throughout (members are now raw pointers).
-//   - When use_HFR=true, allocates fine-path async-total buffers (d/h_total_nbit/ncell)
-//     and CUB temp storage (d_cub_temp); all null otherwise.
 
 #include <algorithm>
 #include <cstddef>
@@ -54,17 +52,15 @@ int Buf<E>::_revbk8_bytes(int bklen)
         static_cast<size_t>(n) * sizeof(T), (tag)))
 
 template <typename E>
-Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
-            int _pardeg, bool _use_HFR)
+Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool, int _pardeg)
     : len(inlen),
-      pardeg((inlen - 1) / ((_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen))) + 1),
-      sublen(_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)),
+      pardeg((inlen - 1) / capi_phf_coarse_tune_sublen(inlen) + 1),
+      sublen(capi_phf_coarse_tune_sublen(inlen)),
       bklen(_bklen),
-      use_HFR(_use_HFR),
       revbk4_bytes(_revbk4_bytes(_bklen)),
       bitstream_max_len(_bitstream4_len(
-          (inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1,
-          _use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen))),
+          (inlen - 1) / capi_phf_coarse_tune_sublen(inlen) + 1,
+          capi_phf_coarse_tune_sublen(inlen))),
       // See scratch4_len's comment in hf_buf.h. The encoded-blob term mirrors
       // memcpy_merge()'s writes exactly: header, reverse codebook, par_nbit,
       // par_entry, bitstream. Rounded up to whole H4 words.
@@ -76,11 +72,11 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
           // bytes. Using sizeof() here under-reserves by 64 bytes, which is
           // exactly enough to keep the original overrun alive.
           (PHFHEADER_FORCED_ALIGN + _revbk4_bytes(_bklen)
-           + 2 * (((inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1)
+           + 2 * (((inlen - 1) / capi_phf_coarse_tune_sublen(inlen) + 1)
                   * sizeof(M))
            + _bitstream4_len(
-                 (inlen - 1) / (_use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) + 1,
-                 _use_HFR ? 1024 : capi_phf_coarse_tune_sublen(inlen)) * sizeof(H4)
+                 (inlen - 1) / capi_phf_coarse_tune_sublen(inlen) + 1,
+                 capi_phf_coarse_tune_sublen(inlen)) * sizeof(H4)
            + sizeof(H4) - 1) / sizeof(H4))),
       rt_bklen(0),
       numSMs(0),
@@ -108,42 +104,25 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
     // Histogram buffers
     d_freq = PALLOC_DEV(uint32_t, bklen, "huf_d_freq");
     h_freq = PALLOC_PIN(uint32_t, bklen, "huf_h_freq");
-
-    // Fine-path async totals and CUB scan temp — only when use_HFR is active
-    if (_use_HFR) {
-        cub_temp_bytes = phf::cuhip::modules<E, H4>::GPU_cub_scan_temp_bytes(pardeg);
-        d_cub_temp    = PALLOC_DEV(uint8_t,  cub_temp_bytes, "huf_d_cub_temp");
-        d_total_nbit  = PALLOC_DEV(uint64_t, 1,              "huf_d_total_nbit");
-        d_total_ncell = PALLOC_DEV(uint64_t, 1,              "huf_d_total_ncell");
-        h_total_nbit  = PALLOC_PIN(uint64_t, 1,              "huf_h_total_nbit");
-        h_total_ncell = PALLOC_PIN(uint64_t, 1,              "huf_h_total_ncell");
-    } else {
-        cub_temp_bytes = 0;
-        d_cub_temp    = nullptr;
-        d_total_nbit  = nullptr;
-        d_total_ncell = nullptr;
-        h_total_nbit  = nullptr;
-        h_total_ncell = nullptr;
-    }
+    d_book_meta = PALLOC_DEV(uint32_t, 4, "huf_d_book_meta");
+    h_book_meta = PALLOC_PIN(uint32_t, 4, "huf_h_book_meta");
 
     // d_encoded / h_encoded alias the scratch buffers (not separate allocations)
     d_encoded = reinterpret_cast<PHF_BYTE*>(d_scratch4);
     h_encoded = reinterpret_cast<PHF_BYTE*>(h_scratch4);
 
-    size_t fine_d_extra = _use_HFR ? (cub_temp_bytes + 2 * sizeof(uint64_t)) : 0;
-    size_t fine_h_extra = _use_HFR ? (2 * sizeof(uint64_t)) : 0;
     total_footprint_d  = (sizeof(H4) * scratch4_len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
                          (sizeof(uint32_t) * bklen) +
-                         fine_d_extra;
+                         (sizeof(uint32_t) * 4);
     total_footprint_h  = (sizeof(H4) * scratch4_len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
                          (sizeof(uint32_t) * bklen) +
-                         fine_h_extra;
+                         (sizeof(uint32_t) * 4);
 }
 
 #undef PALLOC_DEV
@@ -170,9 +149,7 @@ Buf<E>::~Buf()
     pool_->freePersistentDevice(d_par_ncell);
     pool_->freePersistentDevice(d_par_entry);
     pool_->freePersistentDevice(d_freq);
-    if (d_cub_temp)    pool_->freePersistentDevice(d_cub_temp);
-    if (d_total_nbit)  pool_->freePersistentDevice(d_total_nbit);
-    if (d_total_ncell) pool_->freePersistentDevice(d_total_ncell);
+    pool_->freePersistentDevice(d_book_meta);
 
     pool_->freePersistentPinned(h_scratch4);
     pool_->freePersistentPinned(h_bk4);
@@ -182,8 +159,7 @@ Buf<E>::~Buf()
     pool_->freePersistentPinned(h_par_ncell);
     pool_->freePersistentPinned(h_par_entry);
     pool_->freePersistentPinned(h_freq);
-    if (h_total_nbit)  pool_->freePersistentPinned(h_total_nbit);
-    if (h_total_ncell) pool_->freePersistentPinned(h_total_ncell);
+    pool_->freePersistentPinned(h_book_meta);
     // d_encoded / h_encoded are aliases — do not free separately
 }
 
@@ -205,6 +181,11 @@ void Buf<E>::memcpy_merge(Header& header, phf_stream_t stream)
                                       cudaMemcpyDeviceToDevice, (cudaStream_t)stream));
     };
 
+    // The format reserves 128 bytes although phf_header is smaller. Clear the
+    // padding so archives do not expose stale pool bytes and both assembly paths
+    // produce deterministic headers.
+    FZ_CUDA_CHECK(cudaMemsetAsync(
+        start, 0, PHFHEADER_FORCED_ALIGN, (cudaStream_t)stream));
     FZ_CUDA_CHECK(cudaMemcpyAsync(start, &header, sizeof(header),
                                   cudaMemcpyHostToDevice, (cudaStream_t)stream));
 

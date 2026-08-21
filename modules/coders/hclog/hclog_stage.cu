@@ -1,8 +1,8 @@
 /**
  * modules/coders/hclog/hclog_stage.cu
  *
- * GPU implementation of HCLOGStage — Compressed-Logarithm adaptive bit-width
- * coding with a per-subchunk TCMS(zigzag) fallback.
+ * GPU implementation of HCLOGStage — CLOG leading-zero compression with
+ * per-subchunk TCMS selection.
  *
  * One CUDA block per chunk, blockDim = 512 threads (HCLOG_TPB). Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC

@@ -42,6 +42,8 @@ layout" contract, and the separable formula differs from LorenzoStage's N-D
 inclusion-exclusion delta. (Same reasoning as `AdaptiveBitpackStage` vs
 `BitpackStage`.)
 
+\image html tiled_lorenzo.svg "The 3-D tiled separable predictor used by cuSZp3: x rows, y leading columns, and the z leading spine form one prediction tree per tile."
+
 ---
 
 ## Template parameter

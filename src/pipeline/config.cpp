@@ -117,12 +117,6 @@ static std::string tomlEscape(const std::string& s) {
     return out;
 }
 
-static HuffmanEncodeMode huffmanModeFromString(const std::string& s) {
-    if (s == "Fine")   return HuffmanEncodeMode::Fine;
-    if (s == "Coarse") return HuffmanEncodeMode::Coarse;
-    throw std::runtime_error("loadConfig: unknown Huffman encode_mode \"" + s + "\"");
-}
-
 static HuffmanBookModel huffmanBookModelFromString(const std::string& s) {
     if (s == "Gaussian")          return HuffmanBookModel::Gaussian;
     if (s == "Laplace")           return HuffmanBookModel::Laplace;
@@ -141,8 +135,16 @@ static const char* huffmanBookModelToString(HuffmanBookModel m) {
     }
 }
 
-static const char* huffmanModeToString(HuffmanEncodeMode m) {
-    return m == HuffmanEncodeMode::Fine ? "Fine" : "Coarse";
+static HuffmanExecutionMode huffmanExecutionModeFromString(const std::string& s) {
+    if (s == "HostCoordinated") return HuffmanExecutionMode::HostCoordinated;
+    if (s == "DeviceResident")  return HuffmanExecutionMode::DeviceResident;
+    throw std::runtime_error(
+        "loadConfig: unknown Huffman execution_mode \"" + s + "\"");
+}
+
+static const char* huffmanExecutionModeToString(HuffmanExecutionMode mode) {
+    return mode == HuffmanExecutionMode::DeviceResident
+        ? "DeviceResident" : "HostCoordinated";
 }
 
 static DataType dataTypeFromString(const std::string& s) {
@@ -693,7 +695,6 @@ static Stage* addADMStage(Pipeline& p, const toml::table& t) {
 static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
-    HuffmanEncodeMode mode = huffmanModeFromString(optStr(t, "encode_mode", "Coarse"));
 
     // Pre-built codebook.  "Adaptive" needs no parameters beyond the floor shift;
     // "Fixed" is expressible in TOML only in its model-derived form, since a raw
@@ -703,6 +704,8 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     const auto        refit_thr   = static_cast<float>(optDbl(t, "book_refit_threshold", 1.2));
     const auto        refit_ivl   = static_cast<uint32_t>(optInt(t, "book_refit_interval", 0));
     const bool        validate_rng = optBool(t, "validate_symbol_range", true);
+    const auto execution_mode = huffmanExecutionModeFromString(
+        optStr(t, "execution_mode", "HostCoordinated"));
     HuffmanBookSpec spec;
     spec.model  = huffmanBookModelFromString(optStr(t, "book_model", "Gaussian"));
     spec.center = optDbl(t, "book_center", -1.0);
@@ -711,11 +714,11 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
 
     auto configure = [&](auto* s) -> Stage* {
         s->setBklen(bklen);
-        s->setEncodeMode(mode);
         s->setAdaptiveFloorShift(floor_shift);
         s->setRefitThreshold(refit_thr);
         s->setRefitInterval(refit_ivl);
         s->setValidateSymbolRange(validate_rng);
+        s->setExecutionMode(execution_mode);
         if      (book_src == "Fixed")    s->setFixedBookFromModel(spec);
         else if (book_src == "Adaptive") s->setBookSource(HuffmanBookSource::Adaptive);
         else if (book_src != "PerBlock")
@@ -1111,14 +1114,6 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     out << "input_type = \"" << dataTypeToString(dt)          << "\"\n";
     out << "bklen = "        << static_cast<int64_t>(bklen)   << "\n";
 
-    // Emit encode_mode only when non-default so existing configs stay minimal.
-    HuffmanEncodeMode mode = HuffmanEncodeMode::Coarse;
-    if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  mode = hs->getEncodeMode();
-    else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) mode = hs->getEncodeMode();
-    else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) mode = hs->getEncodeMode();
-    if (mode != HuffmanEncodeMode::Coarse)
-        out << "encode_mode = \"" << huffmanModeToString(mode) << "\"\n";
-
     // Emit the pre-built codebook keys only for a model-derived fixed book — that is
     // the only form TOML can round-trip.  A book set from a raw frequency table saves
     // as PerBlock; the caller has to re-supply the table through the C++ API.
@@ -1145,6 +1140,9 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     };
     auto emitValidate = [&out](auto* hs) {
         if (!hs->getValidateSymbolRange()) out << "validate_symbol_range = false\n";
+        if (hs->getExecutionMode() != HuffmanExecutionMode::HostCoordinated)
+            out << "execution_mode = \""
+                << huffmanExecutionModeToString(hs->getExecutionMode()) << "\"\n";
     };
     if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  { emitBook(hs); emitValidate(hs); }
     else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) { emitBook(hs); emitValidate(hs); }

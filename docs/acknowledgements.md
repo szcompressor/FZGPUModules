@@ -14,13 +14,13 @@ see \ref third_party_notices "Third-party notices".
 | Project | License | Relationship | Stages |
 |---|---|---|---|
 | \ref ack_lc "LC framework" | BSD-3-Clause | Direct port / algorithm-faithful reimpl | `RZEStage`, `RREStage`, `RAREStage`, `RAZEStage`, `CLOGStage`, `HCLOGStage`, `BitshuffleStage`, `TUPLStage`, `DifferenceStage`, `QuantizerStage` |
-| \ref ack_cusz "cuSZ / PHF" | BSD-3-Clause | Algorithm follow / vendored PHF headers | `LorenzoQuantStage`, `HuffmanStage` |
+| \ref ack_cusz "cuSZ" | BSD-3-Clause | Algorithm follow / vendored Huffman sources | `LorenzoQuantStage`, `HuffmanStage` |
 | \ref ack_fzgpu "FZ-GPU" | BSD-3-Clause | Direct port of fused kernels | `BitplaneRZEStage` |
 | \ref ack_cusz_hi "cuSZ-Hi" | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
 | \ref ack_cuszp "cuSZp / cuSZp2 / cuSZp3" | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | \ref ack_mans "MANS" | BSD-3-Clause | Direct port of kernels | `ADMStage` |
 | \ref ack_dietgpu "dietGPU" | MIT | Vendored headers | `ANSStage` |
-| \ref ack_gpulz "GPULZ" | **None declared upstream** | Direct port of encode/decode kernels | `GPULZStage` |
+| \ref ack_gpulz "GPULZ" | **None declared upstream** | Substantially rewritten derivative | `GPULZStage` |
 | \ref ack_aiz "AIZ_VLDB26" | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
 | \ref ack_fsz "FSZ" | BSD-3-Clause | **Algorithmic attribution only; no code used** (written from the paper before FSZ 1.0.0 was released) | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | \ref ack_log_transform "Point-wise relative transform" | n/a — paper only | **Algorithmic attribution only; no code used** | `LogTransformStage` |
@@ -71,7 +71,7 @@ Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher (Texas State Un
 
 ---
 
-## cuSZ / PHF {#ack_cusz}
+## cuSZ {#ack_cusz}
 
 **Repository:** https://github.com/szcompressor/cuSZ  
 **License:** BSD-3-Clause  
@@ -84,10 +84,11 @@ Indiana University, University of Kentucky, Oakland University (see copyright no
 - **`LorenzoQuantStage`** (`modules/fused/lorenzo_quant/`) — GPU kernels and the fused
   predictor+quantizer design follow the cuSZ Lorenzo implementation (`lrz_c.cuhip.inl`,
   `lrz_x.cuhip.inl`).
-- **`HuffmanStage`** (`modules/coders/huffman/`) — the PHF source files (`hf.h`,
+- **`HuffmanStage`** (`modules/coders/huffman/`) — cuSZ's Huffman source files (`hf.h`,
   `hf_bk*.cc`, `hf_buf.cc`, `hf_canon.cc`, `hf_hl.cc`, `hf_kernels.cu`, `hf_impl.hh`)
-  are vendored copies adapted from `origin/v1.1.0_dev` of the PHF codec in the cuSZ
-  repository, with modifications documented at the top of each file.
+  are vendored copies adapted from `origin/v1.1.0_dev` of the cuSZ repository, with
+  modifications documented at the top of each file. cuSZ uses `phf` as this
+  implementation's internal namespace/type prefix.
 
 **Citation:**
 
@@ -262,20 +263,19 @@ GPUs", ICS '23
 
 **Stages:**
 
-- **`GPULZStage`** (`modules/coders/gpulz/`) — the encode/decode kernels are a direct
-  port of `compressKernelI` / `decompressKernel` from the upstream `gpulz.cu`. The
-  per-chunk sliding-window match search (shared-memory lookahead buffer + window,
-  Blelloch prefix sum over per-item byte sizes, literal/match flag-bitmap construction)
-  is preserved, retargeted from upstream's fixed `BLOCK_SIZE`/`WINDOW_SIZE`/`INPUT_TYPE`
-  macro configuration to compile-time template parameters (`T`, `CS`) dispatched at
-  runtime.
+- **`GPULZStage`** (`modules/coders/gpulz/`) — a substantially rewritten derivative
+  of upstream `gpulz.cu`. It retains `compressKernelI`'s per-chunk flag-bitmap/token
+  stream grammar and sequential literal/match parse. Its exact/hashed match search,
+  block prefix sum, staged writes, and block-parallel decoder are FZGPUModules
+  implementations; the decoder no longer follows upstream's single-thread
+  `decompressKernel`.
 
-  **Changes from original:** the per-chunk container format (raw-fallback flag, CUB
+  The per-chunk container format (raw-fallback flag, CUB
   exclusive-scan packing offsets, deferred tail-size readback via `postStreamSync()`) is
   FZGPUModules' own, following the same pattern as `RREStage`/`RZEStage`. Upstream's
   separate flag/data pack-out step (`compressKernelIII`) is folded into FZGPUModules'
-  `gpulzPackKernel`. Split mode (emitting `flags` and `literals` as separate output
-  ports) has no upstream counterpart.
+  `gpulzPackKernel`. Split mode (emitting literals, lengths, offsets, and metadata as
+  separate output ports) has no upstream counterpart.
 
   **License caveat:** the upstream repository publishes no `LICENSE` file and declares no
   license. Its README copyright notice does not grant redistribution permission. Anyone

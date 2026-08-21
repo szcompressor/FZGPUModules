@@ -135,7 +135,7 @@ position within the payload.
 | 3  | `SCALE`        | `ScaleStage` (test utility) |
 | 4  | `PASSTHROUGH`  | `PassThroughStage` (test utility) |
 | 5  | `RLE`          | `RLEStage` — run-length encoding |
-| 6  | `HUFFMAN`      | `HuffmanStage` — GPU Huffman entropy coding (PHF) |
+| 6  | `HUFFMAN`      | `HuffmanStage` — GPU Huffman entropy coding (cuSZ port) |
 | 7  | `BITPACK`      | `BitpackStage` — dense N-bit integer packing |
 | 10 | `SPLIT`        | `SplitStage` (test utility) |
 | 11 | `MERGE`        | `MergeStage` — concatenate N ports into one buffer / split back |
@@ -144,12 +144,12 @@ position within the payload.
 | 15 | `ZIGZAG`       | `ZigzagStage` — zigzag encode/decode |
 | 16 | `NEGABINARY`   | `NegabinaryStage` — negabinary encode/decode |
 | 17 | `BITSHUFFLE`   | `BitshuffleStage` — GPU bit-matrix transpose |
-| 18 | `RZE`          | `RZEStage` — recursive zero-byte elimination |
-| 26 | `RRE`          | `RREStage` — repetition-reduction encoding (LC component) |
-| 27 | `RARE`         | `RAREStage` — repetition-adaptive reduction encoding (LC component, auto-k RRE) |
-| 28 | `RAZE`         | `RAZEStage` — zero-adaptive reduction encoding (LC component, auto-k RZE) |
-| 29 | `CLOG`         | `CLOGStage` — Compressed-Logarithm adaptive bit-width coding (LC component) |
-| 30 | `HCLOG`        | `HCLOGStage` — Compressed-Logarithm coding with per-subchunk TCMS fallback (LC component) |
+| 18 | `RZE`          | `RZEStage` — zero-word bitmap reducer with recursive bitmap compression (LC component) |
+| 26 | `RRE`          | `RREStage` — repeated-word bitmap reducer with recursive bitmap compression (LC component) |
+| 27 | `RARE`         | `RAREStage` — adaptive top-bit matching generalization of RRE (LC component) |
+| 28 | `RAZE`         | `RAZEStage` — adaptive leading-zero-bit generalization of RZE (LC component) |
+| 29 | `CLOG`         | `CLOGStage` — per-subchunk leading-zero compression and bit packing (LC component) |
+| 30 | `HCLOG`        | `HCLOGStage` — CLOG bit packing with per-subchunk TCMS selection (LC component) |
 | 31 | `TUPL`         | `TUPLStage` — tuple deinterleave / AoS-to-SoA transpose (LC component) |
 
 **Rule:** never reuse or renumber an existing value — stage type IDs are baked into

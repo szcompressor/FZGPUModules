@@ -85,7 +85,7 @@ descriptor read, which costs nothing next to the copy they enable.
 
 **Source:** `modules/coders/huffman/phf/hf_bk.cc`, `capi_phf_coarse_tune_sublen()`
 **Measured:** 2026-08, H100 (sm_90), `LorenzoQuant -> Huffman`, `bklen` 1024,
-`book_source = Adaptive`, `encode_mode = Coarse`
+`book_source = Adaptive`
 
 `sublen` (elements per coarse-encode partition, with
 `pardeg = ceil(inlen/sublen)`) drives cost in three directions at once:
@@ -166,34 +166,6 @@ single-stream form, which codes the whole payload by construction, a split leaks
 any byte left out. Both the raw-fallback chunks and the per-chunk size table are
 folded into the ports above for exactly that reason: leaving them out cost 28%
 and 67% respectively in testing.
-
----
-
-## CN-HF-2 — why `HuffmanEncodeMode::Fine` does not engage on real data
-
-**Source:** `modules/coders/huffman/huffman_stage.h`, `setEncodeMode()`
-**Measured:** CESM-ATM `CLDHGH`/`CLDLOW`/`FLDSC`/`PRECT`/`TS`, `eb` 1e-2 … 1e-5,
-`LorenzoQuant -> Huffman`, bklen 1024, radius 512
-
-The fine path packs four codes per 32-bit shard, so it requires **every** code in
-the book to fit in 8 bits, and silently falls back to `Coarse` otherwise.
-
-The barrier is structural, not a tuning matter. An 8-bit ceiling admits at most
-256 codewords by Kraft's inequality, and the quantized fields carry 322–1025
-distinct symbols at all but the coarsest bound. Across all 20 (field, eb) cells
-the longest code was **12–24 bits — never ≤ 8**, so the fine path never ran.
-
-Only near-uniform distributions stay inside the ceiling, and those are exactly
-the distributions Huffman cannot compress. Where a ≤ 8-bit book is even
-constructible, package-merge puts its cost at **+1.8% to +14.6% bits/symbol**.
-
-Restricting to **≤ 16 bits** instead costs at most **+0.31%** across the same
-cells and is always constructible. So the change that would make a fine path
-reachable is a 2x16-bit shard geometry, not length-limiting to 8. Not
-implemented.
-
-Use `getLastUsedFineEncode()` to check which path a call actually took rather
-than assuming the requested one ran.
 
 ---
 

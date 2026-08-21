@@ -10,7 +10,7 @@
     { "name": "splitMode", "type": "bool", "default": false, "description": "Emit literals, lengths, offsets, and metadata on separate ports." }
   ],
   "provenance": {
-    "sourceProject": "ICS23-GPULZ", "sourceUrl": "https://github.com/hpdps-group/ICS23-GPULZ", "relationship": "direct-port", "license": "NO-LICENSE-DECLARED"
+    "sourceProject": "ICS23-GPULZ", "sourceUrl": "https://github.com/hpdps-group/ICS23-GPULZ", "relationship": "reimplementation", "license": "NO-LICENSE-DECLARED"
   },
   "docs": "stage_gpulz.html", "sourcePath": "modules/coders/gpulz", "versionAdded": "2.0"
 }

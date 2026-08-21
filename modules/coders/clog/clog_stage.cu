@@ -1,7 +1,8 @@
 /**
  * modules/coders/clog/clog_stage.cu
  *
- * GPU implementation of CLOGStage — Compressed-Logarithm adaptive bit-width coding.
+ * GPU implementation of CLOGStage — per-subchunk leading-zero compression
+ * and adaptive bit-width packing.
  *
  * One CUDA block per chunk, blockDim = 512 threads (CLOG_TPB). Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC

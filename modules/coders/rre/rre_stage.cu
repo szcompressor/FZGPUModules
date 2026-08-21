@@ -1,7 +1,7 @@
 /**
  * modules/coders/rre/rre_stage.cu
  *
- * GPU implementation of RREStage — Repetition-Reduction Encoding.
+ * GPU implementation of the LC RRE repeated-word bitmap reducer.
  *
  * One CUDA block per chunk, blockDim = 512 threads (RRE_TPB).  Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC

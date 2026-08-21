@@ -5,8 +5,8 @@
 Turns a **point-wise relative** error bound into a plain **absolute** one, so an
 ordinary ABS quantizer downstream delivers the relative guarantee. Implements
 the transformation scheme of X. Liang, S. Di, D. Tao, Z. Chen and F. Cappello,
-*"An efficient transformation scheme for lossy data compression with point-wise
-relative error bound"*, IEEE CLUSTER 2018, pp. 179–189.
+"An efficient transformation scheme for lossy data compression with point-wise
+relative error bound", IEEE CLUSTER 2018, pp. 179–189.
 
 ---
 
@@ -39,7 +39,7 @@ you both the guarantee and good compression:
 
 | Approach | Per-element guarantee? | Compresses? |
 |---|---|---|
-| `LorenzoQuantStage` / `GInterpStage` with `PREL` | **No** — bounds `\|e\|/max\|x\|` | Yes |
+| `LorenzoQuantStage` / `GInterpStage` with `PREL` | **No** | Yes |
 | `QuantizerStage` with `REL` | Yes | **No** — no predictor in front |
 | `LogTransformStage` → predictor → ABS quantizer | Yes | Yes |
 
@@ -48,20 +48,6 @@ quantizer, on raw values. Its codes still carry the field's full spatial
 redundancy. Putting the log **upstream of the predictor** is what gets both —
 that is the paper's contribution, and it is why this is a transform rather than
 a new compressor: it bolts onto an existing absolute-error pipeline.
-
-Measured on `CLDHGH.f32` (3600×1800) at `delta = 1e-3`, via
-`examples/eb_mode_analysis.cpp`:
-
-| mode | ratio | PSNR | max `\|e\|/\|x\|` | violations |
-|---|---|---|---|---|
-| PREL (Lorenzo→Huffman) | 13.55 | 70.79 | 3.33e-01 | 4,826,356 / 6,480,000 |
-| REL (Quantizer→Bitpack) | 1.00 | 80.99 | 1.00e-03 | 0 |
-| **LOG+Lorenzo** | **6.36** | **80.99** | **1.00e-03** | **0** |
-
-**6.4× the compression of `QuantizerStage` REL at an identical guarantee and
-identical PSNR.** It does not reach PREL's 13.55 — the sign channel and the
-wider log-space dynamic range cost real bits — but PREL is not delivering the
-bound that was asked for.
 
 ---
 
@@ -99,7 +85,7 @@ Forward (4 outputs):
 
 | Index | Name | Type | Contents |
 |---|---|---|---|
-| 0 | `output` | `TInput[n]` | `log2(\|x\|)`, or the log floor at outlier positions |
+| 0 | `output` | `TInput[n]` | `log2(abs(x))`, or the log floor at outlier positions |
 | 1 | `signs` | `uint8[ceil(n/8)]` | bit `i` set ⇒ element `i` is negative |
 | 2 | `outlier_vals` | `TInput[k]` | original values at outlier positions |
 | 3 | `outlier_idxs` | `uint32[k]` | indices of outlier positions |
@@ -117,7 +103,7 @@ header — the same mechanism `QuantizerStage` uses.
 | Setting | Default | Purpose |
 |---|---|---|
 | `setErrorBound(delta)` | `1e-3` | The point-wise relative bound you want |
-| `setThreshold(t)` | `0` (off) | `\|x\| < t` ⇒ lossless outlier. Trades a bigger outlier list for a narrower, more compressible log range |
+| `setThreshold(t)` | `0` (off) | `abs(x) < t` ⇒ lossless outlier. Trades a bigger outlier list for a narrower, more compressible log range |
 | `setOutlierCapacity(c)` | `0.05` | Fraction of `n` reserved for outliers |
 | `quantizerErrorBound()` | — | **Read this and hand it to the downstream quantizer** |
 | `minimumErrorBound()` | — | Smallest `delta` float32 log space can honour (~1.4e-6) |

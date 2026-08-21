@@ -1,7 +1,7 @@
 /**
  * modules/coders/rare/rare_stage.cu
  *
- * GPU implementation of RAREStage — Repetition-Adaptive Reduction Encoding.
+ * GPU implementation of the LC RARE adaptive top-bit matching reducer.
  *
  * One CUDA block per chunk, blockDim = 512 threads (RARE_TPB). Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC

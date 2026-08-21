@@ -92,7 +92,13 @@ inputs    = [{from = "lrz", port = "codes"}]
 
 ---
 
-## Execution flow (CPU–GPU movement pattern) {#ans-execution}
+## GPU execution and host synchronization {#ans-execution}
+
+The histogram, probability-table construction, rANS coding, prefix sum, packing,
+decode-table construction, and rANS decoding all run on the GPU. The stage is not
+fully device-resident, however: the host reads and parses the bitstream header to
+learn data-dependent sizes and launch parameters. Those small D2H transfers create
+the synchronization points shown below; the CPU does not encode or decode symbols.
 
 ### Forward pass
 

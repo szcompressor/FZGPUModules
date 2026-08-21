@@ -804,6 +804,9 @@ void Pipeline::validate() {
         }
     }
 
+    for (const auto& [stage, node] : stage_to_node_)
+        stage->setTerminalOutput(node->dependents.empty());
+
     FZ_LOG(DEBUG, "Validation passed");
 }
 

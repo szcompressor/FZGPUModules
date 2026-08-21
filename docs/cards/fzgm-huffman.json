@@ -10,7 +10,7 @@
 
   "category": "coder",
   "algorithm": "huffman",
-  "description": "PHF Huffman entropy coder (T = u8/u16/u32). Lossless. Multi-kernel coarse encode path with a CPU prefix-sum sync. Byte-transparent output.",
+  "description": "cuSZ Huffman entropy coder (T = u8/u16/u32). Lossless. Supports host-coordinated and GPU-assembled coarse paths. Byte-transparent output.",
 
   "lossy": false,
   "hardware": "gpu",
@@ -28,11 +28,11 @@
       "min": 1
     },
     {
-      "name": "encodeMode",
+      "name": "executionMode",
       "type": "enum",
-      "values": ["Coarse", "Fine"],
-      "default": "Coarse",
-      "description": "Coarse = the supported multi-kernel path with CPU sync. Fine is experimental: it requires all codes to fit in 8 bits and silently falls back to Coarse otherwise, which is what happens on realistic data."
+      "values": ["HostCoordinated", "DeviceResident"],
+      "default": "HostCoordinated",
+      "description": "DeviceResident performs canonical book construction, partition scan, stream assembly, and header parsing on the GPU for every book source; only terminal Fixed is CUDA Graph compatible."
     }
   ],
 
