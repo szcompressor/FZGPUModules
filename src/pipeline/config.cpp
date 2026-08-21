@@ -117,12 +117,6 @@ static std::string tomlEscape(const std::string& s) {
     return out;
 }
 
-static HuffmanEncodeMode huffmanModeFromString(const std::string& s) {
-    if (s == "Fine")   return HuffmanEncodeMode::Fine;
-    if (s == "Coarse") return HuffmanEncodeMode::Coarse;
-    throw std::runtime_error("loadConfig: unknown Huffman encode_mode \"" + s + "\"");
-}
-
 static HuffmanBookModel huffmanBookModelFromString(const std::string& s) {
     if (s == "Gaussian")          return HuffmanBookModel::Gaussian;
     if (s == "Laplace")           return HuffmanBookModel::Laplace;
@@ -139,10 +133,6 @@ static const char* huffmanBookModelToString(HuffmanBookModel m) {
         case HuffmanBookModel::Gaussian:
         default:                                  return "Gaussian";
     }
-}
-
-static const char* huffmanModeToString(HuffmanEncodeMode m) {
-    return m == HuffmanEncodeMode::Fine ? "Fine" : "Coarse";
 }
 
 static DataType dataTypeFromString(const std::string& s) {
@@ -693,7 +683,6 @@ static Stage* addADMStage(Pipeline& p, const toml::table& t) {
 static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
-    HuffmanEncodeMode mode = huffmanModeFromString(optStr(t, "encode_mode", "Coarse"));
 
     // Pre-built codebook.  "Adaptive" needs no parameters beyond the floor shift;
     // "Fixed" is expressible in TOML only in its model-derived form, since a raw
@@ -711,7 +700,6 @@ static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
 
     auto configure = [&](auto* s) -> Stage* {
         s->setBklen(bklen);
-        s->setEncodeMode(mode);
         s->setAdaptiveFloorShift(floor_shift);
         s->setRefitThreshold(refit_thr);
         s->setRefitInterval(refit_ivl);
@@ -1110,14 +1098,6 @@ static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
     if (sz >= 3) std::memcpy(&bklen, buf + 1, sizeof(uint16_t));
     out << "input_type = \"" << dataTypeToString(dt)          << "\"\n";
     out << "bklen = "        << static_cast<int64_t>(bklen)   << "\n";
-
-    // Emit encode_mode only when non-default so existing configs stay minimal.
-    HuffmanEncodeMode mode = HuffmanEncodeMode::Coarse;
-    if      (auto* hs = dynamic_cast<HuffmanStage<uint8_t>*>(s))  mode = hs->getEncodeMode();
-    else if (auto* hs = dynamic_cast<HuffmanStage<uint16_t>*>(s)) mode = hs->getEncodeMode();
-    else if (auto* hs = dynamic_cast<HuffmanStage<uint32_t>*>(s)) mode = hs->getEncodeMode();
-    if (mode != HuffmanEncodeMode::Coarse)
-        out << "encode_mode = \"" << huffmanModeToString(mode) << "\"\n";
 
     // Emit the pre-built codebook keys only for a model-derived fixed book — that is
     // the only form TOML can round-trip.  A book set from a raw frequency table saves

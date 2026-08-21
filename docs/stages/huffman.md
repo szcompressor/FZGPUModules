@@ -14,12 +14,13 @@ huf->setBklen(1024);
 
 ## What it does
 
-Entropy-encodes a flat symbol stream using GPU-accelerated Huffman coding (PHF
-coarse-grained encoding).  Forward pass produces a variable-length bitstream with
-an embedded self-describing header; inverse pass reconstructs the original symbol
-array exactly.
+Entropy-encodes a flat symbol stream using cuSZ's GPU-accelerated Huffman coder.
+The cuSZ sources use `phf` as an internal namespace and type prefix; it is not a
+separate library or algorithm. The forward pass produces a variable-length bitstream
+with an embedded self-describing header; inverse pass reconstructs the original
+symbol array exactly.
 
-- **Forward:** `T[] → uint8_t[]`  PHF bitstream with embedded `phf_header`
+- **Forward:** `T[] → uint8_t[]`  cuSZ Huffman bitstream with embedded `phf_header`
 - **Inverse:** `uint8_t[] → T[]`  Exact symbol reconstruction
 
 ---
@@ -44,7 +45,6 @@ Only these types are compiled and linked:
 | Setting | Type | Default | Purpose |
 |---|---|---|---|
 | `setBklen(n)` | `uint32_t` | 256 (U8), 1024 (U16/U32) | Codebook length — number of distinct symbols |
-| `setEncodeMode(m)` | `HuffmanEncodeMode` | `Coarse` | Leave at `Coarse`. `Fine` is experimental and does not engage on realistic data — see [Experimental: `Fine` encode mode](#huffman-fine-reachability) |
 | `setBookSource(s)` | `HuffmanBookSource` | `PerBlock` | `Adaptive`/`Fixed` reuse one codebook — see [Pre-built codebooks](#huffman-prebuilt-book) |
 | `setAdaptiveFloorShift(k)` | `uint8_t` | 24 | `Adaptive` frequency floor, as `max_freq >> k` |
 | `setRefitThreshold(r)` | `float` | 1.2 | `Adaptive` refits when the bit rate degrades past `r`x the fitted rate (0 = never) |
@@ -53,7 +53,7 @@ Only these types are compiled and linked:
 | `setFixedBookFromModel(spec)` | `HuffmanBookSpec` | — | Build a `Fixed` book from an analytic distribution |
 | `setFixedBookFromFreq(f, n)` | `const uint32_t*`, `uint32_t` | — | Build a `Fixed` book from a frequency table |
 
-### Setting `bklen`
+### Setting bklen
 
 `bklen` is the size of the Huffman codebook and must cover the full range of
 symbols that will appear in the input.  **All input symbols must be in `[0, bklen)`.**
@@ -76,7 +76,7 @@ Typical values:
 | Generic byte data | `uint8_t` | `256` (default) |
 
 Set `bklen` before the first `compress()` call.  Changing `bklen` after the first
-`execute()` forces a full reallocation of all PHF internal buffers on the next call.
+`execute()` forces a full reallocation of all Huffman internal buffers on the next call.
 
 ---
 
@@ -112,7 +112,7 @@ p.finalize();
 **Why `zigzag_codes=true` is required here:**  With `zigzag_codes=false` (raw delta),
 positive deltas map to `[0, radius-1]` and negative deltas wrap to
 `[65537-radius, 65535]` in uint16.  These two lobes require `bklen=65536` for
-the PHF codebook to cover the full symbol range.  With zigzag, all codes land in
+the Huffman codebook to cover the full symbol range.  With zigzag, all codes land in
 the contiguous range `[0, 2*radius-2]`, so `bklen=2*radius` is sufficient.
 
 See `examples/presets/cusz.toml` for the corresponding TOML configuration.
@@ -127,7 +127,6 @@ name        = "huf"
 type        = "Huffman"
 input_type  = "uint16"   # "uint8", "uint16", or "uint32"
 bklen       = 1024       # optional; defaults to 256 (uint8) or 1024 (uint16/uint32)
-encode_mode = "Coarse"   # optional; leave at "Coarse" ("Fine" is experimental)
 book_source = "PerBlock" # optional; "PerBlock" (default), "Adaptive", or "Fixed"
 book_floor_shift = 24    # Adaptive only; frequency floor as max_freq >> shift
 book_refit_threshold = 1.2  # Adaptive only; refit when bit rate degrades past this (0 = never)
@@ -154,7 +153,7 @@ offline from representative scientific data, and from Shah et al., *Lightweight
 Huffman Coding for Efficient GPU Compression* (ICS'23), which fits distributions to
 cuSZ's quantization-code stream and selects a precomputed codebook at runtime.
 
-### `Adaptive` — sample once, reuse (recommended)
+### Adaptive — sample once, reuse (recommended)
 
 Histograms the **first** block only, then builds a codebook from that histogram and
 pins it.  One histogram for the lifetime of the stage instead of one per call:
@@ -172,27 +171,18 @@ containing them still encodes correctly.  It also bounds Huffman depth — see t
 27-bit limit below.  If the book still does not fit, the shift is halved and the
 build retried; shift 0 is a uniform book, which always fits.
 
-Compression ratio is essentially unchanged, because the book is fitted to the data
-rather than guessed.  Geometric mean ratio against `PerBlock` over 26 (preset, field)
-combinations — `cusz.toml`, `cusz_hi_cr.toml` and `gpu_zstd.toml` across 5 CESM-ATM
-fields, 3 Hurricane-ISABEL fields and EXAALT:
+`Adaptive` is not a fully GPU-resident encoder. On a fitting call, the histogram is
+computed on the GPU but copied to the host, and the canonical tree is built on the
+CPU. Reused-book calls skip that work, but the default symbol-range guard still
+copies a verdict to the host, and cuSZ's coarse encode path always copies partition
+metadata to the host for its prefix sum. Disabling the guard removes only the first
+of those reused-book synchronizations; the partition-prefix synchronization remains.
 
-| preset | upstream of Huffman | `Adaptive` ratio vs `PerBlock` |
-|---|---|---|
-| `cusz.toml`       | `LorenzoQuant` codes, bklen 1024 | **-0.0%** |
-| `cusz_hi_cr.toml` | `GInterp` codes, bklen 4096      | **-0.5%** |
-| `gpu_zstd.toml`   | `GPULZ` literals, bklen 4096     | **-0.0%** |
+**There is no fully GPU-only Huffman mode.** `PerBlock`, `Adaptive`, and `Fixed`
+all use the host-coordinated coarse encoding path. The book source changes when
+the codebook is built or reused, not how encoded partitions are assembled.
 
-Worst single field: -1.3%.  Sweeping the error bound over `1e-2 … 1e-5` on three
-fields moves it by less than 0.01%.  Reconstruction PSNR is identical to `PerBlock`
-in every cell, as it must be — the codebook affects only how the symbols are spelled.
-
-Throughput gains are real but not yet well characterized: roughly 1.1x–1.4x geometric
-mean per preset on a development box (WSL2, RTX 3080 Ti, single run per cell), and
-1.5x–2.2x on repeated small-to-medium compresses of one field.  Run-to-run spread on
-that machine is about ±20%, so treat all of these as provisional.
-
-### `Fixed` — a book chosen up front
+### Fixed — a book chosen up front
 
 Skips the histogram entirely, using a codebook derived from an analytic distribution
 or supplied directly:
@@ -212,77 +202,23 @@ data — offline-generated books in the CEAZ sense, or a workflow where the same
 has to be shared across independently compressed chunks.  Otherwise prefer
 `Adaptive`: it reaches the same steady-state throughput without the ratio risk.
 
-**That ratio risk is large.**  Over the same 26 combinations, a reasonably configured
-`Fixed` model book (Laplace, centered per preset, `scale = bklen/64`) lost a geometric
-mean of **-31%** on `cusz.toml`, **-83%** on `cusz_hi_cr.toml` and **-11%** on
-`gpu_zstd.toml`, with a worst case of -93%.  On `cusz_hi_cr.toml` it pinned the ratio
-near 4.5 on every field, from ones `PerBlock` compressed 12x to ones it compressed
-61x — at that point the model's own entropy, not the data, sets the output size.
-
-The knobs are sharp in both directions.  On CESM `CLDHGH` at `1e-4` the same book
-costs only 3%, which is what makes `Fixed` easy to over-trust from a single
-measurement; at `1e-2` on the same field it costs 68%.  If you use `Fixed`, measure it
-on your own data, upstream stage, *and* error bound.
-
 ### Things to know about both
 
-- **`Adaptive` does not eliminate the ratio/tuning question — it answers it.** A model
-  book cannot match a bimodal or otherwise irregular code distribution; a sampled one
-  tracks whatever the data actually does.
-- **`book_floor_shift` matters much more at large `bklen`.**  Dropping it from 24 to 12
-  costs about 1–3% ratio at `bklen = 1024` but **23%** at `bklen = 4096`, because the
-  floor swallows a larger share of a wider distribution.  Leave it at the default
-  unless a book fails to build.
-- **The book is fitted to the first block only, so ratio drifts across a long run.**
-  Measured with `fzgmod-profile-huffman-drift` (one pipeline, many successive
-  different steps): **4.7% mean / 9.6% worst** across 23 CESM `CLOUD` levels, **8.3%
-  / 27.6%** across 5 different CESM-ATM fields, **9.2% / 22.6%** across 20 Hurricane
-  slabs.  Real but bounded, and still well under what a fixed model book gives up.
-  Nothing detects drift automatically; `PerBlock` is the refit-every-call bound.
+- The book is fitted to the first block only, so ratio drifts across a long run.
 - **Refitting.**  `setRefitThreshold(r)` (default 1.2) rebuilds the book once the
-  encoded bit rate degrades past `r` times the rate it achieved when fitted — free,
-  because `encode()` already reports `total_nbit`.  The refit lands on the *next*
+  encoded bit rate degrades past `r` times the rate it achieved when fitted. The refit lands on the *next*
   call; the current one is already encoded.  This handles a distribution drifting
   toward less compressible: over 26 CESM `CLOUD` levels it cuts the loss from 42% to
   0.9%.  It cannot see a block that is *more* compressible than the fitted one while
-  still being poorly served by its book — `LHFLX` lost 27.6% ratio to a `CLDHGH`
-  codebook while its bit rate fell.  `setRefitInterval(n)` refits unconditionally
+  still being poorly served by its book. `setRefitInterval(n)` refits unconditionally
   every `n` calls and covers that case at the cost of one histogram per `n`.
   **When every call carries a genuinely different variable, prefer `PerBlock`**: a
   refit always lands one call late, so it cannot match a book fitted to the block
   being encoded.
-- **A constant first block no longer poisons the book.**  A step whose values
-  are all identical produces a single-symbol sample; the frequency floor turns that
-  into a book where the dominant symbol costs a full bit, and it is then pinned
-  forever.  The same CESM field measures **42% mean loss** when the fit lands on a
-  constant level against **4.7%** when it does not.  This is not exotic — CESM
-  `CLOUD` levels 0–2 and Hurricane `CLOUDf48` slabs 18–19 are all exactly constant.
-  A degeneracy guard now refuses to pin a book fitted to a block with fewer than two
-  distinct symbols, or with over 99.9% of its mass on one; the block is still encoded
-  with that book, but the next call re-histograms.  This removed the failure mode —
-  the same CESM run went from 42% mean loss to 0.86%.
-
-- **The bitstream is unchanged.**  The reverse codebook still travels in every
-  encoded stream, so output from either mode decodes through the stock path with no
-  extra configuration and no file-format change.
-- **The out-of-range symbol check is restored by a device-side guard.**  In
-  `PerBlock` a symbol `>= bklen` is caught by the `sum(h_freq) == inlen` test.  Once a
-  book is pinned nothing histograms, so `setValidateSymbolRange()` (default on) runs a
-  grid-stride kernel and throws before `encode()` launches — necessarily before,
-  because an out-of-range index faults inside the encode kernel and cannot be reported
-  afterwards.  That costs one stream sync: about 16% of `Adaptive`'s throughput at
-  24.7 MiB (24.4 vs 29.0 GB/s, still 1.35x over `PerBlock`), within noise at 1 MiB.
-  Disable it for CUDA Graph capture, or when the range is guaranteed upstream —
-  disabling it with genuinely out-of-range symbols is undefined behaviour and in
-  practice takes down the CUDA context.
 - **Codes cannot exceed 27 bits.**  `HuffmanWord<4>` holds the code in a 27-bit
-  field.  A frequency distribution skewed enough to need a wider code is rejected with
-  an exception in `PerBlock` and `Fixed` mode (the reference builder clamped it to an
-  unusable `prefix_code = 0` and printed to stdout, which produced an undecodable
-  stream).  `Adaptive` instead flattens its frequency floor until the book fits.
-- **Ratio is data-dependent.**  Measure against `PerBlock` for your upstream stage
-  before adopting either mode — the code distributions produced by `GInterp`,
-  `AdaptiveLorenzo` and the LC stages differ from cuSZ-style dual quantization.
+  field. A `PerBlock` book that exceeds it falls back to a reusable frequency-floored
+  Adaptive book; a caller-supplied `Fixed` book is rejected. `Adaptive` flattens its
+  frequency floor until the book fits.
 
 `setFixedBookFromFreq()` rejects a zero-frequency bin, and both setters reject a
 book whose codes will not fit `HuffmanWord<4>`'s 27-bit code field (widen the model
@@ -304,18 +240,16 @@ requires two host-synchronous operations inside each forward execute call — on
 transfer the histogram to the CPU for codebook construction, and one to synchronize
 partition metadata for prefix-sum computation.
 
-`setBookSource()` with `Adaptive` or `Fixed` removes steps 1–4 below (barrier 1)
-from every call after the first. Barrier 2 has no working opt-out: the experimental
-`Fine` mode targets it but does not engage on realistic data, so the flow below is
-what runs in every supported configuration.
+`Adaptive` removes steps 1–4 below after a book has been fitted, and `Fixed` omits
+them once its configured book is resident. Barrier 2 remains in every call.
 
 ### Forward pass
 
 ```
 GPU  ←input T[]                                       output uint8_t[]→
   1. GPU histogram (p2013 shared-mem atomics)         d_freq[bklen]
+  2. cudaMemcpyAsync D2H                              h_freq[bklen]
      └─ cudaStreamSynchronize() ◄── HOST BARRIER 1
-  2. cudaMemcpy D2H (blocking)                        h_freq[bklen]
      └─ CPU: sum(h_freq) == inlen check — throws if any symbol ≥ bklen
   3. CPU: canonical Huffman tree build                h_bk4[], h_revbk4[]
   4. cudaMemcpy H2D                                   d_bk4[], d_revbk4[]
@@ -326,7 +260,7 @@ GPU  ←input T[]                                       output uint8_t[]→
         CPU: prefix-sum over pardeg partitions
         cudaMemcpy H2D(h_par_entry)
   7. GPU encode phase 4 — concatenate partitions      d_bitstream
-  8. GPU memcpy_merge — assemble full PHF blob        d_encoded
+  8. GPU memcpy_merge — assemble Huffman blob         d_encoded
   9. cudaMemcpyAsync D2D → pipeline output buffer
 ```
 
@@ -335,42 +269,9 @@ latency-bound. `Adaptive`/`Fixed` removes barrier 1; barrier 2 remains in every
 supported configuration. `isGraphCompatible()` returns `false` regardless, because
 `encode()` returns `total_nbit` / `total_ncell` to the host to assemble `phf_header`
 before the H2D merge. Making the stage capturable would additionally require
-assembling that header and running the merge on the device. **Not planned** — graph
-capture has not shown a measurable benefit elsewhere in the library, which does not
-justify that rework.
-
-### Experimental: `Fine` encode mode {#huffman-fine-reachability}
-
-The fine kernel packs four codes into a 32-bit shard accumulator, so it requires
-**every** code in the book to fit in 8 bits. `encode()` scans the built book and
-falls back to the coarse path when it does not. Two accessors make that visible:
-
-| Accessor | Meaning |
-|---|---|
-| `getLastUsedFineEncode()` | Did the last forward call actually run the fine kernel? Always `false` in `Coarse` mode. |
-| `getLastMaxCodeLen()` | Longest code, in bits, in the book the last call used. Reported in both modes — in `Coarse` it is what says whether switching to `Fine` would take effect (it engages only at ≤ 8). |
-
-A fallback also logs one `FZ_LOG(WARN)`, re-armed only when the code length changes,
-so a resident `Fixed`/`Adaptive` book does not warn on every call.
-
-Measured through `LorenzoQuant -> Huffman` (bklen 1024, radius 512) on CESM-ATM
-`CLDHGH`/`CLDLOW`/`FLDSC`/`PRECT`/`TS` at `eb` `1e-2 … 1e-5`, the longest code is
-**12–24 bits in all 20 cells — never ≤ 8**, so the fine path never ran.
-
-This is structural rather than a tuning problem. By Kraft's inequality an 8-bit
-ceiling admits at most **256** codewords, and these fields carry 322–1025 distinct
-quantization symbols at every bound but the coarsest. Length-limiting cannot
-manufacture a code that does not exist:
-
-| Constraint | Constructible? | Cost vs unconstrained Huffman |
-|---|---|---|
-| ≤ 8 bits | only when ≤ 256 distinct symbols (4 of 12 cells) | +1.8% … +14.6% bits/symbol |
-| ≤ 16 bits | always | **+0.00% … +0.31%** |
-
-So the change that would make the fine path reachable is a **2x16-bit shard
-geometry**, not length-limiting to 8 bits. Until then, treat `Fine` as effective
-only for small alphabets — bitplane or byte-oriented inputs rather than
-wide-radius quantization codes.
+computing partition offsets, assembling the header, and merging the stream on the
+device. A device-resident option is under consideration but is not currently
+implemented.
 
 ### Inverse pass
 
@@ -384,10 +285,10 @@ GPU  ←input uint8_t[]                                 output T[]→
 
 ## Internal buffer layout
 
-`HuffmanStage<T>` holds a `phf::Buf<T>` object (lazily allocated on first execute,
-reused as long as input length stays within the allocated capacity).  This object manages all PHF
-internal device and host allocations directly via `cudaMalloc`/`cudaMallocHost`
-**outside** the pipeline memory pool.  The pool is not used.
+`HuffmanStage<T>` holds a `phf::Buf<T>` object (the internal cuSZ name), lazily
+allocated on first execute and reused while the input stays within capacity. Its
+device and pinned-host scratch is allocated persistently through the pipeline memory
+pool.
 
 Approximate device footprint for a stream of `N` elements with codebook of length `B`:
 
@@ -416,7 +317,7 @@ reconstruct the stage for decompression:
 [3..10]  original_len_   (uint64_t, little-endian; element count)
 ```
 
-The PHF bitstream is self-describing: the 128-byte `phf_header` is embedded at
+The cuSZ Huffman bitstream is self-describing: the 128-byte `phf_header` is embedded at
 offset 0 of the encoded output and contains the codebook and partition layout.
 
 ---
@@ -434,28 +335,21 @@ Consequence: **when pairing with `LorenzoQuantStage`, `zigzag_codes=true` is
 required** unless you set `bklen=65536`.  Raw signed-delta codes are not contiguous
 in `[0, bklen)` for any `bklen < 65536`.
 
-**Not CUDA Graph compatible in any configuration.**  Two device-to-host
-synchronization points exist in every forward call (histogram D2H for codebook
-construction; partition metadata D2H for prefix-sum computation).
-The adaptive or fixed codebook setting removes the first, but the second and the
-encoded-size round trip in `encode()` remain.  The stage cannot be included in a
-graph-captured pipeline.
+**Huffman scratch is pool-owned, but not allocated from the stream-ordered arena.**
+`phf::Buf<T>` asks `MemoryPool` for persistent device and pinned-host allocations.
+Those APIs call `cudaMalloc` and `cudaMallocHost` directly; unlike the pool's normal
+`allocate(size, stream)` path, they take no stream and are not ordered after earlier
+work on one. `MemoryPool` supplies lifetime ownership, accounting, and cleanup here,
+not suballocation or asynchronous reuse.
 
-**Latency-bound, not throughput-bound.**  The CPU codebook build and the D2H syncs
-are serial barriers.  Kernel execution time is small relative to round-trip PCIe
-latency.  HuffmanStage performs poorly on very small inputs (< ~100 KB), which is
-where a reused codebook helps most in relative terms: the cost it removes is per-call
-and does not shrink with the payload.
-
-**PHF scratch is pool-managed, not stream-ordered.**  `phf::Buf<T>` allocates all
-PHF internal scratch via `MemoryPool::allocatePersistentDevice` /
-`allocatePersistentPinned` (backed by `cudaMalloc` / `cudaMallocHost`).  These
-allocations are persistent — they survive for the lifetime of the stage and are
-returned to the pool when `phf::Buf<T>` is destroyed.  They are reported in
-`pool->getPersistentDeviceBytes()` / `getPersistentPinnedBytes()` for total
-footprint accounting.  They are not stream-ordered and do not participate in buffer
-coloring.  Pool sizing (`MemoryPoolConfig::multiplier`) controls the stream-ordered
-I/O buffer pool only; persistent PHF scratch is additional.
+The allocations keep stable addresses for the lifetime of `phf::Buf<T>`. A pool
+`reset()` does not release them, and buffer coloring cannot alias them with stage I/O
+or another stage's scratch. When `phf::Buf<T>` is destroyed, `MemoryPool` untracks
+them and calls `cudaFree` / `cudaFreeHost`; they are not returned to the reusable
+`cudaMemPool_t` arena. Their bytes appear in `getPersistentDeviceBytes()` and
+`getPersistentPinnedBytes()`, but do not count against the stream-ordered arena's
+`pool_size_multiplier`. This allocation property does not make Huffman graph
+compatible: its execution still contains host synchronizations.
 
 **Reallocation on capacity growth.**  `phf::Buf<T>` is reallocated only when the
 input element count grows past the previously allocated capacity (`cap_inlen_`), or
@@ -469,10 +363,12 @@ overhead; steady-state or shrinking workloads do not.
 
 ## Acknowledgements
 
-`HuffmanStage` incorporates PHF source files (`hf.h`, `hf_bk*.cc`, `hf_buf.cc`,
-`hf_canon.cc`, `hf_hl.cc`, `hf_kernels.cu`, `hf_impl.hh`) vendored and adapted
-from the **cuSZ** project PHF codec (`origin/v1.1.0_dev`), by the cuSZ team
-(BSD-3-Clause). Changes are documented at the top of each adapted file.
+`HuffmanStage` incorporates cuSZ's Huffman source files (`hf.h`, `hf_bk*.cc`,
+`hf_buf.cc`, `hf_canon.cc`, `hf_hl.cc`, `hf_kernels.cu`, `hf_impl.hh`) vendored
+and adapted from `origin/v1.1.0_dev` of the **cuSZ** repository (BSD-3-Clause).
+cuSZ calls this implementation `phf` internally; that name is retained in its
+namespace, structures, and file-format types. Changes are documented at the top
+of each adapted file.
 
 > cuSZ team (UChicago Argonne National Laboratory, Indiana University, and others).
 > *pSZ/cuSZ: A GPU-Based Error-Bounded Lossy Compressor for Scientific Data.*

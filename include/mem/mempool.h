@@ -132,10 +132,10 @@ public:
      */
     void* allocatePersistentPinned(size_t bytes, const std::string& tag = "");
 
-    /** Return a previously persistent-device allocation to the pool. */
+    /** Free and untrack a persistent-device allocation. */
     void freePersistentDevice(void* ptr);
 
-    /** Return a previously persistent-pinned allocation to the pool. */
+    /** Free and untrack a persistent pinned-host allocation. */
     void freePersistentPinned(void* ptr);
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────

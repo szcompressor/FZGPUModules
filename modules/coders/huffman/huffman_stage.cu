@@ -71,14 +71,12 @@ template <typename T>
 void HuffmanStage<T>::initBuf(size_t inlen, MemoryPool* pool)
 {
     buf_.reset();  // destroy old Buf<T> first — returns allocations to pool
-    bool use_hfr = (encode_mode_ == HuffmanEncodeMode::Fine);
-    buf_               = std::make_unique<phf::Buf<T>>(inlen, bklen_, pool, -1, use_hfr);
+    buf_               = std::make_unique<phf::Buf<T>>(inlen, bklen_, pool);
     // Fresh d_bk4 / d_revbk4 allocations: whatever fixed book was resident is gone.
     fixed_book_resident_ = false;
     pool_              = pool;
     cap_inlen_         = inlen;
     last_bklen_        = bklen_;
-    last_encode_mode_  = encode_mode_;
     fz::module::GPU_histogram_generic_optimizer_on_initialization<T>(
         inlen, static_cast<uint16_t>(bklen_),
         hist_grid_dim_, hist_block_dim_, hist_shmem_use_, hist_r_per_block_);
@@ -320,9 +318,6 @@ size_t HuffmanStage<T>::estimateDeviceFootprintBytes(size_t inlen) const
                 + sizeof(T) * (100 + n / 10 + 1)          // d_brval
                 + sizeof(uint32_t) * (100 + n / 10 + 1)   // d_bridx
                 + sizeof(uint32_t);                        // d_brnum
-    // Fine mode adds CUB temp storage (~few KB) and two uint64_t device scalars
-    if (encode_mode_ == HuffmanEncodeMode::Fine)
-        base += 65536 + 2 * sizeof(uint64_t);  // conservative CUB temp upper bound
     return base;
 }
 
@@ -341,8 +336,6 @@ size_t HuffmanStage<T>::estimatePinnedFootprintBytes(size_t inlen) const
                 + sizeof(M) * pardeg * 3                  // h_par_nbit/ncell/entry
                 + sizeof(uint32_t) * bklen_               // h_freq
                 + sizeof(uint32_t);                        // h_brnum
-    if (encode_mode_ == HuffmanEncodeMode::Fine)
-        base += 2 * sizeof(uint64_t);  // h_total_nbit, h_total_ncell
     return base;
 }
 
@@ -367,9 +360,9 @@ void HuffmanStage<T>::execute(
         T*     d_input = static_cast<T*>(inputs[0]);
         size_t inlen   = sizes[0] / sizeof(T);
 
-        // Reallocate when capacity exceeded, bklen changed, or encode mode changed.
+        // Reallocate when capacity is exceeded or bklen changes.
         // Use pool from execute() parameter; on first call, this also sets pool_.
-        if (!buf_ || inlen > cap_inlen_ || bklen_ != last_bklen_ || encode_mode_ != last_encode_mode_)
+        if (!buf_ || inlen > cap_inlen_ || bklen_ != last_bklen_)
             initBuf(inlen, pool);
 
         // The histogram (and with it the D2H, the host sync, and the out-of-range
@@ -507,24 +500,6 @@ void HuffmanStage<T>::execute(
         size_t   outlen = 0;
         phf::high_level<T>::encode(
             buf_.get(), d_input, inlen, &d_out, &outlen, header_, stream);
-
-        // Mirror out which encode path actually ran.  Fine falls back to coarse for
-        // books with codes longer than 8 bits, and without this the fallback is
-        // invisible to anyone benchmarking the two modes against each other.
-        last_used_fine_   = buf_->last_used_fine;
-        last_max_codelen_ = buf_->last_max_codelen;
-
-        // Warn on the first fallback and again only if the code length moves, so a
-        // resident Fixed/Adaptive book does not emit this once per compress call.
-        if (encode_mode_ == HuffmanEncodeMode::Fine && !last_used_fine_ &&
-            last_max_codelen_ != warned_max_codelen_) {
-            warned_max_codelen_ = last_max_codelen_;
-            FZ_LOG(WARN,
-                   "HuffmanStage: Fine encode requested but max code length is %u bits "
-                   "(> 8); fell back to the coarse path. Measurements from this stage "
-                   "are coarse-path numbers.",
-                   static_cast<unsigned>(last_max_codelen_));
-        }
 
         // ── Adaptive refit trigger ───────────────────────────────────────────
         // encode() already reports total_nbit, so the achieved bit rate costs

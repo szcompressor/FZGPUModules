@@ -6,7 +6,7 @@
 //   - Removed timer/io includes (not needed).
 //   - Buf<E> refactored to use pool-managed raw pointers instead of unique_ptr members.
 //     Constructor takes MemoryPool* and allocates via allocatePersistentDevice/Pinned.
-//     Destructor returns all allocations to the pool via freePersistentDevice/Pinned.
+//     Destructor asks the pool to free and untrack them via freePersistentDevice/Pinned.
 //     The pool is the sole owner; Buf<E> holds non-owning raw pointers.
 
 #pragma once
@@ -69,7 +69,6 @@ struct Buf {
     size_t       pardeg;
     size_t       sublen;
     const size_t bklen;
-    const bool   use_HFR;
     const size_t revbk4_bytes;
     const size_t bitstream_max_len;
     /// H4-word capacity of d_scratch4/h_scratch4.
@@ -88,11 +87,6 @@ struct Buf {
     uint16_t rt_bklen;
     int      numSMs;
 
-    // Diagnostics written by high_level<E>::encode() on every forward call.  The fine
-    // path is only *requested* by use_HFR; encode() falls back to coarse when the built
-    // book has a code longer than 8 bits, so these record what actually ran.
-    uint8_t  last_max_codelen = 0;      ///< Max Huffman code length in the book just used.
-    bool     last_used_fine   = false;  ///< True iff GPU_fine_encode ran on the last call.
     size_t   total_footprint_d = 0;
     size_t   total_footprint_h = 0;
 
@@ -122,17 +116,6 @@ struct Buf {
     uint32_t* d_freq;
     uint32_t* h_freq;
 
-    // Fine-path async totals: populated after GPU_fine_encode; read after caller sync.
-    // Null when use_HFR is false.
-    uint64_t* d_total_nbit;
-    uint64_t* d_total_ncell;
-    uint64_t* h_total_nbit;
-    uint64_t* h_total_ncell;
-
-    // CUB temp storage for GPU_encode_scan (ExclusiveSum). Null when use_HFR is false.
-    uint8_t*  d_cub_temp;
-    size_t    cub_temp_bytes;
-
     // ── Static helpers ────────────────────────────────────────────────────────
     static int _revbk4_bytes(int bklen);
     static int _revbk8_bytes(int bklen);
@@ -159,12 +142,11 @@ struct Buf {
     // ── Constructor / destructor ──────────────────────────────────────────────
 
     /**
-     * Allocate all PHF internal buffers from `pool` via
+     * Allocate all cuSZ Huffman internal buffers from `pool` via
      * allocatePersistentDevice / allocatePersistentPinned.
-     * Destructor returns all pointers to the same pool.
+     * Destructor asks the same pool to free and untrack all pointers.
      */
-    Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool,
-        int _pardeg = -1, bool _use_HFR = false);
+    Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool, int _pardeg = -1);
     ~Buf();
 
     // ── Mutators ──────────────────────────────────────────────────────────────
