@@ -195,6 +195,68 @@ __global__ void KERNEL_CUHIP_HF_decode(
     }
 }
 
+template <typename E, typename H, typename M>
+__global__ void KERNEL_CUHIP_HF_decode_device_header(
+    PHF_BYTE* encoded, int revbook_nbyte, E* out)
+{
+    constexpr int CELL_BITWIDTH = sizeof(H) * 8;
+    extern __shared__ uint8_t s_revbook[];
+
+    const auto* header = reinterpret_cast<const phf_header*>(encoded);
+    const auto* revbook = encoded + header->entry[PHFHEADER_REVBK];
+    auto* bitstream = reinterpret_cast<H*>(
+        encoded + header->entry[PHFHEADER_BITSTREAM]);
+    auto* par_nbit = reinterpret_cast<M*>(
+        encoded + header->entry[PHFHEADER_PAR_NBIT]);
+    auto* par_entry = reinterpret_cast<M*>(
+        encoded + header->entry[PHFHEADER_PAR_ENTRY]);
+
+    for (int i = threadIdx.x; i < revbook_nbyte; i += blockDim.x)
+        s_revbook[i] = revbook[i];
+    __syncthreads();
+
+    auto decode_partition = [&](H* input, E* partition_out, int total_bw) {
+        int next_bit;
+        int idx_bit = 0, idx_byte = 0, idx_out = 0;
+        H bufr = input[idx_byte];
+        auto first = reinterpret_cast<H*>(s_revbook);
+        auto entry = first + CELL_BITWIDTH;
+        auto keys = reinterpret_cast<E*>(s_revbook + sizeof(H) * (2 * CELL_BITWIDTH));
+        H v = (bufr >> (CELL_BITWIDTH - 1)) & 0x1;
+        int l = 1, i = 0;
+
+        while (i < total_bw) {
+            while (v < first[l]) {
+                ++i;
+                idx_byte = i / CELL_BITWIDTH;
+                idx_bit = i % CELL_BITWIDTH;
+                if (idx_bit == 0) bufr = input[idx_byte];
+                next_bit = (bufr >> (CELL_BITWIDTH - 1 - idx_bit)) & 0x1;
+                v = (v << 1) | next_bit;
+                ++l;
+            }
+            partition_out[idx_out++] = keys[entry[l] + v - first[l]];
+            ++i;
+            if (i < total_bw) {
+                idx_byte = i / CELL_BITWIDTH;
+                idx_bit = i % CELL_BITWIDTH;
+                if (idx_bit == 0) bufr = input[idx_byte];
+                next_bit = (bufr >> (CELL_BITWIDTH - 1 - idx_bit)) & 0x1;
+                v = next_bit;
+            }
+            l = 1;
+        }
+    };
+
+    const int stride = blockDim.x * gridDim.x;
+    for (int gid = blockIdx.x * blockDim.x + threadIdx.x;
+         gid < header->pardeg; gid += stride) {
+        decode_partition(
+            bitstream + par_entry[gid], out + static_cast<size_t>(header->sublen) * gid,
+            static_cast<int>(par_nbit[gid]));
+    }
+}
+
 }  // namespace phf
 
 
@@ -294,6 +356,14 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase4(
             " were allocated. The codebook is a poor enough fit for this data that "
             "the encoding expands past the buffer bound.");
 
+    GPU_coarse_encode_phase4_device(
+        in_buf, par_entry, par_ncell, hfpar, bitstream, stream);
+}
+
+PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_encode_phase4_device(
+    H* in_buf, M* par_entry, M* par_ncell, phf::par_config hfpar,
+    H* bitstream, void* stream)
+{
     phf::KERNEL_CUHIP_encode_phase4_concatenate<H, M>
         <<<hfpar.pardeg, 128, 0, (cudaStream_t)stream>>>
         (in_buf, par_entry, par_ncell, hfpar.sublen, bitstream);
@@ -330,6 +400,17 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode(
     phf::KERNEL_CUHIP_HF_decode<E, H, M>
         <<<grid_dim, block_dim, revbook_len, (cudaStream_t)stream>>>
         (in_bitstream, in_revbook, in_par_nbit, in_par_entry, revbook_len, sublen, pardeg, out_decoded);
+}
+
+PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode_device(
+    PHF_BYTE* in_encoded, size_t revbook_len, int numSMs,
+    E* out_decoded, void* stream)
+{
+    constexpr int block_dim = HuffmanHelper::BLOCK_DIM_DEFLATE;
+    const int grid_dim = numSMs > 0 ? 8 * numSMs : 1;
+    phf::KERNEL_CUHIP_HF_decode_device_header<E, H, M>
+        <<<grid_dim, block_dim, revbook_len, (cudaStream_t)stream>>>
+        (in_encoded, static_cast<int>(revbook_len), out_decoded);
 }
 
 #undef PHF_MODULE_TPL

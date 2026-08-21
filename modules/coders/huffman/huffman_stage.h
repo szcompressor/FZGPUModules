@@ -7,8 +7,10 @@
  * Forward: `T[]` → variable-length cuSZ Huffman bitstream (`phf_header` prepended).
  * Inverse: cuSZ Huffman bitstream → `T[]`.
  *
- * The encode path is the multi-kernel coarse-grained path, which carries a CPU
- * prefix-sum sync in the middle of encode.
+ * Both execution modes use the multi-kernel coarse-grained coder.  The default
+ * HostCoordinated mode carries a CPU prefix-sum sync in the middle of encode;
+ * DeviceResident keeps the partition scan and stream assembly on the GPU for all
+ * book sources, including canonical codebook construction from device histograms.
  *
  * Note: the histogram D2H is a CPU-sync operation.  It disappears
  * entirely under HuffmanBookSource::Fixed, which builds the codebook once up front
@@ -43,13 +45,19 @@ namespace phf { template<typename E> struct Buf; }
 
 namespace fz {
 
+/** Selects how the forward Huffman bitstream is assembled. */
+enum class HuffmanExecutionMode {
+    HostCoordinated, ///< cuSZ coarse path with a host partition-prefix scan (default).
+    DeviceResident,  ///< Device scan/header assembly; book construction follows the selected source.
+};
+
 /**
  * Selects where the Huffman codebook comes from on the forward path.
  *
- * `PerBlock` is the classic path: histogram the input, copy the frequencies to the
- * host, build a canonical tree, copy the codebook back.  `Fixed` builds one book up
- * front and reuses it for every call, which removes the histogram kernel, the
- * frequency D2H, the host stream sync, and the host tree build from every compress.
+ * `PerBlock` builds a fresh book from each input histogram. HostCoordinated follows
+ * cuSZ by copying frequencies to the CPU; DeviceResident builds the same canonical
+ * book directly from the device histogram. `Fixed` builds one book up front and
+ * reuses it for every call.
  *
  * Prior work: CEAZ (Xiong et al., ICS'22) generates canonical codewords offline from
  * representative scientific data; Shah et al., *Lightweight Huffman Coding for
@@ -165,6 +173,17 @@ public:
     }
     uint32_t getBklen() const         { return bklen_; }
 
+    /**
+     * Select the forward execution path. `DeviceResident` moves partition scan
+     * and stream assembly to the GPU for every book source. PerBlock and Adaptive
+     * fitting also construct their canonical tree and reverse book directly from
+     * the device histogram. The PHF stream format is unchanged. Exact size/error
+     * readback is deferred to postStreamSync() when terminal and performed before
+     * return when a downstream stage needs the size.
+     */
+    void setExecutionMode(HuffmanExecutionMode mode) { execution_mode_ = mode; }
+    HuffmanExecutionMode getExecutionMode() const { return execution_mode_; }
+
     // ── Pre-built codebooks ───────────────────────────────────────────────────
 
     /**
@@ -220,19 +239,16 @@ public:
      * codebook with the raw symbol: an out-of-range value reads past `d_bk4` and
      * produces a stream that cannot be decoded, silently.
      *
-     * The check costs one grid-stride pass over the input **and one stream sync**.
-     * The sync is unavoidable: the verdict has to be known before `encode()`
-     * launches, since an out-of-range index faults inside the encode kernel and
-     * cannot be reported after the fact.  It is still much cheaper than the
-     * `PerBlock` path it replaces — a 4-byte device-to-host copy instead of `bklen`
-     * words, and no host-side tree build — but it is not free, and it makes the
-     * stage ineligible for CUDA Graph capture.
+     * HostCoordinated pays one grid-stride pass and a stream sync so it can reject
+     * the input before cuSZ's unchecked fill kernel launches. DeviceResident uses
+     * a checked fill that substitutes a safe code and reports the offender at the
+     * normal completion readback, so it adds no mid-encode synchronization.
      *
      * Turn it off when the symbol range is guaranteed by construction upstream (for
      * example `LorenzoQuantStage` with `setZigzagCodes(true)` and
-     * `bklen == 2 * quant_radius`), or when capturing a graph.  Doing so with
-     * genuinely out-of-range symbols is undefined behaviour — in practice it takes
-     * down the CUDA context.
+     * `bklen == 2 * quant_radius`). Doing so with genuinely out-of-range symbols
+     * makes the result invalid; DeviceResident remains memory-safe but does not
+     * promise a meaningful decoded value for the substituted symbol.
      */
     void setValidateSymbolRange(bool on) { validate_symbol_range_ = on; }
     bool getValidateSymbolRange() const  { return validate_symbol_range_; }
@@ -345,11 +361,14 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    // Not graph-compatible in the current implementation. Fixed/Adaptive remove
-    // the histogram D2H after a book is resident, but encode still returns
-    // total_nbit/total_ncell to the host to assemble phf_header before the H2D
-    // merge. A device-resident path must replace that prefix scan and assembly.
-    bool isGraphCompatible() const override { return false; }
+    bool isGraphCompatible() const override {
+        return !is_inverse_ && execution_mode_ == HuffmanExecutionMode::DeviceResident
+               && book_source_ == HuffmanBookSource::Fixed && is_terminal_output_;
+    }
+
+    void setTerminalOutput(bool terminal) override { is_terminal_output_ = terminal; }
+
+    void postStreamSync(fz::stream_t stream) override;
 
     // ── Pool lifecycle ────────────────────────────────────────────────────────
 
@@ -385,8 +404,19 @@ public:
     ) const override {
         if (input_sizes.empty()) return {0};
         if (!is_inverse_) {
-            // Upper bound: generous 2× input for worst-case bitstream + header overhead.
-            return {input_sizes[0] * 2 + 4096};
+            const size_t n = input_sizes[0] / sizeof(T);
+            if (n == 0) return {0};
+            const size_t sublen = capi_phf_coarse_tune_sublen(n);
+            const size_t pardeg = (n - 1) / sublen + 1;
+            constexpr size_t kMaxCodeBits = 27;
+            constexpr size_t kCellBits = 32;
+            const size_t cells_per_partition =
+                (sublen * kMaxCodeBits + kCellBits - 1) / kCellBits;
+            const size_t bitstream_bytes = pardeg * cells_per_partition * sizeof(uint32_t);
+            const size_t reverse_book_bytes =
+                phf_reverse_book_bytes(static_cast<uint16_t>(bklen_), 4, sizeof(T));
+            return {PHFHEADER_FORCED_ALIGN + reverse_book_bytes
+                    + 2 * pardeg * sizeof(PHF_METADATA) + bitstream_bytes};
         }
         // Inverse: exact decoded size restored from the serialized header.
         return {original_len_ * sizeof(T)};
@@ -470,6 +500,7 @@ public:
 private:
     bool              is_inverse_   = false;
     uint32_t          bklen_        = defaultBklen();
+    HuffmanExecutionMode execution_mode_ = HuffmanExecutionMode::HostCoordinated;
     HuffmanBookSource book_source_  = HuffmanBookSource::PerBlock;
 
     // Frequency table defining the fixed codebook (host-only; see setFixedBookFromFreq).
@@ -511,6 +542,10 @@ private:
     // cuSZ Huffman working buffers — allocated on first execute() or in onFinalize()
     std::unique_ptr<phf::Buf<T>> buf_;
     phf_header header_ {};
+    uint8_t* pending_device_output_ = nullptr;
+    bool pending_device_readback_ = false;
+    size_t pending_device_inlen_ = 0;
+    bool is_terminal_output_ = true;
 
     // Pool used for buf_ allocations.  Set by onFinalize() or captured from the
     // pool parameter on the first execute() call.  Raw non-owning pointer; the
@@ -547,6 +582,15 @@ private:
     // Builds a reusable codebook from a sampled histogram, flooring frequencies and
     // retrying with a flatter floor until the book fits the 27-bit code field.
     void buildAdaptiveBook(const uint32_t* h_hist, fz::stream_t stream);
+
+    // Builds d_bk4 and d_revbk4 directly from buf_->d_freq. DeviceResident uses
+    // this for PerBlock/Adaptive histograms and for a Fixed table copied H2D.
+    void buildDeviceBook(fz::stream_t stream, MemoryPool* pool,
+                         size_t expected_symbols, uint32_t source_mode);
+
+    // Records the achieved bit rate and applies Adaptive refit policy. Called
+    // immediately for HostCoordinated and from postStreamSync for DeviceResident.
+    void updateAdaptiveRate(size_t inlen, size_t total_nbit);
 
     // Index of the first symbol with freq > 0 whose built code is unusable, or -1.
     int findUnusableCode(const uint32_t* freq) const;

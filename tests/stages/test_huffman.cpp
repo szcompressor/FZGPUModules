@@ -2,8 +2,9 @@
  * tests/stages/test_huffman.cpp
  *
  * GPU unit tests for HuffmanStage<T>.
- * Not graph-compatible (the coarse encode path performs a host prefix sum and
- * host-side header assembly).
+ * The default host-coordinated path is not graph-compatible.  The fixed-book
+ * DeviceResident forward path performs its scan and header assembly on-device
+ * and is graph-compatible when Huffman is the terminal stage.
  *
  *   HF1   HuffmanStage/RoundTrip_U16                  — uint16_t forward+inverse exact match
  *   HF2   HuffmanStage/RoundTrip_U8                   — uint8_t forward+inverse exact match
@@ -29,6 +30,14 @@
  *   HF31  HuffmanStage/AdaptiveBook_DegenerateSampleNotPinned — a constant first block must not pin the book
  *   HF32  HuffmanStage/AdaptiveBook_RefitOnRateRegression     — bit-rate regression triggers a refit
  *   HF33  HuffmanStage/PinnedBookSymbolRangeGuard            — pinned books still reject symbols >= bklen
+ *   HF34  HuffmanStage/DeviceResidentFixedBookRoundTrip       — device-resident uint16 round-trip
+ *   HF35  HuffmanStage/DeviceResidentMatchesHostCoordinatedBytes — identical PHF stream
+ *   HF36  HuffmanStage/DeviceResidentBookSourcesAndRange       — all sources + validation
+ *   HF37  HuffmanStage/Uint8OutputEstimateCoversCodewordLimit — conservative archive bound
+ *   HF38  HuffmanStage/DeviceResidentRoundTrip_U8             — device-resident uint8 round-trip
+ *   HF39  HuffmanStage/DeviceResidentRoundTrip_U32            — device-resident uint32 round-trip
+ *   HF40  HuffmanStage/DeviceResidentNonTerminalPipeline       — exact-size downstream composition
+ *   HF41  HuffmanStage/DeviceResidentMatchesHostBooksForAllSources — GPU tree compatibility
  */
 
 #include <gtest/gtest.h>
@@ -72,6 +81,7 @@ static std::vector<uint8_t> huffman_encode(
     std::vector<size_t> sizes   = {in_bytes};
     stage.execute(stream, &pool, inputs, outputs, sizes);
     cudaStreamSynchronize(stream);
+    stage.postStreamSync(stream);
 
     const size_t actual = stage.getActualOutputSize(0);
     std::vector<uint8_t> h_out(actual);
@@ -240,6 +250,16 @@ TEST(HuffmanStage, SaveRestoreState) {
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(HuffmanStage, GraphCompatible) {
     HuffmanStage<uint16_t> stage;
+    EXPECT_FALSE(stage.isGraphCompatible());
+
+    stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    EXPECT_FALSE(stage.isGraphCompatible()) << "device mode still needs a fixed book";
+
+    stage.setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    EXPECT_TRUE(stage.isGraphCompatible());
+
+    stage.setInverse(true);
     EXPECT_FALSE(stage.isGraphCompatible());
 }
 
@@ -693,6 +713,12 @@ TEST(HuffmanStage, OverlongCodeThrows) {
     stage.setFixedBookFromFreq(freq.data(), BK);
     EXPECT_THROW(huffman_encode(stage, h_in, cs.stream, *pool), std::runtime_error);
 
+    HuffmanStage<uint8_t> device_stage;
+    device_stage.setFixedBookFromFreq(freq.data(), BK);
+    device_stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    EXPECT_THROW(
+        huffman_encode(device_stage, h_in, cs.stream, *pool), std::runtime_error);
+
     // Adaptive is the documented way out: it flattens the frequency range until
     // the book fits rather than failing.
     HuffmanStage<uint8_t> adaptive;
@@ -775,6 +801,15 @@ TEST(HuffmanStage, PerBlockFallsBackToAdaptiveOnOverlongCode) {
     ASSERT_EQ(dec.size(), N);
     for (size_t i = 0; i < N; ++i)
         ASSERT_EQ(dec[i], h_in[i]) << "mismatch at " << i;
+
+    HuffmanStage<uint8_t> device_stage;
+    device_stage.setBklen(BK);
+    device_stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    auto device_enc = huffman_encode(device_stage, h_in, cs.stream, *pool);
+    EXPECT_TRUE(device_stage.getAdaptiveFallbackUsed());
+    device_stage.setInverse(false);
+    EXPECT_EQ(
+        huffman_decode(device_stage, device_enc, N, cs.stream, *pool), h_in);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -936,4 +971,198 @@ TEST(HuffmanStage, PinnedBookSymbolRangeGuard) {
     auto dec2 = huffman_decode(unchecked, enc2, N, cs.stream, *pool);
     ASSERT_EQ(dec2.size(), N);
     for (size_t i = 0; i < N; ++i) ASSERT_EQ(dec2[i], ok[i]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF34-HF40 — Device-resident assembly path
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST(HuffmanStage, DeviceResidentFixedBookRoundTrip) {
+    constexpr size_t N = 32771;  // partial final coarse partition
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint16_t>((i * 29 + i / 17) % 1024);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t), 8.0f);
+
+    HuffmanStage<uint16_t> stage;
+    stage.setBklen(1024);
+    stage.setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+
+    auto encoded = huffman_encode(stage, input, cs.stream, *pool);
+    ASSERT_GT(encoded.size(), PHFHEADER_FORCED_ALIGN);
+    stage.setInverse(false);
+    auto decoded = huffman_decode(stage, encoded, N, cs.stream, *pool);
+    EXPECT_EQ(decoded, input);
+}
+
+TEST(HuffmanStage, DeviceResidentMatchesHostCoordinatedBytes) {
+    constexpr size_t N = 20003;
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint16_t>((i * 13) % 700);
+
+    CudaStream cs;
+    auto host_pool = make_test_pool(N * sizeof(uint16_t), 8.0f);
+    auto device_pool = make_test_pool(N * sizeof(uint16_t), 8.0f);
+
+    HuffmanBookSpec spec{HuffmanBookModel::Laplace, -1.0, 96.0, 2.0};
+    HuffmanStage<uint16_t> host;
+    host.setBklen(1024);
+    host.setFixedBookFromModel(spec);
+
+    HuffmanStage<uint16_t> device;
+    device.setBklen(1024);
+    device.setFixedBookFromModel(spec);
+    device.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+
+    const auto host_bytes = huffman_encode(host, input, cs.stream, *host_pool);
+    const auto device_bytes = huffman_encode(device, input, cs.stream, *device_pool);
+    EXPECT_EQ(device_bytes, host_bytes);
+}
+
+TEST(HuffmanStage, DeviceResidentBookSourcesAndRange) {
+    constexpr size_t N = 8193;
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint16_t>((i * 19 + i / 13) % 700);
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint16_t), 8.0f);
+
+    HuffmanStage<uint16_t> per_block;
+    per_block.setBklen(1024);
+    per_block.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    auto per_block_bytes = huffman_encode(per_block, input, cs.stream, *pool);
+    per_block.setInverse(false);
+    EXPECT_EQ(huffman_decode(per_block, per_block_bytes, N, cs.stream, *pool), input);
+
+    HuffmanStage<uint16_t> adaptive;
+    adaptive.setBklen(1024);
+    adaptive.setBookSource(HuffmanBookSource::Adaptive);
+    adaptive.setRefitInterval(1);
+    adaptive.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    auto adaptive_bytes = huffman_encode(adaptive, input, cs.stream, *pool);
+    adaptive.setInverse(false);
+    EXPECT_EQ(huffman_decode(adaptive, adaptive_bytes, N, cs.stream, *pool), input);
+
+    // A second encode reuses the sampled Adaptive book while keeping the same
+    // fully device-resident assembly path.
+    adaptive.setInverse(false);
+    std::reverse(input.begin(), input.end());
+    adaptive_bytes = huffman_encode(adaptive, input, cs.stream, *pool);
+    adaptive.setInverse(false);
+    EXPECT_EQ(huffman_decode(adaptive, adaptive_bytes, N, cs.stream, *pool), input);
+    EXPECT_EQ(adaptive.getRefitCount(), 1u)
+        << "deferred device metrics must preserve Adaptive refit policy";
+
+    HuffmanStage<uint16_t> fixed;
+    fixed.setBklen(1024);
+    fixed.setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    fixed.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    input[N / 2] = 5000;
+    EXPECT_THROW(
+        huffman_encode(fixed, input, cs.stream, *pool), std::runtime_error);
+}
+
+TEST(HuffmanStage, Uint8OutputEstimateCoversCodewordLimit) {
+    HuffmanStage<uint8_t> stage;
+    constexpr size_t N = 1 << 20;
+    const size_t bound = stage.estimateOutputSizes({N})[0];
+    EXPECT_GT(bound, 3 * N);
+}
+
+TEST(HuffmanStage, DeviceResidentRoundTrip_U8) {
+    constexpr size_t N = 8195;
+    std::vector<uint8_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint8_t>((i * 17 + i / 11) % 256);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N, 8.0f);
+    HuffmanStage<uint8_t> stage;
+    stage.setBklen(256);
+    stage.setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+
+    const auto encoded = huffman_encode(stage, input, cs.stream, *pool);
+    stage.setInverse(false);
+    EXPECT_EQ(huffman_decode(stage, encoded, N, cs.stream, *pool), input);
+}
+
+TEST(HuffmanStage, DeviceResidentRoundTrip_U32) {
+    constexpr size_t N = 12291;
+    std::vector<uint32_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint32_t>((i * 31 + i / 7) % 1024);
+
+    CudaStream cs;
+    auto pool = make_test_pool(N * sizeof(uint32_t), 8.0f);
+    HuffmanStage<uint32_t> stage;
+    stage.setBklen(1024);
+    stage.setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+
+    const auto encoded = huffman_encode(stage, input, cs.stream, *pool);
+    stage.setInverse(false);
+    EXPECT_EQ(huffman_decode(stage, encoded, N, cs.stream, *pool), input);
+}
+
+TEST(HuffmanStage, DeviceResidentNonTerminalPipeline) {
+    constexpr size_t N = 4096;
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint16_t>((i * 23 + i / 5) % 1024);
+
+    Pipeline p(N * sizeof(uint16_t), MemoryStrategy::PREALLOCATE, 8.0f);
+    auto* huf = p.addStage<HuffmanStage<uint16_t>>();
+    huf->setBklen(1024);
+    huf->setFixedBookFromModel(
+        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
+    huf->setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    auto* rle = p.addStage<RLEStage<uint8_t>>();
+    p.connect(rle, huf);
+    ASSERT_NO_THROW(p.finalize());
+    EXPECT_FALSE(huf->isGraphCompatible());
+
+    CudaStream cs;
+    const auto result = pipeline_round_trip<uint16_t>(p, input, cs.stream);
+    EXPECT_EQ(result.data, input);
+}
+
+TEST(HuffmanStage, DeviceResidentMatchesHostBooksForAllSources) {
+    constexpr size_t N = 24017;
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i) {
+        if (i % 11 == 0) input[i] = static_cast<uint16_t>((i * 37) % 900);
+        else if (i % 3 == 0) input[i] = 7;
+        else input[i] = static_cast<uint16_t>((i * 5 + i / 9) % 83);
+    }
+
+    CudaStream cs;
+    auto host_pool = make_test_pool(N * sizeof(uint16_t), 10.0f);
+    auto device_pool = make_test_pool(N * sizeof(uint16_t), 10.0f);
+
+    for (const auto source : {HuffmanBookSource::PerBlock,
+                              HuffmanBookSource::Adaptive}) {
+        HuffmanStage<uint16_t> host;
+        host.setBklen(1024);
+        host.setBookSource(source);
+
+        HuffmanStage<uint16_t> device;
+        device.setBklen(1024);
+        device.setBookSource(source);
+        device.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+
+        EXPECT_EQ(
+            huffman_encode(device, input, cs.stream, *device_pool),
+            huffman_encode(host, input, cs.stream, *host_pool))
+            << "device-built canonical book differs for source "
+            << static_cast<int>(source);
+    }
 }

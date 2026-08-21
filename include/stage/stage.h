@@ -268,6 +268,16 @@ public:
     virtual bool isGraphCompatible() const { return true; }
 
     /**
+     * Inform the stage whether all of its forward outputs are pipeline outputs.
+     *
+     * A stage with deferred exact sizing may keep readback in postStreamSync when
+     * terminal, but must publish an exact size before returning from execute when
+     * a downstream stage will consume its output. Default: no placement-sensitive
+     * behavior.
+     */
+    virtual void setTerminalOutput(bool terminal) { (void)terminal; }
+
+    /**
      * Peak persistent scratch bytes this stage holds in the MemoryPool.
      *
      * Only count allocations that are drawn from the pool and kept alive across

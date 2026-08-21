@@ -442,12 +442,16 @@ into a variable-length bitstream with an embedded self-describing header.
 > All input symbols must be in `[0, bklen)`. When pairing with Lorenzo/Quantizer
 > using `zigzag_codes=true`, set `bklen = 2 * quant_radius` to cover the exact
 > symbol range without over-allocating the codebook.
-> HuffmanStage is not CUDA Graph compatible (two D2H syncs per forward call).
+> The default HostCoordinated path is not CUDA Graph compatible. DeviceResident
+> execution is graph-compatible with a Fixed book when Huffman is terminal.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | input_type | string | "uint16" | Symbol element type. One of "uint8", "uint16", "uint32". |
 | bklen | integer | 256 (uint8) / 1024 (uint16, uint32) | Codebook length. Must cover all symbols: all inputs must be in `[0, bklen)`. |
+| book_source | string | "PerBlock" | "PerBlock", "Adaptive", or "Fixed". |
+| execution_mode | string | "HostCoordinated" | "DeviceResident" builds canonical books, scans partitions, and assembles streams on the GPU for every book source. Nonterminal placement reads exact size before the next stage; terminal Fixed is graph-compatible. |
+| validate_symbol_range | boolean | true | Reject input symbols outside `[0, bklen)`. DeviceResident reports failures after the pipeline completion barrier. |
 
 ```toml
 [[stage]]
@@ -455,6 +459,9 @@ name       = "huf"
 type       = "Huffman"
 input_type = "uint16"
 bklen      = 1024
+book_source = "Fixed"
+book_model = "Uniform"
+execution_mode = "DeviceResident"
 inputs     = [{from = "lrz", port = "codes"}]
 ```
 

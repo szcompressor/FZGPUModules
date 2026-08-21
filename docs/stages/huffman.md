@@ -128,6 +128,7 @@ type        = "Huffman"
 input_type  = "uint16"   # "uint8", "uint16", or "uint32"
 bklen       = 1024       # optional; defaults to 256 (uint8) or 1024 (uint16/uint32)
 book_source = "PerBlock" # optional; "PerBlock" (default), "Adaptive", or "Fixed"
+execution_mode = "HostCoordinated" # or "DeviceResident"
 book_floor_shift = 24    # Adaptive only; frequency floor as max_freq >> shift
 book_refit_threshold = 1.2  # Adaptive only; refit when bit rate degrades past this (0 = never)
 book_refit_interval  = 0    # Adaptive only; refit every N calls (0 = off)
@@ -171,16 +172,13 @@ containing them still encodes correctly.  It also bounds Huffman depth — see t
 27-bit limit below.  If the book still does not fit, the shift is halved and the
 build retried; shift 0 is a uniform book, which always fits.
 
-`Adaptive` is not a fully GPU-resident encoder. On a fitting call, the histogram is
-computed on the GPU but copied to the host, and the canonical tree is built on the
-CPU. Reused-book calls skip that work, but the default symbol-range guard still
-copies a verdict to the host, and cuSZ's coarse encode path always copies partition
-metadata to the host for its prefix sum. Disabling the guard removes only the first
-of those reused-book synchronizations; the partition-prefix synchronization remains.
-
-**There is no fully GPU-only Huffman mode.** `PerBlock`, `Adaptive`, and `Fixed`
-all use the host-coordinated coarse encoding path. The book source changes when
-the codebook is built or reused, not how encoded partitions are assembled.
+With `HostCoordinated`, a fitting call copies the histogram to the host and builds
+the canonical tree on the CPU. `DeviceResident` instead builds the tree, canonical
+forward book, and PHF reverse book directly from `d_freq`. The small priority queue
+runs serially in one GPU thread because normal alphabets contain only 256 or 1024
+symbols; avoiding the synchronization matters more than parallelising that amount
+of work. Its heap tie rules and canonical ordering match cuSZ, so the resulting PHF
+stream is byte-identical.
 
 ### Fixed — a book chosen up front
 
@@ -195,6 +193,9 @@ huf->setFixedBookFromModel({HuffmanBookModel::Laplace, /*center=*/-1.0,
                             /*scale=*/32.0, /*shape=*/2.0});
 
 huf->setFixedBookFromFreq(freq.data(), 1024);   // or a table; every entry non-zero
+
+// Optional: keep encode/decode device-resident after this book is configured.
+huf->setExecutionMode(HuffmanExecutionMode::DeviceResident);
 ```
 
 `Fixed` is the right choice only when you must know the codebook before seeing any
@@ -229,11 +230,12 @@ trained on a sample of real data cannot make that promise.
 Only the model form round-trips through TOML — a raw frequency table exceeds the
 128-byte per-stage config slot and has to be re-supplied through the C++ API.
 
-Fixed books do **not** make the stage graph-capturable; see below.
+A fixed book with the default `HostCoordinated` execution still has the partition
+prefix barrier. Select `DeviceResident` to remove it and enable forward graph capture.
 
 ---
 
-## Execution flow (CPU–GPU movement pattern) {#huffman-execution}
+## Execution modes {#huffman-execution}
 
 HuffmanStage is unusual among FZGPUModules stages in that its default configuration
 requires two host-synchronous operations inside each forward execute call — one to
@@ -266,19 +268,37 @@ GPU  ←input T[]                                       output uint8_t[]→
 
 **Consequence:** the CPU-visible barriers per compress call make this stage
 latency-bound. `Adaptive`/`Fixed` removes barrier 1; barrier 2 remains in every
-supported configuration. `isGraphCompatible()` returns `false` regardless, because
+host-coordinated configuration. `isGraphCompatible()` returns `false` because
 `encode()` returns `total_nbit` / `total_ncell` to the host to assemble `phf_header`
-before the H2D merge. Making the stage capturable would additionally require
-computing partition offsets, assembling the header, and merging the stream on the
-device. A device-resident option is under consideration but is not currently
-implemented.
+before the H2D merge.
+
+### DeviceResident pass
+
+`DeviceResident` preserves the same PHF stream format while removing both barriers:
+the GPU histogram feeds device-side canonical book construction, and a CUB scan
+computes partition offsets. It safely records out-of-range symbols without indexing
+past the codebook, concatenates partitions directly into the pipeline output, and
+assembles `phf_header` on the GPU. Adaptive frequency flooring and the 27-bit
+fallback also happen in the book-build kernel. Exact size, validation status, and
+Adaptive fit metadata are read in `postStreamSync()` after the pipeline's normal
+completion barrier, not during `execute()`.
+
+When Huffman is terminal, exact-size readback stays in `postStreamSync()` after the
+pipeline completion barrier. When it has a downstream consumer, the stage performs
+that small readback before returning from `execute()` so the consumer receives the
+exact byte count. This makes nonterminal composition correct at the cost of a host
+synchronization. Forward execution is CUDA Graph compatible only for terminal
+`Fixed` mode today; PerBlock and Adaptive now contain no mid-execute host work, but
+their captured-state/refit contract has not yet been enabled for graph replay. A
+model-derived Fixed frequency table is prepared once on the CPU and copied H2D; its
+canonical tree and both encoded books are built on the GPU.
 
 ### Inverse pass
 
 ```
 GPU  ←input uint8_t[]                                 output T[]→
-  1. cudaMemcpy D2H (blocking) — read phf_header      128-byte header
-  2. GPU decode — revbk lookup → symbol reconstruction
+  HostCoordinated: D2H phf_header, then GPU decode
+  DeviceResident:  GPU kernel parses phf_header and decodes partitions directly
 ```
 
 ---
@@ -296,10 +316,14 @@ Approximate device footprint for a stream of `N` elements with codebook of lengt
 |---|---|
 | Histogram `d_freq` | `B × 4` bytes |
 | Codebook `d_bk4` | `B × 4` bytes |
-| Reverse codebook `d_revbk4` | `~4 × B × sizeof(T)` bytes |
+| Reverse codebook `d_revbk4` | `256 + B × sizeof(T)` bytes |
 | Partition metadata (3 arrays) | `pardeg × 4 × 3` bytes |
-| Bitstream scratch | `N × 4` bytes (worst case) |
+| Bitstream scratch | up to `pardeg × ceil(sublen × 27 / 32) × 4` bytes |
 | Output `d_encoded` (alias of scratch) | same |
+
+Device book construction additionally uses transient stream-ordered scratch for a
+`2B`-node frequency/parent array, a `2B`-entry heap, and `B`-entry work tables. It is
+released on the same stream immediately after the build kernel.
 
 The stage output buffer (pipeline-managed) receives a D2D copy of `d_encoded`; the
 pipeline pool provides that buffer.
@@ -348,8 +372,9 @@ or another stage's scratch. When `phf::Buf<T>` is destroyed, `MemoryPool` untrac
 them and calls `cudaFree` / `cudaFreeHost`; they are not returned to the reusable
 `cudaMemPool_t` arena. Their bytes appear in `getPersistentDeviceBytes()` and
 `getPersistentPinnedBytes()`, but do not count against the stream-ordered arena's
-`pool_size_multiplier`. This allocation property does not make Huffman graph
-compatible: its execution still contains host synchronizations.
+`pool_size_multiplier`. Allocation choice is independent of graph compatibility;
+`HostCoordinated` execution contains host synchronizations, while the fixed-book
+`DeviceResident` path does not contain one inside `execute()`.
 
 **Reallocation on capacity growth.**  `phf::Buf<T>` is reallocated only when the
 input element count grows past the previously allocated capacity (`cap_inlen_`), or

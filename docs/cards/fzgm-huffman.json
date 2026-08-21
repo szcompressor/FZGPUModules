@@ -10,7 +10,7 @@
 
   "category": "coder",
   "algorithm": "huffman",
-  "description": "cuSZ Huffman entropy coder (T = u8/u16/u32). Lossless. Multi-kernel GPU encode path with a CPU prefix-sum sync. Byte-transparent output.",
+  "description": "cuSZ Huffman entropy coder (T = u8/u16/u32). Lossless. Supports host-coordinated and GPU-assembled coarse paths. Byte-transparent output.",
 
   "lossy": false,
   "hardware": "gpu",
@@ -26,6 +26,13 @@
       "type": "int",
       "description": "Codebook length (distinct symbols). Default 256 for u8, 1024 for u16/u32. Must be <= 2^(8*sizeof(T)).",
       "min": 1
+    },
+    {
+      "name": "executionMode",
+      "type": "enum",
+      "values": ["HostCoordinated", "DeviceResident"],
+      "default": "HostCoordinated",
+      "description": "DeviceResident performs canonical book construction, partition scan, stream assembly, and header parsing on the GPU for every book source; only terminal Fixed is CUDA Graph compatible."
     }
   ],
 

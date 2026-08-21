@@ -104,6 +104,8 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool, int _pardeg)
     // Histogram buffers
     d_freq = PALLOC_DEV(uint32_t, bklen, "huf_d_freq");
     h_freq = PALLOC_PIN(uint32_t, bklen, "huf_h_freq");
+    d_book_meta = PALLOC_DEV(uint32_t, 4, "huf_d_book_meta");
+    h_book_meta = PALLOC_PIN(uint32_t, 4, "huf_h_book_meta");
 
     // d_encoded / h_encoded alias the scratch buffers (not separate allocations)
     d_encoded = reinterpret_cast<PHF_BYTE*>(d_scratch4);
@@ -113,12 +115,14 @@ Buf<E>::Buf(size_t inlen, size_t _bklen, fz::MemoryPool* pool, int _pardeg)
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
-                         (sizeof(uint32_t) * bklen);
+                         (sizeof(uint32_t) * bklen) +
+                         (sizeof(uint32_t) * 4);
     total_footprint_h  = (sizeof(H4) * scratch4_len) + (sizeof(H4) * bklen) +
                          (sizeof(PHF_BYTE) * revbk4_bytes) +
                          (sizeof(H4) * bitstream_max_len) +
                          (sizeof(M) * pardeg * 3) +
-                         (sizeof(uint32_t) * bklen);
+                         (sizeof(uint32_t) * bklen) +
+                         (sizeof(uint32_t) * 4);
 }
 
 #undef PALLOC_DEV
@@ -145,6 +149,7 @@ Buf<E>::~Buf()
     pool_->freePersistentDevice(d_par_ncell);
     pool_->freePersistentDevice(d_par_entry);
     pool_->freePersistentDevice(d_freq);
+    pool_->freePersistentDevice(d_book_meta);
 
     pool_->freePersistentPinned(h_scratch4);
     pool_->freePersistentPinned(h_bk4);
@@ -154,6 +159,7 @@ Buf<E>::~Buf()
     pool_->freePersistentPinned(h_par_ncell);
     pool_->freePersistentPinned(h_par_entry);
     pool_->freePersistentPinned(h_freq);
+    pool_->freePersistentPinned(h_book_meta);
     // d_encoded / h_encoded are aliases — do not free separately
 }
 
@@ -175,6 +181,11 @@ void Buf<E>::memcpy_merge(Header& header, phf_stream_t stream)
                                       cudaMemcpyDeviceToDevice, (cudaStream_t)stream));
     };
 
+    // The format reserves 128 bytes although phf_header is smaller. Clear the
+    // padding so archives do not expose stale pool bytes and both assembly paths
+    // produce deterministic headers.
+    FZ_CUDA_CHECK(cudaMemsetAsync(
+        start, 0, PHFHEADER_FORCED_ALIGN, (cudaStream_t)stream));
     FZ_CUDA_CHECK(cudaMemcpyAsync(start, &header, sizeof(header),
                                   cudaMemcpyHostToDevice, (cudaStream_t)stream));
 

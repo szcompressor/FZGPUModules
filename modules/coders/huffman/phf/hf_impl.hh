@@ -304,6 +304,12 @@ public:
         phf::par_config hfpar, H* bitstream, const size_t max_bitstream_len,
         const size_t total_ncell, void* stream);
 
+    // Device-resident counterpart: the caller has allocated the proven
+    // worst-case bound, so no host-visible total is needed before launch.
+    static void GPU_coarse_encode_phase4_device(
+        H* in_buf, M* par_entry, M* par_ncell, phf::par_config hfpar,
+        H* bitstream, void* stream);
+
     // ── Coarse encode (CPU-sync phase 3, stable default) ─────────────────────
     static void GPU_coarse_encode(
         E* in_data, size_t data_len, H* in_book, uint32_t book_len,
@@ -317,6 +323,10 @@ public:
         H* in_bitstream, uint8_t* in_revbook, size_t const revbook_len,
         M* in_par_nbit, M* in_par_entry, size_t const sublen,
         size_t const pardeg, E* out_decoded, void* stream);
+
+    static void GPU_coarse_decode_device(
+        PHF_BYTE* in_encoded, size_t revbook_len, int numSMs,
+        E* out_decoded, void* stream);
 
 };
 

@@ -9,6 +9,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — 2.0.0
 
+### Added
+- Added `HuffmanExecutionMode::DeviceResident`: cuSZ-compatible canonical tree/forward/reverse-book construction directly from device histograms, device-side partition scan and PHF assembly for PerBlock/Adaptive/Fixed books, safe range validation, device-side header parsing on decode, terminal fixed-book CUDA Graph support, and automatic exact-size readback when Huffman feeds a downstream stage.
+
 ### Removed
 - Removed Huffman's experimental `Fine` encode mode, its public API and diagnostics, TOML/card option, documentation, profiling selection, and mode-specific tests; `HuffmanStage` now exposes only the supported cuSZ coarse-grained encoder.
 

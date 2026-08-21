@@ -116,6 +116,12 @@ struct Buf {
     uint32_t* d_freq;
     uint32_t* h_freq;
 
+    // Device-book build status: status, flags, floor shift used, range offender.
+    // Kept persistent because terminal DeviceResident reads it only after the
+    // pipeline completion barrier.
+    uint32_t* d_book_meta;
+    uint32_t* h_book_meta;
+
     // ── Static helpers ────────────────────────────────────────────────────────
     static int _revbk4_bytes(int bklen);
     static int _revbk8_bytes(int bklen);
