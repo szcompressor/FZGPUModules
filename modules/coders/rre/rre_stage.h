@@ -2,7 +2,7 @@
 
 /**
  * @file rre_stage.h
- * @brief Repetition-Reduction Encoding stage — lossless byte-stream compressor.
+ * @brief LC RRE repeated-word bitmap reducer — lossless byte-stream compressor.
  *
  * Standalone port of the LC framework `RRE` component.  Operates on a raw byte
  * stream treated as `word_size`-byte words (1, 2, 4, or 8).  Each chunk is
@@ -38,7 +38,7 @@
 namespace fz {
 
 /**
- * Repetition-Reduction Encoding stage.
+ * LC RRE repeated-word bitmap reducer.
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; only 16384 is supported).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1).

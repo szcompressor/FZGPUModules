@@ -1,7 +1,7 @@
 /**
  * modules/coders/rze/rze_stage.cu
  *
- * GPU implementation of RZEStage — Zero-Elimination Encoding (LC RZE_1/2/4/8).
+ * GPU implementation of the LC RZE_1/2/4/8 zero-word bitmap reducer.
  *
  * One CUDA block per chunk, blockDim = 512 threads (RZE_TPB).  Each block holds
  * the chunk in shared memory (in / out / temp) and runs the vendored LC

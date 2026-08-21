@@ -1,7 +1,7 @@
 {
-  "schemaVersion": "1.0", "id": "fzgm-hclog", "stage": "HCLOGStage", "name": "Hierarchical Chunked Local-Offset Encoder",
+  "schemaVersion": "1.0", "id": "fzgm-hclog", "stage": "HCLOGStage", "name": "HCLOG Leading-Zero/TCMS Bit Packer",
   "zhubModule": "clog", "isNewGeneralModule": false, "category": "coder", "algorithm": "hclog",
-  "description": "Lossless hierarchical LC-framework CLOG port for chunk-local integer offsets.",
+  "description": "Lossless LC-framework HCLOG port. For each of 32 subchunks it selects the smaller required width between raw unsigned values and their TCMS representation, then bit-packs that representation. HCLOG is retained as the upstream identifier and is not described as a logarithmic transform.",
   "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
   "config": [
     { "name": "chunkSize", "type": "int", "values": [4096, 8192, 16384], "default": 16384, "description": "Independent chunk size in bytes." },

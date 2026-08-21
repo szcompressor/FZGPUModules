@@ -14,8 +14,9 @@ rare->setWordSize(1);   // 1, 2, 4, or 8 (default 1)
 
 ## What it does
 
-Repetition-Adaptive Reduction Encoding — the `RARE` lossless component of the
-**LC framework**. RARE is the auto-k generalization of `RREStage`: rather than
+`RARE` is the upstream name of this lossless **LC framework** component; LC
+describes its behavior without expanding the token. It generalizes `RREStage`:
+rather than
 RRE's binary "word repeats its predecessor in full, or is dropped entirely"
 test, it histograms how many top bits of `word ^ predecessor` are zero across
 the whole chunk, picks **one global cut `keep`** (`0 <= keep < word_size*8`)

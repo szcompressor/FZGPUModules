@@ -1,7 +1,7 @@
 {
-  "schemaVersion": "1.0", "id": "fzgm-clog", "stage": "CLOGStage", "name": "Chunked Local-Offset Encoder",
+  "schemaVersion": "1.0", "id": "fzgm-clog", "stage": "CLOGStage", "name": "CLOG Leading-Zero Bit Packer",
   "zhubModule": "clog", "isNewGeneralModule": false, "category": "coder", "algorithm": "clog",
-  "description": "Lossless LC-framework CLOG port that stores chunk-local base values and compact offsets.",
+  "description": "Lossless LC-framework CLOG port. It divides each chunk into 32 subchunks, determines their common leading-zero bits, and packs each subchunk using the minimum required width. CLOG is retained as the upstream identifier and is not expanded as a logarithmic transform.",
   "lossy": false, "hardware": "gpu", "io": { "inputDtypes": ["u8"], "outputDtypes": ["u8"] },
   "config": [
     { "name": "chunkSize", "type": "int", "values": [4096, 8192, 16384], "default": 16384, "description": "Independent chunk size in bytes." },

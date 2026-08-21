@@ -1,8 +1,8 @@
 /**
  * tests/stages/test_hclog_stage.cpp
  *
- * GPU unit tests for HCLOGStage — Compressed-Logarithm adaptive bit-width
- * coding with a per-subchunk TCMS(zigzag) fallback (LC component, the
+ * GPU unit tests for HCLOGStage — CLOG leading-zero compression with
+ * per-subchunk TCMS selection (LC component, the
  * auto-selecting sibling of CLOGStage). Splits each chunk into a fixed 32
  * subchunks; each subchunk finds its own max value — both the raw magnitude
  * and the TCMS-reinterpreted magnitude — and bit-packs every element in it to

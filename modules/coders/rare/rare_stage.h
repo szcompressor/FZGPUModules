@@ -2,7 +2,7 @@
 
 /**
  * @file rare_stage.h
- * @brief Repetition-Adaptive Reduction Encoding stage — lossless byte-stream compressor.
+ * @brief LC RARE adaptive top-bit matching reducer — lossless byte-stream compressor.
  *
  * Standalone port of the LC framework `RARE` component. `RARE` is the
  * auto-k generalization of `RRE` (see `RREStage`): rather than a binary
@@ -44,7 +44,7 @@
 namespace fz {
 
 /**
- * Repetition-Adaptive Reduction Encoding stage.
+ * LC RARE adaptive top-bit matching reducer.
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1).

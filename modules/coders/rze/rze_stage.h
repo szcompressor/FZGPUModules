@@ -2,7 +2,7 @@
 
 /**
  * @file rze_stage.h
- * @brief Zero-Elimination Encoding stage — lossless byte-stream compressor.
+ * @brief LC RZE zero-word bitmap reducer — lossless byte-stream compressor.
  *
  * Standalone port of the LC framework `RZE` component.  Operates on a raw byte
  * stream treated as `word_size`-byte words (1, 2, 4, or 8 → LC RZE_1/2/4/8; the
@@ -38,7 +38,7 @@
 namespace fz {
 
 /**
- * Zero-Elimination Encoding stage.
+ * LC RZE zero-word bitmap reducer.
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; only 16384 is supported).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1 = LC RZE_1).

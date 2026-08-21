@@ -14,14 +14,13 @@ clog->setWordSize(1);   // 1, 2, 4, or 8 (default 1)
 
 ## What it does
 
-Compressed-Logarithm coding — the `CLOG` lossless component of the **LC
-framework**. Splits each chunk into a **fixed 32 subchunks** (not
-configurable — tied to the 32-lane warp used to parallelize the per-subchunk
-reduction). Each subchunk independently finds its own max value and computes
-the minimum bit-width needed to represent it, then every element in that
-subchunk is truncated to exactly that width. This is lossless: no element in
-a subchunk exceeds its own max, so none needs more bits than the width
-chosen for it.
+`CLOG` is the upstream name of this lossless **LC framework** component; LC
+does not provide an expansion, and no logarithmic transform is performed. It
+splits each chunk into a **fixed 32 subchunks** (not configurable
+— tied to the 32-lane warp used to parallelize the per-subchunk reduction).
+For each subchunk, it determines how many leading zero bits all values share
+and stores only the remaining low bits. Equivalently, it computes the minimum
+bit width required by the subchunk and packs every value at that width.
 
 Unlike `RREStage`/`RAREStage`/`RZEStage`/`RAZEStage`, CLOG has **no auxiliary
 bitmap and no per-element full/dropped decision** — every element in a

@@ -13,9 +13,10 @@ auto* rze = p.addStage<fz::RZEStage>();
 
 ## What it does
 
-Zero-Elimination Encoding — the `RZE` lossless component of the **LC framework**
-(`RZE_1/2/4/8`, used by cuSZ-Hi's LC pipelines). Operates on a raw byte stream
-treated as `word_size`-byte words. Each chunk is processed in shared memory:
+`RZE` is the upstream name of this lossless **LC framework** component; LC
+describes its behavior without expanding the token. The `RZE_1/2/4/8`
+variants are used by cuSZ-Hi's LC pipelines. It operates on a raw byte stream
+treated as `word_size`-byte words, processing each chunk in shared memory:
 
 - **Level 1 (ZE):** compact non-zero words; emit a 1-bit-per-word zero bitmap.
 - **Bitmap recursion:** the level-1 bitmap is itself RE-compressed through the

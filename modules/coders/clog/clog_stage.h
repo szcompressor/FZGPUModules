@@ -2,7 +2,7 @@
 
 /**
  * @file clog_stage.h
- * @brief Compressed-Logarithm (adaptive bit-width) coding stage — lossless byte-stream compressor.
+ * @brief LC CLOG leading-zero compression and adaptive bit-packing stage.
  *
  * Standalone port of the LC framework `CLOG` component. Splits each chunk
  * into a fixed **32 subchunks**; each subchunk finds its own max value and
@@ -40,7 +40,7 @@
 namespace fz {
 
 /**
- * Compressed-Logarithm adaptive bit-width coding stage.
+ * LC CLOG per-subchunk leading-zero compression and bit-packing stage.
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1), unsigned only.

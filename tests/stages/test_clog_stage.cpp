@@ -1,8 +1,8 @@
 /**
  * tests/stages/test_clog_stage.cpp
  *
- * GPU unit tests for CLOGStage — Compressed-Logarithm adaptive bit-width
- * coding (LC component). Splits each chunk into a fixed 32 subchunks; each
+ * GPU unit tests for CLOGStage — per-subchunk leading-zero compression and
+ * adaptive bit-width packing (LC component). Each chunk has 32 subchunks; each
  * subchunk finds its own max value and bit-packs every element in it to the
  * minimum bit-width needed to represent that max losslessly. Unlike
  * RRE/RARE/RZE/RAZE there is no bitmap and no per-element full/dropped

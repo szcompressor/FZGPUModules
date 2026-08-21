@@ -1496,7 +1496,7 @@ static __device__ inline void d_ZEdecode(const int decsize, const T* const datai
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// d_RRE.h — single-chunk Repetition-Reduction Encode / Decode.
+// d_RRE.h — single-chunk repeated-word bitmap encode / decode.
 // ─────────────────────────────────────────────────────────────────────────
 template <typename T, int ChunkBytes = CS>
 static __device__ inline bool d_RRE(int& csize, byte in [ChunkBytes], byte out [ChunkBytes], byte temp [ChunkBytes])

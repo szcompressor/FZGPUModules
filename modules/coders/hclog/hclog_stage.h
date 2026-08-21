@@ -2,7 +2,7 @@
 
 /**
  * @file hclog_stage.h
- * @brief Compressed-Logarithm coding with a per-subchunk TCMS fallback — lossless byte-stream compressor.
+ * @brief LC HCLOG leading-zero compression with per-subchunk TCMS selection.
  *
  * Standalone port of the LC framework `HCLOG` component — the `CLOG`
  * algorithm (see `CLOGStage`) plus one extra step per subchunk: HCLOG also
@@ -43,8 +43,8 @@
 namespace fz {
 
 /**
- * Compressed-Logarithm adaptive bit-width coding stage with a per-subchunk
- * TCMS fallback (the auto-selecting sibling of `CLOGStage`).
+ * LC HCLOG adaptive bit-width coding stage with per-subchunk TCMS selection
+ * (the auto-selecting sibling of `CLOGStage`).
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1), unsigned only.

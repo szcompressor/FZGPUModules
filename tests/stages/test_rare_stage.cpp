@@ -1,8 +1,8 @@
 /**
  * tests/stages/test_rare_stage.cpp
  *
- * GPU unit tests for RAREStage — Repetition-Adaptive Reduction Encoding (LC
- * component). The auto-k generalization of RRE: histograms how many top bits
+ * GPU unit tests for the LC RARE adaptive top-bit matching reducer. It
+ * generalizes RRE by measuring how many top bits
  * of `word ^ predecessor` match across the chunk, picks one global `keep` cut
  * that maximizes savings, then bit-packs the bottom `keep` bits of every
  * matching word (non-matching words are stored in full, as in RRE). The

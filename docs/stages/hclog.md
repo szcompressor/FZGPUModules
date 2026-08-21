@@ -14,14 +14,14 @@ hclog->setWordSize(1);   // 1, 2, 4, or 8 (default 1)
 
 ## What it does
 
-Compressed-Logarithm coding with a per-subchunk TCMS fallback — the `HCLOG`
-lossless component of the **LC framework**, the auto-selecting sibling of
-`CLOGStage`. Uses the same fixed-32-subchunk, minimum-bit-width truncation
-scheme as CLOG, but for **each subchunk** it also computes the minimum
-bit-width needed after reinterpreting every value via TCMS (the same
-two's-complement → sign-magnitude / zigzag transform `ZigzagStage` uses) and
-picks whichever of the two is smaller — recording the choice as one flag bit
-per subchunk (32 bits total, stored as a single `int` at the very front of
+`HCLOG` is the upstream name of this lossless **LC framework** component; LC
+does not describe it as logarithmic coding, and no logarithmic transform is
+performed. It is the auto-selecting sibling of `CLOGStage` and uses the same
+fixed-32-subchunk leading-zero compression. For **each subchunk** it also
+computes the minimum bit width after reinterpreting every value via TCMS (the
+same two's-complement → sign-magnitude / zigzag transform `ZigzagStage` uses)
+and picks whichever representation is smaller, recording the choice as one
+flag bit per subchunk (32 bits total, stored as a single `int` at the front of
 the chunk).
 
 This does meaningfully better than plain CLOG on **bipolar-looking data** —

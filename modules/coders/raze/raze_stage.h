@@ -2,7 +2,7 @@
 
 /**
  * @file raze_stage.h
- * @brief Zero-Adaptive Reduction Encoding stage — lossless byte-stream compressor.
+ * @brief LC RAZE adaptive leading-zero-bit reducer — lossless byte-stream compressor.
  *
  * Standalone port of the LC framework `RAZE` component. `RAZE` is the
  * auto-k generalization of `RZE` (see `RZEStage`): rather than a binary
@@ -43,7 +43,7 @@
 namespace fz {
 
 /**
- * Zero-Adaptive Reduction Encoding stage.
+ * LC RAZE adaptive leading-zero-bit reducer.
  *
  * `setChunkSize(bytes)` — chunk size (default 16384; one of 4096/8192/16384).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1).

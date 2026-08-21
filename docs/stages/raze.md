@@ -14,8 +14,9 @@ raze->setWordSize(1);   // 1, 2, 4, or 8 (default 1)
 
 ## What it does
 
-Zero-Adaptive Reduction Encoding — the `RAZE` lossless component of the **LC
-framework**. RAZE is the auto-k generalization of `RZEStage`: rather than
+`RAZE` is the upstream name of this lossless **LC framework** component; LC
+describes its behavior without expanding the token. It generalizes `RZEStage`:
+rather than
 RZE's binary "word is exactly zero, or it's kept in full" test, it histograms
 how many top bits of each word (on its own — not compared against a
 predecessor) are zero across the whole chunk, picks **one global cut `keep`**

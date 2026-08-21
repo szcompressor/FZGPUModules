@@ -3,7 +3,7 @@
 
   "id": "fzgm-rze",
   "stage": "RZEStage",
-  "name": "Zero-Elimination Encoder",
+  "name": "RZE Zero-Word Bitmap Reducer",
 
   "zhubModule": "repeat-elimination",
   "isNewGeneralModule": false,
@@ -11,7 +11,7 @@
   "category": "coder",
   "algorithm": "rze",
   "variantLabel": "zero-specialized (RZE)",
-  "description": "GPU zero-elimination encoding stage (LC framework RZE). Processes the input as word_size-byte words (1/2/4/8). Each chunk is encoded independently: Level 1 compacts non-zero words and emits a 1-bit-per-word bitmap; the bitmap is then hierarchically RE-compressed (2048/256/32/4 byte levels). Lossless. Forward (compress) is CUDA Graph-capturable; inverse requires blocking D2H header reads. Designed for LC/PFPL-style pipelines following BitshuffleStage.",
+  "description": "GPU port of the LC framework RZE component. Processes word_size-byte words independently per chunk, compacts non-zero words, emits a 1-bit-per-word bitmap, and recursively compresses that bitmap through 2048/256/32/4-byte levels. Lossless. Forward is CUDA Graph-capturable; inverse requires blocking D2H header reads. RZE is retained as the upstream identifier without assigning it an expansion.",
 
   "lossy": false,
   "hardware": "gpu",
