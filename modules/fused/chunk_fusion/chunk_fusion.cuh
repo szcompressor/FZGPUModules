@@ -95,18 +95,32 @@ struct QuantSplitOutlier {
                                 uint32_t* __restrict__ s, const void* pp,
                                 const ChunkSideCtx& side) {
         const Params p = *static_cast<const Params*>(pp);
+        const int lane = threadIdx.x & 31;
         for (int i = threadIdx.x; i < cnt; i += TPB) {
             const float x = in[base + i];
             const int   q = __float2int_rn(x * p.ebx2_r);
             if (q > -(int)p.radius && q < (int)p.radius && fabsf(x) < p.threshold) {
                 s[i] = (uint32_t)((q << 1) ^ (q >> 31));   // zigzag(q)
-            } else {
-                s[i] = 0u;                                  // outlier sentinel
-                const uint32_t slot = atomicAdd(side.out_count, 1u);
-                if (slot < side.max) {
-                    side.out_idxs[slot] = (uint32_t)(base + i);   // global element index
-                    side.out_vals[slot] = x;
-                }
+                continue;
+            }
+            s[i] = 0u;                                      // outlier sentinel
+            // Warp-aggregated append: the outlier lanes of this warp claim a contiguous
+            // block of slots with ONE global atomicAdd by the leader (lowest outlier
+            // lane), then each takes its rank within the block — instead of one global
+            // atomicAdd per outlier. Cuts global-counter contention up to 32x. Only
+            // outlier lanes reach here, so __activemask() is exactly the outlier set
+            // (tail-safe: partial final chunks just have fewer active lanes).
+            const unsigned outmask   = __activemask();
+            const int      leader    = __ffs(outmask) - 1;
+            const unsigned rank      = __popc(outmask & ((1u << lane) - 1));
+            uint32_t       warp_base = 0;
+            if (lane == leader)
+                warp_base = atomicAdd(side.out_count, __popc(outmask));
+            warp_base = __shfl_sync(outmask, warp_base, leader);   // broadcast base slot
+            const uint32_t slot = warp_base + rank;
+            if (slot < side.max) {
+                side.out_idxs[slot] = (uint32_t)(base + i);   // global element index
+                side.out_vals[slot] = x;
             }
         }
     }
