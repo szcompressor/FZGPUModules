@@ -5,6 +5,8 @@
 #include "pipeline/fusion_planner.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 #include "fused/chunk_fusion/chunk_op_params.h"
+#include "fused/fused_block/nvrtc_warp_fusion.h"
+#include "fused/fused_block/warp_op_params.h"
 
 #include <gtest/gtest.h>
 #include <cuda_runtime.h>
@@ -558,14 +560,50 @@ TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
         EXPECT_EQ(op.strategy, FusionStrategy::WarpRegister);
         EXPECT_EQ(op.op_name, kNames[i]);
     }
+    // The predictor stage carries the shape the generic NVRTC runner needs (EPL +
+    // packed params with a leading inv2eb slot) so the runner does not downcast it.
+    const FusedOpDecl pred2 = g[0].stages[1]->getFusedOp();
+    EXPECT_EQ(pred2.elems_per_lane, 1u);
+    EXPECT_EQ(pred2.params.size(), sizeof(fused::warp::Lorenzo1DParams));
+    EXPECT_EQ(pred2.include_header, "fused/fused_block/warp_fusion.cuh");
+
     // cuSZp3 shares the strategy with a different predictor op — same generic entry.
     Pipeline p3(300 * 180 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
     buildCuszp3(p3, 300, 180);
     p3.finalize();
     auto g3 = planFusionGroups(*p3.getDAG());
     ASSERT_EQ(g3.size(), 1u);
-    EXPECT_EQ(g3[0].stages[1]->getFusedOp().strategy, FusionStrategy::WarpRegister);
-    EXPECT_EQ(g3[0].stages[1]->getFusedOp().op_name, "TiledLorenzo2DPredictor");
+    const FusedOpDecl pred3 = g3[0].stages[1]->getFusedOp();
+    EXPECT_EQ(pred3.strategy, FusionStrategy::WarpRegister);
+    EXPECT_EQ(pred3.op_name, "TiledLorenzo2DPredictor");
+    EXPECT_EQ(pred3.elems_per_lane, 2u);
+    EXPECT_EQ(pred3.params.size(), sizeof(fused::warp::TiledLorenzo2DParams));
+    // n_ab = padded tile-major count: ceil(300/8)*8 * ceil(180/8)*8 = 304 * 184.
+    EXPECT_EQ(pred3.n_ab, size_t{304} * 184);
+}
+
+// Warp NVRTC codegen contract (host-only): the WarpFusionSpec composes into the two
+// extern-C kernels wrapping fused_rate_body/fused_pack_body, parameterised on the
+// predictor policy type and ElemsPerLane. End-to-end byte-identity is covered by the
+// cuszp2/cuszp3 tests; here we lock the spec → source mapping (adding a predictor is a
+// data change to the spec, no new launcher/dispatch).
+TEST(FusionPlanner, WarpNvrtcCodegenComposesSpecOps) {
+    fused::WarpFusionSpec s2;   // cuSZp2 defaults: Lorenzo1DPredictor, EPL=1
+    const std::string src2 = fused::generateWarpFusionSource(s2);
+    EXPECT_NE(src2.find("Lorenzo1DPredictor pred = Lorenzo1DPredictor::fromParams"),
+              std::string::npos);
+    EXPECT_NE(src2.find("fused_rate_body<1>"), std::string::npos);
+    EXPECT_NE(src2.find("fused_pack_body<1>"), std::string::npos);
+    EXPECT_NE(src2.find("#include \"fused/fused_block/warp_fusion.cuh\""), std::string::npos);
+    EXPECT_NE(src2.find("fz_fused_warp_rate"), std::string::npos);
+    EXPECT_NE(src2.find("fz_fused_warp_pack"), std::string::npos);
+
+    // Swapping the predictor + EPL is a data change — no new C++.
+    fused::WarpFusionSpec s3{"TiledLorenzo2DPredictor", 2};
+    const std::string src3 = fused::generateWarpFusionSource(s3);
+    EXPECT_NE(src3.find("TiledLorenzo2DPredictor::fromParams"), std::string::npos);
+    EXPECT_NE(src3.find("fused_rate_body<2>"), std::string::npos);
+    EXPECT_EQ(src3.find("Lorenzo1DPredictor"), std::string::npos);
 }
 
 // ── NVRTC codegen contract (host-only): the stage-chain fingerprint composes

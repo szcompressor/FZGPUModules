@@ -89,6 +89,14 @@ struct FusedOpDecl {
     std::string          include_header;  ///< header that defines it (for the codegen #include)
     std::vector<uint8_t> params;          ///< POD Params bytes; empty for stateless ops
 
+    /// Warp-register predictors only (0/unused otherwise): the shape a generic warp
+    /// runner needs so it does not have to downcast the predictor stage. The kernel
+    /// is templated on `elems_per_lane` (= block_size/32), and the blocks cover
+    /// `n_ab` padded elements. The predictor packs its config into `params` with a
+    /// leading `float inv2eb` slot (offset 0) the runner fills from the resolved bound.
+    uint32_t             elems_per_lane = 0;
+    size_t               n_ab = 0;
+
     bool valid() const { return !op_name.empty(); }
 };
 

@@ -5,10 +5,11 @@
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
-#include "fused/fused_block/fused_block.h"
+#include "fused/fused_block/nvrtc_warp_fusion.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace fz {
@@ -20,10 +21,12 @@ namespace {
 //    cuszp2/cuszp3 matchers: the stages declare WarpRegister fused-ops (the
 //    predictor op name selects the fused driver), the planner guarantees the
 //    Map -> BlockLocal -> Cooperative ordering, and the runner dispatches on the
-//    predictor. Adding a predictor = a policy + a launcher + one dispatch case,
-//    not a new registry entry. Unlike the chunk strategy this is not NVRTC-
-//    composed: the warp driver is a fixed kernel skeleton with few knobs, so the
-//    coder is always AdaptiveBitpack and the launchers take typed args.
+//    predictor. Like the chunk strategy this is now NVRTC-composed: the predictor
+//    stage declares its device-policy op + packed params + shape (elems_per_lane,
+//    n_ab) via getFusedOp(), and the generic runner builds a WarpFusionSpec and
+//    calls one launcher — no per-predictor dispatch or pre-instantiated launcher.
+//    Adding a predictor = write its policy in warp_fusion.cuh + declare it on the
+//    stage. The coder is always AdaptiveBitpack (the fixed-rate sink of this family).
 bool matchesWarpRegister(const std::vector<Stage*>& g) {
     if (g.size() != 3) return false;               // Quant -> Predictor -> AdaptiveBitpack
     for (Stage* s : g) {
@@ -49,35 +52,26 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     // (padding-excluded, see primeComputedAbsEb). The fused kernel quantizes with this
     // and the reused inverse reconstructs with the same computed_abs_eb_, so ABS and
     // NOA share one uniform-step fused path.
-    const float eb = static_cast<float>(q->getComputedAbsEb());
+    const float eb     = static_cast<float>(q->getComputedAbsEb());
+    const float inv2eb = 1.0f / (2.0f * eb);
 
-    // Dispatch on the declared predictor op → the matching fused driver. The
-    // driver is a compile-time <EPL, Predictor> template, so this maps the op name
-    // to its pre-instantiated launcher (the residual O(predictor) glue).
-    const std::string pred = g[1]->getFusedOp().op_name;
-    size_t archive_bytes = 0, n_ab = 0;
-    if (pred == "Lorenzo1DPredictor") {
-        const size_t n = ctx.input_bytes / sizeof(float);
-        archive_bytes = fused::launchFusedCuszp2Compress(
-            static_cast<const float*>(ctx.d_input), n, eb,
-            a->getBlockSize(), a->getOutlierSelection(),
-            static_cast<uint8_t*>(ctx.d_output), ctx.pool,
-            static_cast<fz::stream_t>(ctx.stream));
-        n_ab = n;
-    } else if (pred == "TiledLorenzo2DPredictor") {
-        auto* l = static_cast<TiledLorenzoStage<int32_t>*>(g[1]);
-        const auto dims = l->getDims();
-        const auto tile = l->getTileShape();
-        archive_bytes = fused::launchFusedCuszp3Compress(
-            static_cast<const float*>(ctx.d_input), dims[0], dims[1], eb,
-            tile[0], tile[1], static_cast<uint8_t*>(ctx.d_output),
-            ctx.pool, static_cast<fz::stream_t>(ctx.stream));
-        const size_t ntx = (dims[0] + tile[0] - 1) / tile[0];
-        const size_t nty = (dims[1] + tile[1] - 1) / tile[1];
-        n_ab = ntx * nty * tile[0] * tile[1];
-    } else {
-        return 0;   // unknown predictor — matcher shouldn't have let this through
-    }
+    // Build the warp spec + params blob from the predictor's own declaration — no
+    // per-predictor dispatch. The predictor packs its geometry with a leading inv2eb
+    // slot (offset 0) it cannot fill (the quantizer owns the bound); patch it here.
+    const FusedOpDecl decl = g[1]->getFusedOp();
+    fused::WarpFusionSpec spec;
+    spec.predictor      = decl.op_name;
+    spec.elems_per_lane = static_cast<int>(decl.elems_per_lane);
+    std::vector<uint8_t> blob = decl.params;
+    if (blob.size() >= sizeof(float)) std::memcpy(blob.data(), &inv2eb, sizeof(float));
+
+    // n_ab: the predictor's padded block-covering count, or the input element count
+    // when it declares 0 (1-D needs no padding).
+    const size_t n_ab = decl.n_ab ? decl.n_ab : ctx.input_bytes / sizeof(float);
+    const size_t archive_bytes = fused::launchNvrtcWarpFused(
+        spec, static_cast<const float*>(ctx.d_input), n_ab,
+        blob.data(), blob.size(),
+        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream));
 
     // The archive masquerades as the staged AdaptiveBitpack output: set the tail
     // stage's execute-time state (num_elements = the padded tile-major count) so

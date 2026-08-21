@@ -391,8 +391,10 @@ add_library(FZGMOD::utils ALIAS fzgmod_utils)
 #### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
 add_library(fzgmod_modules
   modules/fused/fused_block/fused_block.cu
+  modules/fused/fused_block/nvrtc_warp_fusion.cu
   modules/fused/chunk_fusion/chunk_fusion.cu
   modules/fused/chunk_fusion/nvrtc_chunk_fusion.cpp
+  modules/fused/common/nvrtc_jit.cpp
   modules/predictors/diff/diff.cu
   modules/predictors/lorenzo/lorenzo_stage.cu
   modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
@@ -466,8 +468,10 @@ fzgmod_set_gpu_source_language(fzgmod_modules)
 # a real library present at build time, so it resolves fine as PRIVATE.
 if(NOT FZGMOD_BACKEND STREQUAL "HIP")
   target_link_libraries(fzgmod_modules PRIVATE CUDA::nvrtc PUBLIC CUDA::cuda_driver)
+  # Only nvrtc_jit.cpp bakes in the source-tree include paths (it invokes NVRTC); the
+  # chunk/warp codegen files just emit source strings and launch.
   set_source_files_properties(
-    modules/fused/chunk_fusion/nvrtc_chunk_fusion.cpp
+    modules/fused/common/nvrtc_jit.cpp
     TARGET_DIRECTORY fzgmod_modules
     PROPERTIES COMPILE_DEFINITIONS
       "FZGMOD_NVRTC_INC_INCLUDE=\"${CMAKE_CURRENT_SOURCE_DIR}/include\";FZGMOD_NVRTC_INC_MODULES=\"${CMAKE_CURRENT_SOURCE_DIR}/modules\"")

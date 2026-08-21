@@ -8,6 +8,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "backend/types.h"
+#include "fused/fused_block/warp_op_params.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -120,11 +121,23 @@ public:
         return FusionSpec{FusionAccess::BlockLocal, block_size_};
     }
 
-    /// Warp-register predictor op (cuSZp2). The op name selects the fused driver
-    /// instantiation in the registry runner; only the block-32 (EPL=1) shape fuses.
+    /// Warp-register predictor op (cuSZp2): 1-D Lorenzo, EPL=1 (block 32). Declares
+    /// the device policy type + its packed params so the generic NVRTC warp runner
+    /// composes the kernel with no per-predictor code. `inv2eb` is left 0 — the
+    /// runner fills it from the resolved quantizer bound (see warp_op_params.h). n_ab
+    /// left 0 ⇒ the runner uses the input element count (1-D needs no padding).
     FusedOpDecl getFusedOp() const override {
         if (isInverse() || block_size_ != 32u) return {};
-        return FusedOpDecl{FusionStrategy::WarpRegister, "Lorenzo1DPredictor", "", {}};
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::WarpRegister;
+        d.op_name        = "Lorenzo1DPredictor";
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        d.elems_per_lane = 1;
+        d.n_ab           = 0;
+        fused::warp::Lorenzo1DParams p{0.0f};
+        d.params.resize(sizeof(p));
+        std::memcpy(d.params.data(), &p, sizeof(p));
+        return d;
     }
 
     /**
