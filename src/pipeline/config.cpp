@@ -573,15 +573,22 @@ static Stage* addAdaptiveBitpackStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "int32"));
     uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 32));
     bool outlier = optBool(t, "outlier_selection", false);
+    // Fused-forward-only: which warp coder policy the fused kernel composes
+    // (default "AdaptiveBitpackCoder"). E.g. "PlainBitpackCoder" for a fixed-rate
+    // A/B baseline. Not serialized into the archive header — the staged path and
+    // the inverse are unchanged, so it never affects decode.
+    std::string fused_coder = optStr(t, "fused_coder", "");
     if (dt == DataType::INT16) {
         auto* s = p.addStage<AdaptiveBitpackStage<int16_t>>();
         s->setBlockSize(block_size);
         s->setOutlierSelection(outlier);
+        if (!fused_coder.empty()) s->setFusedCoder(fused_coder);
         return s;
     } else if (dt == DataType::INT32) {
         auto* s = p.addStage<AdaptiveBitpackStage<int32_t>>();
         s->setBlockSize(block_size);
         s->setOutlierSelection(outlier);
+        if (!fused_coder.empty()) s->setFusedCoder(fused_coder);
         return s;
     }
     throw std::runtime_error("loadConfig: unsupported AdaptiveBitpack input_type");
