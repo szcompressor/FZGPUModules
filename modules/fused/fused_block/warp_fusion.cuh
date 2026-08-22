@@ -120,6 +120,43 @@ __device__ __forceinline__ void applyTransforms(int (&d)[EPL], uint32_t lane) {
     applyTransforms<EPL, R...>(d, lane);
 }
 
+// cuSZp3 3-D (PROTOTYPE): linear-ABS quant + 3-D separable tiled Lorenzo (tz > 1).
+// Mirrors tiled_lorenzo_delta_kernel's 3-D path exactly (X-delta if lx>0, else Y if
+// ly>0, else Z if lz>0, else tile origin), re-quantising each neighbour from the float
+// field so the delta equals the staged code delta (byte-identical). tile_elems==64 ⇒
+// local ∈ [0,64). NOTE: like the 2-D predictor this re-reads neighbours from GLOBAL and
+// the fused kernel recomputes it in BOTH the rate and pack passes.
+struct TiledLorenzo3DPredictor {
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    __device__ static TiledLorenzo3DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
+        return TiledLorenzo3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+    }
+    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+        const uint32_t local = lane + 32u * static_cast<uint32_t>(m);   // element within tile
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lz = local / (tx * ty);
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
+        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gz = tiz * tz + lz;
+        if (gx >= dx || gy >= dy || gz >= dz) return 0;                 // padding
+        const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
+        const int cur = __float2int_rn(in[gidx] * inv2eb);
+        int pred;
+        if (lx > 0)      pred = __float2int_rn(in[gidx - 1] * inv2eb);                         // X
+        else if (ly > 0) pred = __float2int_rn(in[gidx - dx] * inv2eb);                        // Y
+        else if (lz > 0) pred = __float2int_rn(in[gidx - static_cast<size_t>(dx) * dy] * inv2eb); // Z
+        else             pred = 0;                                                             // origin
+        return cur - pred;
+    }
+};
+
 // ── Coder policies (the swappable Cooperative sink) ──────────────────────────
 // A warp coder is the variable-length tail of the register chain. Its two halves
 // mirror the two-pass driver: `cost()` (called by ALL lanes — it warp-reduces the

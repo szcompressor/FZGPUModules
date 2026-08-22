@@ -160,8 +160,10 @@ public:
     // the separable delta per element. tz > 1 is not fused yet.
     FusionSpec getFusionSpec() const override {
         auto t = effectiveTile();
-        if (is_inverse_ || t[2] != 1) return {};
-        return FusionSpec{FusionAccess::BlockLocal, t[0] * t[1]};
+        if (is_inverse_) return {};
+        // Block-local for fusion; the block is one tile. 2-D (tz==1) and 3-D (tz>1)
+        // both fuse — the warp op gate (getFusedOp) requires tile_elems==64 (EPL=2).
+        return FusionSpec{FusionAccess::BlockLocal, t[0] * t[1] * t[2]};
     }
 
     /// Warp-register predictor op (cuSZp3): 2-D separable tiled Lorenzo, EPL=2 (tile
@@ -171,21 +173,29 @@ public:
     /// runner fills it from the resolved quantizer bound (see warp_op_params.h).
     FusedOpDecl getFusedOp() const override {
         const auto t = effectiveTile();
-        if (is_inverse_ || t[2] != 1u || t[0] * t[1] != 64u) return {};
+        if (is_inverse_ || t[0] * t[1] * t[2] != 64u) return {};   // only tile_elems==64 (EPL=2)
         const uint32_t dx = static_cast<uint32_t>(dims_[0]);
         const uint32_t dy = static_cast<uint32_t>(dims_[1]);
-        const uint32_t tx = t[0], ty = t[1];
+        const uint32_t dz = static_cast<uint32_t>(dims_[2]);
+        const uint32_t tx = t[0], ty = t[1], tz = t[2];
         const uint32_t ntx = (dx + tx - 1u) / tx;
         const uint32_t nty = (dy + ty - 1u) / ty;
+        const uint32_t ntz = (dz + tz - 1u) / tz;
         FusedOpDecl d;
         d.strategy       = FusionStrategy::WarpRegister;
-        d.op_name        = "TiledLorenzo2DPredictor";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
-        d.n_ab           = static_cast<size_t>(ntx) * nty * tx * ty;
-        fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
-        d.params.resize(sizeof(p));
-        std::memcpy(d.params.data(), &p, sizeof(p));
+        if (tz == 1u) {   // 2-D
+            d.op_name = "TiledLorenzo2DPredictor";
+            d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
+            fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
+            d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
+        } else {          // 3-D (PROTOTYPE)
+            d.op_name = "TiledLorenzo3DPredictor";
+            d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
+            fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
+            d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
+        }
         return d;
     }
 

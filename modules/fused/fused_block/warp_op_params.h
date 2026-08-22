@@ -33,6 +33,14 @@ struct TiledLorenzo2DParams {
     uint32_t ntx;      ///< number of tiles along x (= ceil(dx/tx))
 };
 
+/// cuSZp3: linear-ABS quant + 3-D separable tiled Lorenzo (tz > 1). PROTOTYPE.
+struct TiledLorenzo3DParams {
+    float    inv2eb;
+    uint32_t dx, dy, dz;   ///< field extents (x fastest)
+    uint32_t tx, ty, tz;   ///< tile extents (tx*ty*tz == block_size == 64)
+    uint32_t ntx, nty;     ///< tiles along x, y (= ceil(dx/tx), ceil(dy/ty))
+};
+
 } // namespace warp
 } // namespace fused
 } // namespace fz

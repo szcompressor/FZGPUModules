@@ -701,6 +701,65 @@ TEST(FusionPlanner, WarpTransformChainZigzagFusesMatchesStaged) {
     cudaFree(d_in);
 }
 
+// cuSZp3 3-D (PROTOTYPE): Quantizer(linear) -> TiledLorenzo(4x4x4) -> AdaptiveBitpack(64)
+// on a 3-D field must fuse (TiledLorenzo3DPredictor warp op) byte-identical to staged and
+// round-trip. Dims not multiples of 4 -> padded tiles (exercises the padding path).
+TEST(FusionPlanner, Cuszp3_3D_FusesMatchesStaged) {
+    const size_t dx = 34, dy = 30, dz = 28;   // none a multiple of 4 -> padded 3-D tiles
+    const size_t n  = dx * dy * dz;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    for (size_t z = 0; z < dz; ++z)
+      for (size_t y = 0; y < dy; ++y)
+        for (size_t x = 0; x < dx; ++x)
+          h[(z*dy+y)*dx+x] = 0.5f*std::sin(x*0.03f)+0.3f*std::cos(y*0.05f)+0.2f*std::sin(z*0.02f);
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto build = [&](Pipeline& p) {
+        p.setDims(dx, dy, dz);
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(eb); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+        auto* tl = p.addStage<TiledLorenzoStage<int32_t>>(); tl->setTileShape(4, 4, 4);
+        p.connect(tl, q, "codes");
+        auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        a->setBlockSize(64); a->setOutlierSelection(true);
+        p.connect(a, tl);
+    };
+    { Pipeline pg(bytes, MemoryStrategy::PREALLOCATE, 2.0f); build(pg); pg.finalize();
+      auto gr = planFusionGroups(*pg.getDAG());
+      ASSERT_EQ(gr.size(), 1u); EXPECT_EQ(gr[0].stages.size(), 3u);
+      EXPECT_EQ(gr[0].stages[1]->getFusedOp().op_name, "TiledLorenzo3DPredictor"); }
+
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f); p.setFusionPolicy(pol);
+        build(p); p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0); cudaDeviceSynchronize();
+        out.resize(sz); cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost);
+        return sz;
+    };
+    std::vector<uint8_t> staged, fused;
+    ASSERT_EQ(compressCopy(FusionPolicy::Off, staged), compressCopy(FusionPolicy::Auto, fused));
+    EXPECT_EQ(staged, fused) << "fused 3-D archive not byte-identical to staged";
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f); p.setFusionPolicy(pol);
+        build(p); p.finalize();
+        void* d_comp=nullptr; size_t sz=0; p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_dec=nullptr; size_t dsz=0; p.decompress(d_comp, sz, &d_dec, &dsz, 0);
+        cudaDeviceSynchronize(); recon.assign(n,0.0f);
+        cudaMemcpy(recon.data(), d_dec, bytes, cudaMemcpyDeviceToHost);
+    };
+    std::vector<float> rs, rf; roundtrip(FusionPolicy::Off, rs); roundtrip(FusionPolicy::Auto, rf);
+    double m=0; for (size_t i=0;i<n;++i) m=std::max(m,(double)std::abs(rf[i]-h[i]));
+    EXPECT_LE(m, eb*1.001) << "fused 3-D round-trip exceeds bound";
+    EXPECT_EQ(rs, rf) << "fused 3-D reconstruction differs from staged";
+    cudaFree(d_in);
+}
+
 // The swappable-coder payoff: fuse the SAME warp chain with a different Cooperative
 // sink (PlainBitpackCoder) composed in by a data change — no new launcher/dispatch,
 // mirroring how RARE/RAZE proved chunk generality. PlainBitpack emits an
