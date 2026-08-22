@@ -236,6 +236,272 @@ uniform, so the fallback always terminates.
 
 ---
 
+## CN-HUFFMAN-1 — DeviceResident throughput, latency, and fit-required boundary
+
+**Source:** commit `a2e888d`, `modules/coders/huffman/huffman_stage.cu`,
+`profiling/huffman_throughput.cpp`
+**Measured:** 2026-08-22, NVIDIA H100 80 GB HBM3 (sm_90), driver 595.84,
+CUDA 12.9.86/runtime 12.9, GCC 13.3.0, CMake 3.28.3, Release,
+`BUILD_PROFILING=ON`, `BUILD_TESTING=ON`
+
+### Method
+
+`fzgmod-profile-huffman-throughput` invokes `HuffmanStage<uint16_t>` directly.
+Input generation, allocations, H2D upload, persistent `phf::Buf` construction,
+and correctness copies are outside the timed regions. Allocations issued by
+`execute()` itself remain timed. Each steady row uses 10 warmups and 31 samples;
+the table reports medians.
+
+**Terminology:** every reported timing is a warmed-up repeated measurement; none
+of the benchmark tables compares the process's first CUDA invocation against later
+invocations. “Adaptive cold fit” is the profiler's historical label for a
+**fit-required call**: it creates a fresh, preallocated stage for every warmup and
+sample, so codebook construction is included but allocation/input setup is not.
+“Adaptive warm reuse” performs one untimed fit, asserts that the book pinned,
+disables automatic refitting, and measures reuse of that same book. `PerBlock` is
+also fully warmed up, but by definition it histograms and rebuilds the codebook on
+every call; there is no reusable-book hot state for PerBlock. Hereafter “cold”
+means codebook state, not GPU/process warmup state.
+
+Two independent clocks are reported:
+
+- **host-observed:** `execute`, stream completion, and `postStreamSync`, including
+  DeviceResident's required PHF header/book-status D2H readback;
+- **GPU event:** from the event immediately before `execute` through the last work
+  it enqueues. The deferred metadata readback is intentionally outside this event
+  interval and remains visible in host-observed latency.
+
+Throughput uses uncompressed input bytes and decimal GB/s. Inputs were 4 KiB,
+64 KiB, 1 MiB, and 64 MiB, with an extra 2/4/8/16/32 MiB crossover sweep. The
+distributions were uniform random over 1024 symbols, skewed, eight-symbol
+low-entropy, and predictive integer codes synthesized from the in-repository
+`data/CLDHGH.f32` field. No external data was downloaded.
+
+Every one of the 128 mode/book/size/distribution configurations decoded exactly.
+For every deterministic format case, HostCoordinated and DeviceResident archives
+were byte-identical. All combinations are supported. Only terminal forward
+DeviceResident+Fixed reports CUDA Graph compatible; PerBlock, both Adaptive
+states, every HostCoordinated case, and all inverse cases correctly report graph
+incompatible rather than failing the benchmark.
+
+### Host-observed results: representative scientific codes
+
+Compression latency and logical throughput follow. Ratio belongs to the archive
+and is identical between execution modes.
+
+| input | book state | HostCoordinated ms / GB/s | DeviceResident ms / GB/s | H/D latency speedup | ratio |
+|---:|---|---:|---:|---:|---:|
+| 4 KiB | PerBlock | 0.194 / 0.02 | 0.842 / 0.00 | 0.23x | 1.04x |
+| 4 KiB | Adaptive cold fit | 0.288 / 0.01 | 3.111 / 0.00 | 0.09x | 1.01x |
+| 4 KiB | Adaptive warm reuse | 0.145 / 0.03 | 0.168 / 0.02 | 0.86x | 1.01x |
+| 4 KiB | Fixed | 0.146 / 0.03 | 0.170 / 0.02 | 0.86x | 0.95x |
+| 1 MiB | PerBlock | 0.289 / 3.63 | 1.903 / 0.55 | 0.15x | 2.63x |
+| 1 MiB | Adaptive cold fit | 0.438 / 2.40 | 3.768 / 0.28 | 0.12x | 2.63x |
+| 1 MiB | Adaptive warm reuse | 0.230 / 4.56 | 0.252 / 4.16 | 0.91x | 2.63x |
+| 1 MiB | Fixed | 0.247 / 4.25 | 0.260 / 4.04 | 0.95x | 2.18x |
+| 64 MiB | PerBlock | 0.835 / 80.40 | 3.019 / 22.23 | 0.28x | 2.68x |
+| 64 MiB | Adaptive cold fit | 0.981 / 68.38 | 4.220 / 15.90 | 0.23x | 2.68x |
+| 64 MiB | Adaptive warm reuse | 0.699 / 96.07 | 0.500 / 134.17 | **1.40x** | 2.68x |
+| 64 MiB | Fixed | 0.735 / 91.32 | 0.531 / 126.32 | **1.38x** | 2.19x |
+
+The large-input warm result is distribution-independent in direction:
+
+| 64 MiB distribution | Adaptive warm, Host / Device GB/s | speedup | Fixed, Host / Device GB/s | speedup |
+|---|---:|---:|---:|---:|
+| uniform | 83.45 / 113.02 | 1.35x | 79.00 / 106.95 | 1.35x |
+| skewed | 103.66 / 146.44 | 1.41x | 93.36 / 130.94 | 1.40x |
+| low entropy | 101.99 / 143.66 | 1.41x | 91.02 / 125.60 | 1.38x |
+| scientific codes | 96.07 / 134.17 | 1.40x | 91.32 / 126.32 | 1.38x |
+
+Decompression does not benefit consistently. At 64 MiB, DeviceResident/host
+latency speedup ranges from 0.87x to 1.02x across distributions and archives.
+For the scientific archive it is 50.9 vs 57.9 GB/s (Adaptive, 0.88x) and 63.0
+vs 69.5 GB/s (Fixed, 0.91x). Book “source” affects decode only through the bytes
+in the self-describing archive; no forward codebook is reused by inverse.
+
+### Crossover and fit/reuse conclusions
+
+- **Warm Adaptive and Fixed compression:** HostCoordinated wins through 2 MiB;
+  DeviceResident wins at the next tested point, 4 MiB, for all four distributions.
+  The 4 MiB speedup is 1.17–1.22x for Adaptive warm and 1.21–1.26x for Fixed.
+  The measured crossover is therefore bracketed at **2–4 MiB** on this H100.
+- **PerBlock and Adaptive fit-required calls:** no crossover through 64 MiB. At 64 MiB,
+  DeviceResident is 0.21–0.88x for PerBlock and 0.23–0.27x for Adaptive cold.
+- **Decompression:** no robust crossover through 64 MiB. A few uniform or
+  low-entropy points reach 1.00–1.02x, but DeviceResident is usually 5–13% slower.
+- **Adaptive amortization:** at 64 MiB the DeviceResident cold-fit penalty over
+  HostCoordinated is 2.48–3.24 ms, while each warm reuse saves 0.189–0.210 ms.
+  It therefore needs roughly **13–17 warm calls after each fit** (14–18 total
+  calls per book) to amortize the device cold fit. A refit interval shorter than
+  that loses overall on this machine even though every warm row is faster.
+
+### Bottleneck attribution
+
+Nsight Systems on the 1 MiB scientific DeviceResident PerBlock case attributes
+82.4% of CUDA kernel time to
+`huffmanBuildCanonicalBookDeviceKernel<uint16_t>`: 1.584 ms per call, with
+`encode_phase2_deflate` next at 0.155 ms. This matches the source launch
+`<<<1,1>>>` and the nearly payload-independent 3–4 ms Adaptive cold latency.
+Adaptive flooring activates all 1024 leaves, which is why its cold builder is
+slower than a sparse PerBlock tree.
+
+The transient device-book scratch is 40,964 bytes at `bklen=1024` and was allocated
+and freed each build. In the trace, the steady `cudaMallocFromPoolAsync` API median
+was 0.025 ms; CUB scan kernels were about 0.003 ms combined. These are measurable
+but far below the 1.584 ms serial tree kernel, so caching scratch is not the first
+optimization. Allocation and pool initialization may still matter to true
+single-shot latency and should remain in a separate first-use benchmark.
+
+For warm DeviceResident compression, host latency exceeds the CUDA-event interval
+by about 0.05–0.06 ms on average because exact output size and status must be read
+back. On the 4 KiB scientific case the GPU interval improves from 0.141 ms to
+0.105 ms, but host-observed latency regresses from 0.145 ms to 0.168 ms: metadata
+completion plus launch overhead erases the device-side assembly gain. At 64 MiB
+the same fixed cost is only about 0.02 ms and encoding kernels dominate, producing
+the 1.38–1.41x warm win.
+
+### Optimization 1: shared-memory builder workspace
+
+The first implementation change keeps the canonical builder's 40,964-byte
+workspace in dynamic shared memory for the normal `bklen <= 1024` case. This
+removes the per-fit pool allocate/free and, more importantly, moves the serial
+heap's dependent loads and stores out of global memory. Books above 1024 symbols
+retain the old pool-backed path; `DeviceResidentLargeBookGlobalScratchFallback`
+covers a 2048-symbol byte-identical round trip.
+
+The direct-stage benchmark below repeats the original 10-warmup/31-median method.
+Values are host-observed compression latency; decompression is unchanged because
+it does not invoke the builder.
+
+| distribution | input | baseline ms | shared-workspace ms | latency reduction |
+|---|---:|---:|---:|---:|
+| uniform | 4 KiB | 2.967 | 2.561 | 13.7% |
+| uniform | 1 MiB | 3.758 | 3.257 | 13.3% |
+| uniform | 64 MiB | 4.097 | 3.652 | 10.9% |
+| skewed | 4 KiB | 0.687 | 0.587 | 14.6% |
+| skewed | 1 MiB | 3.780 | 3.274 | 13.4% |
+| skewed | 64 MiB | 4.036 | 3.586 | 11.1% |
+| low entropy | 4 KiB | 0.696 | 0.449 | 35.5% |
+| low entropy | 1 MiB | 0.591 | 0.504 | 14.7% |
+| low entropy | 64 MiB | 0.855 | 0.828 | 3.2% |
+| scientific codes | 4 KiB | 0.841 | 0.722 | 14.1% |
+| scientific codes | 1 MiB | 1.902 | 1.638 | 13.9% |
+| scientific codes | 64 MiB | 3.017 | 2.706 | 10.3% |
+
+The end-to-end cuSZ-style `LorenzoQuant<float,uint16> -> Huffman<uint16>`
+PerBlock rerun used 31 samples on the same three local fields as the baseline.
+Compression ratio, reconstruction error, and Huffman payload bytes remain
+unchanged. The table compares DeviceResident host-observed compression latency;
+the HostCoordinated column is included to show the remaining crossover gap.
+
+| field | bytes | HostCoordinated baseline ms | DeviceResident before ms | DeviceResident after ms | D/R reduction | remaining H/D speedup |
+|---|---:|---:|---:|---:|---:|---:|
+| CESM CLDHGH | 25,920,000 | 0.500 | 2.105 | 1.885 | 10.5% | 0.27x |
+| Hurricane TC | 100,000,000 | 0.765 | 2.421 | 2.184 | 9.8% | 0.35x |
+| NYX temperature | 536,870,912 | 2.545 | 3.516 | 3.333 | 5.2% | 0.76x |
+
+There is still no PerBlock crossover through 537 MB, although the largest
+field improves from 1.38x slower than HostCoordinated to 1.31x slower.
+
+This is a useful first reduction, but it does not change the diagnosis. In a
+post-change Nsight Systems trace of the 1 MiB uniform case, the builder still
+accounts for 90.3% of kernel time and takes 2.958 ms. The remaining cost is the
+serial compatibility heap itself, not allocation. A first warp-cooperative heap
+prototype was rejected because it failed the host/device byte-equivalence test on
+tied frequencies; deterministic compatibility is not traded for benchmark speed.
+
+### Optimization 2: cap DeviceResident decode CTAs
+
+The device-header decode path previously launched `8 * numSMs` CTAs for every
+archive because `pardeg` was read only inside the kernel. Each CTA copies the
+reverse book to shared memory before discovering whether it owns a partition, so
+small and medium fields launched hundreds of needless book copies. The launch is
+now capped by `ceil(estimated_pardeg / 256)` while the embedded header remains
+authoritative. The kernel already uses a grid-stride partition loop, so archives
+with older or environment-selected partition geometry remain correct even when
+their embedded `pardeg` exceeds the estimate. Test
+`DeviceResidentDecodeUsesEmbeddedPartitionGeometry` encodes with `sublen=64`,
+decodes with the default estimator and its much smaller grid, and round-trips.
+
+| cuSZ field | DeviceResident decompress before ms | after ms | reduction | HostCoordinated ms | after D/H speedup |
+|---|---:|---:|---:|---:|---:|
+| CESM CLDHGH | 0.858 | 0.865 | -0.8% | 0.781 | 0.90x |
+| Hurricane TC | 1.117 | 0.954 | 14.6% | 0.886 | 0.93x |
+| NYX temperature | 4.149 | 3.605 | 13.1% | 3.606 | 1.00x |
+
+The decoder reaches parity on the 537 MB NYX field and substantially closes the
+100 MB gap, but CESM remains launch/serial-decode limited. Direct-stage 64 MiB
+GPU-event time improves by 4.9–5.7% for uniform/scientific archives and is nearly
+unchanged for sparse books; the end-to-end gain is larger where the old overlaunch
+was most exposed.
+
+### Decision
+
+The allocation/global-memory part of the builder is now addressed. The next step
+must replace the serial compatibility heap with a deterministic parallel builder,
+with byte-equivalence tests that deliberately contain frequency ties. Phase2/4
+tuning remains lower priority. Decode CTA overlaunch is addressed; further inverse
+work would need to parallelize the per-partition serial bit walker rather than
+adjust launch geometry again.
+
+### Handoff state for the next optimization
+
+The working tree is intentionally uncommitted. The current validated implementation
+contains two optimizations: shared-memory builder workspace for `bklen <= 1024`
+with a global-scratch fallback above it, and a capped DeviceResident decode grid.
+The dedicated profiler, tests, changelog entry, and this note are part of the same
+working-tree change. Start by reading `AGENTS.md`, this entire `CN-HUFFMAN-1`
+entry, and the current diff; do not reset or overwrite these changes.
+
+The next target is the 1-thread compatibility heap inside
+`huffmanBuildCanonicalBookDeviceKernel`. A warp-cooperative heap prototype was
+attempted and removed after tied frequencies produced a different/invalid tree.
+Do not resurrect it without first proving the exact `qinsert`/`qremove` tie order.
+The existing host/device byte-identity contract is intentional: equal-frequency
+cases must not merely round-trip, they must produce the same PHF payload.
+
+Acceptance gates for the next builder optimization:
+
+1. preserve PerBlock, Adaptive-fit, Fixed-fit, overlong fallback, and symbol-range
+   behavior for `uint8_t`, `uint16_t`, and `uint32_t`;
+2. retain byte-for-byte HostCoordinated/DeviceResident output, including deliberate
+   tied-frequency distributions;
+3. retain the `bklen > 1024` fallback or replace it with a tested general path;
+4. run `test_huffman`, `test_graph_capture`, and Compute Sanitizer;
+5. rerun the direct 10-warmup/31-median profiler before the three-field cuSZ test;
+6. record failed prototypes and before/after evidence here, not in source comments;
+7. do not commit unless explicitly requested.
+
+### Reproduction
+
+```bash
+CUDACXX=/software/u24/nvhpc/25.7/Linux_x86_64/25.7/cuda/12.9/bin/nvcc \
+  cmake --preset cuda-h200 -DBUILD_TESTING=ON -DBUILD_PROFILING=ON \
+  -DCUDAToolkit_ROOT=/software/u24/nvhpc/25.7/Linux_x86_64/25.7/cuda/12.9
+cmake --build --preset cuda-h200 -j8 \
+  --target test_huffman fzgmod-profile-huffman-throughput
+./build/cuda-h200/tests/stages/test_huffman --gtest_color=no
+./build/cuda-h200/bin/profiling/fzgmod-profile-huffman-throughput \
+  --sizes 4K,64K,1M,64M --warmups 10 --repetitions 31 \
+  --distribution all --csv /tmp/huffman-throughput-full.csv
+./build/cuda-h200/bin/profiling/fzgmod-profile-huffman-throughput \
+  --sizes 2M,4M,8M,16M,32M --warmups 10 --repetitions 31 \
+  --distribution all --book adaptive_warm --operation compress \
+  --csv /tmp/huffman-crossover-warm.csv
+./build/cuda-h200/bin/profiling/fzgmod-profile-huffman-throughput \
+  --sizes 2M,4M,8M,16M,32M --warmups 10 --repetitions 31 \
+  --distribution all --book fixed --operation compress \
+  --csv /tmp/huffman-crossover-fixed.csv
+/software/u24/nvhpc/25.7/Linux_x86_64/25.7/compilers/bin/nsys profile \
+  --trace=cuda,nvtx --stats=true --force-overwrite=true \
+  -o /tmp/huffman-device-perblock-1m \
+  ./build/cuda-h200/bin/profiling/fzgmod-profile-huffman-throughput \
+  --sizes 1M --warmups 0 --repetitions 3 --distribution scientific \
+  --mode device --book per_block --operation compress
+```
+
+---
+
 ## CN-LRZ-1 — Lorenzo block-mode inverse: CTA width vs reset period
 
 **Source:** `modules/predictors/lorenzo/lorenzo_stage.cu`,

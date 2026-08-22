@@ -179,3 +179,15 @@ set_target_properties(fzgmod-profile-huffman-drift PROPERTIES
 if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-huffman-drift PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
+
+# ── Huffman host/device throughput and latency benchmark ─────────────────────
+# Direct-stage benchmark spanning execution mode, codebook lifetime, operation,
+# input size, and symbol distribution. Correctness and deterministic archive
+# identity are checked as part of every measured configuration.
+add_executable(fzgmod-profile-huffman-throughput huffman_throughput.cpp)
+target_link_libraries(fzgmod-profile-huffman-throughput PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-huffman-throughput PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+if(NVTX3_INCLUDE_DIR)
+    target_include_directories(fzgmod-profile-huffman-throughput PRIVATE ${NVTX3_INCLUDE_DIR})
+endif()

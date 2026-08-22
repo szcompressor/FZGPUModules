@@ -38,6 +38,8 @@
  *   HF39  HuffmanStage/DeviceResidentRoundTrip_U32            — device-resident uint32 round-trip
  *   HF40  HuffmanStage/DeviceResidentNonTerminalPipeline       — exact-size downstream composition
  *   HF41  HuffmanStage/DeviceResidentMatchesHostBooksForAllSources — GPU tree compatibility
+ *   HF42  HuffmanStage/DeviceResidentLargeBookGlobalScratchFallback — >1024-symbol fallback
+ *   HF43  HuffmanStage/DeviceResidentDecodeUsesEmbeddedPartitionGeometry — capped-grid compatibility
  */
 
 #include <gtest/gtest.h>
@@ -49,6 +51,7 @@
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <numeric>
@@ -1165,4 +1168,61 @@ TEST(HuffmanStage, DeviceResidentMatchesHostBooksForAllSources) {
             << "device-built canonical book differs for source "
             << static_cast<int>(source);
     }
+}
+
+TEST(HuffmanStage, DeviceResidentLargeBookGlobalScratchFallback) {
+    constexpr size_t N = 16387;
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint16_t>((i * 29 + i / 7) % 1800);
+
+    CudaStream cs;
+    auto host_pool = make_test_pool(N * sizeof(uint16_t), 12.0f);
+    auto device_pool = make_test_pool(N * sizeof(uint16_t), 12.0f);
+
+    HuffmanStage<uint16_t> host;
+    host.setBklen(2048);
+
+    HuffmanStage<uint16_t> device;
+    device.setBklen(2048);
+    device.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+
+    const auto host_bytes = huffman_encode(host, input, cs.stream, *host_pool);
+    const auto device_bytes = huffman_encode(device, input, cs.stream, *device_pool);
+    EXPECT_EQ(device_bytes, host_bytes);
+
+    device.setInverse(false);
+    EXPECT_EQ(huffman_decode(device, device_bytes, N, cs.stream, *device_pool), input);
+}
+
+TEST(HuffmanStage, DeviceResidentDecodeUsesEmbeddedPartitionGeometry) {
+    constexpr size_t N = 200003;
+    std::vector<uint16_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = static_cast<uint16_t>((i * 17 + i / 11) % 700);
+
+    CudaStream cs;
+    auto encode_pool = make_test_pool(N * sizeof(uint16_t), 10.0f);
+    auto decode_pool = make_test_pool(N * sizeof(uint16_t), 10.0f);
+
+    struct SublenEnvReset {
+        bool armed = true;
+        ~SublenEnvReset() { if (armed) unsetenv("FZ_HF_SUBLEN"); }
+    } env_reset;
+    setenv("FZ_HF_SUBLEN", "64", 1);
+
+    HuffmanStage<uint16_t> encoder;
+    encoder.setBklen(1024);
+    const auto encoded = huffman_encode(encoder, input, cs.stream, *encode_pool);
+
+    uint8_t stage_header[128]{};
+    const size_t stage_header_bytes =
+        encoder.serializeHeader(0, stage_header, sizeof(stage_header));
+    unsetenv("FZ_HF_SUBLEN");
+    env_reset.armed = false;
+
+    HuffmanStage<uint16_t> decoder;
+    decoder.deserializeHeader(stage_header, stage_header_bytes);
+    decoder.setExecutionMode(HuffmanExecutionMode::DeviceResident);
+    EXPECT_EQ(huffman_decode(decoder, encoded, N, cs.stream, *decode_pool), input);
 }

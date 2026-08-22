@@ -14,6 +14,7 @@
 //     i >= total_bw — the outer while loop catches that on the next iteration.
 //     Surfaced by compute-sanitizer as a 4-byte OOB read at address+1B-past-end.
 
+#include <algorithm>
 #include <numeric>
 #include <stdexcept>
 
@@ -403,11 +404,19 @@ PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode(
 }
 
 PHF_MODULE_TPL void PHF_MODULE_CLASS::GPU_coarse_decode_device(
-    PHF_BYTE* in_encoded, size_t revbook_len, int numSMs,
+    PHF_BYTE* in_encoded, size_t revbook_len, size_t estimated_pardeg,
+    int numSMs,
     E* out_decoded, void* stream)
 {
     constexpr int block_dim = HuffmanHelper::BLOCK_DIM_DEFLATE;
-    const int grid_dim = numSMs > 0 ? 8 * numSMs : 1;
+    const size_t blocks_for_estimate =
+        (estimated_pardeg + block_dim - 1) / block_dim;
+    const size_t occupancy_cap = numSMs > 0 ? static_cast<size_t>(8 * numSMs) : 1;
+    // The embedded header remains authoritative inside the kernel. This estimate
+    // only avoids launching hundreds of idle CTAs for small archives; a smaller
+    // grid still covers a larger/older embedded pardeg through the grid-stride loop.
+    const int grid_dim = static_cast<int>(
+        std::max<size_t>(1, std::min(blocks_for_estimate, occupancy_cap)));
     phf::KERNEL_CUHIP_HF_decode_device_header<E, H, M>
         <<<grid_dim, block_dim, revbook_len, (cudaStream_t)stream>>>
         (in_encoded, static_cast<int>(revbook_len), out_decoded);

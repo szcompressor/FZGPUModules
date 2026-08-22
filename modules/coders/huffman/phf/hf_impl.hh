@@ -325,7 +325,8 @@ public:
         size_t const pardeg, E* out_decoded, void* stream);
 
     static void GPU_coarse_decode_device(
-        PHF_BYTE* in_encoded, size_t revbook_len, int numSMs,
+        PHF_BYTE* in_encoded, size_t revbook_len, size_t estimated_pardeg,
+        int numSMs,
         E* out_decoded, void* stream);
 
 };

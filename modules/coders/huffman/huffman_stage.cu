@@ -156,11 +156,12 @@ enum : uint32_t {
     HUF_BOOK_FLAG_DEGENERATE = 1u << 2,
 };
 
-// Serial tree construction on one device thread. bklen is normally 256 or 1024,
-// so removing the host round trip matters more than parallelising this small
-// priority queue. The heap operations intentionally mirror cuSZ's CPU builder,
-// including its strict/non-strict frequency tie rules, so canonical output stays
-// byte-identical.
+// Serial tree construction on one device thread. The heap operations intentionally
+// mirror cuSZ's CPU builder, including its strict/non-strict frequency tie rules,
+// so canonical output stays byte-identical. For the common <= 1024-symbol books,
+// the working set lives in shared memory: the old global-memory heap made every
+// dependent sift step pay device-memory latency. Larger books retain the global
+// scratch fallback. Measurements and rationale: docs/codebase_notes.md CN-HUFFMAN-1.
 template <typename T>
 __global__ void huffmanBuildCanonicalBookDeviceKernel(
     const uint32_t* __restrict__ source_freq, uint32_t bklen,
@@ -169,8 +170,23 @@ __global__ void huffmanBuildCanonicalBookDeviceKernel(
     uint8_t* __restrict__ reverse_book, uint32_t* __restrict__ meta,
     uint64_t* __restrict__ node_freq, int32_t* __restrict__ node_parent,
     int32_t* __restrict__ heap, int32_t* __restrict__ leaf_node,
-    uint32_t* __restrict__ work_freq)
+    uint32_t* __restrict__ work_freq, bool use_shared_scratch)
 {
+    extern __shared__ __align__(8) uint8_t shared_scratch[];
+    if (use_shared_scratch) {
+        const size_t node_capacity = 2 * static_cast<size_t>(bklen);
+        const size_t freq_bytes = node_capacity * sizeof(uint64_t);
+        const size_t parent_bytes = node_capacity * sizeof(int32_t);
+        const size_t heap_bytes = (node_capacity + 1) * sizeof(int32_t);
+        const size_t leaf_bytes = static_cast<size_t>(bklen) * sizeof(int32_t);
+        node_freq = reinterpret_cast<uint64_t*>(shared_scratch);
+        node_parent = reinterpret_cast<int32_t*>(shared_scratch + freq_bytes);
+        heap = reinterpret_cast<int32_t*>(shared_scratch + freq_bytes + parent_bytes);
+        leaf_node = reinterpret_cast<int32_t*>(
+            shared_scratch + freq_bytes + parent_bytes + heap_bytes);
+        work_freq = reinterpret_cast<uint32_t*>(
+            shared_scratch + freq_bytes + parent_bytes + heap_bytes + leaf_bytes);
+    }
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
     constexpr uint32_t kMaxCodeBits = HuffmanWord<4>::FIELD_CODE;
@@ -595,27 +611,32 @@ void HuffmanStage<T>::buildDeviceBook(
     const size_t scratch_bytes =
         freq_bytes + parent_bytes + heap_bytes + leaf_bytes + work_bytes;
 
-    auto* scratch = static_cast<uint8_t*>(
+    // 1024 symbols require 40,964 bytes, below CUDA's portable 48 KiB dynamic
+    // shared-memory limit. Keep arbitrary larger bklen values supported through
+    // the previous pool-backed path.
+    const bool use_shared_scratch = bklen_ <= 1024;
+    auto* scratch = use_shared_scratch ? nullptr : static_cast<uint8_t*>(
         pool->allocate(scratch_bytes, stream, "huf_device_book"));
     auto* node_freq = reinterpret_cast<uint64_t*>(scratch);
-    auto* node_parent = reinterpret_cast<int32_t*>(scratch + freq_bytes);
-    auto* heap = reinterpret_cast<int32_t*>(
-        scratch + freq_bytes + parent_bytes);
-    auto* leaf_node = reinterpret_cast<int32_t*>(
-        scratch + freq_bytes + parent_bytes + heap_bytes);
-    auto* work_freq = reinterpret_cast<uint32_t*>(
-        scratch + freq_bytes + parent_bytes + heap_bytes + leaf_bytes);
+    auto* node_parent = scratch ? reinterpret_cast<int32_t*>(scratch + freq_bytes) : nullptr;
+    auto* heap = scratch ? reinterpret_cast<int32_t*>(
+        scratch + freq_bytes + parent_bytes) : nullptr;
+    auto* leaf_node = scratch ? reinterpret_cast<int32_t*>(
+        scratch + freq_bytes + parent_bytes + heap_bytes) : nullptr;
+    auto* work_freq = scratch ? reinterpret_cast<uint32_t*>(
+        scratch + freq_bytes + parent_bytes + heap_bytes + leaf_bytes) : nullptr;
 
     buf_->register_runtime_bklen(static_cast<uint16_t>(bklen_));
     FZ_CUDA_CHECK(cudaMemsetAsync(
         buf_->d_book_meta, 0, 4 * sizeof(uint32_t), stream));
-    huffmanBuildCanonicalBookDeviceKernel<T><<<1, 1, 0, stream>>>(
+    huffmanBuildCanonicalBookDeviceKernel<T><<<
+        1, 1, use_shared_scratch ? scratch_bytes : 0, stream>>>(
         buf_->d_freq, bklen_, expected_symbols, source_mode,
         adaptive_floor_shift_, validate_symbol_range_, buf_->d_bk4,
         buf_->d_revbk4, buf_->d_book_meta, node_freq, node_parent,
-        heap, leaf_node, work_freq);
+        heap, leaf_node, work_freq, use_shared_scratch);
     FZ_CUDA_CHECK(cudaGetLastError());
-    pool->free(scratch, stream);
+    if (scratch) pool->free(scratch, stream);
 }
 
 template <typename T>
@@ -1019,8 +1040,10 @@ void HuffmanStage<T>::execute(
         // legacy path reads it on the caller's stream (rather than the default
         // stream) and synchronizes only that stream before launching decode.
         if (execution_mode_ == HuffmanExecutionMode::DeviceResident) {
+            const size_t estimated_pardeg =
+                (inlen - 1) / buf_->sublen + 1;
             phf::cuhip::modules<T, uint32_t>::GPU_coarse_decode_device(
-                d_encoded, buf_->revbk4_bytes, buf_->numSMs,
+                d_encoded, buf_->revbk4_bytes, estimated_pardeg, buf_->numSMs,
                 static_cast<T*>(outputs[0]), stream);
             FZ_CUDA_CHECK(cudaGetLastError());
         } else {
