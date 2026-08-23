@@ -129,7 +129,7 @@ TEST(DeviceBuffer, CompressIntoMatchesBorrowingForm) {
 
 // ── DB4 ──────────────────────────────────────────────────────────────────────
 TEST(DeviceBuffer, OwnedBufferFreesOnDestruction) {
-    constexpr size_t N = 1 << 18;   // 1 MB, large enough to see in cudaMemGetInfo
+    constexpr size_t N = 1 << 18;   // 1 MB per decompress output
     const size_t in_bytes = N * sizeof(float);
 
     auto h_in = make_random_floats(N, 13);
@@ -142,16 +142,26 @@ TEST(DeviceBuffer, OwnedBufferFreesOnDestruction) {
 
     BorrowedDeviceBuffer comp = p->compress(ConstDeviceSpan(d_in.void_ptr(), in_bytes), stream);
 
+    // "Frees on destruction" is tested as "no monotonic growth across many cycles":
+    // each iteration allocates a fresh owned buffer and destroys it at scope exit.
+    // A single cudaMalloc is not reliably visible in cudaMemGetInfo (coarse
+    // granularity / context reservation vary by machine), but a destructor that
+    // failed to free would accumulate kIters * in_bytes and show clearly.
+    constexpr int kIters = 128;   // a leak here would be ~128 MB, far above noise
     const size_t before = free_device_bytes();
-    {
+    for (int i = 0; i < kIters; ++i) {
         OwnedDeviceBuffer dec = p->decompressOwned(comp.cspan(), stream);
         ASSERT_NE(dec.data(), nullptr);
         EXPECT_EQ(dec.bytes(), in_bytes);
-        EXPECT_LT(free_device_bytes(), before);   // allocation is real
-    }
-    // Destructor must have freed it — no cudaFree by the caller.
+    }   // dec destructs each iteration — must free
     FZ_TEST_CUDA(cudaDeviceSynchronize());
-    EXPECT_GE(free_device_bytes(), before - (in_bytes / 2));
+    const size_t after = free_device_bytes();
+
+    // Allow a few buffers of slack for pool/context noise; catch a real per-iter leak.
+    const size_t slack = 8 * in_bytes;
+    EXPECT_GE(after + slack, before)
+        << "owned decompress leaked across " << kIters << " cycles: before=" << before
+        << " after=" << after;
 }
 
 // ── DB5 / DB6 ────────────────────────────────────────────────────────────────
