@@ -21,6 +21,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - Removed Huffman's experimental `Fine` encode mode, its public API and diagnostics, TOML/card option, documentation, profiling selection, and mode-specific tests; `HuffmanStage` now exposes only the supported cuSZ coarse-grained encoder.
 
 ### Fixed
+- **Linear quantization silently wrapped bins outside signed `TCode` range.** Tight NOA bounds on offset-valued fields can require indices much wider than int32 (S3D `N2` at `1e-6` needs roughly 3.3e10). The linear kernel now uses a guarded int64 rounding intermediate, records any signed-code overflow in device scratch, and `postStreamSync()` refuses the run with remediation guidance instead of producing a corrupt archive. Regression test: `QuantizerLinear.RefusesCodeOverflow`; rationale: `CN-QUANT-3`.
 - Docker image builds now retain `THIRD_PARTY.md` in the build context so the CMake install step can package the required third-party notices.
 - Installed packages now include the project `LICENSE` and `THIRD_PARTY.md`; synchronized all 30-stage documentation/catalog surfaces, completed newer-stage attribution, and corrected the cuSZ-Hi/SZx/ROIBIN-SZ license records.
 - **GPU CI builds could exhaust the self-hosted runner's root filesystem.** Both build phases now cap compilation at four concurrent jobs and use isolated compiler temporary directories that are removed when the build step exits; also fixed an out-of-bounds write while zeroing `LorenzoQuantConfig::reserved` that the CI compiler exposed.
