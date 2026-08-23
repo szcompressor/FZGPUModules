@@ -13,7 +13,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FORMAT = ROOT / "include" / "fzm_format.h"
-FACTORY = ROOT / "include" / "stage" / "stage_factory.h"
+MODULES = ROOT / "modules"
 CONFIG = ROOT / "src" / "pipeline" / "config.cpp"
 UMBRELLA = ROOT / "include" / "fzgpumodules.h"
 CMAKE = ROOT / "CMakeLists.txt"
@@ -36,10 +36,20 @@ def duplicates(items):
 
 def main():
     fmt = FORMAT.read_text(encoding="utf-8")
-    factory = FACTORY.read_text(encoding="utf-8")
     config = CONFIG.read_text(encoding="utf-8")
     umbrella = UMBRELLA.read_text(encoding="utf-8")
     cmake = CMAKE.read_text(encoding="utf-8")
+
+    # Stages self-register their FZM-header factory from their own .cu via
+    # FZ_REGISTER_SIMPLE_STAGE(StageType::X, Class) or
+    # FZ_REGISTER_STAGE_FACTORY(StageType::X, fn) — see include/stage/stage_registry.h.
+    # There is no central factory switch to parse any more, so scan modules/ instead.
+    registrar_pattern = re.compile(
+        r"FZ_REGISTER_(?:SIMPLE_STAGE|STAGE_FACTORY)\s*\(\s*(?:fz::)?StageType::([A-Z0-9_]+)"
+    )
+    factory_cases = set()
+    for cu_path in MODULES.rglob("*.cu"):
+        factory_cases.update(registrar_pattern.findall(cu_path.read_text(encoding="utf-8")))
 
     enum_body = require_match(
         r"enum\s+class\s+StageType[^\{]*\{(.*?)\};", fmt, "StageType", re.S
@@ -63,7 +73,6 @@ def main():
     registry_enums = [row[1] for row in registry_rows]
     registry_dirs = [row[4] for row in registry_rows]
 
-    factory_cases = set(re.findall(r"case\s+StageType::([A-Z0-9_]+)", factory))
     string_cases = set(re.findall(r"case\s+StageType::([A-Z0-9_]+)", fmt))
     implemented_enums = set(enum_names) - RESERVED
     registered_enums = set(registry_enums)
@@ -82,9 +91,9 @@ def main():
         errors.append(f'duplicate source directory "{value}" in kStageRegistry')
 
     for name in sorted(implemented_enums - factory_cases):
-        errors.append(f"StageType::{name} has no createStage() factory case")
+        errors.append(f"StageType::{name} has no FZ_REGISTER_SIMPLE_STAGE/FZ_REGISTER_STAGE_FACTORY registration")
     for name in sorted(factory_cases - implemented_enums):
-        errors.append(f"factory handles unknown/reserved StageType::{name}")
+        errors.append(f"a stage .cu registers unknown/reserved StageType::{name}")
     for name in sorted(implemented_enums - registered_enums):
         errors.append(f"StageType::{name} is missing from kStageRegistry")
     for name in sorted(registered_enums - implemented_enums):
@@ -111,7 +120,7 @@ def main():
         if not re.search(rf"\b{re.escape(save_fn)}\s*\(", config):
             errors.append(f"{public_name}: saver {save_fn} is not defined")
         if enum_name not in factory_cases:
-            errors.append(f"{public_name}: StageType::{enum_name} has no factory case")
+            errors.append(f"{public_name}: StageType::{enum_name} has no self-registered factory")
 
     for error in errors:
         print(f"FAIL {error}")
