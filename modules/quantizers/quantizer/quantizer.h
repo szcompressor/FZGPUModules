@@ -458,6 +458,9 @@ private:
     /// passes it as a `uint32_t` kernel-launch argument. Not used in inplace
     /// mode (which has no separate scatter path).
     uint32_t* d_outlier_count_scratch_ = nullptr;
+    /// Set by linear forward kernels when a quantization bin is outside the
+    /// signed TCode range; postStreamSync() converts it to a hard failure.
+    uint32_t* d_linear_overflow_scratch_ = nullptr;
     /// Pool that owns `d_outlier_count_scratch_` — captured at allocation
     /// time so the destructor returns it to the right pool.
     MemoryPool* persistent_pool_ = nullptr;
@@ -472,6 +475,7 @@ private:
     /// persistent allocator. Idempotent; no-op if already allocated, or if
     /// the stage is configured for inplace-outlier mode.
     void initOutlierCountScratch(MemoryPool* pool);
+    void initLinearOverflowScratch(MemoryPool* pool);
 
     bool isInplaceMode() const {
         return config_.inplace_outliers

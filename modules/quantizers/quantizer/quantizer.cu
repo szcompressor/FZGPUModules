@@ -31,8 +31,8 @@ namespace fz {
  * still reporting `status: ok`.
  * The failing case and its numbers: docs/codebase_notes.md CN-QUANT-1
  *
- * `int` is still the bin type: codes are at most 32-bit, and widening q would
- * change the wrap semantics linear mode documents.
+ * `int` is the regular radius-clamped bin type. Linear mode uses a wide
+ * intermediate solely to detect and refuse TCode overflow (CN-QUANT-3).
  */
 template<typename T> __device__ __forceinline__ int quantRound(T v);
 template<> __device__ __forceinline__ int quantRound<float>(float v)   { return __float2int_rn(v); }
@@ -168,22 +168,43 @@ __global__ void quantizer_abs_fwd_inplace_kernel(
  * Forward ABS/NOA linear / no-outlier variant (cuSZp-style).
  *
  * code = round(value / (2*abs_eb)), stored two's-complement in TCode. No radius
- * clamp, no threshold, no outlier path — the only atomic and the only divergent
- * branch of the regular forward kernel are removed, leaving a pure memory-bound
- * map. A value whose bin exceeds TCode range simply wraps, so the caller must
- * size TCode wide enough (use uint32_t). The codes are *declared* by the stage as
- * the signed DataType so downstream LorenzoStage<intN> reads them correctly.
+ * clamp, threshold, or outlier path. A value whose bin exceeds signed TCode
+ * range cannot be reconstructed, so the kernel records overflow and the stage
+ * refuses the run instead of silently wrapping. See CN-QUANT-3.
  */
+template<typename T> __device__ __forceinline__ long long quantRoundWide(T v);
+template<> __device__ __forceinline__ long long quantRoundWide<float>(float v) {
+    return __float2ll_rn(v);
+}
+template<> __device__ __forceinline__ long long quantRoundWide<double>(double v) {
+    return __double2ll_rn(v);
+}
+
 template<typename TInput, typename TCode>
 __global__ void quantizer_linear_fwd_kernel(
     const TInput* __restrict__ in, size_t n,
     TInput ebx2_r,          // 1 / (2 * abs_eb)
-    TCode* __restrict__ codes
+    TCode* __restrict__ codes,
+    uint32_t* __restrict__ overflow
 ) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
-    int q = quantRound<TInput>(in[i] * ebx2_r);
-    codes[i] = static_cast<TCode>(q);  // signed stored as two's-complement
+    const TInput scaled = in[i] * ebx2_r;
+    using SCode = typename std::make_signed<TCode>::type;
+    constexpr long long kWideGuard = std::numeric_limits<long long>::max() / 2;
+    if (!isfinite(scaled) || quantAbs(scaled) > static_cast<TInput>(kWideGuard)) {
+        atomicExch(overflow, 1u);
+        codes[i] = TCode(0);
+        return;
+    }
+    const long long q = quantRoundWide<TInput>(scaled);
+    if (q < static_cast<long long>(std::numeric_limits<SCode>::lowest()) ||
+        q > static_cast<long long>(std::numeric_limits<SCode>::max())) {
+        atomicExch(overflow, 1u);
+        codes[i] = TCode(0);
+        return;
+    }
+    codes[i] = static_cast<TCode>(static_cast<SCode>(q));
 }
 
 /**
@@ -486,7 +507,11 @@ QuantizerStage<TInput, TCode>::~QuantizerStage()
     if (persistent_pool_ != nullptr && d_outlier_count_scratch_ != nullptr) {
         persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
     }
+    if (persistent_pool_ != nullptr && d_linear_overflow_scratch_ != nullptr) {
+        persistent_pool_->freePersistentDevice(d_linear_overflow_scratch_);
+    }
     d_outlier_count_scratch_ = nullptr;
+    d_linear_overflow_scratch_ = nullptr;
     persistent_pool_         = nullptr;
 }
 
@@ -506,10 +531,25 @@ void QuantizerStage<TInput, TCode>::initOutlierCountScratch(MemoryPool* pool)
 }
 
 template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::initLinearOverflowScratch(MemoryPool* pool)
+{
+    if (d_linear_overflow_scratch_ != nullptr || !isLinearMode()) return;
+    if (pool == nullptr) {
+        throw std::runtime_error(
+            "QuantizerStage: linear-overflow scratch requires a MemoryPool");
+    }
+    persistent_pool_ = pool;
+    persistent_pool_alive_ = pool->lifetimeToken();
+    d_linear_overflow_scratch_ = static_cast<uint32_t*>(
+        pool->allocatePersistentDevice(sizeof(uint32_t), "quantizer_linear_overflow"));
+}
+
+template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::onFinalize(
     size_t /*estimated_inlen*/, MemoryPool* pool)
 {
     initOutlierCountScratch(pool);
+    initLinearOverflowScratch(pool);
 }
 
 template<typename TInput, typename TCode>
@@ -766,6 +806,11 @@ void QuantizerStage<TInput, TCode>::execute(
         FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
                                        sizeof(uint32_t), stream));
     }
+    if (isLinearMode()) {
+        initLinearOverflowScratch(pool);
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_linear_overflow_scratch_, 0,
+                                      sizeof(uint32_t), stream));
+    }
 
     // ── Resolve absolute error bound ──────────────────────────────────────────
     if (config_.eb_mode == ErrorBoundMode::ABS) {
@@ -889,7 +934,8 @@ void QuantizerStage<TInput, TCode>::execute(
             quantizer_linear_fwd_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
                 static_cast<const TInput*>(inputs[0]),
                 num_elements, ebx2_r,
-                static_cast<TCode*>(outputs[0]));
+                static_cast<TCode*>(outputs[0]),
+                d_linear_overflow_scratch_);
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TCode)};
             return;
@@ -982,8 +1028,24 @@ void QuantizerStage<TInput, TCode>::execute(
 
 template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::postStreamSync(cudaStream_t stream) {
-    // Inplace mode never allocates the scratch; nothing to read back.
-    if (is_inverse_ || d_outlier_count_scratch_ == nullptr) return;
+    if (is_inverse_) return;
+    if (isLinearMode()) {
+        if (d_linear_overflow_scratch_ == nullptr) return;
+        uint32_t overflow = 0;
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&overflow, d_linear_overflow_scratch_,
+                                      sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (overflow != 0) {
+            throw std::runtime_error(
+                "QuantizerStage linear_mode: round(value / (2 * abs_eb)) exceeds "
+                "the signed TCode range. Silent integer wrap would violate the "
+                "error bound; use wider codes, a value-centering transform, an "
+                "outlier-capable quantizer, or a looser error bound.");
+        }
+        return;
+    }
+    // Inplace mode never allocates the count scratch; nothing to read back.
+    if (d_outlier_count_scratch_ == nullptr) return;
     // A fused split-outlier run already reported the authoritative count via
     // setFusedSideOutput (it appended into its own counter, not this scratch, which
     // is stale) — reading it here would clobber the count back to 0.

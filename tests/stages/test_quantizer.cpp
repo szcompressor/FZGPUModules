@@ -446,7 +446,40 @@ TEST(QuantizerLinear, DoubleTinyRangeLargeOffsetRespectsBound) {
         << " (ratio " << (max_err / expected_abs_eb) << "x)";
 }
 
-// QZ5c: the same shape, but with a bound that is genuinely unrepresentable in
+// QZ5c: tightening the same offset/range shape makes the correct quantization
+// index exceed int32. Linear mode has no outlier escape, so it must refuse the
+// run rather than wrap the code and produce a plausible but corrupt archive.
+TEST(QuantizerLinear, RefusesCodeOverflow) {
+    CudaStream stream;
+    constexpr size_t N       = 1 << 12;
+    constexpr double OFFSET  = 0.7369;
+    constexpr double RANGE   = 1.10e-5;
+    constexpr double USER_EB = 1.0e-6;
+    const size_t in_bytes    = N * sizeof(double);
+
+    std::vector<double> h_input(N);
+    for (size_t i = 0; i < N; i++)
+        h_input[i] = OFFSET + RANGE * (0.5 + 0.5 * std::sin(i * 0.01));
+
+    CudaBuffer<double> d_in(N);
+    d_in.upload(h_input, stream);
+    stream.sync();
+
+    Pipeline pipeline(in_bytes, MemoryStrategy::MINIMAL, 6.0f);
+    auto* q = pipeline.addStage<QuantizerStage<double, uint32_t>>();
+    q->setErrorBound(static_cast<float>(USER_EB));
+    q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setLinearMode(true);
+    pipeline.finalize();
+
+    void* d_comp = nullptr;
+    size_t comp_sz = 0;
+    EXPECT_THROW(
+        pipeline.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream),
+        std::runtime_error);
+}
+
+// QZ5d: the same shape, but with a bound that is genuinely unrepresentable in
 // the input type. No kernel can satisfy it, so the stage must refuse rather
 // than emit a stream that decodes cleanly into out-of-bound values.
 TEST(QuantizerNOA, RefusesBoundBelowInputTypeSpacing) {
@@ -1515,13 +1548,14 @@ TEST(QuantizerTypeMatrix, DoubleUint32_PipelineRoundTrip) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QZ-L1..L6: Linear / no-outlier mode (cuSZp-style signed codes)
+// QZ-L1..L7: Linear / no-outlier mode (cuSZp-style signed codes)
 //   QL1  QuantizerLinear/ABSRoundTrip          — signed codes, no outliers, within eb
 //   QL2  QuantizerLinear/NOARoundTrip          — linear + NOA range scan
 //   QL3  QuantizerLinear/PortAndTypeContract   — 1 output "codes" declared INT32; inverse 1 input
 //   QL4  QuantizerLinear/HeaderRoundTrip       — linear_mode flag survives serialize/deserialize
 //   QL5  QuantizerLinear/IncompatibleModesThrow — REL/inplace/zigzag + linear each throw
 //   QL6  QuantizerLinear/Pipeline              — Quantizer(linear) → Lorenzo(block) end-to-end
+//   QL7  QuantizerLinear/RefusesCodeOverflow   — int32 bin overflow is a hard failure
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Linear forward: single "codes" output (no outlier triplet).
