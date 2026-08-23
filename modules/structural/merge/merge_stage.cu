@@ -10,6 +10,7 @@
  */
 
 #include "structural/merge/merge_stage.h"
+#include "stage/stage_registry.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 
@@ -83,3 +84,6 @@ void MergeStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::MERGE, fz::MergeStage);

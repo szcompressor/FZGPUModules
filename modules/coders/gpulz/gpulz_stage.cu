@@ -15,6 +15,7 @@
 // Upstream: https://github.com/boyuanzhang62/AIZ_VLDB26 — see THIRD_PARTY.md.
 
 #include "coders/gpulz/gpulz_stage.h"
+#include "stage/stage_registry.h"
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -1706,3 +1707,6 @@ void GPULZStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::GPULZ, fz::GPULZStage);

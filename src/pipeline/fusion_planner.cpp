@@ -1,5 +1,5 @@
-#include "pipeline/fusion_planner.h"
-#include "pipeline/dag.h"
+#include "advanced/fusion_planner.h"
+#include "advanced/dag.h"
 #include "stage/stage.h"
 
 #include <unordered_set>

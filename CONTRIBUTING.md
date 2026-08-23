@@ -108,7 +108,7 @@ Full instructions: [docs/how_to_add_a_stage.md](docs/how_to_add_a_stage.md)
 Key requirements for any new stage:
 - All required `Stage` virtual methods implemented
 - `StageType` enum value chosen (unique integer, never reuse or renumber existing values)
-- Registered in `StageFactory`, `config.cpp` (TOML), and root `CMakeLists.txt`
+- Self-registers its FZM-header factory in the stage `.cu` (`FZ_REGISTER_SIMPLE_STAGE` / `FZ_REGISTER_STAGE_FACTORY`); registered in `config.cpp` (TOML) and root `CMakeLists.txt`
 - Tests: ForwardRoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState
 
 ---

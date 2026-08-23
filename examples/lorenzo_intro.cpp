@@ -120,9 +120,7 @@ int main(int argc, char** argv) {
 
     p.finalize();
 
-    void* d_compressed = nullptr;
-    size_t compressed_size = 0;
-    p.compress(d_input, input_bytes, &d_compressed, &compressed_size, 0);
+    fz::BorrowedDeviceBuffer comp = p.compress({d_input, input_bytes}, 0);
     cudaDeviceSynchronize();
 
     const auto lrz_sizes = lorenzo->getActualOutputSizesByName();
@@ -133,18 +131,15 @@ int main(int argc, char** argv) {
     std::cout << "\n-- Compress profiling --\n";
     p.getLastPerfResult().print(std::cout);
 
-    void* d_reconstructed = nullptr;
-    size_t reconstructed_size = 0;
-    p.decompress(d_compressed, compressed_size, &d_reconstructed, &reconstructed_size, 0);
+    fz::BorrowedDeviceBuffer recon = p.decompressBorrowed(comp.cspan(), 0);
     cudaDeviceSynchronize();
 
     std::cout << "\n-- Decompress profiling --\n";
     p.getLastPerfResult().print(std::cout);
 
-    if (reconstructed_size != input_bytes) {
-        std::cerr << "unexpected reconstructed size: " << reconstructed_size
+    if (recon.bytes() != input_bytes) {
+        std::cerr << "unexpected reconstructed size: " << recon.bytes()
                   << " (expected " << input_bytes << ")\n";
-        // d_reconstructed is pool-owned — do NOT cudaFree.
         cudaFree(d_input);
         return 1;
     }
@@ -152,8 +147,8 @@ int main(int argc, char** argv) {
     std::vector<float> h_reconstructed(N);
     cudaMemcpy(
         h_reconstructed.data(),
-        d_reconstructed,
-        reconstructed_size,
+        recon.data(),
+        recon.bytes(),
         cudaMemcpyDeviceToHost);
 
     float max_abs_error = 0.0f;
@@ -182,12 +177,12 @@ int main(int argc, char** argv) {
     std::cout << "  input MiB:     "
               << (static_cast<double>(input_bytes) / (1024.0 * 1024.0))
               << "\n";
-    std::cout << "  compressed:    " << compressed_size << "\n";
+    std::cout << "  compressed:    " << comp.bytes() << "\n";
     std::cout << "  outliers:      " << outlier_count
               << (outlier_count > 0 ? " (present)" : " (none)") << "\n";
     std::cout << "  ratio:         "
-              << (compressed_size > 0
-                  ? static_cast<double>(input_bytes) / compressed_size
+              << (comp.bytes() > 0
+                  ? static_cast<double>(input_bytes) / comp.bytes()
                   : 0.0)
               << "x\n";
     std::cout << "  max abs error: " << max_abs_error << "\n";
@@ -195,7 +190,6 @@ int main(int argc, char** argv) {
     std::cout << "  rmse:          " << rmse << "\n";
     std::cout << "  <= eb:         " << within_eb_pct << "%\n";
 
-    // d_reconstructed is pool-owned (default) — do NOT cudaFree.
     cudaFree(d_input);
     return 0;
 }

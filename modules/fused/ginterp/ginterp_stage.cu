@@ -2,6 +2,11 @@
 // https://github.com/shixun404/cuSZ-Hi), BSD-3-Clause. See THIRD_PARTY.md.
 
 #include "fused/ginterp/ginterp_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "fused/ginterp/ginterp_kernels.h"
 #include "fused/ginterp/cusz_type_subset.h"  // INTERPOLATION_PARAMS full def
 #include "predictors/predictor_utils.cuh"
@@ -1282,3 +1287,34 @@ template class GInterpStage<double, uint16_t>;
 template class GInterpStage<double, uint32_t>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* GInterp_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::GInterpConfig; using fz::GInterpStage;
+    if (config_size < sizeof(GInterpConfig))
+        throw std::runtime_error("GInterp config too small: " + std::to_string(config_size));
+    GInterpConfig gc;
+    std::memcpy(&gc, config, sizeof(GInterpConfig));
+    fz::Stage* stage = nullptr;
+    auto make_ginterp = [&](auto input_tag) {
+        using TInput = decltype(input_tag);
+        if (gc.code_type == DataType::UINT8) {
+            auto* s = new GInterpStage<TInput, uint8_t>();  s->deserializeHeader(config, config_size); stage = s;
+        } else if (gc.code_type == DataType::UINT16) {
+            auto* s = new GInterpStage<TInput, uint16_t>(); s->deserializeHeader(config, config_size); stage = s;
+        } else if (gc.code_type == DataType::UINT32) {
+            auto* s = new GInterpStage<TInput, uint32_t>(); s->deserializeHeader(config, config_size); stage = s;
+        } else {
+            throw std::runtime_error("Unsupported GInterp code_type: "
+                + std::to_string(static_cast<int>(gc.code_type)));
+        }
+    };
+    if (gc.input_type == DataType::FLOAT32)      make_ginterp(float{});
+    else if (gc.input_type == DataType::FLOAT64) make_ginterp(double{});
+    else throw std::runtime_error("Unsupported GInterp input_type: "
+            + std::to_string(static_cast<int>(gc.input_type)));
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::G_INTERP, GInterp_fromHeader);

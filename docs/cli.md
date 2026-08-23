@@ -146,7 +146,7 @@ Abbreviated `benchmark` output:
 
 Contract notes for consumers:
 
-- **`device_ms` vs `host_wall_ms`.** `device_ms` is true GPU wall time measured by
+- **device_ms vs host_wall_ms.** `device_ms` is true GPU wall time measured by
   CUDA events bracketing the pipeline (`timing_method: cuda_events_dag`); it excludes
   PCIe transfers and host setup. `host_wall_ms` is the full end-to-end call including
   file I/O and pipeline construction. For cross-tool throughput comparison use
@@ -175,9 +175,9 @@ Contract notes for consumers:
 | -i FILE | Input file |
 | -o FILE | Output file |
 | -c FILE.toml | Load pipeline from TOML config |
-| --stages STAGE_CHAIN | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze[1\|2\|4\|8], rre[1\|2\|4\|8], rare[1\|2\|4\|8], raze[1\|2\|4\|8], clog[1\|2\|4\|8], hclog[1\|2\|4\|8], tupl[DIM_WORD_SIZE], gpulz[1\|2\|4\|8], diff, rle[1\|2\|4\|8], huffman, ans, adm, none) |
-| -t f32\|f64 | Data type (default: f32) |
-| -m rel\|abs\|noa | Error bound mode (default: rel) |
+| --stages STAGE_CHAIN | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze[1/2/4/8], rre[1/2/4/8], rare[1/2/4/8], raze[1/2/4/8], clog[1/2/4/8], hclog[1/2/4/8], tupl[DIM_WORD_SIZE], gpulz[1/2/4/8], diff, rle[1/2/4/8], huffman, ans, adm, none) |
+| -t f32/f64 | Data type (default: f32) |
+| -m rel/abs/noa | Error bound mode (default: rel) |
 | -e VALUE | Error bound value (default: 1e-3) |
 | -r VALUE | Quantization radius (default: 32768) |
 | -l XxYxZ | Dimensions (inferred if omitted) |

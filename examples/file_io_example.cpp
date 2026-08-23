@@ -121,9 +121,7 @@ int main(int argc, char* argv[]) {
         Pipeline comp(data_bytes);
         build_pipeline(comp);
 
-        void*  d_compressed  = nullptr;
-        size_t compressed_sz = 0;
-        comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz);
+        fz::BorrowedDeviceBuffer comp_buf = comp.compress({d_input, data_bytes});
         cudaDeviceSynchronize();
 
         comp.writeToFile(fzm_path);
@@ -132,10 +130,10 @@ int main(int argc, char* argv[]) {
         std::printf("  Input:      %zu bytes (%.2f MB)\n",
                     data_bytes, data_bytes / 1048576.0);
         std::printf("  Compressed: %zu bytes (%.2f MB)  ratio = %.2fx\n",
-                    compressed_sz, compressed_sz / 1048576.0,
-                    static_cast<double>(data_bytes) / static_cast<double>(compressed_sz));
+                    comp_buf.bytes(), comp_buf.bytes() / 1048576.0,
+                    static_cast<double>(data_bytes) / static_cast<double>(comp_buf.bytes()));
     }
-    // Pipeline goes out of scope here — pool freed, d_compressed invalidated.
+    // Pipeline goes out of scope here — pool freed, comp_buf invalidated.
     // The .fzm file on disk is still valid.
 
     // ── Step 2: Static decompressFromFile (caller-owned) ─────────────────────

@@ -27,7 +27,7 @@ Pipeline(input_size)          ← size the memory pool
 ## Enums
 
 ### fz::MemoryStrategy
-Defined in `include/pipeline/dag.h`.
+Defined in `include/advanced/dag.h`.
 
 | Value | Behavior |
 |-------|----------|
@@ -44,7 +44,7 @@ Defined in `modules/fused/lorenzo_quant/lorenzo_quant.h`. Used by `LorenzoQuantS
 | `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute) | Useful for single bounds over multiple datasets |
 | `PREL` | **Pseudo**-relative — `abs_eb = eb × max(abs(data))`, then applied as a plain `ABS` bound | Bounds `error / max(abs(x))`, **not** `error / abs(x)`. The cheap approximation used by the predictor-fused stages, which cannot vary the bound per element. |
 
-**`REL` vs `PREL` — the distinction that matters.** `PREL` is only as tight as
+**REL vs PREL — the distinction that matters.** `PREL` is only as tight as
 `REL` for elements at the peak magnitude. An element at 1% of peak sees an
 effective relative error 100× looser than the `eb` you asked for, and elements
 near zero are unbounded in relative terms. If you need a per-element relative
@@ -104,91 +104,86 @@ The dims are pushed into the stage at add-time and again at `finalize()`.
 
 ---
 
-## Compression
+## Compression and Decompression
 
-### Pool-owned output (default)
-The pipeline holds the output buffer. Do **not** `cudaFree` it.
+New code should prefer the span-based \ref explicit_ownership_api "Explicit-ownership API"
+below, which states ownership in the return type. The pointer overloads documented
+here remain fully supported; ownership for each is summarized in the
+\ref memory_ownership_summary "Memory Ownership Summary".
+
+The default (pool-owned) path is the simplest — the pipeline holds the buffer, so
+you never `cudaFree` it:
 
 ```cpp
 void*  d_compressed  = nullptr;
 size_t compressed_sz = 0;
 pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
-// d_compressed is valid until the next compress(), reset(), or Pipeline destruction
-```
-
-### Caller-owned output
-Pre-allocate the buffer; the pipeline writes into it.
-
-```cpp
-size_t capacity = pipeline.getMaxCompressedSize(input_bytes);
-void*  d_buf    = nullptr;
-cudaMalloc(&d_buf, capacity);
-
-size_t actual_sz = 0;
-pipeline.compress(d_input, input_bytes, d_buf, capacity, &actual_sz, stream);
-// caller owns d_buf; cudaFree when done
-```
-
-`getMaxCompressedSize(input_bytes)` returns a tight upper bound safe to use as the buffer capacity.
-
----
-
-## Decompression
-
-### Pool-owned output (default)
-```cpp
-void*  d_output  = nullptr;
-size_t output_sz = 0;
-pipeline.decompress(d_compressed, compressed_sz, &d_output, &output_sz, stream);
-// d_output is valid until the next decompress() or Pipeline destruction
-```
-
-### Caller-owned output
-```cpp
-pipeline.setPoolManagedDecompOutput(false);
+// valid until the next compress()/reset() or Pipeline destruction
 
 void*  d_output  = nullptr;
 size_t output_sz = 0;
 pipeline.decompress(d_compressed, compressed_sz, &d_output, &output_sz, stream);
-// caller owns d_output; cudaFree when done
+// valid until the next decompress() or Pipeline destruction
 ```
 
-### Caller-allocated buffer (no internal allocation)
-```cpp
-size_t decomp_capacity = pipeline.getLastUncompressedSize();
-void*  d_buf = nullptr;
-cudaMalloc(&d_buf, decomp_capacity);
+The other overloads write into a caller-provided buffer (or hand back a caller-owned
+allocation). Each throws if a supplied buffer is too small, reporting the size needed:
 
-size_t actual_sz = 0;
-pipeline.decompress(d_compressed, compressed_sz,
-                    d_buf, decomp_capacity, &actual_sz, stream);
-// caller owns d_buf; cudaFree when done
-// Writes straight into d_buf (no temp alloc/copy/free); synchronous (result ready on return).
-```
+| Overload | Ownership | Notes |
+|---|---|---|
+| `compress(in, n, d_buf, capacity, &actual, stream)` | caller's buffer | size with `getMaxCompressedSize(n)` |
+| `decompress(in, n, &d_out, &sz, stream)` after `setPoolManagedDecompOutput(false)` | caller-owned (`cudaFree`) | fresh allocation each call |
+| `decompress(in, n, d_buf, capacity, &actual, stream)` | caller's buffer | synchronous; no temp alloc/copy/free |
+| `decompressInto(in, n, d_buf, capacity, &actual, stream)` | caller's buffer | fully async for overlapped decode — see [Performance Tuning](\ref performance_tuning) |
 
-### Stream-concurrent decode (`decompressInto`, async)
-```cpp
-// PREALLOCATE required. No internal cudaMalloc/cudaFree/D2D copy/cudaStreamSynchronize,
-// so decode calls on distinct streams can overlap. *actual_sz is the planned size;
-// the bytes are valid only after YOU synchronize the stream.
-pipeline.decompressInto(d_compressed, compressed_sz,
-                        d_buf, decomp_capacity, &actual_sz, stream);
-cudaStreamSynchronize(stream);   // now d_buf is valid
-```
-Use one Pipeline instance per concurrent stream. Note: RZE/RRE/Huffman/AdaptiveBitpack
-inverse stages do a blocking device→host header read inside `execute()` that this cannot
-remove — for full overlap of those pipelines, drive each slot from its own host thread.
+`decompressInto()` requires `PREALLOCATE`, leaves `*actual` as the *planned* size, and
+does **not** synchronize — the bytes are valid only after you synchronize the stream
+yourself. Use one Pipeline per concurrent stream. (Some inverse coders — RZE/RRE/Huffman/
+AdaptiveBitpack — still do a blocking device→host header read inside `execute()`; for full
+overlap of those, drive each slot from its own host thread.)
 
-**Sizing helpers:**
-
-| Call | Returns |
-|------|---------|
-| `getMaxCompressedSize(input_bytes)` | Upper-bound on compressed output size |
-| `getLastUncompressedSize()` | Original input size from the most recent `compress()` call |
+**Sizing helpers:** `getMaxCompressedSize(input_bytes)` (tight upper bound for a compress
+buffer) and `getLastUncompressedSize()` (original size from the most recent `compress()`).
 
 ---
 
-## Memory Ownership Summary
+## Explicit-ownership API (preferred in new code) {#explicit_ownership_api}
+
+The pointer overloads above encode ownership in *how* you call them (`void**`
+vs `void*`) and in mutable pipeline state (`setPoolManagedDecompOutput()`). The
+span-based API states it in the type instead, and is a thin wrapper over the
+same execution core — identical behavior, no performance difference.
+
+| Call | Returns | Ownership |
+|---|---|---|
+| `compress(ConstDeviceSpan, stream)` | `BorrowedDeviceBuffer` | Pool-owned; do not free |
+| `compressInto(ConstDeviceSpan, DeviceSpan, stream)` | `size_t` bytes written | Caller's buffer |
+| `decompressBorrowed(ConstDeviceSpan, stream)` | `BorrowedDeviceBuffer` | Pool-owned; do not free |
+| `decompressOwned(ConstDeviceSpan, stream)` | `OwnedDeviceBuffer` | Caller-owned; freed on destruction |
+| `decompressInto(ConstDeviceSpan, DeviceSpan, stream)` | `size_t` bytes written | Caller's buffer (synchronous) |
+| `decompressIntoAsync(ConstDeviceSpan, DeviceSpan, stream)` | `size_t` planned bytes | Caller's buffer (async; PREALLOCATE only) |
+
+```cpp
+fz::BorrowedDeviceBuffer comp = pipeline.compress({d_in, in_bytes}, stream);
+// comp is pool memory: no cudaFree, invalidated by the next compress()/reset()
+
+fz::OwnedDeviceBuffer out = pipeline.decompressOwned(comp.cspan(), stream);
+// out.data() / out.bytes(); freed when `out` goes out of scope
+```
+
+`decompressBorrowed()` and `decompressOwned()` ignore
+`setPoolManagedDecompOutput()` — the call site decides, and the flag is left
+exactly as the caller set it. `OwnedDeviceBuffer` is move-only and records the
+device it was allocated on, so it frees through the backend the library was
+built against (never a hard-coded `cudaFree`) and on the right device.
+`release()` hands the raw pointer back if you need to manage it yourself.
+
+The types live in `include/pipeline/device_buffer.h` and allocate nothing
+themselves; `DeviceSpan` / `ConstDeviceSpan` are plain non-owning views.
+
+---
+
+## Memory Ownership Summary {#memory_ownership_summary}
 
 | Buffer | Owner | Rule |
 |--------|-------|------|
@@ -199,6 +194,8 @@ remove — for full overlap of those pipelines, drive each slot from its own hos
 | File decompress (`decompressFromFile` static) | Caller | Must `cudaFree` |
 | File decompress (`decompressFromFileInstance`) | Depends on `setPoolManagedDecompOutput()` | Same rules as `decompress()` |
 | Memory decompress (`decompressFromMemory`) | Depends on `setPoolManagedDecompOutput()` | Same rules as `decompress()` |
+| `BorrowedDeviceBuffer` (from `compress()` / `decompressBorrowed()`) | Pipeline | Do **not** free; invalidated by the next call reusing the slot |
+| `OwnedDeviceBuffer` (from `decompressOwned()`) | Caller | Freed on destruction; `release()` to take the raw pointer |
 
 ---
 
@@ -272,26 +269,23 @@ slot.decompressFromMemory(header.data(), header.size(),
 
 ## CUDA Graph Capture
 
-CUDA Graph capture records the entire compression pass as a replayable graph,
-eliminating CPU kernel-launch overhead on repeated calls with the same pipeline.
+Records the compression pass as a replayable graph, eliminating CPU kernel-launch
+overhead on repeated calls. See [Performance Tuning](\ref performance_tuning) for when
+this is worth it.
 
 ```cpp
 fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE);
 // ... addStage, connect ...
 pipeline.enableGraphMode(true);
 pipeline.finalize();
-
 pipeline.warmup(stream);         // JIT-compile kernels
 pipeline.captureGraph(stream);   // record once
-
-// Subsequent compress() calls replay the graph
-pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
+pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);  // replays
 ```
 
-Call `compress()` only after `captureGraph()`; use the same stream for capture and replay.
-
-Requirements: `PREALLOCATE` strategy, non-zero input size at construction, all stages
-graph-compatible, single-source pipeline. Incompatible with the caller-owned `compress()` overload.
+Requirements: `PREALLOCATE`, non-zero input size at construction, a single-source
+pipeline of graph-compatible stages, and the same stream for capture and replay.
+Incompatible with the caller-owned `compress()` overload.
 
 ---
 
@@ -320,12 +314,22 @@ graph-compatible, single-source pipeline. Incompatible with the caller-owned `co
 
 ## API Stability and Versioning {#api_stability}
 
-### Public API boundary
+### API tiers
 
-The stable public API (source-compatible across 1.x) is everything reachable from `include/fzgpumodules.h`:
-`Pipeline`, `Stage`, `StageFactory`, FZM file structs, `MemoryPool` public interface, and the `MemoryStrategy` / `ErrorBoundMode` enums.
+The public headers are organized into three tiers by how stable they are:
 
-Anything under `src/`, kernel implementations in `modules/*.cu`, allocation heuristics, pool sizing, buffer-coloring details, and logging output text may change in any release without being treated as breaking.
+| Tier | What | Headers | Guarantee |
+|---|---|---|---|
+| **Stable** | The API most users need | `fzgpumodules.h`, `pipeline/compressor.h` (`Pipeline`), `pipeline/device_buffer.h`, `pipeline/config.h`, `pipeline/perf.h`, `pipeline/stat.h`, `fzm_format.h`, the `modules/**/*_stage.h` stage headers, the `MemoryStrategy` / `ErrorBoundMode` enums | source-compatible within a major version |
+| **Extension** | For custom-stage authors | `stage/stage.h`, `stage/stage_registry.h`, `stage/fusion.h`, `mem/mempool.h` (the `MemoryPool` interface a stage's `execute()` uses) | may grow at minor versions via backward-compatible defaults |
+| **Advanced** (`include/advanced/`) | Pipeline internals exposed for experimentation | `advanced/dag.h` (`CompressionDAG` / `DAGNode` / `BufferInfo`), `advanced/fusion_planner.h`, `advanced/fusion_registry.h` | **no** source-compatibility promise; may change any release |
+
+The umbrella `fzgpumodules.h` no longer advertises the Advanced headers. `Pipeline`
+still depends on `CompressionDAG` internally, so those types remain reachable
+transitively — but reach for them deliberately (`#include "advanced/dag.h"`), knowing
+they are unstable. Anything under `src/`, the kernel implementations in `modules/*.cu`,
+allocation heuristics, pool sizing, buffer-coloring details, and logging output text may
+change in any release without being treated as breaking.
 
 ### Versioning policy (SemVer)
 

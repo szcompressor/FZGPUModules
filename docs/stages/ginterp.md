@@ -89,7 +89,7 @@ the launcher), unconditionally — this is **not** a double-only branch:
   same dynamic-shmem path.
 - The launcher only calls `cudaFuncSetAttribute(...,
   cudaFuncAttributeMaxDynamicSharedMemorySize, …)` when the tile exceeds 48 KB,
-  so the opt-in fires **only for 3-D `double`**. `float` (and all 2-D) use the
+  so the opt-in fires **only for 3-D double**. `float` (and all 2-D) use the
   default dynamic region and never touch the attribute.
 - `float` throughput is expected to be unchanged versus the previous
   static-`__shared__` version: same shared-memory size, same occupancy, same
@@ -99,7 +99,7 @@ the launcher), unconditionally — this is **not** a double-only branch:
   memory is ≥ ~77 KB (Volta and newer). On older GPUs capped at 48 KB the
   `cudaFuncSetAttribute` call fails and the launch surfaces the error. 2-D
   `double` and all `float` configs are unaffected.
-- **Auto-tuning (modes 1-4) is `float`-only.** The cuSZ-Hi profiling kernels
+- **Auto-tuning (modes 1-4) is float-only.** The cuSZ-Hi profiling kernels
   write their metrics into a data-typed buffer while the host analysis is
   `float`; `double` inputs with a profiling mode set fall back to the
   deterministic baseline with a warning (mode 5 manual `α`/`β` is still honored).
@@ -247,7 +247,7 @@ Other limitations:
   pre-set, and (for mode 5) `manual_alpha > 0`. Modes 1/2/3/4 each end with a
   D2H + `cudaStreamSynchronize` of the error array, so those remain
   graph-incompatible.
-- **Fixed `LEVEL = 4` and anchor tile size `16` on every axis** for both
+- **Fixed LEVEL = 4 and anchor tile size 16 on every axis** for both
   3-D (16×16×16) and 2-D (16×16) — these stay aligned with cuSZ-Hi's hardcoded
   choices for the 3-D path. The 2-D path uses the same `LEVEL=4 / 16×16` tile
   rather than upstream cuSZ-Hi's `LEVEL=6 / 8×8 × 4`-numAnchorBlocks default
@@ -340,7 +340,7 @@ auto_tuning  = 0            # 0=off, 1=cheap, 3=full, 4=full+a/b sweep, 5=manual
 ## Serialized header
 
 `GInterpConfig` (~96 bytes) — fits comfortably in `FZM_STAGE_CONFIG_SIZE`
-(128 B). Stores `error_bound` (a **`double`**, so the resolved absolute bound
+(128 B). Stores `error_bound` (a **double**, so the resolved absolute bound
 survives the round-trip at full precision for `double` inputs), `quant_radius`
 (the resolved value, never 0 by the time it lands here), `dim_x/y/z`, anchor
 extents, `eb_mode`, `input_type` / `code_type`, the user-specified `user_eb`, and

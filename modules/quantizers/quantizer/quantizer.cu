@@ -1,6 +1,11 @@
 // Algorithm adapted from the LC/PFPL framework (Burtscher et al., BSD-3-Clause).
 // Upstream: https://github.com/burtscher/LC-framework — see THIRD_PARTY.md.
 #include "quantizers/quantizer/quantizer.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "quantizers/dither.cuh"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
@@ -1256,3 +1261,27 @@ template class QuantizerStage<double, uint16_t>;
 template class QuantizerStage<double, uint32_t>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* Quantizer_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::QuantizerConfig; using fz::QuantizerStage;
+    if (config_size < sizeof(QuantizerConfig))
+        throw std::runtime_error("QuantizerConfig too small: " + std::to_string(config_size));
+    QuantizerConfig qc;
+    std::memcpy(&qc, config, sizeof(QuantizerConfig));
+    if (qc.input_type == DataType::FLOAT32 && qc.code_type == DataType::UINT16) {
+        auto* s = new QuantizerStage<float, uint16_t>();  s->deserializeHeader(config, config_size); return s;
+    } else if (qc.input_type == DataType::FLOAT32 && qc.code_type == DataType::UINT32) {
+        auto* s = new QuantizerStage<float, uint32_t>();  s->deserializeHeader(config, config_size); return s;
+    } else if (qc.input_type == DataType::FLOAT64 && qc.code_type == DataType::UINT16) {
+        auto* s = new QuantizerStage<double, uint16_t>(); s->deserializeHeader(config, config_size); return s;
+    } else if (qc.input_type == DataType::FLOAT64 && qc.code_type == DataType::UINT32) {
+        auto* s = new QuantizerStage<double, uint32_t>(); s->deserializeHeader(config, config_size); return s;
+    }
+    throw std::runtime_error("Unsupported QuantizerStage types: input_type="
+        + std::to_string(static_cast<int>(qc.input_type))
+        + " code_type=" + std::to_string(static_cast<int>(qc.code_type)));
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::QUANTIZER, Quantizer_fromHeader);

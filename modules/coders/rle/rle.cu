@@ -1,4 +1,9 @@
 #include "coders/rle/rle.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "log.h"
 #include "backend/api.h"
 #include "backend/cub.h"
@@ -674,3 +679,31 @@ template void launchRLEDecompressKernel<int32_t>(const int32_t*, const uint32_t*
 template void launchRLEDecompressKernel<int64_t>(const int64_t*, const uint32_t*, const uint32_t*, int64_t*, uint32_t, cudaStream_t);
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* RLE_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::RLEStage; using fz::Stage;
+    if (config_size >= 1) {
+        DataType dt;
+        std::memcpy(&dt, config, sizeof(DataType));
+        Stage* stage = nullptr;
+        switch (dt) {
+            case DataType::UINT8:    stage = new RLEStage<uint8_t>();  break;
+            case DataType::UINT16:   stage = new RLEStage<uint16_t>(); break;
+            case DataType::UINT32:   stage = new RLEStage<uint32_t>(); break;
+            case DataType::UINT64:   stage = new RLEStage<uint64_t>(); break;
+            case DataType::INT8:     stage = new RLEStage<int8_t>();   break;
+            case DataType::INT16:    stage = new RLEStage<int16_t>();  break;
+            case DataType::INT32:    stage = new RLEStage<int32_t>();  break;
+            case DataType::INT64:    stage = new RLEStage<int64_t>();  break;
+            default: throw std::runtime_error("Unsupported RLE data type: "
+                        + std::to_string(static_cast<int>(dt)));
+        }
+        stage->deserializeHeader(config, config_size);
+        return stage;
+    }
+    return new RLEStage<uint16_t>();
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::RLE, RLE_fromHeader);

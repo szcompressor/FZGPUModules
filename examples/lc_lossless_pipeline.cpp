@@ -92,18 +92,16 @@ static void run(const char* label, Pipeline& p,
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    void* d_comp = nullptr;  size_t comp_sz = 0;
-    p.compress(d_in, in_bytes, &d_comp, &comp_sz, stream);
+    fz::BorrowedDeviceBuffer comp = p.compress({d_in, in_bytes}, stream);
 
-    void* d_dec = nullptr;   size_t dec_sz = 0;
-    p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream);
+    fz::BorrowedDeviceBuffer dec = p.decompressBorrowed(comp.cspan(), stream);
     cudaStreamSynchronize(stream);
 
-    std::vector<float> recon(dec_sz / sizeof(float));
-    cudaMemcpy(recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
+    std::vector<float> recon(dec.bytes() / sizeof(float));
+    cudaMemcpy(recon.data(), dec.data(), dec.bytes(), cudaMemcpyDeviceToHost);
 
     const float err   = max_abs_error(host, recon);
-    const double ratio = static_cast<double>(in_bytes) / static_cast<double>(comp_sz);
+    const double ratio = static_cast<double>(in_bytes) / static_cast<double>(comp.bytes());
     const bool   ok    = (recon.size() == host.size()) && (err <= eb * 1.05f);
 
     std::printf("  %-10s  CR %6.2fx   max|err| %.3e   %s\n",

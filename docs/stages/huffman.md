@@ -56,7 +56,7 @@ Only these types are compiled and linked:
 ### Setting bklen
 
 `bklen` is the size of the Huffman codebook and must cover the full range of
-symbols that will appear in the input.  **All input symbols must be in `[0, bklen)`.**
+symbols that will appear in the input.  **All input symbols must be in [0, bklen).**
 Symbols outside this range are detected after the histogram D2H and throw a
 `std::runtime_error` naming the count of out-of-range symbols — but only on calls that
 actually histogram, so the check does not run once a codebook has been pinned by
@@ -109,7 +109,7 @@ p.connect(huf, lrz, "codes");
 p.finalize();
 ```
 
-**Why `zigzag_codes=true` is required here:**  With `zigzag_codes=false` (raw delta),
+**Why zigzag_codes=true is required here:**  With `zigzag_codes=false` (raw delta),
 positive deltas map to `[0, radius-1]` and negative deltas wrap to
 `[65537-radius, 65535]` in uint16.  These two lobes require `bklen=65536` for
 the Huffman codebook to cover the full symbol range.  With zigzag, all codes land in
@@ -213,7 +213,7 @@ has to be shared across independently compressed chunks.  Otherwise prefer
   0.9%.  It cannot see a block that is *more* compressible than the fitted one while
   still being poorly served by its book. `setRefitInterval(n)` refits unconditionally
   every `n` calls and covers that case at the cost of one histogram per `n`.
-  **When every call carries a genuinely different variable, prefer `PerBlock`**: a
+  **When every call carries a genuinely different variable, prefer PerBlock**: a
   refit always lands one call late, so it cannot match a book fitted to the block
   being encoded.
 - **Codes cannot exceed 27 bits.**  `HuffmanWord<4>` holds the code in a 27-bit

@@ -51,16 +51,11 @@ operation inherits. Implementations live under `modules/`. From the outside a st
 a black box: it takes one or more device buffers as input and produces one or more named
 outputs.
 
-Key methods every stage implements:
-
-| Method | Purpose |
-|--------|---------|
-| `execute(stream, pool, inputs, outputs, sizes)` | Dispatch the GPU kernel |
-| `estimateOutputSizes(input_sizes)` | Predict output buffer sizes for pre-allocation |
-| `estimateScratchBytes(input_sizes)` | Request persistent scratch memory at finalize-time |
-| `setInverse(bool)` | Switch between compression (forward) and decompression (inverse) |
-| `serializeHeader()` / `deserializeHeader()` | Save/restore config for FZM file round-trips |
-| `setDims(array<size_t,3>)` | Pass spatial dimensions to dimension-aware stages |
+Every stage implements a small set of virtual methods — `execute()` (dispatch the
+kernel), `estimateOutputSizes()` / `estimateScratchBytes()` (buffer sizing), `setInverse()`
+(forward vs. inverse), `serializeHeader()` / `deserializeHeader()` (FZM round-trips), and
+`setDims()` (dimension-aware stages). The full contract, and how to implement each, is in
+\ref how_to_add_a_stage "How to Add a New Stage".
 
 Stages declare *named* outputs (e.g. `"codes"`, `"outlier_errors"`) so the pipeline
 can route individual outputs by name rather than by position. Most stages have a single
@@ -71,36 +66,17 @@ through the DAG separately.
 
 `Pipeline` (`include/pipeline/compressor.h`) is the user-facing API. It wraps
 `CompressionDAG` and `MemoryPool` and hides buffer-ID bookkeeping behind a
-named-output wiring model:
+named-output wiring model. The lifecycle is four steps — construct (input size sizes
+the pool), `addStage<T>()` + `connect(downstream, upstream, "port")` to build the graph,
+`finalize()` to validate topology and allocate buffers, then `compress()` / `decompress()`.
 
-```cpp
-// 1. Construct (input size is used for memory pool sizing)
-fz::Pipeline pipeline(n * sizeof(float), fz::MemoryStrategy::PREALLOCATE);
-pipeline.setDims(nx, ny);
-
-// 2. Add stages and wire them
-auto* lrz = pipeline.addStage<fz::LorenzoQuantStage<float, uint16_t>>(
-    fz::LorenzoQuantStage<float, uint16_t>::Config{1e-4f});
-auto* rle = pipeline.addStage<fz::RLEStage<uint16_t>>();
-pipeline.connect(rle, lrz, "codes");   // route the "codes" output to RLE
-
-// 3. Finalize — validates topology, assigns execution levels, allocates buffers
-pipeline.finalize();
-
-// 4. Compress / decompress
-void* d_compressed; size_t compressed_size;
-pipeline.compress(d_input, n * sizeof(float), &d_compressed, &compressed_size, stream);
-
-void* d_output; size_t output_size;
-pipeline.decompress(d_compressed, compressed_size, &d_output, &output_size, stream);
-```
-
-For more usage patterns — caller-allocated output, CUDA Graph capture, file I/O, and
-multi-branch pipelines — see the \ref mainpage "Quick Start" and `examples/`.
+For the full lifecycle with code — including caller-allocated output, CUDA Graph capture,
+and file I/O — see the \ref mainpage "Quick Start", the \ref api_reference "API Reference",
+and `examples/`.
 
 ### CompressionDAG
 
-`CompressionDAG` (`include/pipeline/dag.h`) holds the graph topology: a set of
+`CompressionDAG` (`include/advanced/dag.h`) holds the graph topology: a set of
 `DAGNode` objects (one per stage), directed edges representing data flow, and a
 `BufferInfo` metadata table tracking each buffer's producer, consumer count, size,
 and allocation state.
@@ -133,15 +109,11 @@ Two strategies control when allocations happen:
 buffers have non-overlapping lifetimes and assigns them to the same backing memory,
 reducing total allocation footprint without affecting correctness.
 
-**Persistent allocations** are a second tier for stage-internal scratch that must
-live for the stage's full lifetime — codebook tables, histogram buffers, partition
-metadata.  These are allocated via `pool->allocatePersistentDevice()` (backed by
-`cudaMalloc`) and `pool->allocatePersistentPinned()` (backed by `cudaMallocHost`),
-and freed when the stage's internal buffer is destroyed or when the pool is torn
-down.  They are not stream-ordered, not subject to MINIMAL/PREALLOCATE policy, and
-not eligible for buffer coloring — but they are tracked for footprint reporting via
-`pool->getPersistentDeviceBytes()` / `getPersistentPinnedBytes()`.  Stages that
-use this path implement `Stage::onFinalize()` to pre-allocate at finalize time.
+**Persistent allocations** are a second tier for stage-internal scratch that must live
+for the stage's full lifetime (codebook tables, histograms, partition metadata), via
+`pool->allocatePersistentDevice()` / `allocatePersistentPinned()`. They are not
+stream-ordered, not subject to MINIMAL/PREALLOCATE policy, and not colored, but are
+tracked for footprint reporting. Stages allocate them from `Stage::onFinalize()`.
 
 ---
 
