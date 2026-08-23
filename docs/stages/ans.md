@@ -37,7 +37,7 @@ allows `ANSStage` to accept any upstream output as raw bytes — most commonly t
 
 ### prob_bits limitation
 
-**Only `prob_bits=10` is supported in this build.**  The dietGPU rANS kernels are
+**Only prob_bits=10 is supported in this build.**  The dietGPU rANS kernels are
 compiled as explicit template instantiations for `kANSDefaultProbBits=10` in
 `modules/coders/ans/dietgpu/GpuANS.cu`.  Calling `setProbBits(n)` with `n != 10`
 and then calling `execute()` throws `std::runtime_error`.  The setter is reserved
@@ -72,7 +72,7 @@ p.connect(ans, lrz, "codes");  // must connect to "codes" port, not "output"
 p.finalize();
 ```
 
-**Why `zigzag_codes=true`:**  Raw signed-delta codes from `LorenzoQuantStage`
+**Why zigzag_codes=true:**  Raw signed-delta codes from `LorenzoQuantStage`
 span a sparse subset of the full uint16 range.  Zigzag remaps them to a compact
 `[0, 2*radius-2]` range, concentrating the probability mass and improving rANS
 compression ratio.  Without zigzag, most of the 256-bucket histogram will be near
@@ -174,7 +174,7 @@ header peek inside `estimateOutputSizes()`.
 
 ## Limitations {#ans-limitations}
 
-**Only `prob_bits=10` is supported.** See \ref ans_stage_settings "Stage settings".
+**Only prob_bits=10 is supported.** See \ref ans_stage_settings "Stage settings".
 
 **Not CUDA Graph compatible.** One device-to-host synchronization point exists in
 every forward call (to read the `ANSCoalescedHeader` for the compressed size) and

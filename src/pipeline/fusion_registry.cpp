@@ -1,4 +1,4 @@
-#include "pipeline/fusion_registry.h"
+#include "advanced/fusion_registry.h"
 #include "stage/stage.h"
 
 #include "quantizers/quantizer/quantizer.h"

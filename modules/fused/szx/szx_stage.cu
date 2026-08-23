@@ -14,6 +14,11 @@
 // reference SZx container (documented in the stage header).
 
 #include "fused/szx/szx_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -378,3 +383,19 @@ template class SZxStage<float>;
 template class SZxStage<double>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* SZx_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::SZxStage; using fz::Stage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::FLOAT32;
+    Stage* stage = nullptr;
+    if      (dt == DataType::FLOAT32) stage = new SZxStage<float>();
+    else if (dt == DataType::FLOAT64) stage = new SZxStage<double>();
+    else throw std::runtime_error("Unsupported SZxStage DataType: "
+            + std::to_string(static_cast<int>(dt)));
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::SZX, SZx_fromHeader);

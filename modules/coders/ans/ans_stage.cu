@@ -7,6 +7,11 @@
 //            (reads ANSCoalescedHeader to determine prob_bits and uncompressed size).
 
 #include "coders/ans/ans_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "ans/GpuANSCodec.h"
 #include "ans/GpuANSStatistics.h"
 #include "ans/GpuANSEncode.h"
@@ -376,3 +381,18 @@ void ANSStage::executeInverse(
 }
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* ANS_fromHeader(const uint8_t* config, size_t config_size) {
+#if !defined(FZGMOD_BACKEND_HIP) && !defined(FZGMOD_BACKEND_SYCL)
+    auto* s = new fz::ANSStage();
+    s->deserializeHeader(config, config_size);
+    return s;
+#else
+    (void)config; (void)config_size;
+    throw std::runtime_error("createStage(): 'ANS' stage is not supported on the current GPU backend");
+#endif
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::ANS, ANS_fromHeader);

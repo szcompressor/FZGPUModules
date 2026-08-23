@@ -1,4 +1,9 @@
 #include "predictors/diff/diff.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "transforms/negabinary/negabinary.h"
 #include "transforms/zigzag/zigzag.h"
 #include "log.h"
@@ -299,3 +304,59 @@ template __global__ void fusionDecodePassKernel<int32_t, uint32_t, FusionMode::Z
 template __global__ void fusionDecodePassKernel<int64_t, uint64_t, FusionMode::ZIGZAG>(const uint64_t*, int64_t*, size_t);
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* Difference_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::FusionMode; using fz::DifferenceStage; using fz::Stage;
+    if (config_size >= 2) {
+        DataType tin_dt  = static_cast<DataType>(config[0]);
+        DataType tout_dt = static_cast<DataType>(config[1]);
+        FusionMode mode = FusionMode::NEGABINARY;
+        if (config_size >= 7) mode = static_cast<FusionMode>(config[6]);
+        Stage* stage = nullptr;
+        if (tin_dt == DataType::INT8 && tout_dt == DataType::UINT8)
+            stage = (mode == FusionMode::ZIGZAG)
+                ? static_cast<Stage*>(new DifferenceStage<int8_t, uint8_t, FusionMode::ZIGZAG>())
+                : static_cast<Stage*>(new DifferenceStage<int8_t, uint8_t, FusionMode::NEGABINARY>());
+        else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16)
+            stage = (mode == FusionMode::ZIGZAG)
+                ? static_cast<Stage*>(new DifferenceStage<int16_t, uint16_t, FusionMode::ZIGZAG>())
+                : static_cast<Stage*>(new DifferenceStage<int16_t, uint16_t, FusionMode::NEGABINARY>());
+        else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32)
+            stage = (mode == FusionMode::ZIGZAG)
+                ? static_cast<Stage*>(new DifferenceStage<int32_t, uint32_t, FusionMode::ZIGZAG>())
+                : static_cast<Stage*>(new DifferenceStage<int32_t, uint32_t, FusionMode::NEGABINARY>());
+        else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64)
+            stage = (mode == FusionMode::ZIGZAG)
+                ? static_cast<Stage*>(new DifferenceStage<int64_t, uint64_t, FusionMode::ZIGZAG>())
+                : static_cast<Stage*>(new DifferenceStage<int64_t, uint64_t, FusionMode::NEGABINARY>());
+        else if (tin_dt == DataType::FLOAT32)  stage = new DifferenceStage<float>();
+        else if (tin_dt == DataType::FLOAT64)  stage = new DifferenceStage<double>();
+        else if (tin_dt == DataType::UINT8)    stage = new DifferenceStage<uint8_t>();
+        else if (tin_dt == DataType::UINT16)   stage = new DifferenceStage<uint16_t>();
+        else if (tin_dt == DataType::UINT32)   stage = new DifferenceStage<uint32_t>();
+        else if (tin_dt == DataType::INT32)    stage = new DifferenceStage<int32_t>();
+        else if (tin_dt == DataType::INT64)    stage = new DifferenceStage<int64_t>();
+        else throw std::runtime_error("Unsupported Difference data type: "
+                + std::to_string(static_cast<int>(tin_dt)));
+        stage->deserializeHeader(config, config_size);
+        return stage;
+    } else if (config_size >= 1) {
+        DataType dt = static_cast<DataType>(config[0]);
+        switch (dt) {
+            case DataType::FLOAT32:  return new DifferenceStage<float>();
+            case DataType::FLOAT64:  return new DifferenceStage<double>();
+            case DataType::UINT8:    return new DifferenceStage<uint8_t>();
+            case DataType::UINT16:   return new DifferenceStage<uint16_t>();
+            case DataType::UINT32:   return new DifferenceStage<uint32_t>();
+            case DataType::INT32:    return new DifferenceStage<int32_t>();
+            case DataType::INT64:    return new DifferenceStage<int64_t>();
+            default: throw std::runtime_error("Unsupported Difference data type: "
+                        + std::to_string(static_cast<int>(dt)));
+        }
+    }
+    return new DifferenceStage<float>();
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::DIFFERENCE, Difference_fromHeader);

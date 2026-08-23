@@ -23,6 +23,11 @@
  */
 
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "backend/api.h"
@@ -610,3 +615,16 @@ template void launchAdaptiveLorenzoInverse<int32_t>(
     const int32_t*, const uint8_t*, const int32_t*, const uint32_t*, int32_t*, size_t, uint32_t, cudaStream_t);
 
 }  // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* AdaptiveLorenzo_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::AdaptiveLorenzoStage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::INT32;
+    if (dt == DataType::INT16) {
+        auto* s = new AdaptiveLorenzoStage<int16_t>(); s->deserializeHeader(config, config_size); return s;
+    }
+    auto* s = new AdaptiveLorenzoStage<int32_t>(); s->deserializeHeader(config, config_size); return s;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::ADAPTIVE_LORENZO, AdaptiveLorenzo_fromHeader);

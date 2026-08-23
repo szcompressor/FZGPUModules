@@ -1,4 +1,9 @@
 #include "coders/bitpack/bitpack_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -378,3 +383,20 @@ template __global__ void bitpackOrReduceKernel<uint16_t>(const uint16_t*, size_t
 template __global__ void bitpackOrReduceKernel<uint32_t>(const uint32_t*, size_t, uint32_t, unsigned int*);
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* Bitpack_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::BitpackStage; using fz::Stage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::UINT16;
+    Stage* stage = nullptr;
+    if      (dt == DataType::UINT8)  stage = new BitpackStage<uint8_t>();
+    else if (dt == DataType::UINT16) stage = new BitpackStage<uint16_t>();
+    else if (dt == DataType::UINT32) stage = new BitpackStage<uint32_t>();
+    else throw std::runtime_error("Unsupported BitpackStage DataType: "
+            + std::to_string(static_cast<int>(dt)));
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::BITPACK, Bitpack_fromHeader);

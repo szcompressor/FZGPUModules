@@ -18,6 +18,7 @@
  */
 
 #include "coders/hclog/hclog_stage.h"
+#include "stage/stage_registry.h"
 #include "coders/lc_common/lc_clog_components.cuh"
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
@@ -481,3 +482,6 @@ void HCLOGStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::HCLOG, fz::HCLOGStage);

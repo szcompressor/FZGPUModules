@@ -1,8 +1,16 @@
 /**
- * @file include/pipeline/dag.h
+ * @file include/advanced/dag.h
  * @brief Compression DAG wiring, execution, and memory strategy types.
  */
 #pragma once
+
+/*
+ * ADVANCED API — no source-compatibility promise. The types here (CompressionDAG,
+ * DAGNode, BufferInfo, the fusion planner/registry) are pipeline internals exposed
+ * for advanced/experimental use; they may change or be removed in any release.
+ * Most users only need <fzgpumodules.h> / pipeline/compressor.h. See the API tiers
+ * in docs/api_reference.md.
+ */
 
 #include "pipeline/perf.h"
 

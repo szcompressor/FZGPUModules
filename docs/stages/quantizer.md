@@ -40,7 +40,7 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | Setting | Purpose | Notes |
 |---|---|---|
 | `setErrorBound(eb)` | User error bound | Interpreted by `setErrorBoundMode()` |
-| `setErrorBoundMode(mode)` | ABS / NOA / REL / PREL | **`REL` is the exact pointwise relative bound** (log-space) — this is the only stage that provides it |
+| `setErrorBoundMode(mode)` | ABS / NOA / REL / PREL | **REL is the exact pointwise relative bound** (log-space) — this is the only stage that provides it |
 | `setQuantRadius(r)` | Quantization radius | Used by ABS/NOA modes |
 | `setOutlierCapacity(f)` | Outlier reserve fraction | 0.0-1.0 of element count |
 | `setZigzagCodes(enable)` | Zigzag-encode codes | ABS/NOA only; improves compressibility |
@@ -114,7 +114,7 @@ forward kernel (the outlier path) are removed — so it is strictly faster and i
 fully **graph-compatible** in ABS mode (no D2H, no outlier-count readback).
 
 Because there is no outlier fallback, a bin that overflows `TCode` simply wraps;
-**size `TCode` wide enough for the data** (use `uint32_t`). The codes are
+**size TCode wide enough for the data** (use `uint32_t`). The codes are
 *declared* by the stage as the **signed** DataType (`UINT16→INT16`,
 `UINT32→INT32`) so they connect directly to a downstream `LorenzoStage<intN>`.
 
@@ -253,7 +253,7 @@ throw at `compress()` if combined with `setDither(true)`) — neither has a
 per-element outlier-escalation path: linear mode has no outlier ports at all,
 and inplace mode's raw-bit escalation mechanism isn't wired up for dithering.
 
-### Dialing back the outlier rate: `setDitherStrength()`
+### Dialing back the outlier rate: setDitherStrength()
 
 The ~25% outlier rate above comes from dithering across the *full* bin width.
 `setDitherStrength(s)` scales the offset amplitude to `s × abs_eb` (or, in REL

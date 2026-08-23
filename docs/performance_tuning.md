@@ -54,24 +54,18 @@ non-default stream, and every stage in the pipeline to be graph-compatible
 `AdaptiveBitpackStage`'s inverse path is not (it reads its header size back from
 device to host before allocating the output).
 
-**Caveat on the effect size:** an early measurement on the cuszp2 pipeline (CLDHGH
-dataset) found CUDA Graph mode worth only ~3% over ungraphed PREALLOCATE — small
-enough that the dominant cost there is elsewhere (extra HBM round-trips between
-DAG stages, not per-call launch overhead). That figure comes from a separate
-benchmarking harness, not from a controlled measurement in this repository — treat
-it as a plausible order of magnitude, not a verified constant, and expect the win
-to be larger for pipelines with many small/cheap stages (where launch overhead is
-proportionally bigger) and smaller for pipelines dominated by one or two expensive
-kernels.
+**Effect size:** an early (uncontrolled) measurement on the cuszp2 pipeline found
+only ~3% over ungraphed PREALLOCATE — the dominant cost there is HBM round-trips
+between DAG stages, not launch overhead. Expect a larger win for pipelines with many
+small stages, smaller for those dominated by one or two expensive kernels.
 
 ### Stream Count
 
 `pipeline.setNumStreams(int)` (default 4, `include/pipeline/compressor.h`) sets how
 many concurrent CUDA streams the DAG scheduler uses for stages at the same
-dependency level. No guidance yet on tuning this against DAG width — the default
-of 4 has not been swept against 1, 2, or 8.
+dependency level. No guidance yet on tuning this against DAG width — the default of 4 is unswept against 1, 2, or 8.
 
-### `decompressInto()` for Double-Buffered Decode Loops
+### decompressInto() for Double-Buffered Decode Loops
 
 The caller-allocated decompress overload (`compressor.h:306`) skips the internal
 `cudaMalloc`/D2D copy/`cudaStreamSynchronize` that the pool-owned decompress path
@@ -80,7 +74,7 @@ does, allowing cross-stream overlap in a double-buffered decode loop. Caveat:
 block on internal D2H reads regardless of which decompress overload is used — this
 lever removes framework-level overhead, not stage-internal syncs.
 
-### `prepareInverse()` for Decode-Only Pipelines
+### prepareInverse() for Decode-Only Pipelines
 
 `compressor.h:339` — caches the inverse DAG across calls and builds output-buffer
 metadata directly from a known uncompressed size, avoiding a throwaway warmup
@@ -91,11 +85,11 @@ that never compresses).
 
 | Setter | Effect |
 |---|---|
-| `enableProfiling(bool)` | Per-stage CUDA event timing when on. Header comment states zero overhead when disabled — not independently re-measured in this repo. |
+| `enableProfiling(bool)` | Per-stage CUDA event timing when on; documented as zero-overhead when disabled *(unverified here)*. |
 | `enableBoundsCheck(bool)` | Runtime buffer-overwrite check; adds per-stage overhead. Always on in debug builds. |
 | `setColoringEnabled(bool)` | Buffer coloring (PREALLOCATE-only) aliases non-overlapping buffer lifetimes to reduce footprint; disabling trades memory for easier `compute-sanitizer` debugging. |
 
-### vGPU / `FZ_FORCE_MEMPOOL_FALLBACK`
+### vGPU / FZ_FORCE_MEMPOOL_FALLBACK
 
 On a vGPU, or with `FZ_FORCE_MEMPOOL_FALLBACK` set in the environment, CUDA's
 stream-ordered mempool allocator is unavailable and the pipeline falls back to
@@ -106,7 +100,7 @@ performance and disables CUDA Graph capture entirely (`mainpage.md:30`).
 
 ## Per-Stage TOML Knobs
 
-### Predictor block/tile size — `Lorenzo`, `TiledLorenzo` {#pt_predictor_block}
+### Predictor block/tile size — Lorenzo, TiledLorenzo {#pt_predictor_block}
 
 `Lorenzo::setBlockSize` and `TiledLorenzo::setTileShape` set the block-local reset
 period / tile shape a downstream `AdaptiveBitpackStage` packs. **As of the
@@ -129,7 +123,7 @@ this only matters if you set a custom tile shape or block size.
 ### Bitshuffle: block size / element width
 
 `setBlockSize`/`setElementWidth` control the bit-matrix transpose granularity.
-Purely a config-surface description in the docs today — no throughput sweep exists.
+No throughput sweep exists yet *(unmeasured)*.
 
 ### RZE / RRE: chunk size, word size
 
@@ -137,12 +131,11 @@ Purely a config-surface description in the docs today — no throughput sweep ex
 restricted to this set because each CUDA block holds one chunk in shared memory,
 and larger values would blow the shared-memory budget. `setWordSize` (1/2/4/8)
 selects the LC `RZE_1`/`RZE_2`/`RZE_4`/`RZE_8` variant matching the upstream data
-width. No controlled throughput comparison across chunk sizes exists yet — this is
-a real documentation gap, not a "no effect" finding.
+width. No throughput comparison across chunk sizes exists yet *(unmeasured)*.
 
 ### AdaptiveBitpack: block size, outlier selection {#pt_adaptive_bitpack}
 
-- **`block_size` 32 or 64 selects the warp-cooperative kernel path** (see the
+- **block_size 32 or 64 selects the warp-cooperative kernel path** (see the
   Changed section of `CHANGELOG.md` and the built-in optimization below); any
   other value uses the original scalar kernels, which are still correct but do not
   benefit from the coalescing fix.
@@ -167,7 +160,7 @@ a real documentation gap, not a "no effect" finding.
 Error bound is typically `≤1.1×eb` on smooth data, up to ~2×eb in adversarial cases
 — see `docs/stages/ginterp.md` for the full breakdown.
 
-### Huffman: `bklen`
+### Huffman: bklen
 
 Not CUDA Graph compatible — two device-to-host synchronizations per forward call
 (histogram D2H for codebook construction, partition-metadata D2H for the
@@ -176,7 +169,7 @@ stage is **latency-bound, not throughput-bound**, and "performs poorly on very
 small inputs (< ~100 KB)" per its own documentation — batch small inputs together
 if you need Huffman coding on them.
 
-### ANS: `prob_bits`
+### ANS: prob_bits
 
 Only `prob_bits=10` is supported in this build (the dietGPU kernels are compiled
 as explicit template instantiations for `kANSDefaultProbBits=10`) — calling
@@ -187,14 +180,14 @@ device-to-host synchronization point per call and is not CUDA Graph compatible.
 
 ## Build-Time Levers
 
-### `CMAKE_BUILD_TYPE`
+### CMAKE_BUILD_TYPE
 
 `Release` (`-O3`) vs `Debug` (`-O0`, `-Wall`) — use `Release` for anything
 performance-sensitive; `Debug` only for development.
 
-### `CMAKE_CUDA_ARCHITECTURES` — a real footgun
+### CMAKE_CUDA_ARCHITECTURES — a real footgun
 
-**Defaults to `"86"`** (`CMakeLists.txt:45`) if not explicitly set. On any other
+**Defaults to "86"** (`CMakeLists.txt:45`) if not explicitly set. On any other
 GPU generation — including the H100 (`sm_90`) this session's measurements were
 taken on — this silently builds PTX for the wrong architecture, either failing to
 run or falling back to JIT compilation at first launch (extra startup latency,
@@ -206,23 +199,20 @@ find-module defaults are not always what you'd expect on a given machine, so it'
 worth double-checking `cmake -B <dir> ... 2>&1 | grep -i "CUDA architectures"`
 after any fresh configure.
 
-### `FZ_LOG_MIN_LEVEL`
+### FZ_LOG_MIN_LEVEL
 
 Compiles out `FZ_LOG()` call sites below the threshold entirely — arguments are
 never evaluated, so this is genuinely zero-overhead for suppressed levels, not
 just a runtime filter. Default `2` (INFO); set to `255` (SILENT) to strip all
 logging for production/embedded builds where every cycle counts.
 
-### `BUILD_PROFILING` / `FZ_PROFILING_ENABLED`
+### BUILD_PROFILING / FZ_PROFILING_ENABLED
 
 Gates NVTX3 annotations (used in `decompressFromFile` and the `profiling/`
-harnesses) and `-fno-omit-frame-pointer` for complete `nsys` CPU stack walks. When
-`BUILD_PROFILING=OFF`, there is zero instrumentation cost (the code doesn't exist
-in the binary). When `ON` but not actively captured under `nsys`, the per-call
-NVTX range-push/pop cost is not quantified in this repo — a real gap if you're
-deciding whether to ship a profiling-enabled build to production.
+harnesses) and `-fno-omit-frame-pointer` for complete `nsys` CPU stack walks. `OFF` compiles the instrumentation out entirely (zero cost). When `ON` but not
+captured under `nsys`, the per-call NVTX range-push/pop cost is *(unmeasured)*.
 
-### `USE_SANITIZER`
+### USE_SANITIZER
 
 `ASanUbsan`, `TSan`, or `Compute` — all are development-only. Tests run
 **10-100x slower** under Compute Sanitizer (`docs/building.md`); use
@@ -236,7 +226,7 @@ adds `-G` for source-level correlation, which is much slower still.
 These aren't user-facing levers — they're always active — but they materially
 change what throughput to expect from the affected stages, so they belong here.
 
-### `AdaptiveBitpackStage`: warp-cooperative encode/decode
+### AdaptiveBitpackStage: warp-cooperative encode/decode
 
 Every encode/decode kernel previously assigned **one CUDA thread to an entire
 data block**, with a strided, non-coalesced access pattern confirmed via `ncu` at
@@ -253,7 +243,7 @@ Measured on CLDHGH (3600×1800, H100):
 | cuszp2 | 103.4 → 110.2 GB/s (1.07x) | 84.0 → 123.2 GB/s (**1.47x**) |
 | cuszp3 | 144.4 → 189.6 GB/s (**1.31x**) | 94.0 → 121.2 GB/s (1.29x) |
 
-### `TiledLorenzoStage`: phased inverse scan
+### TiledLorenzoStage: phased inverse scan
 
 The inverse kernel previously ran a single, fully-serial 64-long dependency chain
 on one thread per tile. Redesigned as one CUDA block per tile, decomposing the

@@ -389,6 +389,7 @@ add_library(FZGMOD::utils ALIAS fzgmod_utils)
 
 #### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
 add_library(fzgmod_modules
+  modules/stage_registry.cpp
   modules/fused/fused_block/fused_block.cu
   modules/fused/fused_block/nvrtc_warp_fusion.cu
   modules/fused/chunk_fusion/chunk_fusion.cu
@@ -520,6 +521,7 @@ add_library(fzgmod_pipeline
   src/pipeline/compressor_io.cpp
   src/pipeline/config.cpp
   src/pipeline/concat_kernel.cu
+  src/pipeline/device_buffer.cpp
   src/pipeline/dag.cpp
   src/pipeline/dag_coloring.cpp
   src/pipeline/dag_query.cpp

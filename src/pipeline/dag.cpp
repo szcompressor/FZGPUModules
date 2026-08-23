@@ -1,5 +1,5 @@
-#include "pipeline/dag.h"
-#include "pipeline/fusion_registry.h"
+#include "advanced/dag.h"
+#include "advanced/fusion_registry.h"
 #include "stage/stage.h"
 #include "mem/mempool.h"
 #include "log.h"

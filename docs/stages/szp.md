@@ -65,7 +65,7 @@ compressor's forward/inverse.
 
 | `error_bound_mode` | meaning | graph-capturable forward |
 |---|---|---|
-| `ABS` (default) | `\|x − x̂\| ≤ eb` per element | yes |
+| `ABS` (default) | abs(x − x̂) ≤ eb per element | yes |
 | `NOA` | value-range relative: `abs_eb = eb · (max − min)` | no |
 
 Reconstruction prefix-sums the per-block deltas to recover `q_i`, then scales by

@@ -109,9 +109,7 @@ static StoredBlock produce_block(int seed) {
     Pipeline prod(BLOCK_BYTES);
     build_pipeline(prod);
 
-    void*  d_comp = nullptr;
-    size_t comp_sz = 0;
-    prod.compress(d_in, BLOCK_BYTES, &d_comp, &comp_sz);
+    fz::BorrowedDeviceBuffer comp_buf = prod.compress({d_in, BLOCK_BYTES});
     cudaDeviceSynchronize();
 
     // (1) the small metadata header — store this next to the blob.
@@ -119,9 +117,9 @@ static StoredBlock produce_block(int seed) {
 
     // (2) an independent copy of the compressed payload (compress() output is
     //     pool-owned and dies with `prod`).
-    out.blob_size = comp_sz;
-    cudaMalloc(&out.d_blob, comp_sz);
-    cudaMemcpy(out.d_blob, d_comp, comp_sz, cudaMemcpyDeviceToDevice);
+    out.blob_size = comp_buf.bytes();
+    cudaMalloc(&out.d_blob, comp_buf.bytes());
+    cudaMemcpy(out.d_blob, comp_buf.data(), comp_buf.bytes(), cudaMemcpyDeviceToDevice);
     cudaDeviceSynchronize();
 
     cudaFree(d_in);

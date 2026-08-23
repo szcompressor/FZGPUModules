@@ -2,7 +2,7 @@
 // in a DAG that a fused kernel could collapse? Pure analysis — no execution.
 
 #include "fzgpumodules.h"
-#include "pipeline/fusion_planner.h"
+#include "advanced/fusion_planner.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 #include "fused/chunk_fusion/chunk_op_params.h"
 #include "fused/fused_block/nvrtc_warp_fusion.h"

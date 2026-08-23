@@ -100,20 +100,16 @@ int main(int argc, char* argv[]) {
         Pipeline p(data_bytes);
         p.loadConfig(cusz_toml);
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        fz::BorrowedDeviceBuffer comp = p.compress({d_input, data_bytes});
         cudaDeviceSynchronize();
 
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz);
+        fz::BorrowedDeviceBuffer dec = p.decompressBorrowed(comp.cspan());
         cudaDeviceSynchronize();
 
         std::printf("  preset:  %s\n", cusz_toml.c_str());
         std::printf("  ratio:   %.2fx\n",
-                    static_cast<double>(data_bytes) / static_cast<double>(comp_sz));
-        std::printf("  max_err: %.2e\n", max_abs_error(h_data, d_dec, dec_sz));
+                    static_cast<double>(data_bytes) / static_cast<double>(comp.bytes()));
+        std::printf("  max_err: %.2e\n", max_abs_error(h_data, dec.data(), dec.bytes()));
 
         // Save the config and compressed data for later sections.
         p.saveConfig(saved_toml);
@@ -150,21 +146,17 @@ int main(int argc, char* argv[]) {
         p2.loadConfig(saved_toml);  // finalizes internally
         p2.enableProfiling(true);
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p2.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        fz::BorrowedDeviceBuffer comp = p2.compress({d_input, data_bytes});
         cudaDeviceSynchronize();
         const auto comp_perf = p2.getLastPerfResult();
 
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p2.decompress(d_comp, comp_sz, &d_dec, &dec_sz);
+        fz::BorrowedDeviceBuffer dec = p2.decompressBorrowed(comp.cspan());
         cudaDeviceSynchronize();
 
         std::printf("  loaded:  %s\n", saved_toml.c_str());
         std::printf("  ratio:   %.2fx  (should match Section 1)\n",
-                    static_cast<double>(data_bytes) / static_cast<double>(comp_sz));
-        std::printf("  max_err: %.2e\n", max_abs_error(h_data, d_dec, dec_sz));
+                    static_cast<double>(data_bytes) / static_cast<double>(comp.bytes()));
+        std::printf("  max_err: %.2e\n", max_abs_error(h_data, dec.data(), dec.bytes()));
 
         std::printf("\n[compress profiling]\n");
         comp_perf.print(std::cout);

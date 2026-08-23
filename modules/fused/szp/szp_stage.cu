@@ -14,6 +14,11 @@
 // of scope — that is a separate HomomorphicOp interface, not a Stage.
 
 #include "fused/szp/szp_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -298,3 +303,19 @@ template class SZpStage<float>;
 template class SZpStage<double>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* SZp_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::SZpStage; using fz::Stage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::FLOAT32;
+    Stage* stage = nullptr;
+    if      (dt == DataType::FLOAT32) stage = new SZpStage<float>();
+    else if (dt == DataType::FLOAT64) stage = new SZpStage<double>();
+    else throw std::runtime_error("Unsupported SZpStage DataType: "
+            + std::to_string(static_cast<int>(dt)));
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::SZP, SZp_fromHeader);

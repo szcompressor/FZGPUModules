@@ -88,7 +88,7 @@ Two integration depths, in increasing order of effort:
 
 1. **Single-GPU primitive (phase 1).** `apply(AddSaturate, A, B, …)` on device
    buffers. Enough to validate correctness and the error model with no network.
-2. **`MPI_Op` over compressed buffers (phase 2).** Register a user reduction op
+2. **MPI_Op over compressed buffers (phase 2).** Register a user reduction op
    (`MPI_Op_create`) whose combine step is `apply(...)`, then drive a
    **ring- or tree-allreduce** where each rank holds a compressed partial and
    every hop combines compressed buffers. The MPI dependency is optional and

@@ -1,4 +1,9 @@
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "backend/api.h"
@@ -294,3 +299,19 @@ template class TiledLorenzoStage<int16_t>;
 template class TiledLorenzoStage<int32_t>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* TiledLorenzo_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::TiledLorenzoStage; using fz::Stage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::INT32;
+    Stage* stage = nullptr;
+    if      (dt == DataType::INT16) stage = new TiledLorenzoStage<int16_t>();
+    else if (dt == DataType::INT32) stage = new TiledLorenzoStage<int32_t>();
+    else throw std::runtime_error("Unsupported TiledLorenzoStage DataType: "
+            + std::to_string(static_cast<int>(dt)));
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::TILED_LORENZO, TiledLorenzo_fromHeader);

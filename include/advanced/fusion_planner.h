@@ -1,7 +1,15 @@
 #pragma once
 
+/*
+ * ADVANCED API — no source-compatibility promise. The types here (CompressionDAG,
+ * DAGNode, BufferInfo, the fusion planner/registry) are pipeline internals exposed
+ * for advanced/experimental use; they may change or be removed in any release.
+ * Most users only need <fzgpumodules.h> / pipeline/compressor.h. See the API tiers
+ * in docs/api_reference.md.
+ */
+
 /**
- * @file include/pipeline/fusion_planner.h
+ * @file advanced/fusion_planner.h
  * @brief Identifies maximal runs of fusable stages in a finalized DAG.
  *
  * The planner is pure analysis: it walks the compress DAG and returns the

@@ -5,7 +5,8 @@
 #pragma once
 
 #include "backend/types.h"
-#include "pipeline/dag.h"
+#include "advanced/dag.h"
+#include "pipeline/device_buffer.h"
 #include "pipeline/perf.h"
 #include "pipeline/config.h"
 #include "stage/stage.h"
@@ -331,6 +332,59 @@ public:
         size_t*     actual_output_size,
         fz::stream_t stream = 0
     );
+
+    // ── Explicit-ownership execution API ──────────────────────────────────────
+    //
+    // Span-based wrappers over the pointer overloads above. Behavior is
+    // identical — these exist so ownership is visible in the signature instead
+    // of depending on `void**` vs `void*` and on setPoolManagedDecompOutput().
+    // Prefer these in new code; the pointer overloads remain supported.
+
+    /**
+     * Compress into pool memory. The returned buffer is borrowed from the pool:
+     * do NOT free it, and treat it as invalidated by the next compress(),
+     * reset(), or Pipeline destruction.
+     */
+    BorrowedDeviceBuffer compress(ConstDeviceSpan input, fz::stream_t stream = 0);
+
+    /**
+     * Compress into a caller-provided buffer. Returns the exact bytes written.
+     * Throws if `output` is too small (see the pointer overload for sizing);
+     * incompatible with CUDA Graph mode.
+     */
+    size_t compressInto(ConstDeviceSpan input, DeviceSpan output, fz::stream_t stream = 0);
+
+    /**
+     * Decompress, returning a buffer borrowed from the pool: do NOT free it.
+     * Valid until the next decompress() or Pipeline destruction.
+     *
+     * An empty `input` means "read from the forward DAG's live buffers", the
+     * same as passing nullptr to the pointer overload. Independent of
+     * setPoolManagedDecompOutput() — this call always borrows.
+     */
+    BorrowedDeviceBuffer decompressBorrowed(ConstDeviceSpan input, fz::stream_t stream = 0);
+
+    /**
+     * Decompress into a fresh caller-owned allocation, released when the
+     * returned buffer is destroyed. Independent of
+     * setPoolManagedDecompOutput() — this call always owns.
+     */
+    OwnedDeviceBuffer decompressOwned(ConstDeviceSpan input, fz::stream_t stream = 0);
+
+    /**
+     * Decompress into a caller-provided buffer. Returns the exact bytes
+     * written. Synchronous, like the `decompress()` pointer overload it wraps
+     * — for the fully stream-asynchronous form use decompressIntoAsync().
+     */
+    size_t decompressInto(ConstDeviceSpan input, DeviceSpan output, fz::stream_t stream = 0);
+
+    /**
+     * Stream-asynchronous decompress into a caller-provided buffer; wraps the
+     * `decompressInto()` pointer overload, including its PREALLOCATE
+     * requirement and its "bytes are valid only after you synchronize"
+     * contract. Returns the planned output size.
+     */
+    size_t decompressIntoAsync(ConstDeviceSpan input, DeviceSpan output, fz::stream_t stream = 0);
 
     /**
      * Make a finalized pipeline ready to decompress() external blobs without a

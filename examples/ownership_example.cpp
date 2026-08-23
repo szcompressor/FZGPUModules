@@ -1,48 +1,47 @@
 /**
  * examples/ownership_example.cpp
  *
- * Compress and decompress output ownership semantics.
+ * Device-buffer ownership, made explicit by type.
  *
- * The pipeline has two independently controllable ownership modes.
+ * The pipeline's explicit-ownership API states ownership in the *return type*, so
+ * the compiler tells you whether you own a buffer — you never have to remember a
+ * flag or a comment:
  *
- * Compress output (choose one per call site):
- *   pool-owned (default)   compress() returns a pool-owned pointer.
- *                          Do NOT cudaFree. Valid until the next compress(),
- *                          reset(), or Pipeline destruction — whichever comes first.
+ *   fz::BorrowedDeviceBuffer   pool-owned. You may read it; you must NOT free it.
+ *                              Invalidated by the next call that reuses the slot
+ *                              (compress/decompress/reset) or Pipeline destruction.
  *
- *   caller-provided        Use compress(d_input, input_sz, d_buf, buf_cap, &actual_sz).
- *                          Caller allocates d_buf (cudaMalloc / static buffer / etc.)
- *                          and owns it completely — the pipeline never touches it after
- *                          the call returns. Use getMaxCompressedSize() for a safe cap.
+ *   fz::OwnedDeviceBuffer      caller-owned, move-only. Frees itself on scope exit
+ *                              through the backend the library was built for (never
+ *                              a hard-coded cudaFree). release() hands you the raw
+ *                              pointer if you want to manage it yourself.
  *
- * Decompress output (choose once per Pipeline via setPoolManagedDecompOutput):
- *   pool-owned (default)   setPoolManagedDecompOutput(true)
- *                          Do NOT cudaFree. Valid until the next decompress() call
- *                          or Pipeline destruction. Survives reset() — the compress
- *                          output is freed by reset() but the decompress output is not.
+ *   fz::DeviceSpan / ConstDeviceSpan   a non-owning {ptr, bytes} view you pass in.
  *
- *   caller-owned           setPoolManagedDecompOutput(false)
- *                          decompress() returns a fresh cudaMalloc'd pointer.
- *                          Caller MUST cudaFree when done.
+ * The calls:
+ *   compress(ConstDeviceSpan) -> BorrowedDeviceBuffer         (into the pool)
+ *   compressInto(ConstDeviceSpan, DeviceSpan) -> size_t       (into your buffer)
+ *   decompressBorrowed(ConstDeviceSpan) -> BorrowedDeviceBuffer
+ *   decompressOwned(ConstDeviceSpan)    -> OwnedDeviceBuffer
+ *   decompressInto(ConstDeviceSpan, DeviceSpan) -> size_t     (into your buffer)
+ *
+ * decompressBorrowed()/decompressOwned() ignore setPoolManagedDecompOutput() — the
+ * call site decides, not pipeline state. (The older pointer overloads + that flag
+ * still work and are documented in docs/api_reference.md, but new code should prefer
+ * these.)
  *
  * No external data files required — uses synthetic float data.
  *
- * Usage:
- *   ./build/bin/examples/ownership_example
- *
  * Build:
- *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build -j$(nproc)
- *   Binary: build/bin/examples/ownership_example
+ *   cmake --preset release -DBUILD_EXAMPLES=ON && cmake --build build/release -j$(nproc)
+ *   Binary: build/release/bin/examples/ownership_example
  */
 
 #include "fzgpumodules.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
-#include <stdexcept>
 #include <vector>
 
 using namespace fz;
@@ -88,61 +87,42 @@ int main() {
     float* d_input = nullptr;
     cudaMalloc(&d_input, data_bytes);
     cudaMemcpy(d_input, h_data.data(), data_bytes, cudaMemcpyHostToDevice);
+    const ConstDeviceSpan input{d_input, data_bytes};
 
-    // ── Section 1: Pool-owned compress output ─────────────────────────────────
+    // ── Section 1: Borrowed (pool-owned) compress + decompress ────────────────
     //
-    // compress() returns a pointer into the internal pool.
-    // The pipeline owns this buffer — do NOT cudaFree it.
-    //
-    // The pointer is valid until the NEXT event, whichever comes first:
-    //   - another compress() call
-    //   - reset()
-    //   - Pipeline destruction
-    //
-    // Pattern: use the compressed data (write to file, send over network, etc.)
-    // BEFORE calling compress() again on the same pipeline.
-    std::printf("── Section 1: pool-owned compress output ─────────────────────────────\n");
+    // compress() returns a BorrowedDeviceBuffer: the pool owns it, so you never
+    // free it. It stays valid only until the next call that reuses its slot
+    // (another compress(), a decompress(), reset(), or Pipeline destruction), so
+    // consume it before the next such call.
+    std::printf("── Section 1: borrowed (pool-owned) buffers ──────────────────────────\n");
     {
         Pipeline p(data_bytes);
         build_pipeline(p);
 
-        void*  d_comp1  = nullptr;
-        size_t comp_sz1 = 0;
-        p.compress(d_input, data_bytes, &d_comp1, &comp_sz1);
+        BorrowedDeviceBuffer comp1 = p.compress(input);
         cudaDeviceSynchronize();
-        std::printf("  compress #1: %zu bytes at %p\n", comp_sz1, d_comp1);
-        // Use d_comp1 here (e.g., write to file, send over network).
-        // Do NOT cudaFree(d_comp1).
+        std::printf("  compress #1: %zu bytes at %p\n", comp1.bytes(), comp1.data());
+        // Use comp1 here (write to file, send over network). Do NOT free it.
 
-        // Calling compress() again invalidates d_comp1.
-        void*  d_comp2  = nullptr;
-        size_t comp_sz2 = 0;
-        p.compress(d_input, data_bytes, &d_comp2, &comp_sz2);
+        // Compress again — comp1's storage may now be reused; treat it as stale.
+        BorrowedDeviceBuffer comp2 = p.compress(input);
         cudaDeviceSynchronize();
-        std::printf("  compress #2: %zu bytes at %p\n", comp_sz2, d_comp2);
-        // d_comp1 is now invalid — the pool reclaimed it. d_comp2 is the live pointer.
+        std::printf("  compress #2: %zu bytes at %p\n", comp2.bytes(), comp2.data());
 
-        // Decompress from the live pool buffer to verify.
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(d_comp2, comp_sz2, &d_dec, &dec_sz);
+        // Decompress the live buffer to verify. decompressBorrowed() also borrows
+        // from the pool — do NOT free the result.
+        BorrowedDeviceBuffer dec = p.decompressBorrowed(comp2.cspan());
         cudaDeviceSynchronize();
-        print_error(h_data, d_dec, dec_sz);
-        // d_dec is pool-owned (default) — do NOT cudaFree.
+        print_error(h_data, dec.data(), dec.bytes());
     }
 
-    // ── Section 2: Caller-provided compress buffer ────────────────────────────
+    // ── Section 2: compressInto a caller-provided buffer ──────────────────────
     //
-    // Use this when you need the compressed data to outlive a subsequent
-    // compress() or reset(), or when you want to manage the buffer yourself
-    // (e.g., a pre-allocated staging area, a pinned host mirror, etc.).
-    //
-    // Steps:
-    //   1. getMaxCompressedSize(input_bytes) — tight worst-case upper bound.
-    //   2. cudaMalloc your own buffer.
-    //   3. Call the caller-provided compress() overload.
-    //   4. cudaFree when you are done with the compressed data.
-    std::printf("\n── Section 2: caller-provided compress buffer ─────────────────────────\n");
+    // When the compressed bytes must outlive a later compress()/reset(), write
+    // them into your own buffer. compressInto() returns the byte count written
+    // and throws if the buffer is too small. getMaxCompressedSize() is a safe cap.
+    std::printf("\n── Section 2: compressInto a caller buffer ────────────────────────────\n");
     {
         Pipeline p(data_bytes);
         build_pipeline(p);
@@ -150,127 +130,95 @@ int main() {
         const size_t max_comp = p.getMaxCompressedSize(data_bytes);
         std::printf("  getMaxCompressedSize: %zu bytes\n", max_comp);
 
-        // Caller allocates and owns this buffer for its entire lifetime.
         void* d_comp_buf = nullptr;
-        cudaMalloc(&d_comp_buf, max_comp);
+        cudaMalloc(&d_comp_buf, max_comp);   // caller owns this for its whole lifetime
 
-        size_t actual_sz = 0;
-        p.compress(d_input, data_bytes, d_comp_buf, max_comp, &actual_sz);
+        const size_t actual = p.compressInto(input, DeviceSpan{d_comp_buf, max_comp});
         cudaDeviceSynchronize();
         std::printf("  actual compressed:    %zu bytes (%.2fx ratio)\n",
-                    actual_sz, static_cast<double>(data_bytes) / actual_sz);
+                    actual, static_cast<double>(data_bytes) / actual);
 
-        // d_comp_buf holds the compressed data and survives any number of
-        // subsequent compress() calls or reset() calls on p.
-
-        // Compress again into a second independent buffer — d_comp_buf is unaffected.
+        // d_comp_buf survives any number of later compress()/reset() calls on p.
         void* d_comp_buf2 = nullptr;
         cudaMalloc(&d_comp_buf2, max_comp);
-        size_t actual_sz2 = 0;
-        p.compress(d_input, data_bytes, d_comp_buf2, max_comp, &actual_sz2);
+        const size_t actual2 = p.compressInto(input, DeviceSpan{d_comp_buf2, max_comp});
         cudaDeviceSynchronize();
-        std::printf("  second compress:      %zu bytes  (d_comp_buf still valid)\n", actual_sz2);
+        std::printf("  second compress:      %zu bytes  (first buffer still valid)\n", actual2);
 
-        // Decompress the first buffer — it is still intact.
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(d_comp_buf, actual_sz, &d_dec, &dec_sz);
+        // Decompress from the first buffer — still intact.
+        OwnedDeviceBuffer dec = p.decompressOwned(ConstDeviceSpan{d_comp_buf, actual});
         cudaDeviceSynchronize();
         std::printf("  decompress from first buffer:\n");
-        print_error(h_data, d_dec, dec_sz);
+        print_error(h_data, dec.data(), dec.bytes());
 
-        cudaFree(d_comp_buf);   // required: caller-provided buffers must be freed
+        cudaFree(d_comp_buf);    // caller-provided buffers are yours to free
         cudaFree(d_comp_buf2);
     }
 
-    // ── Section 3: Pool-owned decompress output (default) ────────────────────
+    // ── Section 3: Borrowed decompress + reset() lifetime ─────────────────────
     //
-    // setPoolManagedDecompOutput(true) is the default.
-    // decompress() returns a pool-owned pointer — do NOT cudaFree.
-    //
-    // Lifetime rules:
-    //   - Valid until the NEXT decompress() call — a second call invalidates the first.
-    //   - Valid across reset() — reset() frees the compress output but NOT the
-    //     decompress output. This is intentional: you may want to inspect the
-    //     decompressed data after freeing forward-DAG memory.
-    //   - Freed on Pipeline destruction.
-    std::printf("\n── Section 3: pool-owned decompress output (default) ─────────────────\n");
+    // A BorrowedDeviceBuffer from decompressBorrowed() survives reset() (reset()
+    // frees the compress output, not the decompress output) but is invalidated by
+    // the next decompress(). This is the pool-owned decompress path with the
+    // ownership stated at the call site rather than through a pipeline flag.
+    std::printf("\n── Section 3: borrowed decompress + reset() lifetime ─────────────────\n");
     {
         Pipeline p(data_bytes);
         build_pipeline(p);
 
-        // setPoolManagedDecompOutput(true) is the default; shown here for clarity.
-        p.setPoolManagedDecompOutput(true);
-
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        BorrowedDeviceBuffer comp = p.compress(input);
         cudaDeviceSynchronize();
 
-        void*  d_dec1  = nullptr;
-        size_t dec_sz1 = 0;
-        p.decompress(d_comp, comp_sz, &d_dec1, &dec_sz1);
+        BorrowedDeviceBuffer dec1 = p.decompressBorrowed(comp.cspan());
         cudaDeviceSynchronize();
-        std::printf("  decompress #1: %zu bytes at %p\n", dec_sz1, d_dec1);
+        std::printf("  decompress #1: %zu bytes at %p\n", dec1.bytes(), dec1.data());
 
-        // reset() frees the compress output — d_comp is now invalid.
-        // But d_dec1 is still valid.
+        // reset() frees the compress output; dec1 is still valid.
         p.reset();
-        std::printf("  after reset(): d_comp invalid, d_dec1 still valid\n");
+        std::printf("  after reset(): compress output freed, dec1 still valid\n");
+        print_error(h_data, dec1.data(), dec1.bytes());
 
-        // Re-verify that d_dec1 is still readable after reset().
-        print_error(h_data, d_dec1, dec_sz1);
-
-        // A second decompress() invalidates d_dec1 (pool reclaims it).
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        // A second decompress reuses dec1's slot — treat dec1 as stale afterward.
+        BorrowedDeviceBuffer comp2 = p.compress(input);
         cudaDeviceSynchronize();
-        void*  d_dec2  = nullptr;
-        size_t dec_sz2 = 0;
-        p.decompress(d_comp, comp_sz, &d_dec2, &dec_sz2);
+        BorrowedDeviceBuffer dec2 = p.decompressBorrowed(comp2.cspan());
         cudaDeviceSynchronize();
-        std::printf("  decompress #2: %zu bytes at %p  (d_dec1 now invalid)\n",
-                    dec_sz2, d_dec2);
-        // Do NOT cudaFree d_dec1 or d_dec2 — pool-owned.
+        std::printf("  decompress #2: %zu bytes at %p  (dec1 now stale)\n",
+                    dec2.bytes(), dec2.data());
     }
 
-    // ── Section 4: Caller-owned decompress output ─────────────────────────────
+    // ── Section 4: Owned decompress output ────────────────────────────────────
     //
-    // setPoolManagedDecompOutput(false) makes decompress() return a fresh
-    // cudaMalloc'd pointer on every call. Use this when you need the decompressed
-    // data to outlive the pipeline, or when you want explicit ownership.
-    // Caller MUST cudaFree every returned pointer.
-    std::printf("\n── Section 4: caller-owned decompress output ─────────────────────────\n");
+    // decompressOwned() hands back an OwnedDeviceBuffer: a fresh allocation you
+    // own. It frees itself when it goes out of scope (through the correct backend),
+    // so there is no cudaFree to remember and no double-free to risk. Use it when
+    // the decompressed data must outlive the pipeline, or when you want a plain
+    // owning handle.
+    std::printf("\n── Section 4: owned decompress output ────────────────────────────────\n");
     {
         Pipeline p(data_bytes);
         build_pipeline(p);
-        p.setPoolManagedDecompOutput(false);
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        BorrowedDeviceBuffer comp = p.compress(input);
         cudaDeviceSynchronize();
 
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz);
-        cudaDeviceSynchronize();
-        std::printf("  decompress: %zu bytes at %p\n", dec_sz, d_dec);
-        print_error(h_data, d_dec, dec_sz);
+        {
+            OwnedDeviceBuffer dec = p.decompressOwned(comp.cspan());
+            cudaDeviceSynchronize();
+            std::printf("  decompress: %zu bytes at %p\n", dec.bytes(), dec.data());
+            print_error(h_data, dec.data(), dec.bytes());
+        }   // dec frees itself here — no cudaFree, no leak, no double-free
+        std::printf("  owned buffer released on scope exit\n");
 
-        // Caller owns d_dec — must cudaFree when done.
-        cudaFree(d_dec);
-        std::printf("  cudaFree'd successfully\n");
-
-        // Each subsequent decompress() returns a new independent pointer.
-        void*  d_dec2  = nullptr;
-        size_t dec_sz2 = 0;
-        p.decompress(d_comp, comp_sz, &d_dec2, &dec_sz2);
+        // Need the raw pointer instead? release() transfers ownership to you.
+        OwnedDeviceBuffer dec2 = p.decompressOwned(comp.cspan());
         cudaDeviceSynchronize();
-        cudaFree(d_dec2);  // each call must be individually freed
-        std::printf("  second decompress cudaFree'd successfully\n");
+        void* raw = dec2.release();   // dec2 no longer owns it
+        cudaFree(raw);                // now it is yours to free
+        std::printf("  release() + cudaFree succeeded\n");
     }
 
-    cudaFree(d_input);
+    cudaFree(d_input);   // d_input is caller-owned — must cudaFree
     std::printf("\nDone.\n");
     return 0;
 }

@@ -1,4 +1,9 @@
 #include "transforms/zigzag/zigzag_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "transforms/zigzag/zigzag.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -146,3 +151,27 @@ template __global__ void zigzagDecodeKernel<int32_t, uint32_t>(const uint32_t*, 
 template __global__ void zigzagDecodeKernel<int64_t, uint64_t>(const uint64_t*, int64_t*, size_t);
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* Zigzag_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::ZigzagStage; using fz::Stage;
+    Stage* stage = nullptr;
+    if (config_size >= 2) {
+        DataType tin_dt  = static_cast<DataType>(config[0]);
+        DataType tout_dt = static_cast<DataType>(config[1]);
+        if      (tin_dt == DataType::INT8  && tout_dt == DataType::UINT8)  stage = new ZigzagStage<int8_t,  uint8_t>();
+        else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16) stage = new ZigzagStage<int16_t, uint16_t>();
+        else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32) stage = new ZigzagStage<int32_t, uint32_t>();
+        else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64) stage = new ZigzagStage<int64_t, uint64_t>();
+        else throw std::runtime_error("Unsupported ZigzagStage type pair: TIn="
+                + std::to_string(static_cast<int>(tin_dt))
+                + " TOut=" + std::to_string(static_cast<int>(tout_dt)));
+    } else {
+        stage = new ZigzagStage<int32_t, uint32_t>();
+    }
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::ZIGZAG, Zigzag_fromHeader);

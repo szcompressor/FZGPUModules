@@ -148,11 +148,10 @@ static StrategyResult run_normal(
     comp.finalize();
     comp.enableProfiling(true);
 
-    void*  d_out  = nullptr;
-    size_t out_sz = 0;
+    fz::BorrowedDeviceBuffer out_buf;
 
     // Warmup — JIT compiles all kernels.
-    comp.compress(d_input, data_bytes, &d_out, &out_sz, 0);
+    out_buf = comp.compress({d_input, data_bytes}, 0);
     cudaDeviceSynchronize();
     const size_t peak_mem = comp.getPeakMemoryUsage();
 
@@ -164,7 +163,7 @@ static StrategyResult run_normal(
 
     for (int i = 0; i < runs; ++i) {
         const auto t0 = std::chrono::high_resolution_clock::now();
-        comp.compress(d_input, data_bytes, &d_out, &out_sz, 0);
+        out_buf = comp.compress({d_input, data_bytes}, 0);
         cudaDeviceSynchronize();
         const auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -210,7 +209,7 @@ static StrategyResult run_normal(
               << tput(mean_h) << " GB/s\n"
               << "  Throughput (dag  mean): " << std::setw(6) << tput(mean_d) << " GB/s\n";
 
-    return {strat_name, peak_mem, out_sz,
+    return {strat_name, peak_mem, out_buf.bytes(),
             mean_h, mean_d, min_h, min_d, max_h, max_d};
 }
 
@@ -266,12 +265,11 @@ static StrategyResult run_graph(
     // Measure peak memory after both warmup and capture.
     const size_t peak_mem = comp.getPeakMemoryUsage();
 
-    void*  d_out  = nullptr;
-    size_t out_sz = 0;
+    fz::BorrowedDeviceBuffer out_buf;
 
-    // One additional un-timed launch to populate d_out / out_sz and establish
+    // One additional un-timed launch to populate out_buf and establish
     // baseline state before the benchmark loop.
-    comp.compress(d_input, data_bytes, &d_out, &out_sz, graph_stream);
+    out_buf = comp.compress({d_input, data_bytes}, graph_stream);
     cudaStreamSynchronize(graph_stream);
 
     std::vector<double> host_ms_v;
@@ -282,7 +280,7 @@ static StrategyResult run_graph(
 
     for (int i = 0; i < runs; ++i) {
         const auto t0 = std::chrono::high_resolution_clock::now();
-        comp.compress(d_input, data_bytes, &d_out, &out_sz, graph_stream);
+        out_buf = comp.compress({d_input, data_bytes}, graph_stream);
         cudaStreamSynchronize(graph_stream);
         const auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -337,7 +335,7 @@ static StrategyResult run_graph(
 
     cudaStreamDestroy(graph_stream);
 
-    return {strat_name, peak_mem, out_sz,
+    return {strat_name, peak_mem, out_buf.bytes(),
             mean_h, mean_d, min_h, min_d, max_h, max_d};
 }
 

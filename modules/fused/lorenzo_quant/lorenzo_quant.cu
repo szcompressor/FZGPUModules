@@ -1,6 +1,11 @@
 // Algorithm adapted from the cuSZ Lorenzo implementation (cuSZ team, BSD-3-Clause).
 // Upstream: https://github.com/szcompressor/cuSZ — see THIRD_PARTY.md.
 #include "backend/warp.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "predictors/predictor_utils.cuh"
 #include "transforms/zigzag/zigzag.h"
@@ -999,3 +1004,24 @@ template void launchLorenzoInverseKernel<double, uint32_t>(
 } // namespace fz
 // (2-D and 3-D kernels + launchers are in lorenzo_quant_nd.cu)
 
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* LorenzoQuant_fromHeader(const uint8_t* config, size_t config_size) {
+    constexpr size_t kMinLorenzoQuantConfig = 32;  // keep in sync with kLegacySize
+    if (config_size < kMinLorenzoQuantConfig)
+        throw std::runtime_error("Lorenzo config too small: " + std::to_string(config_size));
+    fz::LorenzoQuantConfig lc{};
+    std::memcpy(&lc, config, std::min(config_size, sizeof(fz::LorenzoQuantConfig)));
+    if (lc.input_type == fz::DataType::FLOAT32 && lc.code_type == fz::DataType::UINT16) {
+        auto* s = new fz::LorenzoQuantStage<float, uint16_t>();
+        s->deserializeHeader(config, config_size); return s;
+    } else if (lc.input_type == fz::DataType::FLOAT64 && lc.code_type == fz::DataType::UINT16) {
+        auto* s = new fz::LorenzoQuantStage<double, uint16_t>();
+        s->deserializeHeader(config, config_size); return s;
+    }
+    throw std::runtime_error("Unsupported Lorenzo template instantiation: input_type="
+        + std::to_string(static_cast<int>(lc.input_type))
+        + " code_type=" + std::to_string(static_cast<int>(lc.code_type)));
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::LORENZO_QUANT, LorenzoQuant_fromHeader);

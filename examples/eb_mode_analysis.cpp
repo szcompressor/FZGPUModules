@@ -227,21 +227,18 @@ static ModeResult run_lorenzo(
     p.connect(huf, lq, "codes");
     p.finalize();
 
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    p.compress(d_in, bytes, &d_comp, &comp_sz, 0);
+    fz::BorrowedDeviceBuffer comp = p.compress({d_in, bytes}, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    void*  d_dec   = nullptr;
-    size_t dec_sz  = 0;
-    p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, 0);
+    fz::BorrowedDeviceBuffer dec;
+    dec = p.decompressBorrowed(comp.cspan(), 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> h_out(n);
-    CUDA_CHECK(cudaMemcpy(h_out.data(), d_dec, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_out.data(), dec.data(), bytes, cudaMemcpyDeviceToHost));
 
-    r.compressed_size = comp_sz;
-    r.ratio           = static_cast<double>(bytes) / static_cast<double>(comp_sz);
+    r.compressed_size = comp.bytes();
+    r.ratio           = static_cast<double>(bytes) / static_cast<double>(comp.bytes());
     // The stage resolved the user eb into an absolute bound; report it so the
     // "same eb, different meaning" story is visible.
     r.abs_eb          = static_cast<double>(lq->getComputedAbsErrorBound());
@@ -280,21 +277,18 @@ static ModeResult run_quantizer_rel(
     p.connect(bp, q, "codes");
     p.finalize();
 
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    p.compress(d_in, bytes, &d_comp, &comp_sz, 0);
+    fz::BorrowedDeviceBuffer comp = p.compress({d_in, bytes}, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    void*  d_dec  = nullptr;
-    size_t dec_sz = 0;
-    p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, 0);
+    fz::BorrowedDeviceBuffer dec;
+    dec = p.decompressBorrowed(comp.cspan(), 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> h_out(n);
-    CUDA_CHECK(cudaMemcpy(h_out.data(), d_dec, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_out.data(), dec.data(), bytes, cudaMemcpyDeviceToHost));
 
-    r.compressed_size = comp_sz;
-    r.ratio           = static_cast<double>(bytes) / static_cast<double>(comp_sz);
+    r.compressed_size = comp.bytes();
+    r.ratio           = static_cast<double>(bytes) / static_cast<double>(comp.bytes());
     r.abs_eb          = 0.0;   // no single absolute bound exists in REL mode
 
     analyze_errors(h_in, h_out, peak, static_cast<double>(eb), r);
@@ -345,21 +339,18 @@ static ModeResult run_log_lorenzo(
     p.connect(huf, lq, "codes");
     p.finalize();
 
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    p.compress(d_in, bytes, &d_comp, &comp_sz, 0);
+    fz::BorrowedDeviceBuffer comp = p.compress({d_in, bytes}, 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    void*  d_dec  = nullptr;
-    size_t dec_sz = 0;
-    p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, 0);
+    fz::BorrowedDeviceBuffer dec;
+    dec = p.decompressBorrowed(comp.cspan(), 0);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<float> h_out(n);
-    CUDA_CHECK(cudaMemcpy(h_out.data(), d_dec, bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_out.data(), dec.data(), bytes, cudaMemcpyDeviceToHost));
 
-    r.compressed_size = comp_sz;
-    r.ratio           = static_cast<double>(bytes) / static_cast<double>(comp_sz);
+    r.compressed_size = comp.bytes();
+    r.ratio           = static_cast<double>(bytes) / static_cast<double>(comp.bytes());
     r.abs_eb          = static_cast<double>(lg->quantizerErrorBound());
 
     analyze_errors(h_in, h_out, peak, static_cast<double>(eb), r);

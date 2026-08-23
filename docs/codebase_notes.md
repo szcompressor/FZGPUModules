@@ -81,7 +81,7 @@ descriptor read, which costs nothing next to the copy they enable.
 
 ---
 
-## CN-HF-1 — Huffman coarse-encode partition length (`sublen`)
+## CN-HF-1 — Huffman coarse-encode partition length (sublen)
 
 **Source:** `modules/coders/huffman/phf/hf_bk.cc`, `capi_phf_coarse_tune_sublen()`
 **Measured:** 2026-08, H100 (sm_90), `LorenzoQuant -> Huffman`, `bklen` 1024,
@@ -511,7 +511,7 @@ The original block-mode inverse launched `blockDim == block_size`, tying CTA
 width to the reset period: a 1024-element segment meant 1024-thread blocks
 running Hillis-Steele with ~2·log2(1024) barriers. `ncu` flagged it as
 barrier-bound, and decompression fell off a cliff exactly there — geometric mean
-**102 GB/s at `block_size = 512` down to 69 at 1024**.
+**102 GB/s at block_size = 512 down to 69 at 1024**.
 
 The replacement gives each thread `Seq` consecutive elements: serial scan in
 registers, then a warp shuffle scan, then one pass over the warp totals — **2
@@ -702,7 +702,7 @@ lever; this pipeline is compute/latency-bound (see CN-AB-TR), not traffic-bound.
 
 ## CN-FUSE-PROOF — full block-local fusion reaches native-class throughput (go decision)
 
-**Go/no-go experiment (`profiling/fuse_proof.cu`), 2026-08.** Counterpart to the
+**Go/no-go experiment (profiling/fuse_proof.cu), 2026-08.** Counterpart to the
 CN-AB-FUSE *negative* result. That one fused only rate+scan+pack and lost 2.4x to
 an in-kernel look-back barrier. This one fuses the **entire block-local chain** —
 `Quantizer(linear) + Lorenzo(32) + AdaptiveBitpack(32,outlier)` — into per-warp
@@ -788,7 +788,7 @@ hand-written implementation.
 
 ## CN-FUSE-EXEC — wiring fused execution into the DAG (Step 2)
 
-**Source:** `include/pipeline/fusion_registry.h`, `src/pipeline/fusion_registry.cpp`,
+**Source:** `include/advanced/fusion_registry.h`, `src/pipeline/fusion_registry.cpp`,
 `modules/fused/fused_block/`, the fusion hook in `CompressionDAG::execute()`,
 `Pipeline::planAndInstallFusion()`, `FusionPolicy`.
 
@@ -1106,11 +1106,11 @@ codegen contract (spec → template-arg list) is locked host-only by
 `NvrtcCodegenComposesSpecOps`.
 
 **What it took to make the op stack NVRTC-compilable (the real work):**
-- **`backend/api.h` no-ops under `__CUDACC_RTC__`** — NVRTC compiles device code
+- **backend/api.h no-ops under __CUDACC_RTC__** — NVRTC compiles device code
   only and provides the intrinsics itself; pulling in the host `<cuda_runtime.h>`
   would fail. `atomics.h`/`warp.h` then reduce to plain `atomicAdd_block`/
   `__shfl_*_sync`/`__ballot_sync`, all NVRTC-native.
-- **Split `chunk_geometry.h` out of `chunk_fusion.h`.** The device path must not pull
+- **Split chunk_geometry.h out of chunk_fusion.h.** The device path must not pull
   `backend/types.h` (it names `cudaStream_t`/`cudaMemPool_t`, host-only). The geometry
   constants (CHUNK_BYTES/NELEM/TPB…) now live in a dependency-free header shared by the
   device harness, the host launcher, and the NVRTC codegen.
@@ -1119,10 +1119,10 @@ codegen contract (spec → template-arg list) is locked host-only by
   (`is_integral`/`is_signed`/`is_unsigned`/`make_unsigned` + the int aliases + `size_t`),
   supplied as three `nvrtcCreateProgram` headers. `assert` is an NVRTC builtin, so
   `<cassert>` is an empty shim.
-- **`__builtin_memcpy` → `__float_as_uint`** in the quant op's outlier bit-cast — the
+- **__builtin_memcpy → __float_as_uint** in the quant op's outlier bit-cast — the
   former is not an NVRTC builtin; the latter is native to both nvcc and NVRTC and is
   bit-identical.
-- **`__builtin_clz{,ll}` → guarded `FZ_CLZ32/64`** in `d_PRencode` (RARE/RAZE): under
+- **__builtin_clz{,ll} → guarded FZ_CLZ32/64** in `d_PRencode` (RARE/RAZE): under
   `__CUDACC_RTC__` use the `__clz`/`__clzll` device intrinsics NVRTC provides, else keep
   `__builtin_*` (which nvcc accepts in host+device passes). Bit-identical for the
   non-zero inputs used, so a fused RARE/RAZE chain matches the staged kernel. Same class

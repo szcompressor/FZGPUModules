@@ -42,6 +42,7 @@
  */
 
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
+#include "stage/stage_registry.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
@@ -634,3 +635,6 @@ template __global__ void bitshuffleDecodeKernelBallot<uint8_t> (const uint32_t*,
 template __global__ void bitshuffleDecodeKernelBallot<uint16_t>(const uint32_t*, uint16_t*, uint32_t);
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::BITSHUFFLE, fz::BitshuffleStage);

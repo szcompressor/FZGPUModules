@@ -30,8 +30,10 @@
 #   tests/stages/CMakeLists.txt  — fz_add_test() entry
 #
 # What still needs manual attention (printed at the end):
-#   include/stage/stage_factory.h  — createStage() case
-#   src/pipeline/config.cpp        — TOML load/save
+#   src/pipeline/config.cpp        — TOML load/save (the one remaining shared file;
+#                                    FZM-header reconstruction self-registers from
+#                                    the generated .cu, so stage_factory.h is no
+#                                    longer touched)
 
 set -euo pipefail
 
@@ -237,6 +239,7 @@ HEADER
 # ── Implementation ────────────────────────────────────────────────────────────
 cat > "${MODULE_DIR}/${LOWER}_stage.cu" << IMPL
 #include "${CATEGORY}/${LOWER}/${LOWER}_stage.h"
+#include "stage/stage_registry.h"   // Self-registers this stage's FZM-header factory.
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "backend/api.h"     // Use backend-neutral device/runtime wrappers.
@@ -280,6 +283,13 @@ void ${NAME}Stage::execute(
 }
 
 } // namespace fz
+
+// Reconstruction from a serialized FZM header. This one line replaces what used
+// to be a hand-added case in stage_factory.h — the decompressor's createStage()
+// finds the stage through this registration. If ${NAME}Stage becomes a template
+// (dispatch on a stored DataType), swap FZ_REGISTER_SIMPLE_STAGE for a custom
+// factory + FZ_REGISTER_STAGE_FACTORY (see docs/how_to_add_a_stage.md, Step 5).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::${UPPER}, fz::${NAME}Stage);
 IMPL
 
 # ── Test skeleton ─────────────────────────────────────────────────────────────
@@ -505,18 +515,12 @@ echo "    ${TEST_FILE}"
 echo "    ${FZM_FORMAT_H}  (StageType enum + stageTypeToString)"
 echo "    ${CMAKELISTS}    (.cu added to ${CMAKE_TARGET})"
 echo "    ${TESTS_CMAKELISTS}  (fz_add_test entry)"
+echo "    ${MODULE_DIR}/${LOWER}_stage.cu  (self-registers its FZM-header factory)"
 echo ""
-echo "Two steps still require manual edits:"
+echo "One step still requires a manual edit (TOML support is the only shared"
+echo "registration that cannot self-register — toml++ is confined to config.cpp):"
 echo ""
-echo "  1. include/stage/stage_factory.h — add createStage() case:"
-echo "       case StageType::${UPPER}: {"
-echo "           auto* s = new ${NAME}Stage();"
-echo "           if (config_size > 0) s->deserializeHeader(config, config_size);"
-echo "           stage = s;"
-echo "           break;"
-echo "       }"
-echo ""
-echo "  2. src/pipeline/config.cpp — add TOML load/save support (3 edits in one place):"
+echo "  1. src/pipeline/config.cpp — add TOML load/save support (3 edits in one place):"
 echo "       // At top: #include \"${CATEGORY}/${LOWER}/${LOWER}_stage.h\""
 echo "       static Stage* add${NAME}Stage(Pipeline& p, const toml::table& t) { ... }"
 echo "       static void   save${NAME}Stage(Stage* s, std::ostringstream& out) { ... }"

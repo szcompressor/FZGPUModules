@@ -4,6 +4,11 @@
 // with point-wise relative error bound", IEEE CLUSTER 2018. No source was copied;
 // see docs/acknowledgements.md.
 #include "transforms/log_transform/log_transform_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "predictors/predictor_utils.cuh"   // scatter_assign_kernel
 #include "backend/api.h"
 #include "mem/mempool.h"
@@ -438,3 +443,13 @@ void LogTransformStage<TInput>::deserializeHeader(const uint8_t* buf, size_t siz
 template class LogTransformStage<float>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* LogTransform_fromHeader(const uint8_t* config, size_t config_size) {
+    auto* s = new fz::LogTransformStage<float>();
+    s->deserializeHeader(config, config_size);
+    return s;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::LOG_TRANSFORM, LogTransform_fromHeader);

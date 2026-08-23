@@ -19,7 +19,7 @@ describes its behavior without expanding the token. It generalizes `RZEStage`:
 rather than
 RZE's binary "word is exactly zero, or it's kept in full" test, it histograms
 how many top bits of each word (on its own — not compared against a
-predecessor) are zero across the whole chunk, picks **one global cut `keep`**
+predecessor) are zero across the whole chunk, picks **one global cut keep**
 (`0 <= keep < word_size*8`) that maximizes total bit savings, then:
 
 - Words whose top `bits - keep` bits are all zero store only their bottom

@@ -112,7 +112,7 @@ header — the same mechanism `QuantizerStage` uses.
 
 ## Limitations
 
-**The downstream `eb` is not wired automatically.** A stage cannot reach across
+**The downstream eb is not wired automatically.** A stage cannot reach across
 the DAG to configure another stage, so `quantizerErrorBound()` is yours to
 propagate. Passing the raw `delta` to the quantizer instead yields a far looser
 relative bound (by roughly `1/log2(1+delta)`, ~693× at `delta = 1e-3`) with no

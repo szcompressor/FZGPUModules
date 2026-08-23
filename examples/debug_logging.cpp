@@ -103,11 +103,10 @@ int main() {
         Pipeline p(data_bytes);
         build_pipeline(p);   // finalize() emits INFO logs
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);  // compress emits INFO
+        fz::BorrowedDeviceBuffer comp;
+        comp = p.compress({d_input, data_bytes});  // compress emits INFO
         cudaDeviceSynchronize();
-        std::printf("  compressed to %zu bytes\n", comp_sz);
+        std::printf("  compressed to %zu bytes\n", comp.bytes());
 
         // Silence the library again before the next section.
         Logger::setCallback(nullptr);
@@ -134,9 +133,8 @@ int main() {
         Pipeline p(data_bytes);
         build_pipeline(p);
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        fz::BorrowedDeviceBuffer comp;
+        comp = p.compress({d_input, data_bytes});
         cudaDeviceSynchronize();
 
         Logger::setCallback(nullptr);
@@ -189,9 +187,8 @@ int main() {
         build_pipeline(p);
         p.enableProfiling(true);
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        fz::BorrowedDeviceBuffer comp;
+        comp = p.compress({d_input, data_bytes});
         cudaDeviceSynchronize();
 
         const auto& perf = p.getLastPerfResult();
@@ -207,9 +204,8 @@ int main() {
         }
 
         // Decompress to see the decompress pass too.
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz);
+        fz::BorrowedDeviceBuffer dec;
+        dec = p.decompressBorrowed(comp.cspan());
         cudaDeviceSynchronize();
 
         std::printf("\n[decompress pass]\n");
@@ -232,18 +228,16 @@ int main() {
         build_pipeline(p);
         p.enableBoundsCheck(true);
 
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        p.compress(d_input, data_bytes, &d_comp, &comp_sz);
+        fz::BorrowedDeviceBuffer comp;
+        comp = p.compress({d_input, data_bytes});
         cudaDeviceSynchronize();
         std::printf("  compress with bounds check: %zu bytes  (no overwrite detected)\n",
-                    comp_sz);
+                    comp.bytes());
 
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz);
+        fz::BorrowedDeviceBuffer dec;
+        dec = p.decompressBorrowed(comp.cspan());
         cudaDeviceSynchronize();
-        std::printf("  decompress with bounds check: %zu bytes\n", dec_sz);
+        std::printf("  decompress with bounds check: %zu bytes\n", dec.bytes());
     }
 
     cudaFree(d_input);

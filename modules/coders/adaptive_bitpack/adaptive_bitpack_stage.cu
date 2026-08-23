@@ -7,6 +7,11 @@
 // exclusive scan — fusion is a downstream-compiler concern. See THIRD_PARTY.md.
 
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "coders/adaptive_bitpack/adaptive_bitpack_kernels.h"
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
@@ -198,3 +203,19 @@ template class AdaptiveBitpackStage<int16_t>;
 template class AdaptiveBitpackStage<int32_t>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* AdaptiveBitpack_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::AdaptiveBitpackStage; using fz::Stage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::INT32;
+    Stage* stage = nullptr;
+    if      (dt == DataType::INT16) stage = new AdaptiveBitpackStage<int16_t>();
+    else if (dt == DataType::INT32) stage = new AdaptiveBitpackStage<int32_t>();
+    else throw std::runtime_error("Unsupported AdaptiveBitpackStage DataType: "
+            + std::to_string(static_cast<int>(dt)));
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::ADAPTIVE_BITPACK, AdaptiveBitpack_fromHeader);
