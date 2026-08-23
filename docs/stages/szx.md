@@ -70,7 +70,7 @@ format port.
 
 | `error_bound_mode` | meaning | graph-capturable forward |
 |---|---|---|
-| `ABS` (default) | `\|x − x̂\| ≤ eb` per element | yes |
+| `ABS` (default) | abs(x − x̂) ≤ eb per element | yes |
 | `NOA` | value-range relative: `abs_eb = eb · (max − min)` | no |
 
 The **ROI branch invariant** holds in both: reconstruction error is bounded per

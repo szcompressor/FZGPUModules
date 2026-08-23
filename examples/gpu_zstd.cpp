@@ -70,24 +70,24 @@ Result run(const char* name, Pipeline& p, const float* d_input,
 {
     Result r{name, 0, 0.0, 0.0f, 0.0f, 0.0f};
 
-    void*  d_comp = nullptr; size_t comp_sz = 0;
-    void*  d_dec  = nullptr; size_t dec_sz  = 0;
+    fz::BorrowedDeviceBuffer comp;
+    fz::BorrowedDeviceBuffer dec;
     cudaEvent_t e0, e1, e2, e3;
     cudaEventCreate(&e0); cudaEventCreate(&e1);
     cudaEventCreate(&e2); cudaEventCreate(&e3);
 
     // warm-up pass (first launch pays module load and pool growth)
-    p.compress(d_input, in_bytes, &d_comp, &comp_sz, stream);
-    p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream);
+    comp = p.compress({d_input, in_bytes}, stream);
+    dec = p.decompressBorrowed(comp.cspan(), stream);
     cudaStreamSynchronize(stream);
 
     cudaEventRecord(e0, stream);
-    p.compress(d_input, in_bytes, &d_comp, &comp_sz, stream);
+    comp = p.compress({d_input, in_bytes}, stream);
     cudaEventRecord(e1, stream);
     cudaStreamSynchronize(stream);
 
     cudaEventRecord(e2, stream);
-    p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream);
+    dec = p.decompressBorrowed(comp.cspan(), stream);
     cudaEventRecord(e3, stream);
     cudaStreamSynchronize(stream);
 
@@ -96,23 +96,23 @@ Result run(const char* name, Pipeline& p, const float* d_input,
 
     if (const char* pv = std::getenv("GPU_ZSTD_PROFILE"); pv && *pv == '1') {
         p.enableProfiling(true);
-        p.compress(d_input, in_bytes, &d_comp, &comp_sz, stream);
+        comp = p.compress({d_input, in_bytes}, stream);
         cudaStreamSynchronize(stream);
         std::printf("\n--- per-stage COMPRESS: %s ---\n", name);
         p.getLastPerfResult().print(std::cout);
-        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream);
+        dec = p.decompressBorrowed(comp.cspan(), stream);
         cudaStreamSynchronize(stream);
         std::printf("--- per-stage DECOMPRESS: %s ---\n", name);
         p.getLastPerfResult().print(std::cout);
         p.enableProfiling(false);
     }
 
-    r.comp_bytes = comp_sz;
-    r.cr = double(in_bytes) / double(comp_sz);
+    r.comp_bytes = comp.bytes();
+    r.cr = double(in_bytes) / double(comp.bytes());
 
     std::vector<float> h_out(h_ref.size(), 0.0f);
-    const size_t copy_bytes = std::min(dec_sz, h_ref.size() * sizeof(float));
-    cudaMemcpy(h_out.data(), d_dec, copy_bytes, cudaMemcpyDeviceToHost);
+    const size_t copy_bytes = std::min(dec.bytes(), h_ref.size() * sizeof(float));
+    cudaMemcpy(h_out.data(), dec.data(), copy_bytes, cudaMemcpyDeviceToHost);
     for (size_t i = 0; i < h_ref.size(); i++)
         r.max_err = std::max(r.max_err, std::fabs(h_out[i] - h_ref[i]));
 

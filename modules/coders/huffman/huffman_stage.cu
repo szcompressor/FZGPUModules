@@ -9,6 +9,11 @@
 //     model-synthesized frequency table, skipping the per-call histogram + host tree build.
 
 #include "coders/huffman/huffman_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "coders/huffman/phf/hf_buf.h"
 #include "util/histogram/histogram.h"
 #include "mem/mempool.h"
@@ -1129,3 +1134,20 @@ template class HuffmanStage<uint16_t>;
 template class HuffmanStage<uint32_t>;
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* Huffman_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::HuffmanStage; using fz::Stage;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0]) : DataType::UINT16;
+    Stage* stage = nullptr;
+    if      (dt == DataType::UINT8)  stage = new HuffmanStage<uint8_t>();
+    else if (dt == DataType::UINT16) stage = new HuffmanStage<uint16_t>();
+    else if (dt == DataType::UINT32) stage = new HuffmanStage<uint32_t>();
+    else throw std::runtime_error("Unsupported HuffmanStage DataType: "
+            + std::to_string(static_cast<int>(dt)));
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::HUFFMAN, Huffman_fromHeader);

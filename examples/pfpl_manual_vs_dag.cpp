@@ -231,8 +231,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Warming up...\n";
     run_manual();
     {
-        void* d_comp = nullptr; size_t comp_sz = 0;
-        dag_p.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
+        fz::BorrowedDeviceBuffer comp_buf;
+        comp_buf = dag_p.compress({d_input, data_bytes}, 0);
         cudaDeviceSynchronize();
     }
     std::cout << "Done.\n\n";
@@ -261,9 +261,9 @@ int main(int argc, char* argv[]) {
         manual_ms_v.push_back(mms);
 
         // ── Pipeline DAG ──────────────────────────────────────────────────────
-        void* d_comp = nullptr; size_t comp_sz = 0;
+        fz::BorrowedDeviceBuffer comp_buf;
         const auto t0d = Clock::now();
-        dag_p.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
+        comp_buf = dag_p.compress({d_input, data_bytes}, 0);
         cudaDeviceSynchronize();
         const auto t1d = Clock::now();
         const double dhms = elapsed_ms(t0d, t1d);

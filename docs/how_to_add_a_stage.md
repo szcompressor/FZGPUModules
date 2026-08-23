@@ -20,19 +20,25 @@ A stage is a single transformation in the pipeline (predictor, coder, transform,
 The pipeline interacts with every stage exclusively through the `Stage` base class interface —
 there is no casting or type-name branching anywhere in pipeline or DAG code.
 
-**Files you will touch for a new stage:**
+**Files you will touch for a new stage.** `scripts/new_stage.sh` scaffolds and
+edits the ones marked *(script)*, so a hand-written stage really only fills in the
+kernels and the TOML support:
 
-| File | What you do |
-|------|-------------|
-| `modules/<category>/<name>/<name>_stage.h` | Stage class declaration |
-| `modules/<category>/<name>/<name>_stage.cu` | CUDA kernels + `execute()` |
-| `include/fzm_format.h` | Add `StageType` enum value |
-| `include/stage/stage_factory.h` | Add reconstruction case in `createStage()` |
-| `CMakeLists.txt` (root) | Add `.cu` to `fzgmod_modules` library target |
-| `src/pipeline/config.cpp` | Add `#include`, `addXxxStage` + `saveXxxStage` helpers, one `kStageRegistry[]` entry |
-| `src/utils/cli/cli.cpp` | *(Optional)* Add name to `--stages` dynamic builder |
-| `tests/stages/test_<name>.cpp` | Standard test set |
-| `tests/stages/CMakeLists.txt` | Register the test |
+| File | What you do | Automation |
+|------|-------------|------------|
+| `modules/<category>/<name>/<name>_stage.h` | Stage class declaration | |
+| `modules/<category>/<name>/<name>_stage.cu` | CUDA kernels + `execute()`, plus one `FZ_REGISTER_SIMPLE_STAGE` / `FZ_REGISTER_STAGE_FACTORY` line that self-registers FZM-header reconstruction | *(script emits the line)* |
+| `include/fzm_format.h` | Add `StageType` enum value + `stageTypeToString()` case | *(script)* |
+| `CMakeLists.txt` (root) | Add `.cu` to `fzgmod_modules` library target | *(script)* |
+| `tests/stages/test_<name>.cpp` + `tests/stages/CMakeLists.txt` | Standard test set, registered | *(script)* |
+| `src/pipeline/config.cpp` | `#include`, `addXxxStage` + `saveXxxStage` helpers, one `kStageRegistry[]` entry — TOML load/save, the only shared file still edited by hand | |
+| `include/fzgpumodules.h` | Add the stage header include (public API export) | |
+| `src/utils/cli/cli.cpp` | *(Optional)* add the name to the `--stages` dynamic builder | |
+
+There is **no central factory switch to edit** — stage reconstruction self-registers
+from the stage's own `.cu` (Step 5). The one shared registration that remains is TOML
+load/save in `config.cpp`, because toml++ is deliberately confined to that translation
+unit.
 
 ---
 
@@ -312,11 +318,11 @@ void MyStage::execute(cudaStream_t stream, MemoryPool* pool,
 } // namespace fz
 ```
 
-**Enqueue all GPU work on `stream`** — the pipeline manages inter-stage ordering
+**Enqueue all GPU work on stream** — the pipeline manages inter-stage ordering
 through CUDA events. Do not call `cudaDeviceSynchronize()` or synchronize a
 *different* stream inside `execute()`.
 
-**Calling `cudaStreamSynchronize(stream)` on your own stream is permitted**
+**Calling cudaStreamSynchronize(stream) on your own stream is permitted**
 when the algorithm inherently requires it (e.g. reading a GPU histogram to the
 host to build a CPU-side codebook, as in Huffman or ANS). When you do this:
 
@@ -354,7 +360,7 @@ The library builds against CUDA **or** HIP (`-DFZGMOD_BACKEND=HIP`, targeting CD
 MI100 `gfx908`). A new stage is expected to compile and run on both. This costs almost
 nothing if you follow one rule from the start, and is painful to retrofit:
 
-> **Never name a CUDA entity directly. Route everything through `include/backend/`.**
+> **Never name a CUDA entity directly. Route everything through include/backend/.**
 
 The facade is deliberately spelled with CUDA names — `cudaMalloc`, `cudaStream_t`,
 `cub::BlockScan` all keep working — and `backend/api.h` re-points them at HIP. So your
@@ -426,22 +432,47 @@ reusing a value corrupts files that contain the old stage type.
 
 ---
 
-## Step 5 — Register in the factory
+## Step 5 — Self-register the FZM-header factory
 
-In `include/stage/stage_factory.h`, add a case to `createStage()`:
+`decompressFromFile()` rebuilds each stage from its serialized header through
+`createStage()` (`include/stage/stage_registry.h`). There is **no central switch**
+to edit — a stage registers its own reconstruction from its `.cu` at file scope,
+so this step stays inside the stage's own directory.
+
+For a stage with no template dispatch, one line at the bottom of `<name>_stage.cu`
+(after `#include "stage/stage_registry.h"`) is enough:
 
 ```cpp
-case StageType::MY_STAGE: {
-    stage = new MyStage();
-    if (config_size > 0)
-        stage->deserializeHeader(config, config_size);
-    break;
-}
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::MY_STAGE, fz::MyStage);
 ```
 
-This is the reconstruction path used by `decompressFromFile()`. If your stage is
-templated on a type, dispatch on the `DataType` byte(s) stored in the config header
-(see the `ZIGZAG` case as a reference).
+If your stage is templated on a type, write a small factory that dispatches on the
+`DataType` byte(s) stored in the config header, then register it:
+
+```cpp
+namespace {
+fz::Stage* MyStage_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType;
+    DataType dt = (config_size > 0) ? static_cast<DataType>(config[0])
+                                    : DataType::INT32;
+    fz::Stage* s = (dt == DataType::INT16) ? static_cast<fz::Stage*>(new fz::MyStage<int16_t>())
+                                           : static_cast<fz::Stage*>(new fz::MyStage<int32_t>());
+    s->deserializeHeader(config, config_size);
+    return s;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::MY_STAGE, MyStage_fromHeader);
+```
+
+The registrar runs at static-init when `libfzgmod_modules` loads. `scripts/new_stage.sh`
+emits the `FZ_REGISTER_SIMPLE_STAGE` line for you.
+
+> **Static-archive builds:** registration relies on the stage's object file being
+> linked in. In the default shared-library build (`BUILD_SHARED_LIBS=ON`) every
+> module object is present in `libfzgmod_modules.so`, so registrars always run. If
+> you link the modules as a static archive, link it with `--whole-archive` (or an
+> equivalent `KEEP`) so the registrars are not stripped. `test_stage_registry`
+> asserts every shipped `StageType` has a registered factory.
 
 ---
 
@@ -503,7 +534,7 @@ static void saveMyStage(Stage* s, std::ostringstream& out) {
 }
 ```
 
-**4. Add one entry to `kStageRegistry[]`**:
+**4. Add one entry to kStageRegistry[]**:
 
 ```cpp
 { "MyStage", StageType::MY_STAGE, addMyStage, saveMyStage },
@@ -640,7 +671,7 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 - [ ] HIP compliance (Step 3b): `backend/types.h` + `backend/api.h` instead of `<cuda_runtime.h>`; `backend/cub.h` instead of `<cub/...>`; warp intrinsics and `_block` atomics via `fz::backend::`; any 32-lane algorithm passes a literal `width = 32`; no inline PTX
 - [ ] `StageType` enum value added (unique integer, never reuse old values)
 - [ ] `stageTypeToString()` case added
-- [ ] `createStage()` factory case added
+- [ ] FZM-header factory self-registered in the `.cu` (`FZ_REGISTER_SIMPLE_STAGE` or `FZ_REGISTER_STAGE_FACTORY`)
 - [ ] `.cu` file added to `fzgmod_modules` in root `CMakeLists.txt`
 - [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
 - [ ] `config.cpp` — `#include` header, `addXxxStage` / `saveXxxStage` helpers, one entry in `kStageRegistry[]`

@@ -40,32 +40,32 @@ Yiqian Liu, Anju Mongandampulath Akathoott, and Martin Burtscher (Texas State Un
 
 **Stages:**
 
-- **`RREStage` + `RZEStage`** (`modules/coders/{rre,rze}/`) — GPU kernels are a faithful port of
+- **RREStage + RZEStage** (`modules/coders/{rre,rze}/`) — GPU kernels are a faithful port of
   `d_RRE.h`, `d_RZE.h`, `d_repetition_elimination.h`, `d_zero_elimination.h`, and `prefix_sum.h`
   (the LC `RRE` and `RZE` lossless components used by cuSZ-Hi's LC pipelines), vendored together in
   `modules/coders/lc_common/lc_chunk_components.cuh`. Both support LC word sizes 1/2/4/8.
-- **`RAREStage` + `RAZEStage`** (`modules/coders/{rare,raze}/`) — GPU kernels are a faithful
+- **RAREStage + RAZEStage** (`modules/coders/{rare,raze}/`) — GPU kernels are a faithful
   port of `d_RARE.h` and `d_RAZE.h`, the auto-k generalizations of `RRE`/`RZE` (one global
   bit-width cut chosen per chunk instead of a binary match/no-match test), sharing a single
   merged `d_PRencode`/`d_PRdecode<T, PartialReduceMode>` template in the same vendored header.
   Both support LC word sizes 1/2/4/8.
-- **`CLOGStage` + `HCLOGStage`** (`modules/coders/{clog,hclog}/`) — GPU kernels are a faithful
+- **CLOGStage + HCLOGStage** (`modules/coders/{clog,hclog}/`) — GPU kernels are a faithful
   port of `d_CLOG.h` and `d_HCLOG.h`: each chunk is split into a fixed 32 subchunks, each
   bit-packed to the minimum width needed for its own max value (`T` unsigned only); HCLOG
   additionally tries a per-subchunk TCMS(zigzag) reinterpretation and keeps whichever is
   smaller. Sharing a single merged `d_CLOGencode`/`d_CLOGdecode<T, CLogMode>` template in
   `modules/coders/lc_common/lc_clog_components.cuh`. Both support LC word sizes 1/2/4/8.
-- **`BitshuffleStage`** (`modules/shufflers/bitshuffle/`) — the 4- and 8-byte butterfly
+- **BitshuffleStage** (`modules/shufflers/bitshuffle/`) — the 4- and 8-byte butterfly
   shuffle kernels are adapted directly from `d_BIT_4` / `d_BIT_8`. The 1- and 2-byte paths
   use a standard `__ballot_sync` approach and are not LC-derived.
-- **`TUPLStage`** (`modules/shufflers/tupl/`) — GPU kernels are a faithful port of
+- **TUPLStage** (`modules/shufflers/tupl/`) — GPU kernels are a faithful port of
   `d_TUPL` / `d_iTUPL` (LC's `TUPLk` tuple deinterleave / AoS-to-SoA transpose). Upstream
   generates one fixed `(dim, word_size)` instantiation per component over a hardcoded
   16 KB chunk; here `dim`, `word_size`, and `block_size` are independent runtime
   parameters instead.
-- **`DifferenceStage`** (`modules/predictors/diff/`) — independently written CUDA kernel
+- **DifferenceStage** (`modules/predictors/diff/`) — independently written CUDA kernel
   following the `d_DIFFNB` algorithm described in the LC/PFPL framework.
-- **`QuantizerStage`** (`modules/quantizers/quantizer/`) — independently written CUDA kernel
+- **QuantizerStage** (`modules/quantizers/quantizer/`) — independently written CUDA kernel
   following the LC/PFPL quantization scheme including ABS/NOA/REL error-bound modes, outlier
   handling, and log-space REL encoding.
 
@@ -81,10 +81,10 @@ Indiana University, University of Kentucky, Oakland University (see copyright no
 
 **Stages:**
 
-- **`LorenzoQuantStage`** (`modules/fused/lorenzo_quant/`) — GPU kernels and the fused
+- **LorenzoQuantStage** (`modules/fused/lorenzo_quant/`) — GPU kernels and the fused
   predictor+quantizer design follow the cuSZ Lorenzo implementation (`lrz_c.cuhip.inl`,
   `lrz_x.cuhip.inl`).
-- **`HuffmanStage`** (`modules/coders/huffman/`) — cuSZ's Huffman source files (`hf.h`,
+- **HuffmanStage** (`modules/coders/huffman/`) — cuSZ's Huffman source files (`hf.h`,
   `hf_bk*.cc`, `hf_buf.cc`, `hf_canon.cc`, `hf_hl.cc`, `hf_kernels.cu`, `hf_impl.hh`)
   are vendored copies adapted from `origin/v1.1.0_dev` of the cuSZ repository, with
   modifications documented at the top of each file. cuSZ uses `phf` as this
@@ -107,7 +107,7 @@ SC '21. https://doi.org/10.1145/3458817.3476173
 
 **Stages:**
 
-- **`BitplaneRZEStage`** (`modules/fused/bitplane_rze/`) — the fused bitplane-transpose +
+- **BitplaneRZEStage** (`modules/fused/bitplane_rze/`) — the fused bitplane-transpose +
   zero-group encode/decode kernels (`bitplane_rze_encode.inl`,
   `bitplane_rze_decode.inl`) are adapted from `KERNEL_CUHIP_fz_fused_encode` /
   `KERNEL_CUHIP_fz_fused_decode` as vendored in `origin/v1.1.0_dev` of cuSZ.
@@ -134,7 +134,7 @@ HPDC '23. https://doi.org/10.1145/3588195.3592994
 
 **Stages:**
 
-- **`GInterpStage`** (`modules/fused/ginterp/`) — the multi-level spline interpolation
+- **GInterpStage** (`modules/fused/ginterp/`) — the multi-level spline interpolation
   kernels are adapted from `spline3.cu` and `spline3_md.inl`.
 
   **Changes from original:** `namespace cusz` → `namespace fz::ginterp`; `err.hh` /
@@ -174,21 +174,21 @@ reimplementations** with no source copied (`LorenzoStage` block mode,
 
 **Stages:**
 
-- **`AdaptiveBitpackStage`** (`modules/coders/adaptive_bitpack/`) — **direct port**
+- **AdaptiveBitpackStage** (`modules/coders/adaptive_bitpack/`) — **direct port**
   of the cuSZp fixed-length (per-block fixed-rate bit-plane) encode/decode kernel
   logic from cuSZp (SC'23), plus the plain vs. outlier selection mode from cuSZp2
   (SC'24). Re-expressed one-thread-per-block with a byte-granular layout and an
   ordinary CUB `DeviceScan` for per-block offsets where cuSZp fuses a decoupled
   look-back scan (that fusion is not reproduced); `MemoryPool` integration and FZM
   scaffolding are FZGPUModules code.
-- **`TiledLorenzoStage`** (`modules/predictors/tiled_lorenzo/`) — **direct port** of
+- **TiledLorenzoStage** (`modules/predictors/tiled_lorenzo/`) — **direct port** of
   the cuSZp3 / VGC (SC'25) dimension-aware (2-D/3-D tiled separable) delta kernel
   logic, re-expressed as a standalone integer predictor with a tile-major output
   reshape; the tile-major decomposition, FZM header, and `MemoryPool` integration
   are FZGPUModules code.
-- **`LorenzoStage::setBlockSize`** — **independent reimplementation** of the
+- **LorenzoStage::setBlockSize** — **independent reimplementation** of the
   block-local 1-D delta from cuSZp (SC'23).
-- **`QuantizerStage` linear mode** — **independent reimplementation** of
+- **QuantizerStage linear mode** — **independent reimplementation** of
   `q = round(x / 2·eb)` from cuSZp (SC'23).
 
 cuSZp3's **memory-efficient compression** and **selective decompression** features are not
@@ -219,7 +219,7 @@ Advisors: Dingwen Tao, Guangming Tan
 
 **Stages:**
 
-- **`ADMStage`** (`modules/transforms/adm/`) — GPU kernels (`mapping_uint16.cu`,
+- **ADMStage** (`modules/transforms/adm/`) — GPU kernels (`mapping_uint16.cu`,
   `mapping_uint32.cu`) are a direct port of `nv/adm/mapping_uint16.cu` and
   `nv/adm/mapping_uint32.cu` from MANS. Kernel logic is unchanged.
 
@@ -239,7 +239,7 @@ Advisors: Dingwen Tao, Guangming Tan
 
 **Stages:**
 
-- **`ANSStage`** (`modules/coders/ans/`) — the rANS kernel headers
+- **ANSStage** (`modules/coders/ans/`) — the rANS kernel headers
   (`GpuANSCodec.h`, `GpuANSEncode.h`, `GpuANSDecode.h`, `GpuANSStatistics.h`,
   `BatchPrefixSum.h`, and `utils/`) are vendored copies placed under
   `modules/coders/ans/dietgpu/`.
@@ -263,7 +263,7 @@ GPUs", ICS '23
 
 **Stages:**
 
-- **`GPULZStage`** (`modules/coders/gpulz/`) — a substantially rewritten derivative
+- **GPULZStage** (`modules/coders/gpulz/`) — a substantially rewritten derivative
   of upstream `gpulz.cu`. It retains `compressKernelI`'s per-chunk flag-bitmap/token
   stream grammar and sequential literal/match parse. Its exact/hashed match search,
   block prefix sum, staged writes, and block-parallel decoder are FZGPUModules
@@ -292,7 +292,7 @@ GPUs", ICS '23
 
 **Stages:**
 
-- **`GPULZStage` all-zero-chunk fast path** (`modules/coders/gpulz/`) — skipping the match
+- **GPULZStage all-zero-chunk fast path** (`modules/coders/gpulz/`) — skipping the match
   search and the flag/data encode entirely for chunks that are wholly zero, gated on a
   warp-vote check, is adapted from the `notEmptyFlagArr` optimization in the "sparse"
   GPULZ variant at `test/gpulz.cuh` upstream.
@@ -363,7 +363,7 @@ relative error bound", IEEE CLUSTER 2018, pp. 179–189
 
 **Stages:**
 
-- **`LogTransformStage`** (`modules/transforms/log_transform/`) — implements the paper's
+- **LogTransformStage** (`modules/transforms/log_transform/`) — implements the paper's
   transformation scheme: mapping data into log space so that a point-wise *relative* error
   bound becomes a plain *absolute* bound, letting an ordinary ABS quantizer downstream
   deliver the relative guarantee. Kernel implementation, the sign/zero/near-zero outlier

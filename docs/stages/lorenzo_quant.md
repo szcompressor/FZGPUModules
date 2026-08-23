@@ -105,7 +105,7 @@ dequantized residuals, so a per-element varying bound cannot be threaded through
 it. For an exact pointwise relative bound use `QuantizerStage` with
 `ErrorBoundMode::REL`.
 
-### Why `PREL` is not `REL`
+### Why PREL is not REL
 
 `PREL` sets `abs_eb = eb × max(abs(x))` and then behaves exactly like `ABS`. It
 therefore bounds
@@ -123,7 +123,7 @@ unbounded in relative terms.
 Measured on `CLDHGH.f32` (3600×1800) at `eb = 1e-3`, via
 `examples/eb_mode_analysis.cpp`:
 
-| `\|x\|` / peak | count | worst `\|e\|/\|x\|` | vs. requested `eb` |
+| abs(x) / peak | count | worst abs(e)/abs(x) | vs. requested `eb` |
 |---|---|---|---|
 | `[1e-1, 1e-0)` | 5,417,230 | 9.90e-03 | 9.9× |
 | `[1e-2, 1e-1)` | 1,050,426 | 9.09e-02 | 90.9× |
@@ -132,7 +132,7 @@ Measured on `CLDHGH.f32` (3600×1800) at `eb = 1e-3`, via
 74% of elements exceed the requested relative bound. `QuantizerStage` REL on the
 same data stays at 1.0× in every decade with zero violations.
 
-**When `PREL` is nevertheless the right choice:** when what you actually care
+**When PREL is nevertheless the right choice:** when what you actually care
 about is fidelity relative to the *field's* scale rather than each element's —
 which is the common case for PSNR-driven work, and is why the SZ family reports
 against the data range. `PREL` and `NOA` differ only in the scan statistic

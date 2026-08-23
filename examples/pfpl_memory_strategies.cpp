@@ -146,11 +146,10 @@ static StrategyResult run_strategy(
     build_pfpl_pipeline(comp, eb, mode, threshold);
     comp.enableProfiling(true);
 
-    void*  d_compressed  = nullptr;
-    size_t compressed_sz = 0;
+    fz::BorrowedDeviceBuffer comp_buf;
 
     // Warmup — also establishes the pipeline output buffer for decompress runs.
-    comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
+    comp_buf = comp.compress({d_input, data_bytes}, 0);
     cudaDeviceSynchronize();
 
     // Peak memory is measured after warmup so both preallocate (which allocates
@@ -168,14 +167,12 @@ static StrategyResult run_strategy(
         const auto t0 = std::chrono::high_resolution_clock::now();
 
         if (phase == ProfilePhase::Compress) {
-            comp.compress(d_input, data_bytes, &d_compressed, &compressed_sz, 0);
+            comp_buf = comp.compress({d_input, data_bytes}, 0);
             cudaDeviceSynchronize();
         } else {
-            void*  d_rec   = nullptr;
-            size_t rec_sz  = 0;
-            comp.decompress(d_compressed, compressed_sz, &d_rec, &rec_sz, 0);
+            fz::BorrowedDeviceBuffer rec = comp.decompressBorrowed(comp_buf.cspan(), 0);
             cudaDeviceSynchronize();
-            // d_rec is pool-owned (default) — do NOT cudaFree.
+            // rec is pool-owned (borrowed) — do NOT free.
         }
 
         const auto t1 = std::chrono::high_resolution_clock::now();
@@ -225,7 +222,7 @@ static StrategyResult run_strategy(
               << "  Throughput (dag  mean): " << std::setw(6)
               << tput(static_cast<double>(mean_d)) << " GB/s\n";
 
-    return {strat_name, peak_mem, compressed_sz,
+    return {strat_name, peak_mem, comp_buf.bytes(),
             mean_h, mean_d, min_h, min_d, max_h, max_d};
 }
 

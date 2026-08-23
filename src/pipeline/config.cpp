@@ -63,6 +63,7 @@
 #include "predictors/diff/diff.h"
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
+#include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
 
 #include <cstring>
 #include <fstream>

@@ -6,6 +6,7 @@
 // See THIRD_PARTY.md.
 
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
+#include "stage/stage_registry.h"
 #include "fused/bitplane_rze/bitplane_rze_kernels.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -177,3 +178,6 @@ void BitplaneRZEStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::BITPLANE_RZE, fz::BitplaneRZEStage);

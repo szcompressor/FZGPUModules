@@ -126,7 +126,7 @@ type   = "TiledLorenzo"
 inputs = [{from = "split", port = "roi"}]   # or "bg", or "peaks"
 ```
 
-> **If a downstream predictor is dimension-aware and `bin_factor > 1`**, give it an
+> **If a downstream predictor is dimension-aware and bin_factor > 1**, give it an
 > explicit `dim_x`/`dim_y`/`dim_z` override. The binned background is not the
 > pipeline's input shape, and `finalize()` re-pushes the global dims over anything
 > set at construction — the predictor would then use the wrong row stride and

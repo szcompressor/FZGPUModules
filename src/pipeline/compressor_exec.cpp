@@ -685,4 +685,73 @@ void Pipeline::compress(
 
 // ── decompress (user-owned output buffer) ────────────────────────────────────
 
+// ── Explicit-ownership span API ──────────────────────────────────────────────
+//
+// Thin wrappers over the pointer overloads: the ownership contract moves into
+// the return type, the behavior is unchanged. See memory/public_api_evolution.md
+// and docs/api_reference.md.
+
+BorrowedDeviceBuffer Pipeline::compress(ConstDeviceSpan input, cudaStream_t stream) {
+    void*  d_out = nullptr;
+    size_t out_sz = 0;
+    compress(input.data, input.bytes, &d_out, &out_sz, stream);
+    return BorrowedDeviceBuffer(d_out, out_sz);
+}
+
+size_t Pipeline::compressInto(ConstDeviceSpan input, DeviceSpan output, cudaStream_t stream) {
+    size_t written = 0;
+    compress(input.data, input.bytes, output.data, output.bytes, &written, stream);
+    return written;
+}
+
+BorrowedDeviceBuffer Pipeline::decompressBorrowed(ConstDeviceSpan input, cudaStream_t stream) {
+    // Always borrow, whatever setPoolManagedDecompOutput() says: the ownership
+    // is stated by the return type, not by pipeline state.
+    const bool prev = pool_managed_decomp_;
+    pool_managed_decomp_ = true;
+    void*  d_out = nullptr;
+    size_t out_sz = 0;
+    try {
+        decompress(input.data, input.bytes, &d_out, &out_sz, stream);
+    } catch (...) {
+        pool_managed_decomp_ = prev;
+        throw;
+    }
+    pool_managed_decomp_ = prev;
+    return BorrowedDeviceBuffer(d_out, out_sz);
+}
+
+OwnedDeviceBuffer Pipeline::decompressOwned(ConstDeviceSpan input, cudaStream_t stream) {
+    // Always own, whatever setPoolManagedDecompOutput() says.
+    const bool prev = pool_managed_decomp_;
+    pool_managed_decomp_ = false;
+    void*  d_out = nullptr;
+    size_t out_sz = 0;
+    try {
+        decompress(input.data, input.bytes, &d_out, &out_sz, stream);
+    } catch (...) {
+        pool_managed_decomp_ = prev;
+        throw;
+    }
+    pool_managed_decomp_ = prev;
+
+    // Record the device the allocation belongs to so the deleter frees it there
+    // even if the caller switches devices before the buffer dies.
+    int device = 0;
+    FZ_CUDA_CHECK(cudaGetDevice(&device));
+    return OwnedDeviceBuffer(d_out, out_sz, device);
+}
+
+size_t Pipeline::decompressInto(ConstDeviceSpan input, DeviceSpan output, cudaStream_t stream) {
+    size_t written = 0;
+    decompress(input.data, input.bytes, output.data, output.bytes, &written, stream);
+    return written;
+}
+
+size_t Pipeline::decompressIntoAsync(ConstDeviceSpan input, DeviceSpan output, cudaStream_t stream) {
+    size_t planned = 0;
+    decompressInto(input.data, input.bytes, output.data, output.bytes, &planned, stream);
+    return planned;
+}
+
 } // namespace fz

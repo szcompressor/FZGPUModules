@@ -166,12 +166,10 @@ static VariantResult run_variant(
 
     std::cout << "\n══ " << name << " ══════════════════════════════════════════\n";
 
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    p.compress(d_input, input_bytes, &d_comp, &comp_sz, 0);
+    fz::BorrowedDeviceBuffer comp = p.compress({d_input, input_bytes}, 0);
     cudaDeviceSynchronize();
 
-    res.compressed_size = comp_sz;
+    res.compressed_size = comp.bytes();
     res.peak_memory     = p.getPeakMemoryUsage();
 
     // ── Compress benchmark ────────────────────────────────────────────────────
@@ -180,7 +178,7 @@ static VariantResult run_variant(
     std::vector<float>  comp_dag;   comp_dag.reserve(runs);
     for (int i = 0; i < runs; ++i) {
         const auto t0 = std::chrono::high_resolution_clock::now();
-        p.compress(d_input, input_bytes, &d_comp, &comp_sz, 0);
+        comp = p.compress({d_input, input_bytes}, 0);
         cudaDeviceSynchronize();
         const auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -206,11 +204,10 @@ static VariantResult run_variant(
     std::cout << "\n  -- Decompress --\n";
     std::vector<double> decomp_host;  decomp_host.reserve(runs);
     std::vector<float>  decomp_dag;   decomp_dag.reserve(runs);
-    void*  d_rec  = nullptr;
-    size_t rec_sz = 0;
+    fz::BorrowedDeviceBuffer rec;
     for (int i = 0; i < runs; ++i) {
         const auto t0 = std::chrono::high_resolution_clock::now();
-        p.decompress(d_comp, comp_sz, &d_rec, &rec_sz, 0);
+        rec = p.decompressBorrowed(comp.cspan(), 0);
         cudaDeviceSynchronize();
         const auto t1 = std::chrono::high_resolution_clock::now();
 
@@ -233,9 +230,9 @@ static VariantResult run_variant(
     res.decomp_min_dag_ms   = *std::min_element(decomp_dag.begin(),  decomp_dag.end());
 
     // ── Error statistics ──────────────────────────────────────────────────────
-    if (rec_sz == input_bytes) {
+    if (rec.bytes() == input_bytes) {
         std::vector<float> h_rec(N);
-        cudaMemcpy(h_rec.data(), d_rec, rec_sz, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_rec.data(), rec.data(), rec.bytes(), cudaMemcpyDeviceToHost);
         double sum_abs = 0.0, sum_sq = 0.0;
         float  max_abs = 0.0f;
         for (size_t i = 0; i < N; ++i) {
@@ -252,7 +249,7 @@ static VariantResult run_variant(
             ? 20.0 * std::log10(data_range) - 20.0 * std::log10(res.rmse)
             : std::numeric_limits<double>::infinity();
     } else {
-        std::cerr << "  WARNING: decompressed size " << rec_sz
+        std::cerr << "  WARNING: decompressed size " << rec.bytes()
                   << " != input size " << input_bytes << " — skipping error stats\n";
     }
     return res;

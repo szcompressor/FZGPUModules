@@ -16,6 +16,7 @@
  */
 
 #include "coders/rare/rare_stage.h"
+#include "stage/stage_registry.h"
 #include "coders/lc_common/lc_chunk_components.cuh"
 #include "backend/algorithms.h"
 #include "mem/mempool.h"
@@ -488,3 +489,6 @@ void RAREStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::RARE, fz::RAREStage);

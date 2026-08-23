@@ -5,6 +5,7 @@
 // The actual encode/decode kernels are in mapping_uint16.cu / mapping_uint32.cu.
 
 #include "transforms/adm/adm_stage.h"
+#include "stage/stage_registry.h"
 #include "transforms/adm/adm_kernels.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -256,3 +257,6 @@ void ADMStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::ADM, fz::ADMStage);

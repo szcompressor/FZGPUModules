@@ -60,18 +60,15 @@ auto* rle = pipeline.addStage<fz::RLEStage<uint16_t>>();
 pipeline.connect(rle, lrz, "codes");
 pipeline.finalize();
 
-// 2. Compress
-void* d_compressed = nullptr;
-size_t compressed_size = 0;
-pipeline.compress(d_input, n * sizeof(float), &d_compressed, &compressed_size, stream);
+// 2. Compress — returns a BorrowedDeviceBuffer (pool-owned; never cudaFree it,
+//    valid until the next compress()/reset() or Pipeline destruction).
+fz::BorrowedDeviceBuffer comp = pipeline.compress({d_input, n * sizeof(float)}, stream);
 
-// 3. Decompress
-void* d_output = nullptr;
-size_t output_size = 0;
-pipeline.decompress(d_compressed, compressed_size, &d_output, &output_size, stream);
+// 3. Decompress. decompressBorrowed() also borrows from the pool (do not free);
+//    use decompressOwned() for a caller-owned fz::OwnedDeviceBuffer that frees itself.
+fz::BorrowedDeviceBuffer out = pipeline.decompressBorrowed(comp.cspan(), stream);
 cudaStreamSynchronize(stream);
-// d_output is pool-owned by default; do not cudaFree it.
-// Call pipeline.setPoolManagedDecompOutput(false) for caller-owned output.
+// out.data() / out.bytes() hold the reconstructed field.
 ```
 
 See `examples/` for more usage patterns including multi-branch pipelines, CUDA Graph
@@ -140,10 +137,9 @@ size_t comp_capacity = pipeline.getMaxCompressedSize(input_bytes);
 void* d_comp_user = nullptr;
 cudaMalloc(&d_comp_user, comp_capacity);
 
-size_t comp_size = 0;
-pipeline.compress(d_input, input_bytes,
-                  d_comp_user, comp_capacity,
-                  &comp_size, stream);
+// compressInto() writes into your buffer and returns the exact byte count.
+size_t comp_size = pipeline.compressInto({d_input, input_bytes},
+                                         {d_comp_user, comp_capacity}, stream);
 ```
 
 For decompression, size the output from the original input or from the FZM header:
@@ -154,10 +150,8 @@ size_t decomp_capacity = header.core.uncompressed_size;
 void* d_decomp_user = nullptr;
 cudaMalloc(&d_decomp_user, decomp_capacity);
 
-size_t decomp_size = 0;
-pipeline.decompress(d_comp_user, comp_size,
-                    d_decomp_user, decomp_capacity,
-                    &decomp_size, stream);
+size_t decomp_size = pipeline.decompressInto({d_comp_user, comp_size},
+                                             {d_decomp_user, decomp_capacity}, stream);
 ```
 
 See `examples/ownership_example.cpp` for a minimal end-to-end example.
@@ -178,7 +172,7 @@ pipeline.warmup(stream);      // JIT-compiles all kernels once
 pipeline.captureGraph(stream);
 
 // subsequent compress() calls replay the captured graph
-pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
+fz::BorrowedDeviceBuffer comp = pipeline.compress({d_input, input_bytes}, stream);
 ```
 
 Call `compress()` only after `captureGraph()`; use the same stream for capture and replay.

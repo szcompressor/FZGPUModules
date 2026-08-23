@@ -299,8 +299,8 @@ Valid `nbits` values: `uint8` → 1/2/4/8; `uint16` → 1/2/4/8/16; `uint32` →
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `chunk_size` | int | 16384 | Chunk size in bytes; must be multiple of 4096 |
-| `levels` | int | 4 | Recursion depth; must be in [1, 4] |
+| `chunk_size` | int | 16384 | Chunk size in bytes; one of 4096, 8192, 16384 |
+| `word_size` | int | 1 | Word granularity 1/2/4/8 = LC RZE_1/2/4/8 |
 
 Incompatible with `graph_mode=True`.
 

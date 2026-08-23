@@ -1,4 +1,9 @@
 #include "transforms/negabinary/negabinary_stage.h"
+#include "stage/stage_registry.h"
+#include <cstring>
+#include <algorithm>
+#include <stdexcept>
+#include <string>
 #include "transforms/negabinary/negabinary.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
@@ -86,3 +91,27 @@ template __global__ void negabinaryDecodeKernel<int32_t, uint32_t>(const uint32_
 template __global__ void negabinaryDecodeKernel<int64_t, uint64_t>(const uint64_t*, int64_t*, size_t);
 
 } // namespace fz
+
+// ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
+namespace {
+fz::Stage* Negabinary_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::DataType; using fz::NegabinaryStage; using fz::Stage;
+    Stage* stage = nullptr;
+    if (config_size >= 2) {
+        DataType tin_dt  = static_cast<DataType>(config[0]);
+        DataType tout_dt = static_cast<DataType>(config[1]);
+        if      (tin_dt == DataType::INT8  && tout_dt == DataType::UINT8)  stage = new NegabinaryStage<int8_t,  uint8_t>();
+        else if (tin_dt == DataType::INT16 && tout_dt == DataType::UINT16) stage = new NegabinaryStage<int16_t, uint16_t>();
+        else if (tin_dt == DataType::INT32 && tout_dt == DataType::UINT32) stage = new NegabinaryStage<int32_t, uint32_t>();
+        else if (tin_dt == DataType::INT64 && tout_dt == DataType::UINT64) stage = new NegabinaryStage<int64_t, uint64_t>();
+        else throw std::runtime_error("Unsupported NegabinaryStage type pair: TIn="
+                + std::to_string(static_cast<int>(tin_dt))
+                + " TOut=" + std::to_string(static_cast<int>(tout_dt)));
+    } else {
+        stage = new NegabinaryStage<int32_t, uint32_t>();
+    }
+    stage->deserializeHeader(config, config_size);
+    return stage;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::NEGABINARY, Negabinary_fromHeader);

@@ -68,30 +68,26 @@ int main() {
     p.finalize();
 
     // ── 3. Compress ───────────────────────────────────────────────────────────
-    void*  d_comp  = nullptr;
-    size_t comp_sz = 0;
-    p.compress(d_input, input_bytes, &d_comp, &comp_sz);
+    // compress() returns a BorrowedDeviceBuffer: the pool owns it, so never free it.
+    fz::BorrowedDeviceBuffer comp = p.compress({d_input, input_bytes});
     cudaDeviceSynchronize();
-    // d_comp is pool-owned — do NOT cudaFree.
 
     // ── 4. Decompress ─────────────────────────────────────────────────────────
-    void*  d_decomp  = nullptr;
-    size_t decomp_sz = 0;
-    p.decompress(d_comp, comp_sz, &d_decomp, &decomp_sz);
+    // decompressBorrowed() also borrows from the pool — do NOT free the result.
+    fz::BorrowedDeviceBuffer decomp = p.decompressBorrowed(comp.cspan());
     cudaDeviceSynchronize();
-    // d_decomp is pool-owned — do NOT cudaFree.
 
     // ── 5. Verify ─────────────────────────────────────────────────────────────
     std::vector<float> h_out(N);
-    cudaMemcpy(h_out.data(), d_decomp, decomp_sz, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out.data(), decomp.data(), decomp.bytes(), cudaMemcpyDeviceToHost);
 
     float max_err = 0.0f;
     for (size_t i = 0; i < N; ++i)
         max_err = std::max(max_err, std::abs(h_out[i] - h_input[i]));
 
     std::printf("input:     %zu bytes (%.2f MB)\n", input_bytes, input_bytes / 1048576.0);
-    std::printf("compressed:%zu bytes (%.2f MB)\n", comp_sz, comp_sz / 1048576.0);
-    std::printf("ratio:     %.2fx\n", static_cast<double>(input_bytes) / comp_sz);
+    std::printf("compressed:%zu bytes (%.2f MB)\n", comp.bytes(), comp.bytes() / 1048576.0);
+    std::printf("ratio:     %.2fx\n", static_cast<double>(input_bytes) / comp.bytes());
     std::printf("max_err:   %.2e  (eb = %.2e)\n", max_err, static_cast<double>(EB));
 
     cudaFree(d_input);  // d_input is caller-owned — must cudaFree

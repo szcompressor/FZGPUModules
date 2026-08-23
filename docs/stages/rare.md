@@ -19,7 +19,7 @@ describes its behavior without expanding the token. It generalizes `RREStage`:
 rather than
 RRE's binary "word repeats its predecessor in full, or is dropped entirely"
 test, it histograms how many top bits of `word ^ predecessor` are zero across
-the whole chunk, picks **one global cut `keep`** (`0 <= keep < word_size*8`)
+the whole chunk, picks **one global cut keep** (`0 <= keep < word_size*8`)
 that maximizes total bit savings, then:
 
 - Words whose top `bits - keep` bits match their predecessor store only their

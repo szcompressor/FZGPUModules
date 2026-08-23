@@ -26,6 +26,7 @@
  */
 
 #include "shufflers/tupl/tupl_stage.h"
+#include "stage/stage_registry.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"
 #include "log.h"
@@ -188,3 +189,6 @@ void TUPLStage::execute(
 }
 
 } // namespace fz
+
+// Self-registration for FZM-header reconstruction (see stage_registry.h).
+FZ_REGISTER_SIMPLE_STAGE(fz::StageType::TUPL, fz::TUPLStage);

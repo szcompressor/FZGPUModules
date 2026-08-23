@@ -195,7 +195,7 @@ decoded without the FZM header (which stores `num_elements`).  The payload must
 always be wrapped in a `Pipeline` with `writeToFile`/`decompressFromFile` or paired
 with the pipeline `decompress()` that restores the header.
 
-**Dtype must be set before `finalize()`.** `setDtype()` must be called before
+**Dtype must be set before finalize().** `setDtype()` must be called before
 `pipeline.finalize()` so the correct element width is used for scratch sizing and
 type checking.
 

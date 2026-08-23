@@ -11,8 +11,12 @@
 #include "fzm_format.h"
 
 #include "pipeline/compressor.h"
-#include "pipeline/dag.h"
 #include "pipeline/stat.h"
+
+// CompressionDAG and the fusion planner/registry are the ADVANCED tier — no
+// source-compatibility promise. Pipeline still works without naming them (they are
+// pulled transitively by compressor.h), so this umbrella no longer advertises them.
+// Reach for them deliberately: #include "advanced/dag.h", "advanced/fusion_*.h".
 
 #include "stage/stage.h"
 

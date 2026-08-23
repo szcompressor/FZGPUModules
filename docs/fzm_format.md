@@ -56,7 +56,7 @@ Each entry's `byte_offset` field gives the segment's start position **relative t
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0  | 4 | `magic`            | Must equal `0x464D5A32` ("FZM2" LE) |
-| 4  | 2 | `version`          | `(major << 8) \| minor`; current = `0x0301` |
+| 4  | 2 | `version`          | high byte = major, low byte = minor; current = `0x0301` |
 | 6  | 2 | `num_buffers`      | Number of `FZMBufferEntry` records |
 | 8  | 8 | `uncompressed_size`| Total uncompressed input size (bytes) |
 | 16 | 8 | `compressed_size`  | Total compressed payload size (bytes) |

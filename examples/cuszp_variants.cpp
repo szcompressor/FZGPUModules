@@ -151,18 +151,18 @@ static VariantResult run_variant(Variant v,
     comp.finalize();
     comp.enableProfiling(true);
 
-    void*  d_comp   = nullptr; size_t comp_sz   = 0;
-    void*  d_decomp = nullptr; size_t decomp_sz = 0;
+    fz::BorrowedDeviceBuffer comp_buf;
+    fz::BorrowedDeviceBuffer decomp_buf;
 
     // Warmup (JIT) — compress then decompress once, untimed.
-    comp.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
-    comp.decompress(d_comp, comp_sz, &d_decomp, &decomp_sz, 0);
+    comp_buf = comp.compress({d_input, data_bytes}, 0);
+    decomp_buf = comp.decompressBorrowed(comp_buf.cspan(), 0);
     cudaDeviceSynchronize();
-    R.compressed_size = comp_sz;
+    R.compressed_size = comp_buf.bytes();
 
     // Validate round-trip on the warmup output.
     std::vector<float> h_decomp(n);
-    cudaMemcpy(h_decomp.data(), d_decomp, n * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_decomp.data(), decomp_buf.data(), n * sizeof(float), cudaMemcpyDeviceToHost);
     double max_err = 0.0;
     for (size_t i = 0; i < n; ++i)
         max_err = std::max(max_err, std::abs(static_cast<double>(h_input[i]) - h_decomp[i]));
@@ -174,13 +174,13 @@ static VariantResult run_variant(Variant v,
     decomp_v.reserve(runs);
     for (int i = 0; i < runs; ++i) {
         auto t0 = std::chrono::high_resolution_clock::now();
-        comp.compress(d_input, data_bytes, &d_comp, &comp_sz, 0);
+        comp_buf = comp.compress({d_input, data_bytes}, 0);
         cudaDeviceSynchronize();
         auto t1 = std::chrono::high_resolution_clock::now();
         comp_v.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
 
         auto t2 = std::chrono::high_resolution_clock::now();
-        comp.decompress(d_comp, comp_sz, &d_decomp, &decomp_sz, 0);
+        decomp_buf = comp.decompressBorrowed(comp_buf.cspan(), 0);
         cudaDeviceSynchronize();
         auto t3 = std::chrono::high_resolution_clock::now();
         decomp_v.push_back(std::chrono::duration<double, std::milli>(t3 - t2).count());
@@ -224,18 +224,18 @@ static VariantResult run_variant(Variant v,
         cudaStreamSynchronize(s);
         std::cout << "  Graph captured.\n";
 
-        void*  g_comp   = nullptr; size_t g_comp_sz   = 0;
-        void*  g_decomp = nullptr; size_t g_decomp_sz = 0;
+        fz::BorrowedDeviceBuffer gcomp_buf;
+        fz::BorrowedDeviceBuffer gdecomp_buf;
 
         // One untimed replay to populate outputs, then validate the round-trip
         // through the graph-produced buffer (decompress runs normally).
-        gcomp.compress(d_input, data_bytes, &g_comp, &g_comp_sz, s);
+        gcomp_buf = gcomp.compress({d_input, data_bytes}, s);
         cudaStreamSynchronize(s);
-        gcomp.decompress(g_comp, g_comp_sz, &g_decomp, &g_decomp_sz, s);
+        gdecomp_buf = gcomp.decompressBorrowed(gcomp_buf.cspan(), s);
         cudaStreamSynchronize(s);
 
         std::vector<float> g_host(n);
-        cudaMemcpy(g_host.data(), g_decomp, n * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(g_host.data(), gdecomp_buf.data(), n * sizeof(float), cudaMemcpyDeviceToHost);
         double g_err = 0.0;
         for (size_t i = 0; i < n; ++i)
             g_err = std::max(g_err, std::abs(static_cast<double>(h_input[i]) - g_host[i]));
@@ -245,13 +245,13 @@ static VariantResult run_variant(Variant v,
         g_v.reserve(runs);
         for (int i = 0; i < runs; ++i) {
             auto t0 = std::chrono::high_resolution_clock::now();
-            gcomp.compress(d_input, data_bytes, &g_comp, &g_comp_sz, s);
+            gcomp_buf = gcomp.compress({d_input, data_bytes}, s);
             cudaStreamSynchronize(s);
             auto t1 = std::chrono::high_resolution_clock::now();
             g_v.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
         }
         R.graph_comp_ms = summarize(g_v);
-        R.graph_ok = (g_comp_sz == R.compressed_size && g_err <= eb * 1.0001);
+        R.graph_ok = (gcomp_buf.bytes() == R.compressed_size && g_err <= eb * 1.0001);
 
         cudaStreamDestroy(s);
 
@@ -263,7 +263,7 @@ static VariantResult run_variant(Variant v,
                   << "  Round-trip via graph   : max abs error " << std::scientific
                   << std::setprecision(3) << g_err
                   << (g_err <= eb * 1.0001 ? "  [within bound]" : "  [OVER BOUND]")
-                  << ", size " << (g_comp_sz == R.compressed_size ? "matches" : "DIFFERS")
+                  << ", size " << (gcomp_buf.bytes() == R.compressed_size ? "matches" : "DIFFERS")
                   << "\n" << std::fixed << std::setprecision(2)
                   << "  Speedup vs PREALLOCATE  : "
                   << (R.comp_ms.min / R.graph_comp_ms.min) << "x (peak compress)\n";

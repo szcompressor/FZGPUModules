@@ -24,6 +24,22 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── Stage self-registration coverage ─────────────────────────────────────────
+fz_add_test(
+    NAME    test_stage_registry
+    SOURCES test_stage_registry.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  pipeline gpu
+)
+
+# ─── Explicit-ownership span API ──────────────────────────────────────────────
+fz_add_test(
+    NAME    test_device_buffer
+    SOURCES test_device_buffer.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
 # ─── Pipeline error-handling / invalid-usage guards ───────────────────────────
 fz_add_test(
     NAME    test_pipeline_errors
