@@ -169,7 +169,20 @@ public:
      */
     void setBklen(uint32_t bklen) {
         constexpr uint32_t kMul = (4u / sizeof(T)) ? (4u / sizeof(T)) : 1u;
-        bklen_ = ((bklen + kMul - 1u) / kMul) * kMul;
+        uint32_t rounded = ((bklen + kMul - 1u) / kMul) * kMul;
+        // bklen_ is stored uint16_t in the serialized header (see the file
+        // comment above) and threaded as uint16_t through the histogram
+        // kernel API end to end. 65536 itself would silently wrap to 0 at
+        // that boundary — validate here instead of producing a corrupt or
+        // crashing stage.
+        if (rounded > 0xFFFFu)
+            throw std::invalid_argument(
+                "HuffmanStage::setBklen: bklen (after rounding, " + std::to_string(rounded) +
+                ") exceeds 65535 — bklen_ is a uint16_t end to end (serialized header and "
+                "histogram kernel API), so the full symbol range of a 16+ bit type cannot be "
+                "histogrammed in one pass. Reduce the upstream quant_radius/code range, or "
+                "split the input across multiple Huffman stages.");
+        bklen_ = rounded;
     }
     uint32_t getBklen() const         { return bklen_; }
 

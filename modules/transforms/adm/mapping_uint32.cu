@@ -151,7 +151,8 @@ __global__ static void adm_map_thrust_u32(
                         ? (diff + 126 - output_idx * 126) * 2 - 1 + shift      \
                         : (diff + 126 - output_idx * 126) * 2 + shift);         \
                 local_code[local_idx] = res;                                    \
-                local_bits[bit_offset / 8] |= static_cast<uint8_t>(1 << (7 - (bit_offset % 8))); \
+                if (bit_offset >= 0 && bit_offset < kChunk * kMaxSignalBytesU32 * 8) \
+                    local_bits[bit_offset / 8] |= static_cast<uint8_t>(1 << (7 - (bit_offset % 8))); \
                 local_idx++;                                                     \
                 bit_offset += output_idx;                                       \
             } while(0)
@@ -161,10 +162,25 @@ __global__ static void adm_map_thrust_u32(
         }
     }
 
-#ifndef NDEBUG
-    if (bit_offset > kChunk * kMaxSignalBytesU32 * 8)
+    // Lower-bound guard: with extreme-magnitude input the center/diff
+    // arithmetic above (uint32_t accumulator, int-cast unsigned diff) can
+    // wrap and drive bit_offset negative — a distinct failure mode from
+    // the overflow above. ADM's algorithm assumes bounded quantization
+    // codes (see the class doc comment); this only clamps to prevent the
+    // negative index from corrupting memory, it does not make the output
+    // meaningful for such inputs.
+    if (bit_offset < 0) {
         atomicOr(d_overflow_flag, 1u);
-#endif
+        bit_offset = 0;
+    }
+    if (bit_offset > kChunk * kMaxSignalBytesU32 * 8) {
+        atomicOr(d_overflow_flag, 1u);
+        // Clamp so the unpack/copy loop below (which sizes itself off
+        // bit_offset/max_bits) can't read/write past local_bits' actual
+        // capacity — the atomicOr above still reports the true overflow
+        // to the host, which throws once this kernel returns.
+        bit_offset = kChunk * kMaxSignalBytesU32 * 8;
+    }
 
     uint16_t max_bits = static_cast<uint16_t>(bit_offset);
     #pragma unroll
@@ -273,7 +289,8 @@ __global__ static void adm_map_decoupled_u32(
                         ? (diff + 126 - output_idx * 126) * 2 - 1 + shift      \
                         : (diff + 126 - output_idx * 126) * 2 + shift);         \
                 local_code[local_idx] = res;                                    \
-                local_bits[bit_offset / 8] |= static_cast<uint8_t>(1 << (7 - (bit_offset % 8))); \
+                if (bit_offset >= 0 && bit_offset < kChunk * kMaxSignalBytesU32 * 8) \
+                    local_bits[bit_offset / 8] |= static_cast<uint8_t>(1 << (7 - (bit_offset % 8))); \
                 local_idx++;                                                     \
                 bit_offset += output_idx;                                       \
             } while(0)
@@ -283,10 +300,25 @@ __global__ static void adm_map_decoupled_u32(
         }
     }
 
-#ifndef NDEBUG
-    if (bit_offset > kChunk * kMaxSignalBytesU32 * 8)
+    // Lower-bound guard: with extreme-magnitude input the center/diff
+    // arithmetic above (uint32_t accumulator, int-cast unsigned diff) can
+    // wrap and drive bit_offset negative — a distinct failure mode from
+    // the overflow above. ADM's algorithm assumes bounded quantization
+    // codes (see the class doc comment); this only clamps to prevent the
+    // negative index from corrupting memory, it does not make the output
+    // meaningful for such inputs.
+    if (bit_offset < 0) {
         atomicOr(d_overflow_flag, 1u);
-#endif
+        bit_offset = 0;
+    }
+    if (bit_offset > kChunk * kMaxSignalBytesU32 * 8) {
+        atomicOr(d_overflow_flag, 1u);
+        // Clamp so the unpack/copy loop below (which sizes itself off
+        // bit_offset/max_bits) can't read/write past local_bits' actual
+        // capacity — the atomicOr above still reports the true overflow
+        // to the host, which throws once this kernel returns.
+        bit_offset = kChunk * kMaxSignalBytesU32 * 8;
+    }
 
     uint16_t max_bits = static_cast<uint16_t>(bit_offset);
     #pragma unroll
@@ -411,9 +443,7 @@ void compress_u32(
             static_cast<size_t>(gsize + 1) * sizeof(int), stream));
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_block_resolved, 0,
             static_cast<size_t>(num_blocks + 1) * sizeof(int), stream));
-#ifndef NDEBUG
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_overflow_flag, 0, sizeof(unsigned int), stream));
-#endif
         adm_map_decoupled_u32<<<num_blocks, kWarpsPerBlock * bsize, sizeof(unsigned int) * 2, stream>>>(
             d_input, s.d_codes, s.d_concat_signals,
             static_cast<uint32_t*>(s.d_centers),
@@ -422,7 +452,6 @@ void compress_u32(
             static_cast<int>(num_elements), kShift, s.d_overflow_flag);
         FZ_CUDA_CHECK(cudaGetLastError());
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-#ifndef NDEBUG
         {
             unsigned int flag = 0;
             FZ_CUDA_CHECK(cudaMemcpy(&flag, s.d_overflow_flag,
@@ -432,13 +461,10 @@ void compress_u32(
                     "ADMStage (U32): local_bits overflow — input diffs exceed algorithm "
                     "capacity; ADM is designed for bounded quantization codes");
         }
-#endif
     } else {
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_bit_signals, 0,
             static_cast<size_t>(num_elements) * kMaxSignalBytesU32, stream));
-#ifndef NDEBUG
         FZ_CUDA_CHECK(cudaMemsetAsync(s.d_overflow_flag, 0, sizeof(unsigned int), stream));
-#endif
         adm_map_thrust_u32<<<gsize, bsize, 0, stream>>>(
             d_input, s.d_codes, s.d_bit_signals,
             static_cast<uint32_t*>(s.d_centers),
@@ -446,7 +472,6 @@ void compress_u32(
             static_cast<int>(num_elements), kShift, s.d_overflow_flag);
         FZ_CUDA_CHECK(cudaGetLastError());
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-#ifndef NDEBUG
         {
             unsigned int flag = 0;
             FZ_CUDA_CHECK(cudaMemcpy(&flag, s.d_overflow_flag,
@@ -456,7 +481,6 @@ void compress_u32(
                     "ADMStage (U32): local_bits overflow — input diffs exceed algorithm "
                     "capacity; ADM is designed for bounded quantization codes");
         }
-#endif
 
         fz::backend::exclusiveScan(stream, s.d_signal_length, s.d_output_lengths,
                                     static_cast<size_t>(gsize));

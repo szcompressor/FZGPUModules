@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 #include "histogram.h"
 
@@ -84,6 +86,19 @@ void GPU_histogram_generic_optimizer_on_initialization(
         max_bytes);
 
     r_per_block = (max_bytes / sizeof(int)) / (hist_len + 1);
+    if (r_per_block < 1)
+        // One privatized histogram replica (hist_len+1 ints) doesn't fit in a
+        // single block's shared memory on this device. Proceeding would pass
+        // repeat=0 into KERNEL_CUHIP_p2013Histogram, which computes
+        // `threadIdx.x % repeat` unconditionally for every thread — a
+        // device-side divide-by-zero that surfaces as "illegal instruction".
+        throw std::runtime_error(
+            "GPU_histogram_generic_optimizer_on_initialization: hist_len (" +
+            std::to_string(hist_len) + ") needs " +
+            std::to_string((size_t)(hist_len + 1) * sizeof(int)) +
+            " bytes of shared memory for one histogram replica, but this device only has " +
+            std::to_string(max_bytes) + " bytes available per block. Reduce hist_len "
+            "(HuffmanStage::setBklen / bklen).");
     grid_dim    = num_SMs;
     block_dim   = ((((data_len / (grid_dim * 1)) + 1) / 64) + 1) * 64;
     while (block_dim > 1024) {

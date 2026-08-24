@@ -205,7 +205,7 @@ public:
         // Forward: natural n -> padded tile-major (num_tiles * tile_elems).
         // Inverse: padded tile-major -> natural n.
         const size_t n = naturalElems(input_sizes);
-        const size_t out_elems = is_inverse_ ? n : paddedElems();
+        const size_t out_elems = is_inverse_ ? n : paddedElems(n);
         return {out_elems * sizeof(T)};
     }
 
@@ -291,10 +291,15 @@ private:
     }
 
     /// Padded tile-major element count = num_tiles * tile_elems.
-    size_t paddedElems() const {
+    /// `natural_n` is the fallback extent (flat 1-D) when dims_[0] == 0 — must
+    /// match execute()'s `if (dx == 0) { dx = in_bytes / sizeof(T); ... }`
+    /// fallback exactly, or this pre-execution size estimate under-sizes the
+    /// output buffer that execute() then overruns.
+    size_t paddedElems(size_t natural_n) const {
         auto t = effectiveTile();
-        const size_t dx = (dims_[0] > 0) ? dims_[0] : 0;
-        const size_t dy = dims_[1], dz = dims_[2];
+        const size_t dx = (dims_[0] > 0) ? dims_[0] : natural_n;
+        const size_t dy = (dims_[0] > 0) ? dims_[1] : 1;
+        const size_t dz = (dims_[0] > 0) ? dims_[2] : 1;
         if (dx == 0) return 0;
         const size_t ntx = (dx + t[0] - 1) / t[0];
         const size_t nty = (dy + t[1] - 1) / t[1];
