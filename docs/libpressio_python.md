@@ -24,8 +24,11 @@ git clone --depth=2 https://github.com/spack/spack.git ~/spack
 
 ### Add the spack package repos
 
-The `fzgpumodules` plugin has not yet been merged into the upstream libpressio or
-robertu94/spack_packages. Until the PRs land, use the fork which contains the package
+FZGPUModules' explicit-ownership pipeline API (`OwnedDeviceBuffer`/`BorrowedDeviceBuffer`,
+`Pipeline::decompressOwned()`) has landed on `szcompressor/FZModules` `main` — no PR to
+track there anymore. The libpressio `fzgpumodules` plugin itself, and the spack package
+definitions that build it, are not yet merged into upstream `robertu94/libpressio` or
+`robertu94/spack_packages`. Until those two land, use the fork which contains the package
 definitions for both `fzgpumodules` and the updated `libpressio`:
 
 ```bash
@@ -60,7 +63,18 @@ spack concretize
 spack install
 ```
 
-Replace `<your_arch>` with your GPU's compute capability (e.g. `80` for A100, `86` for RTX 3090).
+Replace `<your_arch>` with your GPU's compute capability (e.g. `80` for A100, `86` for RTX 3090,
+`90` for H100).
+
+**Gotcha:** if spack resolves `swig@4.1` or newer, the build fails inside
+`pressioPYTHON_wrap.cxx` with `too few arguments to function 'SWIG_Python_AppendOutput'` —
+libpressio's vendored `numpy.i` calls the pre-4.1 2-argument form, and SWIG 4.1 added a
+required third argument to that runtime function. Pin swig in the environment before
+concretizing:
+
+```bash
+spack config add "packages:swig:require:@=4.0.2"
+```
 
 ### Activate in Python
 
@@ -94,6 +108,29 @@ decompressed = comp.decode(compressed, data.copy())
 
 print(f"max error: {float(abs(data - decompressed).max()):.3e}")  # <= 1e-3
 ```
+
+For linear pipelines, `python/fzgm_helper.py`'s `Chain` builder avoids hand-writing
+`"sN <- sM:port"` connection strings and `"fzgpumodules:sN:<option>"` keys:
+
+```python
+import numpy as np
+from fzgm_helper import Chain
+
+data = np.random.rand(256, 256).astype(np.float32)
+
+comp = (Chain()
+    .add("lorenzo:float:uint16", quant_radius=999, outlier_capacity=0.25)
+    .add("rze", from_port="codes", chunk_size=8192)
+    .configure(fusion="auto")
+    .compressor(eb=1e-3))
+
+compressed   = comp.encode(data)
+decompressed = comp.decode(compressed, data.copy())
+```
+
+It's a thin builder, not a libpressio feature — for non-linear graphs (multiple
+branches into one stage, direction-dependent stages, config-file mode) build
+`early_config` by hand as above.
 
 ---
 
@@ -161,6 +198,7 @@ decompressed = comp.decode(compressed, out)
 | `fzgpumodules:memory_multiplier` | float | 3.0 | GPU pool size multiplier |
 | `fzgpumodules:num_streams` | int | 1 | Parallel CUDA streams |
 | `fzgpumodules:graph_mode` | bool | False | CUDA graph capture (see below) |
+| `fzgpumodules:fusion` | str | `"off"` | `"off"` or `"auto"` — kernel fusion (see below) |
 | `fzgpumodules:config_file` | str | `""` | Path to TOML pipeline config file (see below) |
 | `fzgpumodules:expose_stage_outputs` | bool | False | Expose terminal stage outputs as metrics after `encode` |
 
@@ -169,10 +207,14 @@ decompressed = comp.decode(compressed, out)
 | Value | Meaning |
 |-------|---------|
 | `ABS` | Absolute error — `abs(x_orig - x_recon) ≤ eb` |
-| `REL` | Global approximate point-wise relative — `abs(error) / abs(x_orig) ≤ eb` (approximately) |
-| `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute) | 
+| `REL` | Exact point-wise relative bound, `abs(error) / abs(x_orig) ≤ eb` — honoured exactly only by `QuantizerStage`. On stages that quantize a fused prediction residual against one global tolerance (`lorenzo:float:*`/`lorenzo:double:*`, i.e. `LorenzoQuantStage`) it is a deprecated alias for `PREL`: the engine logs a warning and resolves it to `PREL` rather than failing, since it cannot honour an exact per-element bound there. |
+| `NOA` | Value-range relative — `abs(error) / value_range ≤ eb` (norm-of-absolute), uses `pressio:abs` as the fraction |
+| `PREL` | Pseudo-relative — `abs_eb = eb * max(abs(data))`, applied as a single absolute bound, uses `pressio:abs` as the fraction. This is the honest name for what `REL` silently did on fused prediction stages before the REL/PREL split; prefer it explicitly there to silence the deprecation warning. |
 
-Note: `pressio:rel` is interpreted as NOA for the plugin, as it follows more semantically distinct definitions of relative error. See [Fast and Effective Lossy Compression on GPUs  and CPUs with Guaranteed Error Bounds](https://doi.org/10.1109/IPDPS64566.2025.00083) for details on the error bound definitions and their implications for compression.
+Note: `pressio:abs` doubles as the bound fraction for `NOA` and `PREL` (both are ABS-family
+bounds under the hood); `pressio:rel` is only read when `error_bound_mode = "rel"`. See
+[Fast and Effective Lossy Compression on GPUs and CPUs with Guaranteed Error Bounds](https://doi.org/10.1109/IPDPS64566.2025.00083)
+for details on the error bound definitions and their implications for compression.
 
 ### Connections format
 
@@ -212,7 +254,8 @@ Per-stage options (prefix `fzgpumodules:sN:`):
 | `quant_radius` | int | 32768 | Bin count / 2 |
 | `outlier_capacity` | float | 0.2 | Outlier buffer as fraction of N |
 | `zigzag_codes` | bool | False | Zigzag-encode codes for better RLE/entropy |
-| `value_base` | float | 0.0 | Pre-scanned value range (NOA/REL); 0 = auto-scan |
+| `value_base` | float | 0.0 | Pre-scanned value range (NOA) or max(abs(data)) (PREL); 0 = auto-scan |
+| `centering` | bool | False | Per-tile mean centering (FSZ): predict each 1024-element tile's first element from the tile mean instead of 0. Helps fields with a large constant offset (temperature in Kelvin, pressure in hPa). 1-D only. |
 
 **Integer variants** (lossless, no per-stage options):
 
@@ -235,6 +278,10 @@ All Lorenzo options above, plus:
 |--------|------|---------|-------------|
 | `outlier_threshold` | float | inf | `abs(x) >= threshold` stored losslessly |
 | `inplace_outliers` | bool | False | Inline outliers in code array (requires `zigzag_codes=True` and `quantizer:float:uint32`) |
+| `linear_mode` | bool | False | ABS/NOA: no-outlier cuSZp-style raw signed codes, no radius clamp, no zigzag. Mutually exclusive with `rel`, `inplace_outliers`, `zigzag_codes`. A value whose bin exceeds the signed code range raises a clean exception at compress time rather than silently wrapping — widen the code type, center the data first, or use an outlier-capable quantizer instead. |
+| `dither` | bool | False | Reconstruct to a deterministic pseudo-random point within the error-bound interval instead of the bin center, decorrelating reconstruction error from the signal. Elements that would violate the bound are escalated to lossless outliers — raise `outlier_capacity` accordingly (dither commonly escalates ~25% of elements at `dither_strength=1.0`). Mutually exclusive with `linear_mode`, `inplace_outliers`. |
+| `dither_seed` | int | 0 | Seed for the deterministic dither offset; persisted in the header |
+| `dither_strength` | float | 1.0 | Dither amplitude as a fraction of the error bound, in `(0, 1]`; `0.0` disables the offset |
 
 ### Difference Stage
 
@@ -304,6 +351,210 @@ Valid `nbits` values: `uint8` → 1/2/4/8; `uint16` → 1/2/4/8/16; `uint32` →
 
 Incompatible with `graph_mode=True`.
 
+### Tiled Lorenzo (dimension-aware, lossless)
+
+```python
+"tiled_lorenzo:int16", "tiled_lorenzo:int32"
+```
+
+Separable Lorenzo predictor over fixed-size tiles (8x8 in 2-D, 4x4x4 in 3-D by default),
+emitted tile-major so a downstream `adaptive_bitpack` block aligns one block per tile.
+Signed integer input (quantizer codes or block deltas) only.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `tile_x` | int | 0 | Tile extent in x (fast dim); 0 = ndim-derived default |
+| `tile_y` | int | 0 | Tile extent in y; 0 = default (1 for 1-D) |
+| `tile_z` | int | 0 | Tile extent in z; 0 = default (1 for 1-D/2-D) |
+
+`tile_x*tile_y*tile_z` must be in `[1, 1024]`, each extent in `[1, 255]`. Set
+`fzgpumodules:dims` for 2-D/3-D data — leaving it at the default `[0,1,1]` treats the
+input as flat 1-D, which is valid but won't exploit 2-D/3-D locality.
+
+### Adaptive Bitpack
+
+```python
+"adaptive_bitpack:int16", "adaptive_bitpack:int32"
+```
+
+Per-block adaptive fixed-rate bit-plane coder (the cuSZp lossless back-end's "plain"
+mode). Pair with `quantizer` (`linear_mode=True`) or `tiled_lorenzo` upstream.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `block_size` | int | 32 | Elements per fixed-rate block, in `[1, 1024]`. Match a `tiled_lorenzo` tile_elems upstream to align blocks to tiles. |
+| `outlier_selection` | bool | False | cuSZp2 per-block plain/outlier selection: store element 0 as a raw outlier and pack only the rest, whichever is smaller |
+
+### LC Byte-Stream Reducers (RZE, RRE, RARE, RAZE, CLOG, HCLOG)
+
+```python
+"rze", "rre", "rare", "raze", "clog", "hclog"
+```
+
+Lossless byte-stream reducers from the LC framework, all sharing the same shape:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `chunk_size` | int | 16384 | Bytes; `rze`/`rre` only support 16384, the others accept 4096/8192/16384 |
+| `word_size` | int | 1 | Word granularity 1/2/4/8; `clog`/`hclog` are unsigned-words only |
+
+`rze` is additionally incompatible with `graph_mode=True`.
+
+### GPULZ (LZ77-style, lossless)
+
+```python
+"gpulz"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `chunk_size` | int | 2048 | Bytes |
+| `word_size` | int | 4 | Match word size in bytes |
+| `match_level` | int | 1 | Encode-side effort: `0` = exact longest match over the near window only; `1` = additionally consults a hashed long-range table (trades throughput for ratio) |
+
+The stage's `split_mode` (four-port literal/length/offset/meta output) is not exposed —
+it changes the stage's output port count, which must be known before construction, and
+`GPULZStage` has no constructor that takes it up front.
+
+### TUPL (AoS→SoA transpose)
+
+```python
+"tupl"
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `block_size` | int | 16384 | Bytes; chunk over which the transpose runs |
+| `word_size` | int | 1 | Bytes per tuple element |
+| `dim` | int | 2 | Tuple width: elements per interleaved group |
+
+### BitplaneRZE (fused, lossless)
+
+```python
+"bitplane_rze"
+```
+
+Fixed `uint16_t` input, no configurable options — bitplane-transpose + zero-group RZE
+fused into one stage (the FZ-GPU lossless codec).
+
+### ANS Entropy Coding
+
+```python
+"ans"
+```
+
+No configurable options in this build — the vendored dietGPU kernels only support
+`prob_bits=10`. Incompatible with `graph_mode=True` (D2H copies in both directions).
+
+### ADM — Adaptive Data Mapping
+
+```python
+"adm:uint16", "adm:uint32"
+```
+
+Assumes bounded quantization codes (small diffs from a per-block center) — see the
+`local_bits overflow` note in `mapping_uint16.cu` / `mapping_uint32.cu`. Input whose
+diffs exceed that capacity raises a clean exception (this used to corrupt device
+memory instead, since the guard was compiled out in Release builds; fixed).
+
+### SZx / SZp (fused lossy compressors)
+
+```python
+"szx:float", "szx:double", "szp:float", "szp:double"
+```
+
+Ultrafast block-local error-bounded compressors (SZx and SZp/fZ-light), each a
+self-contained fused stage rather than a Lorenzo+quantize+code pipeline.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `block_size` | int | 128 | Elements per block, in `[1, 4096]` |
+
+Use `fzgpumodules:error_bound_mode` / `pressio:abs` as usual — **only `abs` and `noa` are
+supported** (`rel`/`prel` raise a clear error at pipeline construction, since neither
+stage has a point-wise or pseudo-relative path).
+
+### Direction-dependent port count stages
+
+The four stages below have a port count that *swaps* with direction — more outputs than
+inputs going forward (compress), and the mirror image going backward (decompress).
+`Pipeline::buildInverseDAG()` reconciles this transparently; there is nothing to
+configure for it. (A related but different case — a stage whose forward port count
+needs to *grow* based on a config value, like `GPULZStage::setSplitMode(true)` taking
+it from 1 output to 4 — is not supported, because `addRawStage()` captures the port
+count once, immediately after `addStage()` returns, before the plugin's factory
+function gets the pointer back to call any setter on it.)
+
+#### AdaptiveLorenzo (lossless)
+
+```python
+"adaptive_lorenzo:int16", "adaptive_lorenzo:int32"
+```
+
+Per-tile adaptive Lorenzo predictor variant search (order-1/order-2, centered/uncentered).
+Forward: 1 input -> 3 outputs (`output`, `modes`, `means`). Inverse: 3 inputs -> 1 output.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `coder_block_size` | int | 32 | Downstream coder block size — fixed at 32 by the cost model; don't change |
+| `blocks_per_tile` | int | 8 | Coder blocks per adaptation tile, in `[1, 32]` (tile size <= 1024) |
+| `enable_order2` | bool | True | Include order-2 (LZ2) prediction variants in the per-tile search |
+| `enable_centering` | bool | True | Include centered prediction variants in the per-tile search |
+
+Pair with `adaptive_bitpack` downstream (`block_size` = `coder_block_size`, i.e. 32).
+
+#### LogTransform
+
+```python
+"log_transform"
+```
+
+Float32 only. Forward: 1 input -> 4 outputs. Inverse: 4 inputs -> 1 output. **Always
+interprets the pipeline's error bound as an exact point-wise relative bound** regardless
+of `fzgpumodules:error_bound_mode` — set `error_bound_mode=rel` and `pressio:rel` so the
+value you set matches what the stage does with it.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `threshold` | float | 0.0 | `\|x\| < threshold` => lossless outlier; 0 disables (only zeros/denormals/inf/NaN escalate) |
+| `outlier_capacity` | float | 0.05 | Fraction of input element count reserved for outliers |
+
+#### GInterp
+
+```python
+"ginterp"
+```
+
+cuSZ-Hi-style interpolation predictor, float32 codes to uint16. **2-D/3-D only** —
+set `fzgpumodules:dims`; 1-D is rejected. Forward: 1 input -> 4 outputs
+(`codes`, `anchor`, `outlier_vals`, `outlier_idxs`). Inverse: 4 inputs -> 1 output.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `quant_radius` | int | 0 | 0 = auto-tune (scans data min/max on first execute); >0 = manual, required for CUDA graph capture |
+| `outlier_capacity` | float | 0.10 | Outlier buffer reserve as fraction of total elements |
+| `auto_tuning_mode` | int | 0 | 0 off, 1 cheap profiling (3-D only, ~1ms), 3 full structural (3-D only, ~5-15ms), 4 full+alpha/beta sweep (3-D only, ~15-30ms), 5 manual override (dim-agnostic, graph-safe) |
+| `manual_alpha` | float | 0.0 | Manual alpha for `auto_tuning_mode=5`; 0.0 defers to the cuSZ-Hi schedule |
+| `manual_beta` | float | 0.0 | Manual beta for `auto_tuning_mode=5`; 0.0 -> beta=4.0 |
+
+Modes 1/3/4 force a host-blocking D2H sync and are incompatible with `graph_mode=True`.
+
+#### ROIBinSplit
+
+```python
+"roibin_split:float", "roibin_split:double"
+```
+
+Splits a field into per-peak regions of interest plus a (optionally binned) background.
+Forward: 1 input -> 3 outputs (`roi`, `background`, `meta`). Inverse: 3 inputs -> 1 output.
+Requires `fzgpumodules:dims` (2-D/3-D).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `peaks_file` | str | `""` | Path to a `.roi` peak-list file (magic `FZROI1`, header `nx/ny/nz/npeaks` as little-endian uint32, then `npeaks` records of `{z:uint32, x:uint16, y:uint16}` = 8 bytes each). **Required** — compression throws if unset. Its geometry must match `fzgpumodules:dims` if both are set. |
+| `roi_half_width` | int | 4 | ROI box half-width in pixels; the box is `(2*hw+1)^2` |
+| `bin_factor` | int | 1 | Background binning factor; 1 disables binning |
+
 ### Huffman Entropy Coding
 
 ```python
@@ -312,10 +563,21 @@ Incompatible with `graph_mode=True`.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `bklen` | int | 256 (uint8) / 1024 (uint16, uint32) | Codebook length; all input symbols must be in `[0, bklen)` |
+| `bklen` | int | 0 (= type's built-in default: 256 for uint8, 1024 for uint16/uint32) | Codebook length; all input symbols must be in `[0, bklen)` |
+| `device_resident` | bool | False | Forward execution path: False = HostCoordinated (cuSZ coarse path), True = DeviceResident (scan/header assembly stays on GPU) |
+| `validate_symbol_range` | bool | True | Verify every symbol is in `[0, bklen)` on the GPU when a codebook is pinned. Safe to disable only when the range is guaranteed upstream (e.g. Lorenzo/Quantizer zigzag codes with `bklen == 2 * quant_radius`). |
+| `adaptive_book` | bool | False | Codebook source: False = PerBlock (fresh histogram+book every call), True = Adaptive (histogram the first call only, reuse forever). `Fixed` book source is not exposed — it needs a caller-supplied frequency table with no scalar option equivalent. |
 
 When following a Lorenzo/Quantizer stage with `zigzag_codes=True` and radius `r`, set `bklen = 2 * r`.
 Incompatible with `graph_mode=True` (two D2H syncs per forward call).
+
+`bklen` values close to 65536 raise a clean error rather than crash — `bklen_` is
+`uint16_t` end to end (serialized header and histogram kernel API), and the histogram
+kernel also needs `(bklen+1)*4` bytes of shared memory for one privatized replica, which
+caps the practical maximum well below 65536 on most devices (~58000 on an H100).
+`setBklen()` and the histogram optimizer both validate and throw instead of launching a
+kernel that would corrupt memory or fault. Keep `bklen` well under 65536, or size the
+upstream `quant_radius` so codes fit the default `bklen` (1024 for uint16).
 
 ---
 
@@ -329,6 +591,7 @@ metrics = comp.get_metrics()
 # Plugin-specific:
 peak_mem   = metrics.get("fzgpumodules:peak_memory",         None)  # bytes
 exec_us    = metrics.get("fzgpumodules:execution_time_us",   None)  # microseconds
+rebuilt    = metrics.get("fzgpumodules:rebuilt",              None)  # bool
 n_outliers = metrics.get("fzgpumodules:s0:outlier_count",    None)  # Lorenzo/Quantizer
 
 # Composite metrics (requires "size" and "error_stat" in composite:plugins):
@@ -351,7 +614,8 @@ Full metrics reference:
 | Key | Type | Description |
 |-----|------|-------------|
 | `fzgpumodules:peak_memory` | int | Peak GPU memory in bytes |
-| `fzgpumodules:execution_time_us` | int | Compress wall time in microseconds |
+| `fzgpumodules:execution_time_us` | int | Stream-synced device execution time (microseconds). Excludes host<->device staging and pipeline (re)build cost — see `rebuilt` below |
+| `fzgpumodules:rebuilt` | bool | True if this `encode()` call (re)built the pipeline (first call, dirty options, or a changed input size in manual-pipeline mode) rather than reusing the cached one. `execution_time_us` excludes build time regardless — in a timing loop, discard measurements where this is true, or warm up first |
 | `fzgpumodules:sN:outlier_count` | int | Outlier count for stage N (Lorenzo/Quantizer) |
 | `size:compression_ratio` | float | Uncompressed / compressed size |
 | `size:compressed_size` | int | Compressed size in bytes |
@@ -439,6 +703,33 @@ decompressed = comp.decode(compressed, codes.copy())
 assert np.array_equal(codes, decompressed)
 ```
 
+### Standalone Fused Lossy Compressor (SZx)
+
+```python
+comp = lp.PressioCompressor.from_config({
+    "compressor_id": "fzgpumodules",
+    "early_config": {
+        "fzgpumodules:stages":      ["szx:float"],
+        "fzgpumodules:connections": [],
+    },
+    "compressor_config": {"pressio:abs": 1e-3},
+})
+```
+
+### Fusion-Enabled Pipeline
+
+```python
+comp = lp.PressioCompressor.from_config({
+    "compressor_id": "fzgpumodules",
+    "early_config": {
+        "fzgpumodules:stages":      ["lorenzo:float:uint16", "rze"],
+        "fzgpumodules:connections": ["s1 <- s0:codes"],
+        "fzgpumodules:fusion":      "auto",
+    },
+    "compressor_config": {"pressio:abs": 1e-4},
+})
+```
+
 ### 3-D Structured Grid
 
 ```python
@@ -490,6 +781,32 @@ for i in range(100):
 
 ---
 
+## Kernel Fusion
+
+Set `fzgpumodules:fusion = "auto"` to let the pipeline planner fuse eligible adjacent
+stages into single kernels — lower launch overhead and less intermediate GPU traffic.
+Off by default.
+
+```python
+comp = lp.PressioCompressor.from_config({
+    "compressor_id": "fzgpumodules",
+    "early_config": {
+        "fzgpumodules:stages":      ["lorenzo:float:uint16", "rze"],
+        "fzgpumodules:connections": ["s1 <- s0:codes"],
+        "fzgpumodules:fusion":      "auto",
+    },
+    "compressor_config": {"pressio:abs": 1e-3},
+})
+```
+
+Fusion may disable CUDA graph mode and buffer coloring for the fused groups (the fused
+runner synchronises, and the fused kernel keeps a group's input live across the whole
+group rather than the per-stage liveness coloring assumes). The environment variable
+`FZ_FUSION=off|auto`, if set, overrides this option at pipeline-build time — this is the
+same knob the underlying C++ `Pipeline::setFusionPolicy()` / `FZ_FUSION` env override use.
+
+---
+
 ## Exposing Stage Outputs
 
 Set `fzgpumodules:expose_stage_outputs = True` in `early_config` to retrieve intermediate pipeline
@@ -535,11 +852,13 @@ metrics = comp.get_metrics()
 
 | Stage | Output port(s) | dtype |
 |-------|----------------|-------|
-| `lorenzo:float:*`, `lorenzo:double:*` | `codes`, `outlier_indices` | code type, uint32 |
+| `lorenzo:float:*`, `lorenzo:double:*` | `codes`, `outlier_indices` (+ `means` if `centering=True`) | code type, uint32 (+ float/double) |
 | `lorenzo:intN` (lossless) | `output` | same as input |
+| `tiled_lorenzo:*`, `adaptive_bitpack:*` | `output` | uint8 (adaptive_bitpack), same as input (tiled_lorenzo) |
 | `quantizer:*` | `codes`, `outlier_idxs` | code type, uint32 |
-| `diff:*`, `zigzag:*`, `negabinary:*` | `output` | same as output type |
-| `rle:*`, `bitpack:*`, `bitshuffle`, `rze`, `rre` | `output` | uint8 |
+| `diff:*`, `zigzag:*`, `negabinary:*`, `adm:*` | `output` | same as output type |
+| `rle:*`, `bitpack:*`, `bitshuffle`, `rze`, `rre`, `rare`, `raze`, `clog`, `hclog`, `gpulz`, `tupl`, `bitplane_rze`, `ans`, `huffman:*` | `output` | uint8 |
+| `szx:*`, `szp:*` | `output` | uint8 |
 
 Note: `quantizer` uses `outlier_idxs`; quantizing Lorenzo uses `outlier_indices`.
 
