@@ -134,6 +134,48 @@ branches into one stage, direction-dependent stages, config-file mode) build
 
 ---
 
+## GPU-resident data (zero-copy)
+
+`encode()`/`decode()` accept any object exposing `__cuda_array_interface__`
+version 3 (CuPy arrays, contiguous PyTorch CUDA tensors, etc.), not just NumPy
+arrays. Passed a device-resident input, libpressio constructs the underlying
+`pressio_data` directly in the `"cudamalloc"` domain — no host round-trip — and
+`encode()`/`decode()` hand back a `PressioDataCuda` (itself exposing
+`__cuda_array_interface__`) instead of a NumPy array:
+
+```python
+import cupy as cp
+
+data = cp.random.rand(256, 256).astype(cp.float32)   # already on the GPU
+
+comp = lp.PressioCompressor.from_config({
+    "compressor_id": "fzgpumodules",
+    "early_config": {
+        "fzgpumodules:stages":      ["lorenzo:float:uint16", "rze"],
+        "fzgpumodules:connections": ["s1 <- s0:codes"],
+    },
+    "compressor_config": {"pressio:abs": 1e-3},
+})
+
+compressed   = comp.encode(data)                      # stays on the GPU
+out          = cp.empty_like(data)
+decompressed = comp.decode(compressed, out)            # stays on the GPU too
+```
+
+Passing a device-resident `out` to `decode()` is what keeps the result on the
+GPU — passing `None` or a NumPy array (as in Quick Start above) still copies
+back to host, unchanged from before. `test/test_fzgm_python.py`'s
+GPU-resident-round-trip checks cover this without requiring CuPy (a minimal
+`__cuda_array_interface__` wrapper via `ctypes` + `libcudart` stands in).
+
+Constraints: only contiguous, unmasked, interface-version-3 arrays — strided or
+masked device arrays raise `NotImplementedError`. Compression still stages
+through the plugin's own `cudamalloc` domain either way; a *different* CUDA
+context's pointer, or a pointer libpressio's domain manager can't otherwise
+reach, would fail rather than silently copy.
+
+---
+
 ## from_config Structure
 
 `PressioCompressor.from_config` takes a dict with three sections:
