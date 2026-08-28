@@ -172,9 +172,12 @@ https://userweb.cs.txstate.edu/~burtscher/papers/ipdps26.pdf.
 TOML:
 
 ```toml
-linear_mode = true
+[[stage]]
+name                  = "quant"
+type                  = "Quantizer"
+linear_mode           = true
 linear_high_precision = true
-power_of_two_bound = false  # true selects the separate tighter-bound arm
+power_of_two_bound    = false  # true selects the separate tighter-bound arm
 ```
 
 ---
