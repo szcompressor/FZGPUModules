@@ -171,6 +171,13 @@ example `setBlockSize(32)` is `block_size = 32`).
 | `SZp` | `SZpStage` | \ref stage_szp "SZpStage" |
 | `Merge` | `MergeStage` | \ref stage_merge "MergeStage" |
 | `ROIBinSplit` | `ROIBinSplitStage` | \ref stage_roibin_split "ROIBinSplitStage" |
+
+For a cuSZp-style `Quantizer` with a strict requested bound, set
+`linear_mode = true` and `linear_high_precision = true`. The optional
+`power_of_two_bound = true` rounds the resolved ABS/NOA/PREL absolute bound
+downward to a power of two; it is therefore a tighter, separately labelled
+rate-distortion configuration. See the Quantizer reference for constraints and
+effective-bound semantics.
 ---
 
 ## Complete Examples

@@ -47,6 +47,8 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | `setOutlierThreshold(t)` | Force outliers | ABS/NOA only; `abs(x) >= t` -> outlier |
 | `setInplaceOutliers(enable)` | Embed outliers in codes | ABS/NOA only; see constraints below |
 | `setLinearMode(enable)` | Signed codes, no outliers | ABS/NOA only; cuSZp-style; see below |
+| `setLinearHighPrecision(enable)` | Strict linear coordinate arithmetic | Linear mode only; double forward/inverse arithmetic and rounding reserve |
+| `setPowerOfTwoBound(enable)` | Tighten uniform bound to a power of two | ABS/NOA/PREL; rounds down, so effective EB is 1x–2x tighter |
 | `setValueBase(v)` | Precomputed value range | NOA only; optional, see below |
 | `setDither(enable)` | Dithered ("_R"-style) reconstruction | ABS/NOA/REL; incompatible with linear/inplace modes; see below |
 | `setDitherSeed(seed)` | Seed for the dither offset | Persisted in the header; default 0 |
@@ -104,22 +106,22 @@ outlier mechanism at all**.
 
 ---
 
-## Linear / no-outlier mode (ABS/NOA only)
+## Linear / no-outlier mode (ABS/NOA/PREL only)
 
 `setLinearMode(true)` selects a cuSZp-style quantizer: each value is mapped to
 `q = round(x / (2 · eb))` and stored as two's-complement in `TCode`, with **no
 radius clamp, no outlier ports, no zigzag**. The forward kernel is a pure
-memory-bound map — the only atomic and the only divergent branch of the regular
-forward kernel (the outlier path) are removed — so it is strictly faster and is
-fully **graph-compatible** in ABS mode (no D2H, no outlier-count readback).
+memory-bound map: the outlier atomic and divergent branch of the regular forward
+kernel are removed. A four-byte overflow flag is read after execution, so linear
+mode is not CUDA-Graph compatible.
 
-Because there is no outlier fallback, a bin that overflows `TCode` simply wraps;
-**size TCode wide enough for the data** (use `uint32_t`). The codes are
+Because there is no outlier fallback, a bin outside signed `TCode` range is a
+hard error; **size TCode wide enough for the data** (use `uint32_t`). The codes are
 *declared* by the stage as the **signed** DataType (`UINT16→INT16`,
 `UINT32→INT32`) so they connect directly to a downstream `LorenzoStage<intN>`.
 
 Constraints (each throws at the first `compress()` if violated):
-- Valid only with `ABS` and `NOA` error-bound modes (not `REL`).
+- Valid only with uniform `ABS`, `NOA`, and `PREL` error-bound modes (not `REL`).
 - Mutually exclusive with `setInplaceOutliers(true)` and `setZigzagCodes(true)`.
 
 Intended front-end for the cuSZp-style modular pipeline:
@@ -129,9 +131,50 @@ auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
 quant->setErrorBound(1e-3f);
 quant->setErrorBoundMode(ErrorBoundMode::ABS);
 quant->setLinearMode(true);                 // signed INT32 codes, no outliers
+quant->setLinearHighPrecision(true);        // strict double-coordinate path
 auto* lrz = p.addStage<LorenzoStage<int32_t>>();
 // lrz->setBlockSize(32);                    // (7.2) block-local 1-D delta, cuSZp uses 32
 p.connect(lrz, quant, "codes");
+```
+
+### Strict coordinate and reconstruction arithmetic
+
+`setLinearHighPrecision(true)` evaluates `x / (2*abs_eb)` with a precomputed
+double reciprocal and a double multiply. Decode likewise converts the signed
+integer code directly to double before multiplying; converting it to float first
+loses low bits when `|q| > 2^24`. For arbitrary uniform steps, the stage scans
+the field magnitude and tightens its internal half-step by the worst-case
+half-ULP of the final `TInput` reconstruction. The serialized effective bound is
+used by decode, while the requested bound remains the external validity target.
+The runtime user-bound parameter is retained as double even for an f32 stage, so
+an f64 range calculation is not first perturbed by a float metadata conversion;
+strict f32 bounds are rounded downward if their representation would loosen the
+TOML value.
+
+This accurate path is not eligible for the float-only warp-register fusion.
+On an H100 direct-stage NOA benchmark over 67,108,864 floats, its median forward
+time was 0.3794 ms versus 0.3752 ms for float coordinates (707.5 versus
+715.4 GB/s, 1.1% slower). The maximum error changed from 1.030x to 0.992x of
+the request. The benchmark is `fzgmod-profile-quantizer-linear`.
+
+`setPowerOfTwoBound(true)` first resolves ABS/NOA/PREL normally and then rounds
+the absolute half-bound down to the nearest power of two. Thus the effective
+bound is never looser and is between 1x and 2x tighter. This policy follows the
+bound adjustment described by SLEEK: binary scaling becomes an exponent shift,
+avoiding general multiplication/division rounding. It is a distinct rate-
+distortion arm: comparisons must report the effective bound because tighter
+quantization can reduce compression ratio.
+
+Reference: Brandon Burtchell et al., “SLEEK: An Efficient and Highly Parallel
+GPU Lossy Compressor,” IPDPS 2026, Section III-A,
+https://userweb.cs.txstate.edu/~burtscher/papers/ipdps26.pdf.
+
+TOML:
+
+```toml
+linear_mode = true
+linear_high_precision = true
+power_of_two_bound = false  # true selects the separate tighter-bound arm
 ```
 
 ---
@@ -144,8 +187,9 @@ p.connect(lrz, quant, "codes");
 | `NOA` | `abs(error) / value_range ≤ eb` | Scales ABS by the data range |
 | `REL` | `abs(error) / abs(x_orig) ≤ eb` | Ratio of error to original value |
 
-**Precision.** ABS and NOA quantize, compare, and reconstruct in `TInput`, so a
-`double` field gets a `double` bound. REL is float32 internally (its log2/exp2
+**Precision.** The default ABS and NOA paths quantize, compare, and reconstruct
+in `TInput`; linear mode can opt into the strict double-coordinate path above.
+REL is float32 internally (its log2/exp2
 approximations are single-precision) and does not currently benefit from
 `TInput = double`.
 
@@ -154,8 +198,10 @@ which for a field whose range is small next to its offset can fall below what
 `TInput` itself can resolve at that magnitude — the input's own round-trip through
 `TInput` then exceeds the bound, so no compressor could honour it. The stage compares
 `abs_eb` against `epsilon(TInput) * max(abs(data))` and throws rather than emitting a
-stream that decodes cleanly into out-of-bound values. Use a wider input type, a looser
-bound, or `ABS` with an explicit bound.
+stream that decodes cleanly into out-of-bound values. The legacy path retains a
+conservative spacing check; strict arbitrary-step linear mode instead reserves the
+exact half-ULP reconstruction budget and refuses only when that budget consumes the
+bound. Use a wider input type, a looser bound, or the power-of-two policy.
 
 **REL mode details:**
 <!-- - Encodes magnitude in log2 space (PFPL), then reconstructs `x_hat` from the log bin. -->

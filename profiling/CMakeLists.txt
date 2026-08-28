@@ -86,6 +86,13 @@ if(NVTX3_INCLUDE_DIR)
     target_include_directories(fzgmod-profile-cuszp2 PRIVATE ${NVTX3_INCLUDE_DIR})
 endif()
 
+# Direct linear-Quantizer benchmark: isolates float versus double coordinate
+# arithmetic and the optional power-of-two bound policy from downstream stages.
+add_executable(fzgmod-profile-quantizer-linear quantizer_linear_profile.cpp)
+target_link_libraries(fzgmod-profile-quantizer-linear PRIVATE fzgmod)
+set_target_properties(fzgmod-profile-quantizer-linear PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/profiling")
+
 # ── L2-blocked tiling prototype (compress locality probe) ────────────────────
 add_executable(fzgmod-profile-l2tile l2tile_profile.cpp)
 target_link_libraries(fzgmod-profile-l2tile PRIVATE fzgmod)

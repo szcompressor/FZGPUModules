@@ -672,6 +672,8 @@ code_type        = "uint32"
 error_bound      = 0.01
 error_bound_mode = "ABS"
 linear_mode      = true
+linear_high_precision = true
+power_of_two_bound = true
 
 [[stage]]
 name      = "tl"
@@ -699,11 +701,22 @@ inputs     = [{from = "tl"}]
     Pipeline p;
     ASSERT_NO_THROW(p.loadConfig(path));
 
+    const std::string saved_path = path + ".saved";
+    ASSERT_NO_THROW(p.saveConfig(saved_path));
+    auto saved = toml::parse_file(saved_path);
+    auto* saved_stages = saved["stage"].as_array();
+    ASSERT_NE(saved_stages, nullptr);
+    auto* saved_quant = (*saved_stages)[0].as_table();
+    ASSERT_NE(saved_quant, nullptr);
+    EXPECT_TRUE((*saved_quant)["linear_high_precision"].value_or(false));
+    EXPECT_TRUE((*saved_quant)["power_of_two_bound"].value_or(false));
+
     CudaStream cs;
     float err = round_trip_error(p, h_input, cs);
 
     EXPECT_LT(err, EB * 1.1f);
     std::remove(path.c_str());
+    std::remove(saved_path.c_str());
 }
 
 TEST(ConfigSave, DeviceResidentHuffmanModeRoundTrips) {

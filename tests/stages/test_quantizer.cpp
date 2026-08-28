@@ -1559,16 +1559,17 @@ TEST(QuantizerTypeMatrix, DoubleUint32_PipelineRoundTrip) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Linear forward: single "codes" output (no outlier triplet).
+template<typename TInput>
 static std::vector<uint8_t> run_linear_forward(
-    QuantizerStage<float, uint32_t>& stage,
-    const std::vector<float>&        h_input,
+    QuantizerStage<TInput, uint32_t>& stage,
+    const std::vector<TInput>&        h_input,
     cudaStream_t                     stream,
     fz::MemoryPool&                  pool,
     size_t*                          codes_bytes = nullptr)
 {
     size_t n = h_input.size();
-    size_t in_bytes = n * sizeof(float);
-    CudaBuffer<float> d_in(n);
+    size_t in_bytes = n * sizeof(TInput);
+    CudaBuffer<TInput> d_in(n);
     d_in.upload(h_input, stream);
     stage.onFinalize(in_bytes, &pool);
 
@@ -1589,8 +1590,9 @@ static std::vector<uint8_t> run_linear_forward(
     return d_codes.download_bytes(cb, stream);
 }
 
-static std::vector<float> run_linear_inverse(
-    QuantizerStage<float, uint32_t>& stage,
+template<typename TInput>
+static std::vector<TInput> run_linear_inverse(
+    QuantizerStage<TInput, uint32_t>& stage,
     const std::vector<uint8_t>&      codes_raw,
     size_t                           n,
     cudaStream_t                     stream,
@@ -1598,7 +1600,7 @@ static std::vector<float> run_linear_inverse(
 {
     CudaBuffer<uint8_t> d_codes(codes_raw.size());
     d_codes.upload(codes_raw, stream);
-    CudaBuffer<float> d_out(n);
+    CudaBuffer<TInput> d_out(n);
     std::vector<void*>  inputs  = {d_codes.void_ptr()};
     std::vector<void*>  outputs = {d_out.void_ptr()};
     std::vector<size_t> sizes   = {codes_raw.size()};
@@ -1699,6 +1701,103 @@ TEST(QuantizerLinear, HeaderRoundTrip) {
     EXPECT_FLOAT_EQ(dst.getErrorBound(), 3e-3f);
 }
 
+TEST(QuantizerLinear, HighPrecisionStrictFloatBound) {
+    CudaStream stream;
+    constexpr float EB = 0.00017496788f;
+    // This first value is a captured tight-bound failure: float reciprocal
+    // multiplication selects the adjacent bin and the final f32 reconstruction
+    // adds another rounding error. The accurate path must satisfy EB exactly,
+    // without a percentage tolerance.
+    std::vector<float> h_input = {
+        215.39996337890625f, 215.40013122558594f,
+        -215.39996337890625f, 0.0f, 1.23456788f, 320.0f
+    };
+    auto pool = make_test_pool(h_input.size() * sizeof(float) * 32);
+
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(EB);
+    fwd.setErrorBoundMode(ErrorBoundMode::ABS);
+    fwd.setLinearMode(true);
+    fwd.setLinearHighPrecision(true);
+
+    auto codes = run_linear_forward(fwd, h_input, stream, *pool);
+    EXPECT_LT(fwd.getComputedAbsEb(), EB)
+        << "arbitrary-step accurate mode must reserve f32 reconstruction rounding";
+
+    QuantizerStage<float, uint32_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+    EXPECT_TRUE(inv.getLinearHighPrecision());
+
+    auto h_recon = run_linear_inverse(inv, codes, h_input.size(), stream, *pool);
+    EXPECT_LE(max_abs_error(h_input, h_recon), EB);
+}
+
+TEST(QuantizerLinear, PowerOfTwoBoundIsDownwardAndStrict) {
+    CudaStream stream;
+    constexpr float REQUESTED_EB = 0.3f;
+    std::vector<float> h_input = {
+        -123.4567f, -1.1f, 0.0f, 1.234567f, 123.4567f
+    };
+    auto pool = make_test_pool(h_input.size() * sizeof(float) * 32);
+
+    QuantizerStage<float, uint32_t> fwd;
+    fwd.setErrorBound(REQUESTED_EB);
+    fwd.setLinearMode(true);
+    fwd.setLinearHighPrecision(true);
+    fwd.setPowerOfTwoBound(true);
+
+    auto codes = run_linear_forward(fwd, h_input, stream, *pool);
+    EXPECT_FLOAT_EQ(fwd.getComputedAbsEb(), 0.25f);
+
+    QuantizerStage<float, uint32_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+    EXPECT_TRUE(inv.getLinearHighPrecision());
+    EXPECT_TRUE(inv.getPowerOfTwoBound());
+    EXPECT_FLOAT_EQ(inv.getComputedAbsEb(), 0.25f);
+
+    auto h_recon = run_linear_inverse(inv, codes, h_input.size(), stream, *pool);
+    EXPECT_LE(max_abs_error(h_input, h_recon), REQUESTED_EB);
+}
+
+TEST(QuantizerLinear, HighPrecisionRetainsDoubleUserBound) {
+    CudaStream stream;
+    constexpr double USER_EB = 1.0e-7;
+    std::vector<double> h_input = {100.0, 100.125, 100.5, 100.875, 101.0};
+    auto pool = make_test_pool(h_input.size() * sizeof(double) * 32);
+
+    QuantizerStage<double, uint32_t> fwd;
+    fwd.setErrorBound(USER_EB);
+    fwd.setErrorBoundMode(ErrorBoundMode::NOA);
+    fwd.setLinearMode(true);
+    fwd.setLinearHighPrecision(true);
+
+    auto codes = run_linear_forward(fwd, h_input, stream, *pool);
+    EXPECT_LE(fwd.getComputedAbsEb(), USER_EB);
+
+    QuantizerStage<double, uint32_t> inv;
+    inv.setInverse(true);
+    uint8_t cfg[128] = {};
+    inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+    auto h_recon = run_linear_inverse(inv, codes, h_input.size(), stream, *pool);
+    double max_error = 0.0;
+    for (size_t i = 0; i < h_input.size(); ++i)
+        max_error = std::max(max_error, std::abs(h_input[i] - h_recon[i]));
+    EXPECT_LE(max_error, USER_EB);
+}
+
+TEST(QuantizerLinear, HighPrecisionDisablesFloatFusion) {
+    QuantizerStage<float, uint32_t> stage;
+    stage.setLinearMode(true);
+    EXPECT_TRUE(stage.getFusionSpec().fusable());
+    stage.setLinearHighPrecision(true);
+    EXPECT_FALSE(stage.getFusionSpec().fusable());
+    EXPECT_FALSE(stage.getFusedOp().valid());
+}
+
 TEST(QuantizerLinear, IncompatibleModesThrow) {
     CudaStream stream;
     constexpr size_t N = 256;
@@ -1725,6 +1824,23 @@ TEST(QuantizerLinear, IncompatibleModesThrow) {
         s.setLinearMode(true);
         s.setZigzagCodes(true);
         EXPECT_THROW(run_linear_forward(s, h_input, stream, *pool), std::runtime_error);
+    }
+    // high precision without linear mode -> throw
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setLinearHighPrecision(true);
+        auto run = [&] { return run_quantizer_forward<uint32_t, float>(
+            s, h_input, stream, *pool); };
+        EXPECT_THROW(run(), std::runtime_error);
+    }
+    // power-of-two policy is defined only for uniform (non-REL) bounds
+    {
+        QuantizerStage<float, uint32_t> s;
+        s.setErrorBoundMode(ErrorBoundMode::REL);
+        s.setPowerOfTwoBound(true);
+        auto run = [&] { return run_quantizer_forward<uint32_t, float>(
+            s, h_input, stream, *pool); };
+        EXPECT_THROW(run(), std::runtime_error);
     }
 }
 

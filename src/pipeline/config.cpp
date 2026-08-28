@@ -310,7 +310,7 @@ static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
 
     bool linear = optBool(t, "linear_mode", false);
     auto configure = [&](auto* quant) {
-        quant->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-3)));
+        quant->setErrorBound(optDbl(t, "error_bound", 1e-3));
         quant->setErrorBoundMode(ebModeFromString(optStr(t, "error_bound_mode", "REL")));
         quant->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 32768)));
         quant->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.05)));
@@ -325,6 +325,8 @@ static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
 
         quant->setInplaceOutliers(optBool(t, "inplace_outliers", false));
         quant->setLinearMode(linear);
+        quant->setLinearHighPrecision(optBool(t, "linear_high_precision", false));
+        quant->setPowerOfTwoBound(optBool(t, "power_of_two_bound", false));
         quant->setDither(optBool(t, "dither", false));
         quant->setDitherSeed(static_cast<uint64_t>(optInt(t, "dither_seed", 0)));
         quant->setDitherStrength(static_cast<float>(optDbl(t, "dither_strength", 1.0)));
@@ -823,6 +825,8 @@ static void saveQuantizerStage(Stage* s, std::ostringstream& out) {
         if (std::isfinite(thr)) out << "outlier_threshold = " << thr << "\n";
         if (q->getInplaceOutliers())  out << "inplace_outliers = true\n";
         if (q->getLinearMode())       out << "linear_mode = true\n";
+        if (q->getLinearHighPrecision()) out << "linear_high_precision = true\n";
+        if (q->getPowerOfTwoBound()) out << "power_of_two_bound = true\n";
         if (q->getDither()) {
             out << "dither = true\n";
             out << "dither_seed = " << static_cast<int64_t>(q->getDitherSeed()) << "\n";
