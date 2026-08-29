@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include <cstring>
 
@@ -245,10 +246,21 @@ void Pipeline::typeCheckConnections() {
     };
 
     constexpr uint8_t kUnknown = static_cast<uint8_t>(DataType::UNKNOWN);
+
+    // A connection's input port isn't stored explicitly -- connect() appends to
+    // dependent's input list in call order (see connectExistingOutput()), so the
+    // Nth connection targeting a given dependent lands on that dependent's input
+    // port N. Track that here instead of assuming port 0, or any stage with more
+    // than one input (MergeStage, Cdf97OutlierCorrectStage, ...) gets checked
+    // against the wrong port's expected type.
+    std::unordered_map<Stage*, size_t> next_input_index;
+
     for (const auto& conn : connections_) {
+        const size_t input_index = next_input_index[conn.dependent]++;
+
         const uint8_t prod_type = conn.producer->getOutputDataType(
             static_cast<size_t>(conn.output_index));
-        const uint8_t cons_type = conn.dependent->getInputDataType(0);
+        const uint8_t cons_type = conn.dependent->getInputDataType(input_index);
 
         if (prod_type == kUnknown || cons_type == kUnknown) continue;
 

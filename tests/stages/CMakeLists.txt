@@ -140,6 +140,22 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── Cdf97Stage (CDF 9/7 wavelet transform, SPERR's DWT) ─────────────────────
+fz_add_test(
+    NAME    test_cdf97
+    SOURCES test_cdf97.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
+# ─── Speck2DStage (GPU-parallel wavefront SPECK-like coder) ─────────────────
+fz_add_test(
+    NAME    test_speck2d
+    SOURCES test_speck2d.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── MergeStage (structural concat/split) ────────────────────────────────────
 fz_add_test(
     NAME    test_merge_stage

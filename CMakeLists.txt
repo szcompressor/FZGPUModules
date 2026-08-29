@@ -392,6 +392,10 @@ add_library(fzgmod_modules
   modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
   modules/transforms/zigzag/zigzag_stage.cu
   modules/transforms/log_transform/log_transform_stage.cu
+  modules/transforms/cdf97/cdf97_stage.cu
+  modules/coders/speck2d/speck2d_stage.cu
+  modules/structural/tee/tee_stage.cu
+  modules/coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.cu
   modules/transforms/negabinary/negabinary_stage.cu
   modules/quantizers/quantizer/quantizer.cu
   modules/coders/rle/rle.cu

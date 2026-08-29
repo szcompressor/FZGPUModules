@@ -1,0 +1,78 @@
+[pipeline]
+# SPERR-style pipeline: CDF 9/7 DWT -> linear quantizer -> GPU-parallel SPECK,
+# with a sparse outlier-correction pass that GUARANTEES the reconstructed
+# field's pointwise error actually respects error_bound (matching what native
+# SPERR's own Outlier_Coder does).
+#
+# Reproduces SPERR's own compressor structure (CDF97 wavelet transform, then
+# SPECK bit-plane coding of the quantized coefficients) entirely on the GPU.
+# SPECK2D is NOT a port of SPERR's bitstream -- it is a from-scratch
+# GPU-parallel reformulation (both encode AND decode fully data-parallel);
+# see modules/coders/speck2d/speck2d_kernels.cuh and
+# memory/speck_algorithm_writeup.md for what changed and why.
+#
+# Why a Tee, and why the correction stage sits where it does: quantizing DWT
+# COEFFICIENTS with a uniform threshold does NOT guarantee a uniform bound on
+# the RECONSTRUCTED FIELD (CDF 9/7's synthesis gain differs by level) --
+# measured misses up to 2.7x the requested bound with no correction. A
+# candidate fix (scale the quantization step per level) was tried and
+# REJECTED: it makes the error WORSE, not better (many coefficients across
+# levels jointly hit any given pixel). Sparse outlier correction is the fix
+# that actually works: quantize normally; separately compute what the
+# reconstruction would be and correct the (rare) pixels that miss the bound.
+# See modules/coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h for
+# the exact topology/port-shape reasoning (it's driven by a real DAG
+# constraint, not an arbitrary choice) and memory/speck_gpu_design.md sec.9
+# for the measured cost (0.06%-8.2% of pixels on CLDHGH/CLDLOW across
+# bounds 1e-2..1e-5; markedly more on FLDSC at the tightest bound -- the
+# guarantee itself is never violated, only its cost varies by field).
+#
+# Pipeline:
+#   Tee (the pipeline's one legal source; duplicates the raw field)
+#     out0 -> CDF97 (float32 DWT, 2-D) -> Quantizer (ABS, linear/signed-code)
+#     out1 -> Cdf97OutlierCorrect.field   (raw field, for computing corrections)
+#   Quantizer.codes -> Cdf97OutlierCorrect.codes
+#   Cdf97OutlierCorrect.correction -> archived leaf (the correction stream)
+#   Cdf97OutlierCorrect.codes      -> SPECK2D -> archived leaf (the main stream)
+#
+# 2-D only. Usage:
+#   fzgmod-cli -c examples/presets/sperr_gpu.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800x1 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+# SPECK2D's worst-case output estimate is ~3x its input, and the correction
+# stream's worst case is another ~2x -- a larger multiplier avoids a mid-run
+# pool growth.
+pool_multiplier = 8.0
+
+[[stage]]
+name = "tee1"
+type = "Tee"
+num_outputs = 2
+passthrough_index = 1   # inverse: the corrected answer, not Cdf97's raw reconstruction
+
+[[stage]]
+name = "dwt"
+type = "CDF97"
+data_type = "float32"      # float64 is SPERR-bit-exact; float32 is faster, not bit-exact
+inputs = [{from = "tee1", port = "out0"}]
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-4
+error_bound_mode = "ABS"
+linear_mode = true         # REQUIRED for SPECK2D: signed int32 codes, no outlier ports
+inputs = [{from = "dwt"}]
+
+[[stage]]
+name = "correct"
+type = "Cdf97OutlierCorrect"
+error_bound = 1e-4          # MUST match quant's error_bound above
+inputs = [{from = "tee1", port = "out1"}, {from = "quant", port = "codes"}]
+
+[[stage]]
+name = "speck"
+type = "SPECK2D"
+inputs = [{from = "correct", port = "codes"}]

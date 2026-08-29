@@ -48,6 +48,10 @@
 #include "coders/hclog/hclog_stage.h"
 #include "shufflers/tupl/tupl_stage.h"
 #include "transforms/log_transform/log_transform_stage.h"
+#include "transforms/cdf97/cdf97_stage.h"
+#include "coders/speck2d/speck2d_stage.h"
+#include "structural/tee/tee_stage.h"
+#include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
@@ -802,6 +806,50 @@ static void saveLogTransformStage(Stage* s, std::ostringstream& out) {
     out << "outlier_capacity = " << lg->getOutlierCapacity() << "\n";
 }
 
+static Stage* addCdf97Stage(Pipeline& p, const toml::table& t) {
+    // double is SPERR-bit-exact; float32 is a faster non-bit-exact variant.
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "float64"));
+    if (dt == DataType::FLOAT32) return p.addStage<Cdf97Stage<float>>();
+    return p.addStage<Cdf97Stage<double>>();
+}
+
+static void saveCdf97Stage(Stage* s, std::ostringstream& out) {
+    out << "data_type = \"" << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+}
+
+static Stage* addSpeck2DStage(Pipeline& p, const toml::table& /*t*/) {
+    return p.addStage<Speck2DStage>();
+}
+static void saveSpeck2DStage(Stage* /*s*/, std::ostringstream& /*out*/) {
+    // No user-facing config: dims/threshold/nbitsA are pipeline/data-derived
+    // and round-trip via the stage's own serializeHeader(), not the TOML file.
+}
+
+static Stage* addTeeStage(Pipeline& p, const toml::table& t) {
+    auto* tee = p.addStage<TeeStage>();
+    int num_outputs = static_cast<int>(optInt(t, "num_outputs", 2));
+    tee->setNumOutputs(num_outputs);
+    tee->setPassthroughIndex(static_cast<int>(optInt(t, "passthrough_index", 0)));
+    return tee;
+}
+static void saveTeeStage(Stage* s, std::ostringstream& out) {
+    auto* tee = static_cast<TeeStage*>(s);
+    out << "num_outputs = " << tee->getNumBranches() << "\n";
+    out << "passthrough_index = " << tee->getPassthroughIndex() << "\n";
+}
+
+static Stage* addCdf97OutlierCorrectStage(Pipeline& p, const toml::table& t) {
+    auto* s = p.addStage<Cdf97OutlierCorrectStage>();
+    // MUST match the paired QuantizerStage's own error_bound (ABS mode) —
+    // see the stage header's doc comment.
+    s->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-4)));
+    return s;
+}
+static void saveCdf97OutlierCorrectStage(Stage* s, std::ostringstream& out) {
+    auto* oc = static_cast<Cdf97OutlierCorrectStage*>(s);
+    out << "error_bound = " << oc->getErrorBound() << "\n";
+}
+
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
     auto* mg = static_cast<MergeStage*>(s);
     const auto& names = mg->getSegmentNames();
@@ -1071,6 +1119,10 @@ static const StageEntry kStageRegistry[] = {
     { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage,        "modules/coders/hclog" },
     { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/shufflers/tupl" },
     { "LogTransform", StageType::LOG_TRANSFORM, addLogTransformStage, saveLogTransformStage, "modules/transforms/log_transform" },
+    { "CDF97",        StageType::CDF97,         addCdf97Stage,        saveCdf97Stage,        "modules/transforms/cdf97" },
+    { "SPECK2D",      StageType::SPECK2D,       addSpeck2DStage,      saveSpeck2DStage,      "modules/coders/speck2d" },
+    { "Tee",          StageType::TEE,           addTeeStage,          saveTeeStage,          "modules/structural/tee" },
+    { "Cdf97OutlierCorrect", StageType::CDF97_OUTLIER_CORRECT, addCdf97OutlierCorrectStage, saveCdf97OutlierCorrectStage, "modules/coders/cdf97_outlier_correct" },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage,        "modules/structural/merge" },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage,          "modules/coders/rle" },
     { "Difference",   StageType::DIFFERENCE,   addDifferenceStage,   saveDifferenceStage,   "modules/predictors/diff" },

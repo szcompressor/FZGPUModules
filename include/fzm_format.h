@@ -105,6 +105,10 @@ enum class StageType : uint16_t {
     GPULZ      = 32,   ///< TODO: describe this stage
     LOG_TRANSFORM = 33, ///< Log-space transform for point-wise relative bounds (Liang et al., CLUSTER'18)
     ADAPTIVE_LORENZO = 34, ///< Per-tile adaptive multi-order Lorenzo + centering (FSZ prediction stage)
+    CDF97      = 35,   ///< CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half)
+    SPECK2D    = 36,   ///< GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format
+    TEE        = 37,   ///< Structural 1->N duplicate (forward) / N->1 select (inverse)
+    CDF97_OUTLIER_CORRECT = 38, ///< Sparse outlier correction, guarantees the GPU SPERR pipeline's pointwise bound
 };
 
 /**
@@ -359,6 +363,7 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::GPULZ:  return "GPULZ";
         case StageType::LOG_TRANSFORM: return "LogTransform";
         case StageType::ADAPTIVE_LORENZO: return "AdaptiveLorenzo";
+        case StageType::CDF97: return "CDF97";
         default:                     return "Unknown";
     }
 }

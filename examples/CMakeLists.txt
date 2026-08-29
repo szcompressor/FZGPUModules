@@ -130,3 +130,20 @@ add_executable(gpu_zstd gpu_zstd.cpp)
 target_link_libraries(gpu_zstd PRIVATE fzgmod)
 set_target_properties(gpu_zstd PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── SPERR GPU pipeline + sparse outlier correction: a TRUE pointwise error
+#    bound on top of CDF97 -> Quantizer -> SPECK2D. Calls the Stage classes
+#    directly (not through Pipeline/DAG) -- see the file's own doc comment
+#    and memory/speck_gpu_design.md sec.9 for why (no DAG "Tee" support yet
+#    for a stage needing both the raw input and a mid-pipeline buffer).
+add_executable(sperr_gpu_bounded sperr_gpu_bounded.cu)
+target_link_libraries(sperr_gpu_bounded PRIVATE fzgmod fzgmod_modules fzgmod_mem)
+set_target_properties(sperr_gpu_bounded PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── DAG-integrated version of the above: real Pipeline/DAG, TeeStage +
+#    Cdf97OutlierCorrectStage wired as real stages (not manual Stage calls).
+add_executable(sperr_gpu_dag_bounded sperr_gpu_dag_bounded.cu)
+target_link_libraries(sperr_gpu_dag_bounded PRIVATE fzgmod fzgmod_modules fzgmod_mem)
+set_target_properties(sperr_gpu_dag_bounded PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
