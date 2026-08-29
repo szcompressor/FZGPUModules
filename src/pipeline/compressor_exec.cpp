@@ -68,10 +68,8 @@ void Pipeline::compress(
     if (!is_finalized_) {
         throw std::runtime_error("Pipeline must be finalized before execution");
     }
-    if (input_nodes_.size() != 1) {
-        throw std::runtime_error(
-            "compress(): pipeline has " + std::to_string(input_nodes_.size()) +
-            " source stage(s); only single-source pipelines are supported");
+    if (input_nodes_.empty()) {
+        throw std::runtime_error("compress(): pipeline has no source stage(s)");
     }
     if (d_input == nullptr) {
         throw std::runtime_error("compress(): null device pointer passed as input");
@@ -92,9 +90,16 @@ void Pipeline::compress(
 
     auto [d_source, source_sz] = prepareInputSource(d_input, input_size, stream);
 
-    dag_->setExternalPointer(input_buffer_ids_[0], const_cast<void*>(d_source));
-    dag_->updateBufferSize(input_buffer_ids_[0], source_sz);
-    source_input_sizes_.assign(1, source_sz);
+    // Every source stage reads the identical external buffer, read-only — a
+    // single physical copy shared across N logical DAG input-buffer IDs (see
+    // Pipeline::setPrimarySource()). This is NOT a duplicate/tee: no stage
+    // writes into its own forward input in place, so aliasing the same
+    // pointer across sources is safe.
+    for (int buf_id : input_buffer_ids_) {
+        dag_->setExternalPointer(buf_id, const_cast<void*>(d_source));
+        dag_->updateBufferSize(buf_id, source_sz);
+    }
+    source_input_sizes_.assign(input_buffer_ids_.size(), source_sz);
     input_size_ = source_sz;
 
     // Re-estimate buffer sizes from runtime inputs when no static hint was given.
@@ -355,9 +360,30 @@ void Pipeline::decompressCore(
         };
     }
 
-    Stage* src_stage = input_nodes_[0]->stage;
-    size_t src_sz    = (source_input_sizes_.size() > 0 && source_input_sizes_[0] > 0)
-                       ? source_input_sizes_[0] : input_size_;
+    // Which source stage's inverse output is "the" decompressed answer.
+    // Single-source pipelines have no ambiguity; multi-source pipelines must
+    // have called setPrimarySource() (see its doc comment) -- default to
+    // input_nodes_[0] (== the first stage added that is a source) only
+    // because *some* deterministic default is needed, not because it's
+    // usually correct for N>1.
+    size_t primary_idx = 0;
+    if (primary_source_stage_ != nullptr) {
+        auto it = std::find_if(input_nodes_.begin(), input_nodes_.end(),
+            [this](DAGNode* n) { return n->stage == primary_source_stage_; });
+        if (it == input_nodes_.end()) {
+            throw std::runtime_error(
+                "decompress(): setPrimarySource() stage '" +
+                primary_source_stage_->getName() + "' is not a source stage of this pipeline");
+        }
+        primary_idx = static_cast<size_t>(it - input_nodes_.begin());
+    } else if (input_nodes_.size() > 1) {
+        FZ_LOG(WARN, "decompress(): %zu source stages and no setPrimarySource() call -- "
+               "defaulting to '%s'; call setPrimarySource() to make this explicit",
+               input_nodes_.size(), input_nodes_[0]->stage->getName().c_str());
+    }
+    Stage* src_stage = input_nodes_[primary_idx]->stage;
+    size_t src_sz    = (source_input_sizes_.size() > primary_idx && source_input_sizes_[primary_idx] > 0)
+                       ? source_input_sizes_[primary_idx] : input_size_;
 
     buildOrReuseInvCache(po_map, src_stage, src_sz, stream);
 

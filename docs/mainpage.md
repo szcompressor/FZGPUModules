@@ -114,6 +114,9 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_szp "SZpStage<T>"                      | `modules/fused/szp/szp_stage.h`                    | SZp/fZ-light quantize + delta + fixed-rate whole compressor |
 | \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
 | \ref stage_roibin_split "ROIBinSplitStage"        | `modules/structural/roibin_split/roibin_split_stage.h` | Split a field into ROI boxes + binned background for dual-error-bound branches (structural) |
+| \ref stage_cdf97 "Cdf97Stage<TInput>"              | `modules/transforms/cdf97/cdf97_stage.h`           | CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half) |
+| \ref stage_speck2d "Speck2DStage"                  | `modules/coders/speck2d/speck2d_stage.h`           | GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format |
+| \ref stage_outlier_correct "OutlierCorrectStage<Reconstructor>" | `modules/coders/outlier_correct/outlier_correct_stage.h` | Sparse exact outlier correction — guarantees a reconstructed-domain pointwise bound, transform-agnostic |
 
 ### Memory Strategies
 

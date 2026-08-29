@@ -106,6 +106,7 @@ All keys are optional. Absent keys use the pipeline constructor defaults.
 | memory_strategy | string | "MINIMAL" | "MINIMAL" or "PREALLOCATE". |
 | pool_multiplier | float | 3.0 | Pool capacity = input_size x pool_multiplier. Relevant for PREALLOCATE. |
 | num_streams | integer | 1 | Number of CUDA streams for multi-stream execution. |
+| primary_source | string | "" (unset) | Stage `name` whose inverse output `decompress()` returns. Only needed when `__external__` (see below) creates more than one source stage; unset uses the sole/first-discovered source. |
 
 ### [[stage]] -- one entry per stage
 
@@ -128,6 +129,17 @@ in the pipeline DAG.
 If port is omitted it defaults to "output" (the single-output port name for all
 stages except Lorenzo, which uses named ports "codes", "outlier_errors",
 "outlier_indices", and "outlier_count").
+
+`{ from = "__external__" }` is a reserved entry, not a stage reference: it
+binds the pipeline's raw input directly to this port
+(`Pipeline::bindExternalInput()`), even when the same stage's `inputs` array
+also has a normal `{ from = "<name>" }` entry at another position — needed by
+[Cdf97OutlierCorrect](#cdf97outliercorrect) below, whose raw-field port and
+codes port come from two different places. Position in the array matters,
+same as for a real connection. When this creates more than one source stage
+in the pipeline, set `[pipeline].primary_source = "<name>"` to say which
+stage's inverse output `decompress()` should return (see the
+[SPERR pipeline example](#sperr-pipeline-bound-guaranteed) below).
 
 ---
 
@@ -178,6 +190,42 @@ For a cuSZp-style `Quantizer` with a strict requested bound, set
 downward to a power of two; it is therefore a tighter, separately labelled
 rate-distortion configuration. See the Quantizer reference for constraints and
 effective-bound semantics.
+
+### CDF97
+
+CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half). Lossless,
+invertible, size-preserving `float -> float` basis change -- not itself
+lossy, feeds a `Quantizer`. No `inputs` key needed when it's the pipeline's
+only true source (the common case).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| data_type | string | "float32" | "float32" or "float64". `float64` reproduces SPERR's coefficients bit-for-bit. |
+
+### SPECK2D
+
+GPU-parallel "wavefront" SPECK-like bit-plane coder (2-D only). Takes signed
+`int32` codes -- the same convention `Quantizer`'s `linear_mode = true`
+emits.
+
+No tunable keys -- dims, threshold, and the tree/magnitude split point are
+all pipeline/data-derived.
+
+### Cdf97OutlierCorrect
+
+Sparse exact outlier correction: turns `CDF97`+`Quantizer`'s reported error
+bound into an actually guaranteed one (quantizing DWT coefficients alone
+does not bound the reconstructed field's pointwise error -- see
+[stage_outlier_correct](stages/outlier_correct.md)). Needs the raw field
+bound to one input port via `{ from = "__external__" }` and the paired
+`Quantizer`'s codes on the other, in that order (see the `inputs` note
+above) -- see the [SPERR pipeline example](#sperr-pipeline-bound-guaranteed)
+below.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| error_bound | float | 1e-4 | MUST equal the paired `Quantizer` stage's own `error_bound` exactly (ABS mode only -- `rel_range`/NOA bounds must be converted to absolute externally before setting this). |
+
 ---
 
 ## Complete Examples
@@ -277,6 +325,60 @@ Load it via the CLI:
 fzgmod-cli -b -c examples/presets/pfpl.toml -i data.f32
 ```
 
+### SPERR pipeline (bound-guaranteed)
+
+CDF 9/7 DWT -> Quantizer -> sparse outlier correction -> SPECK2D. Unlike the
+two examples above, this pipeline has **two** source stages (`dwt`, a pure
+source with no `inputs` key, and `correct`, bound to the raw input via
+`{ from = "__external__" }` alongside its normal `quant` connection) --
+`primary_source` says which one's reconstruction `decompress()` returns.
+This is `examples/presets/sperr_gpu.toml`; see
+[stage_outlier_correct](stages/outlier_correct.md) for why the pipeline
+needs this stage at all (a plain `CDF97 -> Quantizer -> SPECK2D` chain does
+not guarantee its reported error bound).
+
+```toml
+[pipeline]
+memory_strategy = "PREALLOCATE"
+pool_multiplier = 8.0
+primary_source  = "correct"    # decompress() returns correct's corrected
+                                # field, not dwt's own uncorrected inverse
+
+[[stage]]
+name = "dwt"
+type = "CDF97"
+data_type = "float32"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type       = "float32"
+code_type        = "uint32"
+error_bound      = 1e-4
+error_bound_mode = "ABS"       # NOA/rel_range is NOT valid for this pipeline -- see below
+linear_mode      = true
+inputs = [{ from = "dwt" }]
+
+[[stage]]
+name = "correct"
+type = "Cdf97OutlierCorrect"
+error_bound = 1e-4              # MUST match quant's error_bound exactly
+inputs = [
+  { from = "__external__" },    # correct.input[0] = raw field
+  { from = "quant", port = "codes" }   # correct.input[1] = codes
+]
+
+[[stage]]
+name = "speck"
+type = "SPECK2D"
+inputs = [{ from = "correct", port = "codes" }]
+```
+
+```bash
+fzgmod-cli -c examples/presets/sperr_gpu.toml \
+    -i data/CLDHGH.f32 -l 3600x1800x1 -b --report --compare data/CLDHGH.f32
+```
+
 ---
 
 ## Limitations
@@ -289,6 +391,8 @@ fzgmod-cli -b -c examples/presets/pfpl.toml -i data.f32
   build. Custom stages written outside the library require a manual addStage()
   / connect() / finalize() call chain (or a PR to add the type to
   `kStageRegistry` in config.cpp).
-- Single-source pipelines only. The [pipeline] table has one input_size and
-  one dims triple. Multi-source pipelines are not currently representable in
-  the config format and must be constructed manually.
+- Multi-source pipelines (`{ from = "__external__" }`, `primary_source`) are
+  representable, but the `[pipeline]` table still has exactly one
+  `input_size` and one `dims` triple -- every source reads the same external
+  buffer (see `Pipeline::bindExternalInput()`), there is no way to express
+  multiple *different* external inputs in this format.

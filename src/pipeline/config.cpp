@@ -48,6 +48,9 @@
 #include "coders/hclog/hclog_stage.h"
 #include "shufflers/tupl/tupl_stage.h"
 #include "transforms/log_transform/log_transform_stage.h"
+#include "transforms/cdf97/cdf97_stage.h"
+#include "coders/speck2d/speck2d_stage.h"
+#include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
 #include "fused/szx/szx_stage.h"
@@ -65,6 +68,7 @@
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -73,6 +77,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace fz {
 
@@ -925,6 +930,37 @@ static void saveROIBinSplitStage(Stage* s, std::ostringstream& out) {
     }
 }
 
+static Stage* addCdf97Stage(Pipeline& p, const toml::table& t) {
+    // double is SPERR-bit-exact; float32 is a faster non-bit-exact variant.
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "float64"));
+    if (dt == DataType::FLOAT32) return p.addStage<Cdf97Stage<float>>();
+    return p.addStage<Cdf97Stage<double>>();
+}
+
+static void saveCdf97Stage(Stage* s, std::ostringstream& out) {
+    out << "data_type = \"" << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
+}
+
+static Stage* addSpeck2DStage(Pipeline& p, const toml::table& /*t*/) {
+    return p.addStage<Speck2DStage>();
+}
+static void saveSpeck2DStage(Stage* /*s*/, std::ostringstream& /*out*/) {
+    // No user-facing config: dims/threshold/nbitsA are pipeline/data-derived
+    // and round-trip via the stage's own serializeHeader(), not the TOML file.
+}
+
+static Stage* addCdf97OutlierCorrectStage(Pipeline& p, const toml::table& t) {
+    auto* s = p.addStage<Cdf97OutlierCorrectStage>();
+    // MUST match the paired QuantizerStage's own error_bound (ABS mode) —
+    // see the stage header's doc comment.
+    s->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-4)));
+    return s;
+}
+static void saveCdf97OutlierCorrectStage(Stage* s, std::ostringstream& out) {
+    auto* oc = static_cast<Cdf97OutlierCorrectStage*>(s);
+    out << "error_bound = " << oc->getErrorBound() << "\n";
+}
+
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
     auto* mg = static_cast<MergeStage*>(s);
     const auto& names = mg->getSegmentNames();
@@ -1202,6 +1238,9 @@ static const StageEntry kStageRegistry[] = {
     { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage,        "modules/coders/hclog" },
     { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/shufflers/tupl" },
     { "LogTransform", StageType::LOG_TRANSFORM, addLogTransformStage, saveLogTransformStage, "modules/transforms/log_transform" },
+    { "CDF97",        StageType::CDF97,         addCdf97Stage,        saveCdf97Stage,        "modules/transforms/cdf97" },
+    { "SPECK2D",      StageType::SPECK2D,       addSpeck2DStage,      saveSpeck2DStage,      "modules/coders/speck2d" },
+    { "Cdf97OutlierCorrect", StageType::CDF97_OUTLIER_CORRECT, addCdf97OutlierCorrectStage, saveCdf97OutlierCorrectStage, "modules/coders/cdf97_outlier_correct" },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage,        "modules/structural/merge" },
     { "ROIBinSplit",  StageType::ROIBIN_SPLIT, addROIBinSplitStage,  saveROIBinSplitStage,  "modules/structural/roibin_split" },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage,          "modules/coders/rle" },
@@ -1264,7 +1303,13 @@ void Pipeline::loadConfig(const std::string& path) {
     }
 
     // ── Pipeline-level settings ───────────────────────────────────────────────
+    // Resolved against stage_map (built below) right before finalize() --
+    // see Pipeline::setPrimarySource()'s doc comment for what this controls.
+    std::string primary_source_name;
     if (auto* pl = doc["pipeline"].as_table()) {
+        if (auto v = (*pl)["primary_source"].as_string())
+            primary_source_name = v->get();
+
         if (auto v = (*pl)["input_size"].as_integer())
             input_size_hint_ = static_cast<size_t>(v->get());
 
@@ -1350,6 +1395,17 @@ void Pipeline::loadConfig(const std::string& path) {
                     "loadConfig: stage \"" + entry.name + "\" input missing 'from' key");
 
             std::string from = from_node->get();
+
+            // Reserved sentinel: this input port binds directly to the
+            // pipeline's external buffer (Pipeline::bindExternalInput()),
+            // not to another stage's output. Position in the `inputs` array
+            // is significant, same as for a real connection -- list it in
+            // the port order the stage expects.
+            if (from == "__external__") {
+                bindExternalInput(entry.ptr);
+                continue;
+            }
+
             auto it = stage_map.find(from);
             if (it == stage_map.end())
                 throw std::runtime_error(
@@ -1361,6 +1417,15 @@ void Pipeline::loadConfig(const std::string& path) {
 
             connect(entry.ptr, it->second, port);
         }
+    }
+
+    // ── Primary source (multi-source pipelines only) ───────────────────────────
+    if (!primary_source_name.empty()) {
+        auto it = stage_map.find(primary_source_name);
+        if (it == stage_map.end())
+            throw std::runtime_error(
+                "loadConfig: primary_source references unknown stage \"" + primary_source_name + "\"");
+        setPrimarySource(it->second);
     }
 
     // ── Finalize ──────────────────────────────────────────────────────────────
@@ -1400,7 +1465,10 @@ void Pipeline::saveConfig(const std::string& path) const {
     out << "num_streams = " << static_cast<int64_t>(num_streams_) << "\n";
     out << "dims = [" << static_cast<int64_t>(dims_[0]) << ", "
         << static_cast<int64_t>(dims_[1]) << ", "
-        << static_cast<int64_t>(dims_[2]) << "]\n\n";
+        << static_cast<int64_t>(dims_[2]) << "]\n";
+    if (primary_source_stage_)
+        out << "primary_source = \"" << tomlEscape(stage_names.at(primary_source_stage_)) << "\"\n";
+    out << "\n";
 
     for (auto& s_uptr : stages_) {
         Stage* s = s_uptr.get();
@@ -1418,25 +1486,48 @@ void Pipeline::saveConfig(const std::string& path) const {
         out << "type = \"" << (entry ? entry->type_name : stageTypeToString(stype)) << "\"\n";
         if (entry) entry->save_fn(s, out);
 
-        // inputs: collect connections that have this stage as dependent
-        bool has_inputs = false;
-        std::ostringstream inputs;
+        // inputs: collect real connections AND bindExternalInput() bindings
+        // that have this stage as dependent, merged in actual port order.
+        // Both connect() and bindExternalInput() append to the same
+        // DAGNode::input_buffer_ids in call order, so that vector's index is
+        // the authoritative port position -- look each one up rather than
+        // assuming real connections always precede external bindings or
+        // vice versa (Cdf97OutlierCorrectStage happens to bind external
+        // first today, but nothing enforces that in general).
+        DAGNode* s_node = stage_to_node_.at(s);
+        std::vector<std::string> port_entries(s_node->input_buffer_ids.size());
         for (auto& conn : connections_) {
             if (conn.dependent != s) continue;
-            if (!has_inputs) {
-                inputs << "inputs = [";
-                has_inputs = true;
-            } else {
-                inputs << ", ";
-            }
-            inputs << "{ from = \"" << tomlEscape(stage_names.at(conn.producer)) << "\"";
+            DAGNode* prod_node = stage_to_node_.at(conn.producer);
+            int buf_id = prod_node->output_index_to_buffer_id.at(conn.output_index);
+            auto it = std::find(s_node->input_buffer_ids.begin(), s_node->input_buffer_ids.end(), buf_id);
+            if (it == s_node->input_buffer_ids.end())
+                throw std::runtime_error("saveConfig: internal error -- connection buffer not found on dependent node");
+            size_t pos = static_cast<size_t>(it - s_node->input_buffer_ids.begin());
+            std::ostringstream e;
+            e << "{ from = \"" << tomlEscape(stage_names.at(conn.producer)) << "\"";
             if (conn.output_name != "output")
-                inputs << ", port = \"" << tomlEscape(conn.output_name) << "\"";
-            inputs << " }";
+                e << ", port = \"" << tomlEscape(conn.output_name) << "\"";
+            e << " }";
+            port_entries[pos] = e.str();
         }
+        for (const auto& [ext_node, ext_buf_id] : explicit_external_bindings_) {
+            if (ext_node != s_node) continue;
+            auto it = std::find(s_node->input_buffer_ids.begin(), s_node->input_buffer_ids.end(), ext_buf_id);
+            if (it == s_node->input_buffer_ids.end())
+                throw std::runtime_error("saveConfig: internal error -- external binding buffer not found on its own node");
+            size_t pos = static_cast<size_t>(it - s_node->input_buffer_ids.begin());
+            port_entries[pos] = "{ from = \"__external__\" }";
+        }
+        bool has_inputs = !port_entries.empty() && std::any_of(
+            port_entries.begin(), port_entries.end(), [](const std::string& e) { return !e.empty(); });
         if (has_inputs) {
-            inputs << "]\n";
-            out << inputs.str();
+            out << "inputs = [";
+            for (size_t i = 0; i < port_entries.size(); i++) {
+                if (i > 0) out << ", ";
+                out << port_entries[i];
+            }
+            out << "]\n";
         }
 
         out << "\n";

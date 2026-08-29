@@ -234,7 +234,8 @@ decompressed = comp.decode(compressed, out)
 | `pressio:rel` | double | 1e-3 | Relative error bound (corresponds to noa to fzgpumodules) |
 | `fzgpumodules:error_bound_mode` | str | `"abs"` | `"abs"`, `"rel"`, `"noa"`, or `"prel"`. On predictor stages `"rel"` warns and maps to `"prel"`; only `QuantizerStage` honours exact `"rel"`. |
 | `fzgpumodules:stages` | list[str] | `["lorenzo:float:uint16", "diff:uint16"]` | Ordered stage tokens |
-| `fzgpumodules:connections` | list[str] | `["s1 <- s0:codes"]` | Stage wiring strings |
+| `fzgpumodules:connections` | list[str] | `["s1 <- s0:codes"]` | Stage wiring strings (`__external__` sentinel: see below) |
+| `fzgpumodules:primary_source` | str | `""` | Stage id whose reconstruction `decode` returns; only needed with a `__external__` connection (see SPERR recipe) |
 | `fzgpumodules:dims` | list[int] | `[0, 1, 1]` | Spatial dims `[nx, ny, nz]`; `nx=0` infers 1-D |
 | `fzgpumodules:memory_strategy` | str | `"minimal"` | `"minimal"` or `"preallocate"` |
 | `fzgpumodules:memory_multiplier` | float | 3.0 | GPU pool size multiplier |
@@ -262,14 +263,24 @@ for details on the error bound definitions and their implications for compressio
 
 ```python
 "fzgpumodules:connections": [
-    "s1 <- s0",        # connect default output of s0 → input of s1
-    "s1 <- s0:codes",  # connect the :codes port of s0 → input of s1
+    "s1 <- s0",           # connect default output of s0 → input of s1
+    "s1 <- s0:codes",     # connect the :codes port of s0 → input of s1
+    "s2 <- __external__", # bind the pipeline's raw input directly to s2's next port
 ]
 ```
 
 Stage IDs are assigned left-to-right from the `stages` list: `s0`, `s1`, `s2`, …
 Unconnected stage outputs become pipeline outputs and are included in the compressed buffer
 automatically.
+
+`__external__` is a reserved source name (not a stage id) for
+`Pipeline::bindExternalInput()` — it binds the untouched pipeline input to a
+specific stage port even when that stage also has other real connections
+(needed by `cdf97_outlier_correct`; see the SPERR recipe below). List it in
+`connections` at the position matching the port it should occupy, same as
+any other connection. When it creates more than one source stage in the
+pipeline, set `fzgpumodules:primary_source` (see Pipeline Options) to say
+which one's reconstruction `decode` should return.
 
 ---
 
@@ -597,6 +608,72 @@ Requires `fzgpumodules:dims` (2-D/3-D).
 | `roi_half_width` | int | 4 | ROI box half-width in pixels; the box is `(2*hw+1)^2` |
 | `bin_factor` | int | 1 | Background binning factor; 1 disables binning |
 
+### SPERR (CDF97 + SPECK2D + outlier correction)
+
+```python
+"cdf97:float", "cdf97:double"    # CDF 9/7 DWT (not itself lossy -- pairs with quantizer)
+"speck2d"                        # 2-D bit-plane coder, no options
+"cdf97_outlier_correct"          # sparse exact correction, see below
+```
+
+`cdf97` and `speck2d` have no per-stage options: `cdf97`'s error bound is
+whatever the paired `quantizer` uses, and `speck2d`'s threshold/tree split
+are pipeline/data-derived. `cdf97_outlier_correct` reads `pressio:abs` (or
+`pressio:rel` under `noa`) from the same `ctx.eb` every lossy stage uses, so
+it automatically matches a paired `quantizer:float:uint32` token in the same
+pipeline — nothing extra to set in sync by hand.
+
+**Why this pipeline needs `fzgpumodules:primary_source` and the
+`__external__` connection sentinel, unlike every recipe above:** quantizing
+CDF 9/7 coefficients directly does not guarantee a pointwise bound on the
+reconstructed field (the synthesis filter's gain differs by decomposition
+level) — `cdf97_outlier_correct` fixes that by comparing a trial
+reconstruction against the ORIGINAL raw input and applying an exact sparse
+correction. That means it needs the untouched input on one port
+simultaneously with `quantizer`'s codes on another. `'sN <- __external__'`
+binds the pipeline's raw input directly to a stage's next port (in place of
+another stage's output); `fzgpumodules:primary_source` says which stage's
+reconstruction `decode` returns, since there are now two source stages
+(`cdf97` and `cdf97_outlier_correct`) and only one can be "the answer".
+
+```python
+comp = lp.PressioCompressor.from_config({
+    "compressor_id": "fzgpumodules",
+    "early_config": {
+        "fzgpumodules:stages": [
+            "cdf97:float",              # s0
+            "quantizer:float:uint32",   # s1
+            "cdf97_outlier_correct",    # s2
+            "speck2d",                  # s3
+        ],
+        "fzgpumodules:connections": [
+            "s1 <- s0",                 # quantizer  <- cdf97's coefficients
+            "s2 <- __external__",       # cdf97_outlier_correct.input[0] = raw field
+            "s2 <- s1:codes",           # cdf97_outlier_correct.input[1] = quant codes
+            "s3 <- s2:codes",           # speck2d <- corrected codes passthrough
+        ],
+        "fzgpumodules:primary_source": "s2",   # decode returns s2's corrected field, not s0's
+    },
+    "compressor_config": {
+        "pressio:abs":               1e-4,
+        "fzgpumodules:s1:linear_mode": True,   # REQUIRED: speck2d needs signed int32 codes
+    },
+})
+
+compressed   = comp.encode(data)
+decompressed = comp.decode(compressed, data.copy())
+assert float(abs(data - decompressed).max()) <= 1e-4   # actually guaranteed, not just reported
+```
+
+Equivalent to `examples/presets/sperr_gpu.toml` — see that file, and
+`modules/coders/outlier_correct/outlier_correct_stage.h`, for the full
+mechanism and why the bound is a real guarantee here (matching native
+SPERR's own `Outlier_Coder`), not merely a reported quantity like most
+other recipes on this page. 2-D only; `pressio:rel` (`noa` mode) is not
+meaningful for this pipeline — `quantizer`'s NOA rescaling and
+`cdf97_outlier_correct`'s literal absolute bound diverge silently. Use
+`pressio:abs`, or convert your relative bound to absolute yourself first.
+
 ### Huffman Entropy Coding
 
 ```python
@@ -901,6 +978,9 @@ metrics = comp.get_metrics()
 | `diff:*`, `zigzag:*`, `negabinary:*`, `adm:*` | `output` | same as output type |
 | `rle:*`, `bitpack:*`, `bitshuffle`, `rze`, `rre`, `rare`, `raze`, `clog`, `hclog`, `gpulz`, `tupl`, `bitplane_rze`, `ans`, `huffman:*` | `output` | uint8 |
 | `szx:*`, `szp:*` | `output` | uint8 |
+| `cdf97:*` | `output` | same as input |
+| `speck2d` | `output` | uint8 |
+| `cdf97_outlier_correct` | `correction`, `codes` | uint8, int32 |
 
 Note: `quantizer` uses `outlier_idxs`; quantizing Lorenzo uses `outlier_indices`.
 

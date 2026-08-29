@@ -1,0 +1,51 @@
+[pipeline]
+memory_strategy = "PREALLOCATE"
+pool_multiplier = 8.0
+# decompress() returns "correct"'s corrected reconstruction, not "dwt"'s own
+# (uncorrected) inverse -- see Pipeline::setPrimarySource()'s doc comment.
+primary_source = "correct"
+
+# GPU SPERR: CDF 9/7 DWT -> Quantizer -> sparse outlier correction -> SPECK2D.
+# Cdf97OutlierCorrectStage guarantees the reconstructed-domain pointwise error
+# bound (quantizing DWT coefficients alone does not -- see
+# modules/coders/outlier_correct/outlier_correct_stage.h's doc comment).
+#
+# Both "dwt" and "correct" read the pipeline's raw input directly
+# (Pipeline::bindExternalInput() -- the "__external__" sentinel below), no
+# fan-out/duplicate-copy stage needed. "dwt" needs no `inputs` key at all: a
+# stage with no other connections is auto-discovered as a pure source, same
+# as any other single-source pipeline.
+#
+# error_bound below is a literal ABSOLUTE pointwise bound: Cdf97OutlierCorrect
+# has no NOA/rel_range rescaling concept, so it must match Quantizer's bound
+# EXACTLY. Use `abs` mode when testing this pipeline (see
+# examples/presets, compression_benchmarking's sperr_gpu_bounded_smoke.yaml).
+
+[[stage]]
+name = "dwt"
+type = "CDF97"
+data_type = "float32"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-4
+error_bound_mode = "ABS"
+linear_mode = true
+inputs = [{from = "dwt"}]
+
+[[stage]]
+name = "correct"
+type = "Cdf97OutlierCorrect"
+error_bound = 1e-4
+inputs = [
+  { from = "__external__" },
+  { from = "quant", port = "codes" }
+]
+
+[[stage]]
+name = "speck"
+type = "SPECK2D"
+inputs = [{from = "correct", port = "codes"}]

@@ -112,6 +112,19 @@ Pipeline::FZMFileHeader Pipeline::buildHeader() const {
     // Build stage information from DAG topology (in execution order)
     const auto& levels = dag_->getLevels();
 
+    // Which stage decompressFromFile() must treat as the answer -- same
+    // resolution decompressCore() uses (see its primary_source_stage_
+    // comment): explicit choice, else the first-discovered source. Recorded
+    // per-stage below (FZM_STAGE_FLAG_PRIMARY_SOURCE) because a mixed
+    // source+consumer stage (bound via bindExternalInput() alongside a real
+    // connection) is invisible to buildSourceSizesFromHeader()'s normal
+    // "nothing produces any of my inputs" source test -- that test has no
+    // way to know that only ONE of a stage's inputs came from
+    // bindExternalInput(), only that at least one didn't.
+    Stage* primary = primary_source_stage_
+        ? primary_source_stage_
+        : (!input_nodes_.empty() ? input_nodes_[0]->stage : nullptr);
+
     for (const auto& level : levels) {
         for (auto* node : level) {
             FZMStageInfo stage_info;
@@ -119,6 +132,8 @@ Pipeline::FZMFileHeader Pipeline::buildHeader() const {
             stage_info.stage_version = 1;
             stage_info.num_inputs    = static_cast<uint8_t>(node->input_buffer_ids.size());
             stage_info.num_outputs   = static_cast<uint8_t>(node->output_buffer_ids.size());
+            if (node->stage == primary)
+                stage_info.stage_flags |= FZM_STAGE_FLAG_PRIMARY_SOURCE;
 
             for (size_t i = 0; i < node->input_buffer_ids.size() && i < FZM_MAX_STAGE_INPUTS; i++) {
                 stage_info.input_buffer_ids[i] = static_cast<uint16_t>(node->input_buffer_ids[i]);
@@ -551,9 +566,28 @@ Pipeline::reconstructForwardTopology(const FZMFileHeader& fh)
 // Identify source stages by topology (no inputs produced by other stages) and
 // look up their uncompressed sizes from the header (v3+) or fall back to the
 // total uncompressed_size for single-source v2 files.
+//
+// A stage flagged FZM_STAGE_FLAG_PRIMARY_SOURCE (see buildHeader()) is
+// force-included and returned ALONE, regardless of what the topology test
+// finds -- it is decompressFromFile()'s answer stage by construction, and a
+// mixed source+consumer stage (bindExternalInput() alongside a real
+// connection, e.g. Cdf97OutlierCorrectStage) fails the plain topology test
+// (it DOES have an input produced by another stage -- just not ALL of them)
+// so the flag is the only way to find it here, where there's no live
+// Pipeline to ask via getSourceStages()/setPrimarySource(). Matches
+// decompressCore()'s own single-entry {{src_stage, src_sz}} shape for the
+// live path -- see its comment.
 std::unordered_map<Stage*, size_t> Pipeline::buildSourceSizesFromHeader(
     const FZMFileHeader& fh, const std::vector<FwdStageDesc>& fwd_topology)
 {
+    for (uint32_t i = 0; i < fh.core.num_stages && i < fwd_topology.size(); i++) {
+        if (fh.stages[i].stage_flags & FZM_STAGE_FLAG_PRIMARY_SOURCE) {
+            return { { fwd_topology[i].stage, static_cast<size_t>(fh.core.uncompressed_size) } };
+        }
+    }
+
+    // Pre-flag archive (written before this flag existed, stage_flags == 0
+    // everywhere): fall back to the original topology-only heuristic.
     std::unordered_set<int> all_output_ids;
     for (const auto& d : fwd_topology)
         for (int bid : d.output_buf_ids) all_output_ids.insert(bid);
@@ -637,8 +671,9 @@ void Pipeline::decompressFromFile(
             : std::vector<StageTimingResult>{};
 
         // ── Extract result ────────────────────────────────────────────────────
-        // Find the source stage and its inverse result buffer.
-        // For the file path we handle only the primary (first-found) source stage.
+        // Find the source stage and its inverse result buffer. source_sizes
+        // has exactly one entry -- the designated primary source (see
+        // buildSourceSizesFromHeader()) -- so this loop just retrieves it.
         Stage* fwd_source = nullptr;
         for (const auto& fwd_desc : fwd_topology) {
             if (source_sizes.count(fwd_desc.stage)) {

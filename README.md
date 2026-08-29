@@ -104,6 +104,9 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |
 | `LogTransformStage<TInput>` | Log transform — turns a point-wise relative bound into an absolute one for a downstream ABS quantizer (Liang et al., CLUSTER'18) |
 | `ADMStage` | Adaptive data mapping — remaps uint16/uint32 streams to a compact 8-bit symbol domain (MANS port) |
+| `Cdf97Stage<TInput>` | CDF 9/7 biorthogonal wavelet transform — SPERR's DWT front-half (lifting constants/boundary handling ported; GPU kernels FZGPUModules' own) |
+| `Speck2DStage` | GPU-parallel "wavefront" SPECK-like bit-plane coder, 2-D — codes the same information as SPERR's `SPECK2D_INT`, independent decode-parallel design |
+| `OutlierCorrectStage<Reconstructor>` / `Cdf97OutlierCorrectStage` | Sparse exact outlier correction — turns a coefficient-domain quantization bound into a GUARANTEED reconstructed-domain pointwise bound (SPERR `Outlier_Coder` mechanism, transform-agnostic via the `Reconstructor` policy) |
 | `RLEStage<T>` | Run-length encoding |
 | `BitshuffleStage` | GPU bit-matrix transpose |
 | `TUPLStage` | AoS <-> SoA tuple transpose — regroups interleaved `dim`-field records by field (LC `TUPLk` port) |
@@ -180,7 +183,7 @@ fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --repo
 
 ## Acknowledgements
 
-FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), and GPULZ and AIZ_VLDB26 (no license declared upstream).
+FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), SPERR (Apache License 2.0), and GPULZ and AIZ_VLDB26 (no license declared upstream).
 
 | Project | Stages |
 |---|---|
@@ -190,6 +193,7 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 | [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) — Indiana U, Argonne NL | `GInterpStage` |
 | [cuSZp / cuSZp2 / cuSZp3](https://github.com/szcompressor/cuSZp) — Huang, Di et al., Argonne NL | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | [MANS](https://github.com/hpdps-group/MANS) — Huang, Yang et al. | `ADMStage` |
+| [SPERR](https://github.com/NCAR/SPERR) — Li, Lindstrom, Clyne, NCAR (Apache License 2.0) | `Cdf97Stage` (direct port: lifting constants, boundary handling); `Speck2DStage`, `OutlierCorrectStage`/`Cdf97OutlierCorrectStage` (algorithmic attribution only, no code ported — see THIRD_PARTY.md) |
 | [dietGPU](https://github.com/facebookresearch/dietgpu) — Meta Platforms (MIT) | `ANSStage` |
 | [GPULZ](https://github.com/hpdps-group/ICS23-GPULZ) — Zhang, Tian, Di et al. (ICS '23; *no license declared upstream*) | `GPULZStage` |
 | [AIZ_VLDB26](https://github.com/boyuanzhang62/AIZ_VLDB26) — Boyuan Zhang (*no license declared upstream*) | `GPULZStage` all-zero-chunk fast path |
