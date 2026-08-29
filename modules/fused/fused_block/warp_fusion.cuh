@@ -428,60 +428,74 @@ __device__ __forceinline__ uint32_t warp_decoupled_lookback(
     return excl;   // identical on all lanes
 }
 
-// Single kernel: delta once → cost → look-back offset → pack. Mirrors the two-pass
-// bodies' delta+transform+cost/pack, but keeps d[] live across the scan.
-template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
+// Single kernel, cuSZp-style COARSE WARP granularity. CTA = 1 warp; each warp OWNS a run
+// of BlocksPerWarp consecutive blocks (BlocksPerWarp*32*EPL elements), computes+holds all
+// their deltas ONCE (no recompute, no 2nd input read), sums their byte costs, does ONE
+// warp-cooperative decoupled look-back over the per-WARP aggregate (scan elements =
+// num_blocks/BlocksPerWarp — coarse, so the look-back latency is hidden behind the warp's
+// large work), then packs every held block at base+intra-warp offset. This is the port of
+// cuSZp2/cuSZp3's fused kernel structure into our generic policy harness: the predictor/
+// coder stay swappable, only the scan/granularity is fixed. Byte-identical to two-pass.
+// (num_warps = grid; g_counter unused here — tile id is blockIdx, forward progress holds
+// because each warp publishes its aggregate before its own look-back, cuSZp-style.)
+template<int ElemsPerLane, int BlocksPerWarp, class Coder, class Pred, class... Transforms>
 __device__ __forceinline__ void fused_single_pass_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint8_t* __restrict__ payload,
-    uint32_t* __restrict__ g_counter, uint32_t* __restrict__ g_state,
-    uint32_t* __restrict__ g_agg, uint32_t* __restrict__ g_incl)
+    uint32_t* __restrict__ /*g_counter*/, uint32_t* __restrict__ g_state,
+    uint32_t* __restrict__ g_agg, uint32_t* __restrict__ g_incl, size_t num_warps)
 {
+    __shared__ uint32_t s_base[BlocksPerWarp];   // exclusive byte offset of each block in the warp
+
     const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t w    = blockIdx.x;            // CTA = 1 warp ⇒ global warp id = blockIdx
+    if (static_cast<size_t>(w) >= num_warps) return;
 
-    // Claim a logical tile (lane 0 draws, broadcast to the warp).
-    uint32_t tile;
-    if (lane == 0u) tile = atomicAdd(g_counter, 1u);
-    tile = __shfl_sync(0xffffffffu, tile, 0);
-    if (tile >= num_blocks) return;
-
-    const size_t   b          = tile;
+    const size_t   b0         = static_cast<size_t>(w) * BlocksPerWarp;
     constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
-    const size_t   start      = b * block_size;
-    const size_t   count      = min(static_cast<size_t>(block_size), n - start);
 
-    int d[ElemsPerLane];
-    #pragma unroll
-    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
-    applyTransforms<ElemsPerLane, Transforms...>(d, lane);
-
-    // Cost: writes this block's meta + its byte length (lane 0). Broadcast the cost.
-    uint32_t my_cost = 0u;
-    Coder::template cost<ElemsPerLane>(d, lane, word_bytes, count,
-                                       meta + Coder::meta_bytes * b, &my_cost);
-    my_cost = __shfl_sync(0xffffffffu, my_cost, 0);
-
-    // Publish aggregate, then look back for the exclusive byte offset.
-    if (lane == 0u) {
-        g_agg[b] = my_cost;
-        __threadfence();
-        g_state[b] = LB_AGG;
+    // ── Phase 1: compute + hold deltas for all my blocks; sum warp cost; block offsets.
+    int      dheld[BlocksPerWarp][ElemsPerLane];   // held across the look-back (local mem)
+    uint32_t warp_total = 0u;
+    #pragma unroll 1
+    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+        const size_t b = b0 + static_cast<size_t>(jb);
+        uint32_t c = 0u;
+        if (b < num_blocks) {
+            const size_t start = b * block_size;
+            const size_t count = min(static_cast<size_t>(block_size), n - start);
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) dheld[jb][m] = pred.delta(lane, b, m);
+            applyTransforms<ElemsPerLane, Transforms...>(dheld[jb], lane);
+            Coder::template cost<ElemsPerLane>(dheld[jb], lane, word_bytes, count,
+                                               meta + Coder::meta_bytes * b, &c);
+            c = __shfl_sync(0xffffffffu, c, 0);
+        }
+        if (lane == 0u) s_base[jb] = warp_total;   // exclusive within this warp
+        warp_total += c;
     }
-    const uint32_t excl = warp_decoupled_lookback(tile,
+    __syncwarp();
+
+    // ── Phase 2: warp-cooperative decoupled look-back over per-warp aggregates → base.
+    if (lane == 0u) { g_agg[w] = warp_total; __threadfence(); g_state[w] = LB_AGG; }
+    const uint32_t base = warp_decoupled_lookback(w,
         reinterpret_cast<volatile uint32_t*>(g_state),
         reinterpret_cast<volatile uint32_t*>(g_agg),
         reinterpret_cast<volatile uint32_t*>(g_incl), lane);
+    if (lane == 0u) { g_incl[w] = base + warp_total; __threadfence(); g_state[w] = LB_PREFIX; }
 
-    // Publish inclusive prefix so successors can short-circuit.
-    if (lane == 0u) {
-        g_incl[b] = excl + my_cost;
-        __threadfence();
-        g_state[b] = LB_PREFIX;
+    // ── Phase 3: pack every held block at its resolved offset (registers, no recompute).
+    #pragma unroll 1
+    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+        const size_t b = b0 + static_cast<size_t>(jb);
+        if (b < num_blocks) {
+            const size_t start = b * block_size;
+            const size_t count = min(static_cast<size_t>(block_size), n - start);
+            Coder::template pack<ElemsPerLane>(dheld[jb], lane, word_bytes, count,
+                                               meta + Coder::meta_bytes * b,
+                                               payload + base + s_base[jb]);
+        }
     }
-
-    // Pack from the still-live registers at the resolved offset.
-    Coder::template pack<ElemsPerLane>(d, lane, word_bytes, count,
-                                       meta + Coder::meta_bytes * b, payload + excl);
 }
 
 // ── Compile-time template kernels (the non-NVRTC path). The NVRTC path generates
