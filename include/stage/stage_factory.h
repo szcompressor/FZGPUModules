@@ -36,7 +36,6 @@
 #include "transforms/log_transform/log_transform_stage.h"
 #include "transforms/cdf97/cdf97_stage.h"
 #include "coders/speck2d/speck2d_stage.h"
-#include "structural/tee/tee_stage.h"
 #include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
 
 #include <memory>
@@ -347,14 +346,6 @@ inline Stage* createStage(StageType type, const uint8_t* config, size_t config_s
 
         case StageType::SPECK2D: {
             auto* s = new Speck2DStage();
-            if (config_size > 0)
-                s->deserializeHeader(config, config_size);
-            stage = s;
-            break;
-        }
-
-        case StageType::TEE: {
-            auto* s = new TeeStage();
             if (config_size > 0)
                 s->deserializeHeader(config, config_size);
             stage = s;

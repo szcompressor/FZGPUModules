@@ -2,16 +2,19 @@
  * tests/pipeline/test_sperr_gpu_bounded.cpp
  *
  * Integration tests for the DAG-integrated GPU SPERR bound-guarantee pipeline:
- * Tee -> Cdf97Stage -> QuantizerStage -> Cdf97OutlierCorrectStage -> Speck2DStage.
- * See `modules/coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h` for
- * why this exact topology (the port-count contract `buildInverseDAG()`
- * enforces), and `memory/speck_gpu_design.md` sec.9 for the mechanism.
+ * Cdf97Stage -> QuantizerStage -> Cdf97OutlierCorrectStage -> Speck2DStage,
+ * with Cdf97Stage and Cdf97OutlierCorrectStage both bound directly to the
+ * pipeline's raw input via Pipeline::bindExternalInput() -- no fan-out/
+ * duplicate-copy stage. See
+ * `modules/coders/outlier_correct/outlier_correct_stage.h` for the port
+ * shape/mechanism and `Pipeline::bindExternalInput()`'s doc comment for why
+ * no such stage is needed, and `memory/speck_gpu_design.md` sec.9 for the
+ * full design history (the earlier TeeStage-based version this replaced).
  *
  *   SB1  BoundGuaranteed                 — round trip actually respects the bound (in-DAG decompress)
  *   SB2  RepeatedCompressDecompressStable — same class of reuse the Speck2DStage cached_n_ bug hid in
  *   SB3  TighterBoundStillGuaranteed     — a second, tighter bound on the same field
- *   SB4  TeeStageMetadata                — port counts, type id
- *   SB5  Cdf97OutlierCorrectStageMetadata — port counts, type id, output names
+ *   SB4  Cdf97OutlierCorrectStageMetadata — port counts, type id, output names
  */
 
 #include <gtest/gtest.h>
@@ -44,11 +47,8 @@ std::vector<float> make_clustered_field(int nx, int ny, uint64_t seed) {
 void build_bounded_pipeline(Pipeline& p, int nx, int ny, float bound) {
     p.setDims(nx, ny, 1);
 
-    auto* tee = p.addStage<TeeStage>();
-    tee->setNumOutputs(2);
-    tee->setPassthroughIndex(1);
-
-    auto* dwt = p.addStage<Cdf97Stage<float>>();
+    auto* dwt = p.addStage<Cdf97Stage<float>>();   // pure source: auto-discovered, no
+                                                    // bindExternalInput() call needed
 
     auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
     quant->setErrorBound(bound);
@@ -57,15 +57,16 @@ void build_bounded_pipeline(Pipeline& p, int nx, int ny, float bound) {
 
     auto* corr = p.addStage<Cdf97OutlierCorrectStage>();
     corr->setErrorBound(bound);
+    p.bindExternalInput(corr);   // corr.input[0] = raw field -- BEFORE the connect()
+                                 // below so the external buffer lands on port 0.
 
     auto* speck = p.addStage<Speck2DStage>();
 
-    p.connect(dwt, tee, "out0");
-    p.connect(corr, tee, "out1");
     p.connect(quant, dwt);
-    p.connect(corr, quant, "codes");
-    p.connect(speck, corr, "codes");
+    p.connect(corr, quant, "codes");     // corr.input[1] = codes
+    p.connect(speck, corr, "codes");     // Speck2D consumes corr's codes passthrough
 
+    p.setPrimarySource(corr);   // decompress() returns corr's corrected field, not dwt's own
     p.finalize();
 }
 
@@ -161,18 +162,6 @@ TEST(SperrGpuBounded, TighterBoundStillGuaranteed) {
     float max_err = 0.0f;
     for (size_t i = 0; i < h_field.size(); ++i) max_err = std::max(max_err, std::fabs(recon[i] - h_field[i]));
     EXPECT_LE(max_err, bound * 1.0001f);
-}
-
-TEST(SperrGpuBounded, TeeStageMetadata) {
-    TeeStage tee;
-    tee.setNumOutputs(3);
-    EXPECT_EQ(tee.getName(), "Tee");
-    EXPECT_EQ(tee.getStageTypeId(), static_cast<uint16_t>(StageType::TEE));
-    EXPECT_EQ(tee.getNumInputs(), 1u);
-    EXPECT_EQ(tee.getNumOutputs(), 3u);
-    tee.setInverse(true);
-    EXPECT_EQ(tee.getNumInputs(), 3u);
-    EXPECT_EQ(tee.getNumOutputs(), 1u);
 }
 
 TEST(SperrGpuBounded, Cdf97OutlierCorrectStageMetadata) {

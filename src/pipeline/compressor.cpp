@@ -247,16 +247,23 @@ void Pipeline::typeCheckConnections() {
 
     constexpr uint8_t kUnknown = static_cast<uint8_t>(DataType::UNKNOWN);
 
-    // A connection's input port isn't stored explicitly -- connect() appends to
-    // dependent's input list in call order (see connectExistingOutput()), so the
-    // Nth connection targeting a given dependent lands on that dependent's input
-    // port N. Track that here instead of assuming port 0, or any stage with more
-    // than one input (MergeStage, Cdf97OutlierCorrectStage, ...) gets checked
-    // against the wrong port's expected type.
-    std::unordered_map<Stage*, size_t> next_input_index;
-
     for (const auto& conn : connections_) {
-        const size_t input_index = next_input_index[conn.dependent]++;
+        // A connection's input port isn't stored explicitly -- connect() and
+        // bindExternalInput() both append to the dependent's DAGNode::
+        // input_buffer_ids in call order, so that vector's index of this
+        // connection's buffer id IS its real port position. Counting entries
+        // in connections_ alone (an earlier version of this fix did that)
+        // undercounts whenever bindExternalInput() also consumed a port on
+        // the same stage without adding to connections_ -- exactly
+        // Cdf97OutlierCorrectStage's shape (external field on port 0, this
+        // connection on port 1).
+        DAGNode* dep_node  = stage_to_node_.at(conn.dependent);
+        DAGNode* prod_node = stage_to_node_.at(conn.producer);
+        int buf_id = prod_node->output_index_to_buffer_id.at(conn.output_index);
+        auto pos_it = std::find(dep_node->input_buffer_ids.begin(), dep_node->input_buffer_ids.end(), buf_id);
+        if (pos_it == dep_node->input_buffer_ids.end())
+            throw std::runtime_error("typeCheckConnections: internal error -- connection buffer not found on dependent node");
+        const size_t input_index = static_cast<size_t>(pos_it - dep_node->input_buffer_ids.begin());
 
         const uint8_t prod_type = conn.producer->getOutputDataType(
             static_cast<size_t>(conn.output_index));
@@ -559,26 +566,64 @@ void Pipeline::printPipeline() const {
 std::pair<std::vector<Stage*>, std::vector<Stage*>> Pipeline::identifyTopology() {
     auto sources = getSourceStages();
     auto sinks = getSinkStages();
-    
-    if (sources.empty() || sinks.empty()) {
-        throw std::runtime_error("Pipeline has no source or sink stages");
+
+    // A pipeline wired entirely through bindExternalInput() (every stage has
+    // some real dependency, e.g. a single mixed source+consumer stage) has
+    // no pure (dependencies.empty()) source -- that's still a valid topology.
+    if (sources.empty() && explicit_external_bindings_.empty()) {
+        throw std::runtime_error("Pipeline has no source stages");
     }
-    
+    if (sinks.empty()) {
+        throw std::runtime_error("Pipeline has no sink stages");
+    }
+
     return {sources, sinks};
 }
 
 void Pipeline::setupInputBuffers(const std::vector<Stage*>& sources) {
     input_nodes_.clear();
     input_buffer_ids_.clear();
+    const bool single = (sources.size() + explicit_external_bindings_.size()) == 1;
     for (size_t i = 0; i < sources.size(); i++) {
         DAGNode* src_node = stage_to_node_[sources[i]];
-        std::string tag = sources.size() == 1
+        // A stage that's both a pure source (dependencies.empty(), so
+        // getSourceStages() found it) AND was separately given an explicit
+        // bindExternalInput() call already has its external buffer -- binding
+        // it again here would give the same node two input-buffer entries
+        // for what's really one external input, corrupting its port count.
+        bool already_bound = std::any_of(explicit_external_bindings_.begin(), explicit_external_bindings_.end(),
+            [&](const auto& p) { return p.first == src_node; });
+        if (already_bound) continue;
+
+        std::string tag = single
             ? "pipeline_input"
             : "pipeline_input_" + std::to_string(i) + "_" + sources[i]->getName();
         dag_->setInputBuffer(src_node, 1, tag);
         input_nodes_.push_back(src_node);
         input_buffer_ids_.push_back(src_node->input_buffer_ids.back());
     }
+    // Stages bound via bindExternalInput() -- may have other real
+    // dependencies too, so getSourceStages() (dependencies.empty()) never
+    // finds them; the buffer id was already created at bindExternalInput()
+    // call time, just append it here.
+    for (const auto& [node, buf_id] : explicit_external_bindings_) {
+        input_nodes_.push_back(node);
+        input_buffer_ids_.push_back(buf_id);
+    }
+}
+
+void Pipeline::bindExternalInput(Stage* stage) {
+    if (is_finalized_) {
+        throw std::runtime_error("bindExternalInput(): cannot call after finalize()");
+    }
+    auto it = stage_to_node_.find(stage);
+    if (it == stage_to_node_.end()) {
+        throw std::runtime_error("bindExternalInput(): stage not added to this pipeline (call addStage() first)");
+    }
+    DAGNode* node = it->second;
+    std::string tag = "pipeline_input_ext_" + stage->getName();
+    dag_->setInputBuffer(node, 1, tag);   // size fixed up later via propagateBufferSizes
+    explicit_external_bindings_.emplace_back(node, node->input_buffer_ids.back());
 }
 
 int Pipeline::autoDetectUnconnectedOutputs() {

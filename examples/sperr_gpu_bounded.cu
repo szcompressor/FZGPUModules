@@ -37,8 +37,10 @@
  * STATUS: validated standalone (this program), calling the Stage classes
  * directly rather than through fz::Pipeline/CompressionDAG -- proves the
  * mechanism and gives real numbers before committing to a DAG-integrated
- * Stage (which needs a "Tee" of the pipeline's raw input to two consumers;
- * see memory/speck_gpu_design.md sec.9 addendum for the follow-up plan).
+ * version. See `sperr_gpu_dag_bounded.cu` for the real Pipeline/DAG
+ * topology (Cdf97Stage + Cdf97OutlierCorrectStage both bound to the raw
+ * input via `Pipeline::bindExternalInput()`) and
+ * memory/speck_gpu_design.md sec.9 for the full history.
  */
 
 #include "fzgpumodules.h"

@@ -1,12 +1,15 @@
 /**
  * @file sperr_gpu_dag_bounded.cu
  * @brief DAG-integrated version of the bound-guarantee mechanism: builds the
- *        real `fz::Pipeline` topology (Tee -> Cdf97 -> Quantizer ->
+ *        real `fz::Pipeline` topology (Cdf97Stage -> QuantizerStage ->
  *        Cdf97OutlierCorrectStage -> Speck2DStage) and calls
  *        `Pipeline::compress()`/`decompress()`, instead of calling Stage
  *        classes directly (`examples/sperr_gpu_bounded.cu`, the earlier
- *        validated prototype). See `Cdf97OutlierCorrectStage`'s header for
- *        the exact topology and why it's shaped this way.
+ *        validated prototype). See `Cdf97OutlierCorrectStage`'s header
+ *        (`modules/coders/outlier_correct/outlier_correct_stage.h`) for the
+ *        port shape and `Pipeline::bindExternalInput()`'s doc comment for
+ *        why no fan-out stage is needed: both `Cdf97Stage` and
+ *        `Cdf97OutlierCorrectStage` bind the pipeline's raw input directly.
  */
 
 #include "fzgpumodules.h"
@@ -47,11 +50,8 @@ int main(int argc, char** argv) {
         Pipeline p(bytes, MemoryStrategy::PREALLOCATE, /*pool_mult=*/8.0f);
         p.setDims(nx, ny, 1);
 
-        auto* tee = p.addStage<TeeStage>();
-        tee->setNumOutputs(2);
-        tee->setPassthroughIndex(1);   // inverse: pass CorrectStage's answer, not Cdf97's raw one
-
-        auto* dwt = p.addStage<Cdf97Stage<float>>();
+        auto* dwt = p.addStage<Cdf97Stage<float>>();   // pure source (no other inputs):
+                                                        // auto-discovered, no bindExternalInput() needed
 
         auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
         quant->setErrorBound(bound);
@@ -60,15 +60,16 @@ int main(int argc, char** argv) {
 
         auto* corr = p.addStage<Cdf97OutlierCorrectStage>();
         corr->setErrorBound(bound);   // MUST match quant's bound
+        p.bindExternalInput(corr);    // corr.input[0] = raw field, bound BEFORE the
+                                      // connect() below so it lands on port 0.
 
         auto* speck = p.addStage<Speck2DStage>();
 
-        p.connect(dwt, tee, "out0");
-        p.connect(corr, tee, "out1");        // CorrectStage.input[0] = raw field copy
         p.connect(quant, dwt);
-        p.connect(corr, quant, "codes");     // CorrectStage.input[1] = codes
-        p.connect(speck, corr, "codes");     // Speck2D consumes CorrectStage's codes passthrough
+        p.connect(corr, quant, "codes");     // corr.input[1] = codes
+        p.connect(speck, corr, "codes");     // Speck2D consumes corr's codes passthrough
 
+        p.setPrimarySource(corr);            // decompress() returns corr's corrected field
         p.finalize();
 
         void* d_compressed = nullptr; size_t compressed_size = 0;

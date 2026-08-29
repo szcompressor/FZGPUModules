@@ -32,7 +32,6 @@
 #include "coders/hclog/hclog_stage.h"
 #include "coders/gpulz/gpulz_stage.h"
 #include "coders/speck2d/speck2d_stage.h"
-#include "structural/tee/tee_stage.h"
 #include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
 #include "shufflers/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
