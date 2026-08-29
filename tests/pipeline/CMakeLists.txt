@@ -32,6 +32,14 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── Multi-source pipelines (Pipeline::setPrimarySource()) ───────────────────
+fz_add_test(
+    NAME    test_multi_source_pipeline
+    SOURCES test_multi_source_pipeline.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
 # ─── Pipeline error-handling / invalid-usage guards ───────────────────────────
 fz_add_test(
     NAME    test_pipeline_errors

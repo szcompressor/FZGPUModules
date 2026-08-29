@@ -771,25 +771,35 @@ void Pipeline::validate() {
 
 std::vector<Stage*> Pipeline::getSourceStages() const {
     std::vector<Stage*> sources;
-    
-    for (const auto& [stage, node] : stage_to_node_) {
-        if (node->dependencies.empty()) {
-            sources.push_back(stage);
+
+    // Iterate dag_->getNodes() (deterministic insertion order), NOT
+    // stage_to_node_ (an unordered_map keyed by Stage*, whose iteration order
+    // depends on heap addresses / ASLR). With exactly one source this never
+    // mattered -- order of one element is irrelevant -- but with multiple
+    // source stages (see Pipeline::setPrimarySource()) this order becomes
+    // input_nodes_'s order, and index 0 is the default primary source when
+    // the caller hasn't called setPrimarySource(). An ASLR-dependent default
+    // would silently pick a different "primary" answer on different runs of
+    // the identical program. Same class of bug, same fix, as
+    // autoDetectUnconnectedOutputs()'s existing comment on this file.
+    for (DAGNode* node : dag_->getNodes()) {
+        if (node->stage && node->dependencies.empty()) {
+            sources.push_back(node->stage);
         }
     }
-    
+
     return sources;
 }
 
 std::vector<Stage*> Pipeline::getSinkStages() const {
     std::vector<Stage*> sinks;
-    
-    for (const auto& [stage, node] : stage_to_node_) {
-        if (node->dependents.empty()) {
-            sinks.push_back(stage);
+
+    for (DAGNode* node : dag_->getNodes()) {
+        if (node->stage && node->dependents.empty()) {
+            sinks.push_back(node->stage);
         }
     }
-    
+
     return sinks;
 }
 

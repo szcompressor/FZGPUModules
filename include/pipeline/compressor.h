@@ -125,6 +125,40 @@ public:
     bool isPoolManagedDecompOutput() const { return pool_managed_decomp_; }
 
     /**
+     * Designate which source stage's inverse output decompress() returns, for
+     * pipelines with more than one source stage (see "Multi-source pipelines"
+     * below). Must be a stage with zero forward inputs (a true source) that was
+     * already added via addStage(). Optional for single-source pipelines.
+     *
+     * ## Multi-source pipelines
+     *
+     * A pipeline may have more than one source stage — more than one stage
+     * with no forward inputs, each independently reading the same external
+     * buffer passed to compress(). This exists for stages that need to see
+     * the *original* input directly, alongside another branch that transforms
+     * it (e.g. an outlier-correction stage that diffs a trial reconstruction
+     * against the untouched original). All source stages receive the exact
+     * same device pointer/size passed to compress() — read-only, never a
+     * duplicate copy — so add a genuine second source stage instead of a
+     * fan-out/tee node when a stage's only reason for existing mid-graph is
+     * to hand a second copy of the raw input to a downstream consumer.
+     *
+     * decompress()'s single returned buffer must still come from exactly one
+     * stage, so with N>1 sources you must call setPrimarySource() to say
+     * which one's inverse output is authoritative; the other source(s)'
+     * inverse outputs are still computed (their results may feed other
+     * stages) but are not directly returned. Defaults to whichever source
+     * stage was added first via addStage() (getSourceStages() walks nodes in
+     * deterministic insertion order), which is almost never what you want
+     * for N>1 — set this explicitly whenever there is more than one source
+     * stage.
+     *
+     * Incompatible with CUDA Graph mode, which still requires exactly one
+     * source stage (enableGraphMode(true) throws otherwise).
+     */
+    void setPrimarySource(Stage* stage) { primary_source_stage_ = stage; }
+
+    /**
      * Return the worst-case compressed output size in bytes for the given input.
      *
      * Must be called after finalize(). Use this to pre-allocate a caller-owned
@@ -874,6 +908,11 @@ private:
     PipelinePerfResult last_perf_result_;
 
     std::vector<DAGNode*> input_nodes_;
+    // Explicit choice of which input_nodes_ entry decompress() returns, for
+    // pipelines with more than one source stage. Null = default to
+    // input_nodes_[0]. Set via setPrimarySource(); resolved to an index lazily
+    // (source stages aren't wired into input_nodes_ until finalize()).
+    Stage* primary_source_stage_ = nullptr;
     std::vector<DAGNode*> output_nodes_;
     std::vector<int>      input_buffer_ids_;
     std::vector<int>      output_buffer_ids_;
