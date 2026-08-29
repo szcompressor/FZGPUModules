@@ -21,7 +21,13 @@ GPU kernels are FZGPUModules' own).
 
 Feeds a quantizer, then (optionally) `Speck2DStage` — see
 [stage_speck2d](speck2d.md) and `examples/presets/sperr_gpu.toml` for the full
-SPERR-style pipeline.
+SPERR-style pipeline. Quantizing this stage's coefficients directly does
+**not** guarantee a pointwise bound on the reconstructed field — CDF 9/7's
+synthesis-filter gain differs by level, so a uniform coefficient threshold
+doesn't translate to a uniform reconstructed-domain error. For an actual
+guarantee, pair with [`Cdf97OutlierCorrectStage`](outlier_correct.md) — see
+that page and `examples/presets/sperr_gpu.toml` for the complete,
+bound-guaranteed pipeline.
 
 ---
 

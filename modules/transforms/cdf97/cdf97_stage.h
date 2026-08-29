@@ -1,5 +1,10 @@
 #pragma once
 
+// Lifting constants, boundary handling, and level-count rule ported from the
+// SPERR project (Li, Lindstrom, Clyne — NCAR), Apache License 2.0 — see
+// THIRD_PARTY.md. Original: include/CDF97.h, src/CDF97.cpp in
+// https://github.com/NCAR/SPERR. GPU kernels are FZGPUModules' own.
+
 /**
  * @file cdf97_stage.h
  * @brief CDF 9/7 biorthogonal wavelet transform stage (SPERR's DWT front-half).

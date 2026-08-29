@@ -15,3 +15,4 @@
 | \subpage stage_bitpack | Dense bit-packing of fixed-width integers |
 | \subpage stage_adaptive_bitpack | Per-block adaptive fixed-rate bit-plane coding (cuSZp plain mode) |
 | \subpage stage_speck2d | GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format |
+| \subpage stage_outlier_correct | Sparse exact outlier correction — turns a coefficient-domain quantization bound into a guaranteed reconstructed-domain pointwise bound, transform-agnostic |

@@ -19,6 +19,7 @@ see [`THIRD_PARTY.md`](../THIRD_PARTY.md) at the repository root.
 | [cuSZ-Hi](#cusz-hi) | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
 | [cuSZp / cuSZp2 / cuSZp3](#cuszp--cuszp2--cuszp3) | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
 | [MANS](#mans) | BSD-3-Clause | Direct port of kernels | `ADMStage` |
+| [SPERR](#sperr) | Apache License 2.0 | Direct port (lifting constants, boundary handling) + algorithmic attribution only (`Speck2DStage`, `OutlierCorrectStage`) | `Cdf97Stage`, `Speck2DStage`, `OutlierCorrectStage`/`Cdf97OutlierCorrectStage` |
 | [dietGPU](#dietgpu) | MIT | Vendored headers | `ANSStage` |
 | [GPULZ](#gpulz) | **None declared upstream** | Direct port of encode/decode kernels | `GPULZStage` |
 | [AIZ_VLDB26](#aiz_vldb26) | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
@@ -227,6 +228,49 @@ Advisors: Dingwen Tao, Guangming Tan
   by `FZ_CUDA_CHECK`; namespace changed from `mans::nv::adm` to `fz::adm`; kernels renamed
   with `_u16`/`_u32` suffix to avoid TU-level naming conflicts; inline comments translated
   to English.
+
+---
+
+## SPERR
+
+**Repository:** https://github.com/NCAR/SPERR
+**License:** Apache License 2.0
+**Authors:** Shaomeng Li, Peter Lindstrom, John Clyne (NCAR)
+**Citation:** Li, S., Lindstrom, P., Clyne, J. *Lossy Scientific Data Compression With
+SPERR*. IPDPS 2023.
+
+**Stages:**
+
+- **`Cdf97Stage`** (`modules/transforms/cdf97/`) — direct port of the numerically
+  load-bearing constants and rules from `sperr::CDF97` (`include/CDF97.h`,
+  `src/CDF97.cpp`): the lifting constants (computed from the filter bank
+  coefficients, not the commented QccPack literal values), the symmetric
+  boundary-extension rule, the level-count rule, and the 3-D dyadic/wavelet-packet
+  selection rule. Validated **bit-exact** against `sperr::CDF97` in double
+  precision. GPU kernels (the axis kernel, coalesced-tile kernel, persistent
+  cooperative-groups level fusion) are FZGPUModules' own — none of that exists in
+  SPERR, which runs single-threaded CPU.
+
+- **`Speck2DStage`** (`modules/coders/speck2d/`) — **algorithmic attribution only,
+  no SPERR code used.** Codes the same kind of information SPERR's `SPECK2D_INT`
+  bit-plane coder does, but the bitstream, data structures, and encode/decode
+  algorithms are an independent, from-scratch, GPU-parallel-decodable design.
+  SPERR's `SPECK_INT`/`SPECK2D_INT` use linked LIP/LIS/LSP lists and a DFS-serial
+  traversal; none of that structure appears here. See
+  `memory/speck_algorithm_writeup.md` for the full derivation and novelty
+  statement.
+
+- **`OutlierCorrectStage<Reconstructor>` / `Cdf97OutlierCorrectStage`**
+  (`modules/coders/outlier_correct/`, `modules/coders/cdf97_outlier_correct/`) —
+  **algorithmic attribution only, no SPERR code used.** Implements the same
+  *mechanism* as SPERR's `Outlier_Coder` (dequantize + inverse-transform a trial
+  reconstruction, diff against the original, exact-correct every point over
+  bound), arrived at independently from `Outlier_Coder.h`/`.cpp` and
+  `SPECK_FLT.cpp`'s call site — not by porting SPERR's code. Generalized beyond
+  SPERR's own design via a transform-agnostic `Reconstructor` policy.
+
+See [`THIRD_PARTY.md`](../THIRD_PARTY.md) for the full Apache License 2.0 text
+required by upstream and the complete relationship writeup for each stage.
 
 ---
 

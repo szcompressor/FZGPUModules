@@ -137,15 +137,18 @@ estimate that overstated a potential arithmetic-coding win, corrected by a
 zstd measurement that found none), and the phase-by-phase build log are in
 `memory/speck_gpu_design.md`.
 
-**These throughput numbers are unaffected by, and should not be confused
-with, a separate known gap:** feeding this stage from `Cdf97Stage` through a
-plain (non-subband-scaled) `QuantizerStage`, as `examples/presets/sperr_gpu.toml`
-does, does **not** currently reproduce SPERR's error-BOUND guarantee — only
-its pipeline structure. Benchkit smoke-testing (`memory/speck_gpu_design.md`
-§9) found the resulting reconstruction error does not reliably track the
-requested bound (a real, non-marginal miss). This stage itself is not the
+**These throughput numbers are unaffected by, and are a separate concern
+from, the pipeline's error-bound guarantee:** feeding this stage from
+`Cdf97Stage` through a plain (non-subband-scaled) `QuantizerStage` does
+**not**, by itself, reproduce SPERR's error-BOUND guarantee — only its
+pipeline structure. `examples/presets/sperr_gpu.toml` closes that gap with
+[`Cdf97OutlierCorrectStage`](outlier_correct.md) between `Quantizer` and this
+stage: a sparse, exact correction pass verified end to end (16/16
+`eb_ok=True` across real fields and bounds `1e-2`..`1e-5`, see
+`memory/speck_gpu_design.md` sec.9). This stage itself was never the
 cause — `Speck2DStage` codes exactly the coefficients it's handed, correctly
-— the gap is in the naive coefficient-domain quantization step upstream.
+— the gap was in the naive coefficient-domain quantization step upstream,
+and it's now fixed at that layer, not here.
 
 ---
 

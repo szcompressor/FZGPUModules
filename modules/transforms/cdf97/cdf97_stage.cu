@@ -1,3 +1,7 @@
+// Adapted from the SPERR project (Li, Lindstrom, Clyne — NCAR), Apache
+// License 2.0 — see THIRD_PARTY.md.
+// Original: include/CDF97.h, src/CDF97.cpp in https://github.com/NCAR/SPERR
+
 /**
  * @file cdf97_stage.cu
  * @brief Cdf97Stage::execute() — drives the CDF 9/7 DWT kernels.

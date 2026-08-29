@@ -111,6 +111,9 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
+| \ref stage_cdf97 "Cdf97Stage<TInput>"              | `modules/transforms/cdf97/cdf97_stage.h`           | CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half) |
+| \ref stage_speck2d "Speck2DStage"                  | `modules/coders/speck2d/speck2d_stage.h`           | GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format |
+| \ref stage_outlier_correct "OutlierCorrectStage<Reconstructor>" | `modules/coders/outlier_correct/outlier_correct_stage.h` | Sparse exact outlier correction — guarantees a reconstructed-domain pointwise bound, transform-agnostic |
 
 ### Memory Strategies
 

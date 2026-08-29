@@ -775,9 +775,37 @@ SPERR is licensed under the Apache License, Version 2.0. Full license text:
       of your accepting any such warranty or additional liability.
 
    END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
 ```
 
-URL: https://github.com/NCAR/SPERR
+URL: https://github.com/NCAR/SPERR (verified against upstream commit
+`b801258`, tag `v0.8.5-1-gb801258`, `main` branch, checked 2026-08-29 — see
+`/home/exouser/compressors/SPERR` for the working checkout this port and
+`Speck2DStage`'s reference-oracle comparisons were validated against).
 
 ---
 
@@ -804,3 +832,35 @@ should be read before any publication claim building on this stage.
 SPERR (Apache License 2.0, see the CDF97 entry above) was used only as a
 *reference oracle* during development — to measure this stage's compression
 rate against, not to derive its implementation from.
+
+---
+
+## OutlierCorrectStage — algorithmic attribution, not a port
+
+**Used by:** `OutlierCorrectStage<Reconstructor>` / `Cdf97OutlierCorrectStage`
+(`modules/coders/outlier_correct/`, `modules/coders/cdf97_outlier_correct/`)
+
+**Relationship: algorithmic attribution only — no SPERR code was used.**
+This stage exists to close the same gap SPERR's own `Outlier_Coder` closes:
+quantizing DWT coefficients with a uniform threshold does not guarantee a
+uniform bound on the reconstructed field (CDF 9/7's synthesis-filter gain
+differs by decomposition level), so SPERR separately dequantizes and
+inverse-transforms a trial reconstruction, diffs it against the original
+signal, and stores an exact correction for every point that misses the
+bound. `OutlierCorrectStage` implements that same *mechanism*, arrived at
+independently from the description in `Outlier_Coder.h`/`Outlier_Coder.cpp`
+and the surrounding call site in `SPECK_FLT::compress()`/`decompress()`
+(`src/SPECK_FLT.cpp`) — not by porting or adapting any of SPERR's code.
+Concretely different: SPERR's `Outlier_Coder` is a private member object
+invoked imperatively inside one large `SPECK_FLT` orchestrator function with
+direct access to every intermediate array (there's no DAG); this stage is a
+graph-native primitive with an explicit two-port contract
+(`Pipeline::bindExternalInput()` supplies the raw field) and a
+transform-agnostic `Reconstructor` policy so the same mechanism works after
+any reversible transform, not just CDF 9/7. See
+`modules/coders/outlier_correct/outlier_correct_stage.h`'s doc comment and
+`memory/speck_gpu_design.md` sec.9 for the full design history, including
+why a coefficient-domain scaling fix was tried first and rejected.
+
+SPERR (Apache License 2.0, see the CDF97 entry above) was read only to
+understand the reference mechanism, not to derive this implementation from.

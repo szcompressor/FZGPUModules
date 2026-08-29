@@ -1,5 +1,11 @@
 #pragma once
 
+// Lifting constants, boundary handling, level-count rule, and 3-D dyadic/
+// wavelet-packet selection rule ported from the SPERR project (Li,
+// Lindstrom, Clyne — NCAR), Apache License 2.0 — see THIRD_PARTY.md.
+// Original: include/CDF97.h, src/CDF97.cpp in https://github.com/NCAR/SPERR.
+// GPU kernels (this file) are FZGPUModules' own.
+
 /**
  * @file cdf97_kernels.cuh
  * @brief Separable multi-level CDF 9/7 DWT built on the 1-D lifting primitive.
