@@ -113,11 +113,60 @@ static std::string generateWarpTISource(int blocks_per_thread) {
     src += "}\n";
     return src;
 }
-static bool tiEnabled(const WarpFusionSpec& spec) {
-    const char* e = std::getenv("FZ_TI");
-    if (!(e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O' || e[0] == 't' || e[0] == 'T'))) return false;
+// The chain shapes TI supports today (milestone 1): Lorenzo1D + AdaptiveBitpack, block=32.
+static bool tiSupportedChain(const WarpFusionSpec& spec) {
     return spec.predictor == "Lorenzo1DPredictor" && spec.coder == "AdaptiveBitpackCoder" &&
-           spec.elems_per_lane == 1 && spec.transforms.empty();   // milestone-1 support only
+           spec.elems_per_lane == 1 && spec.transforms.empty();
+}
+static bool envOn(const char* name) {
+    const char* e = std::getenv(name);
+    return e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O' || e[0] == 't' || e[0] == 'T');
+}
+static float adaptiveThreshold() {   // avg fixed-rate crossover: <= → TI, > → warp-coop
+    if (const char* e = std::getenv("FZ_ADAPTIVE_THRESH")) { const float v = std::atof(e); if (v > 0) return v; }
+    return 16.0f;   // measured crossover: xx r~14 (TI wins 393 vs 236), vx r~17.6 (warp-coop wins);
+                    // provisional 2-point fit — retune with more fields.
+}
+
+// Probe: over a strided sample of blocks, compute each block's fixed-rate (serial Lorenzo1D +
+// bitWidth) and accumulate. Cheap prediction-quality signal for the adaptive dispatch.
+__global__ void ti_rate_probe_kernel(const float* __restrict__ in, size_t n, float inv2eb,
+                                     size_t num_blocks, size_t stride,
+                                     unsigned int* __restrict__ rate_sum, unsigned int* __restrict__ cnt) {
+    const size_t s  = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t bi = s * stride;
+    if (bi >= num_blocks) return;
+    const size_t base = bi * 32u;
+    int prev = 0; unsigned int acc = 0u;
+    #pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        const size_t g = base + static_cast<size_t>(i);
+        const int q = (g < n) ? __float2int_rn(in[g] * inv2eb) : 0;
+        const int d = q - prev; prev = q;
+        acc |= (d < 0) ? static_cast<unsigned>(-d) : static_cast<unsigned>(d);
+    }
+    atomicAdd(rate_sum, acc ? static_cast<unsigned>(32 - __clz(acc)) : 0u);
+    atomicAdd(cnt, 1u);
+}
+
+// Returns the sampled average fixed-rate (prediction quality). ~SAMPLE blocks, strided.
+static float probeAvgRate(const float* d_in, size_t n, float inv2eb, size_t num_blocks,
+                          MemoryPool* pool, cudaStream_t stream) {
+    const size_t SAMPLE = 8192;
+    const size_t stride = num_blocks > SAMPLE ? num_blocks / SAMPLE : 1;
+    const size_t nsamp  = (num_blocks + stride - 1) / stride;
+    auto* d_sum = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t), stream, "ti_probe_sum"));
+    auto* d_cnt = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t), stream, "ti_probe_cnt"));
+    FZ_CUDA_CHECK(cudaMemsetAsync(d_sum, 0, sizeof(uint32_t), stream));
+    FZ_CUDA_CHECK(cudaMemsetAsync(d_cnt, 0, sizeof(uint32_t), stream));
+    const unsigned T = 256, G = static_cast<unsigned>((nsamp + T - 1) / T);
+    ti_rate_probe_kernel<<<G, T, 0, stream>>>(d_in, n, inv2eb, num_blocks, stride, d_sum, d_cnt);
+    uint32_t h_sum = 0, h_cnt = 0;
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_sum, d_sum, 4, cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&h_cnt, d_cnt, 4, cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    pool->free(d_cnt, stream); pool->free(d_sum, stream);
+    return h_cnt ? static_cast<float>(h_sum) / static_cast<float>(h_cnt) : 0.0f;
 }
 static int tiBlocksPerThread() {   // blocks each thread owns; warp = 32*this blocks
     if (const char* e = std::getenv("FZ_TI_BPT")) { const int v = std::atoi(e); if (v >= 1 && v <= 256) return v; }
@@ -177,7 +226,19 @@ size_t launchNvrtcWarpFused(
 
     // ── Thread-independent (cuSZp-layout) path: CTA=1 warp, each thread owns BPT blocks; warp
     // owns 32*BPT blocks; scan over num_warps = ceil(num_blocks/(32*BPT)). Byte-identical to AB.
-    if (tiEnabled(spec)) {
+    // Use TI when the chain supports it AND (FZ_TI forces it, OR FZ_ADAPTIVE probes low avg rate
+    // = compressible data, TI's winning regime). Both paths are byte-identical → pure throughput.
+    bool use_ti = false;
+    if (tiSupportedChain(spec)) {
+        if (envOn("FZ_TI")) {
+            use_ti = true;
+        } else if (envOn("FZ_ADAPTIVE")) {
+            const float inv2eb  = (params_bytes >= sizeof(float)) ? *reinterpret_cast<const float*>(pred_params) : 0.0f;
+            const float avg_r   = probeAvgRate(d_in, n_ab, inv2eb, num_blocks, pool, stream);
+            use_ti = (avg_r <= adaptiveThreshold());
+        }
+    }
+    if (use_ti) {
         const int      BPT             = tiBlocksPerThread();
         const size_t   blocks_per_warp = static_cast<size_t>(BPT) * 32u;
         const unsigned num_warps       = static_cast<unsigned>((num_blocks + blocks_per_warp - 1) / blocks_per_warp);
