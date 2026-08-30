@@ -93,6 +93,37 @@ static std::string generateWarpSinglePassSource(const WarpFusionSpec& spec, int 
 // Single-pass (coarse warp-granular decoupled look-back) is the DEFAULT warp-register path:
 // one kernel, no CUB scan, no delta recompute, byte-identical to the two-pass path. Set
 // FZ_SINGLEPASS=0 to force the legacy two-pass (rate → CUB scan → pack) for A/B.
+// ── Thread-independent (cuSZp-layout) path — Phase 4 wiring, gated FZ_TI=1 ────────────────
+// Milestone 1 supports ONLY Lorenzo1D + AdaptiveBitpack (block=32, no transforms): those map to
+// warp_ti::ThreadLorenzo1DPredictor / ThreadFixedRateCoder, which emit the byte-identical AB stream.
+static std::string generateWarpTISource(int blocks_per_thread) {
+    std::string src;
+    src += "#include \"fused/fused_block/warp_ti_fusion.cuh\"\n";
+    src += "using namespace fz::fused::warp_ti;\n";
+    src += "extern \"C\" __global__ void fz_fused_warp_ti(\n";
+    src += "    const float* in, unsigned long long n, const unsigned char* pp,\n";
+    src += "    unsigned word_bytes, unsigned long long num_blocks,\n";
+    src += "    unsigned char* meta, unsigned char* payload,\n";
+    src += "    unsigned* g_state, unsigned* g_agg, unsigned* g_incl, unsigned long long num_warps) {\n";
+    src += "  ThreadLorenzo1DPredictor pred = ThreadLorenzo1DPredictor::fromParams(in, (size_t)n, pp);\n";
+    src += "  fused_ti_body<" + std::to_string(blocks_per_thread) +
+           ", ThreadFixedRateCoder, ThreadLorenzo1DPredictor>(\n";
+    src += "      pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, payload,\n";
+    src += "      g_state, g_agg, g_incl, (size_t)num_warps);\n";
+    src += "}\n";
+    return src;
+}
+static bool tiEnabled(const WarpFusionSpec& spec) {
+    const char* e = std::getenv("FZ_TI");
+    if (!(e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O' || e[0] == 't' || e[0] == 'T'))) return false;
+    return spec.predictor == "Lorenzo1DPredictor" && spec.coder == "AdaptiveBitpackCoder" &&
+           spec.elems_per_lane == 1 && spec.transforms.empty();   // milestone-1 support only
+}
+static int tiBlocksPerThread() {   // blocks each thread owns; warp = 32*this blocks
+    if (const char* e = std::getenv("FZ_TI_BPT")) { const int v = std::atoi(e); if (v >= 1 && v <= 256) return v; }
+    return 32;   // cuSZp default (block_num=32 → 32768 elems/warp)
+}
+
 static bool singlePassEnabled() {
     const char* e = std::getenv("FZ_SINGLEPASS");
     if (!e) return true;                                   // default on
@@ -143,6 +174,33 @@ size_t launchNvrtcWarpFused(
     const unsigned grid = static_cast<unsigned>((num_blocks + WPB - 1) / WPB);
     unsigned long long n_arg = n_ab, nb_arg = num_blocks;
     unsigned wb_arg = cfg.word_bytes;
+
+    // ── Thread-independent (cuSZp-layout) path: CTA=1 warp, each thread owns BPT blocks; warp
+    // owns 32*BPT blocks; scan over num_warps = ceil(num_blocks/(32*BPT)). Byte-identical to AB.
+    if (tiEnabled(spec)) {
+        const int      BPT             = tiBlocksPerThread();
+        const size_t   blocks_per_warp = static_cast<size_t>(BPT) * 32u;
+        const unsigned num_warps       = static_cast<unsigned>((num_blocks + blocks_per_warp - 1) / blocks_per_warp);
+        auto* d_state = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_warps, stream, "ti_lb_state"));
+        auto* d_agg   = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_warps, stream, "ti_lb_agg"));
+        auto* d_incl  = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_warps, stream, "ti_lb_incl"));
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_state, 0, sizeof(uint32_t)*num_warps, stream));  // LB_NONE
+
+        const std::string tsrc = generateWarpTISource(BPT);
+        CUfunction tik = reinterpret_cast<CUfunction>(nvrtcGetKernel(tsrc, "fz_fused_warp_ti"));
+        unsigned long long nw_arg = num_warps;
+        void* ti_args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params, (void*)&wb_arg,
+                            (void*)&nb_arg, (void*)&d_meta, (void*)&d_payload,
+                            (void*)&d_state, (void*)&d_agg, (void*)&d_incl, (void*)&nw_arg };
+        CU_CHECK(cuLaunchKernel(tik, num_warps,1,1, 32u,1,1, 0, (CUstream)stream, ti_args, nullptr));
+
+        uint32_t h_total = 0;   // g_incl[last warp] == total payload bytes
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&h_total, d_incl + num_warps-1, 4, cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        pool->free(d_incl, stream); pool->free(d_agg, stream); pool->free(d_state, stream);
+        pool->free(d_params, stream);
+        return meta_region + static_cast<size_t>(h_total);
+    }
 
     // ── Single-pass decoupled-lookback path (one kernel, no CUB scan, no recompute).
     // Small fields can't spawn enough warps to hide the cross-warp look-back latency, so the

@@ -148,10 +148,10 @@ struct ThreadFixedRateCoder {
 
 // ── Harness (Phase 3) ────────────────────────────────────────────────────────
 // CTA = 1 warp. Thread `lane` owns block (jb,lane) = linear index warp_block_base + jb*32 + lane
-// for jb in [0,BlocksPerWarp). Holds all codes, computes LINEAR-order byte offsets with a 2-D
+// for jb in [0,BlocksPerThread). Holds all codes, computes LINEAR-order byte offsets with a 2-D
 // warp prefix, gets the warp's base via the decoupled look-back, then packs. `meta`/`payload`
 // point at the AdaptiveBitpack meta region and payload region of the archive.
-template<int BlocksPerWarp, class Coder, class Pred>
+template<int BlocksPerThread, class Coder, class Pred>
 __device__ __forceinline__ void fused_ti_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint8_t* __restrict__ payload,
@@ -162,13 +162,13 @@ __device__ __forceinline__ void fused_ti_body(
     const uint32_t w    = blockIdx.x;                 // CTA = 1 warp ⇒ global warp id
     if (static_cast<size_t>(w) >= num_warps) return;
 
-    const size_t warp_block_base = static_cast<size_t>(w) * BlocksPerWarp * 32u;
+    const size_t warp_block_base = static_cast<size_t>(w) * BlocksPerThread * 32u;
 
     // ── Phase A: predict + cost every block this thread owns (one per row jb).
-    int      d[BlocksPerWarp][32];   // held codes (local memory) — no recompute in pack
-    uint32_t bcost[BlocksPerWarp];   // this lane's block cost per row
+    int      d[BlocksPerThread][32];   // held codes (local memory) — no recompute in pack
+    uint32_t bcost[BlocksPerThread];   // this lane's block cost per row
     #pragma unroll 1
-    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+    for (int jb = 0; jb < BlocksPerThread; ++jb) {
         const size_t b = warp_block_base + static_cast<size_t>(jb) * 32u + lane;
         if (b < num_blocks) {
             const size_t base = b * 32u;
@@ -182,10 +182,10 @@ __device__ __forceinline__ void fused_ti_body(
 
     // ── Phase B: LINEAR-order 2-D prefix. block(jb,lane) sits at linear pos jb*32+lane, so its
     // exclusive byte offset within the warp = (sum of rows < jb) + (intra-row exclusive prefix).
-    uint32_t blk_excl[BlocksPerWarp];
+    uint32_t blk_excl[BlocksPerThread];
     uint32_t warp_total = 0u;        // cumulative sum of full rows processed so far
     #pragma unroll 1
-    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+    for (int jb = 0; jb < BlocksPerThread; ++jb) {
         const uint32_t v = bcost[jb];
         uint32_t inc = v;
         #pragma unroll
@@ -208,7 +208,7 @@ __device__ __forceinline__ void fused_ti_body(
 
     // ── Phase D: pack every held block at its resolved linear offset.
     #pragma unroll 1
-    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+    for (int jb = 0; jb < BlocksPerThread; ++jb) {
         const size_t b = warp_block_base + static_cast<size_t>(jb) * 32u + lane;
         if (b < num_blocks) {
             const size_t base = b * 32u;
