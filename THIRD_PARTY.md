@@ -1,4 +1,4 @@
-# Third-Party Licenses {#third_party_notices}
+# Third-Party Licenses
 
 FZGPUModules incorporates or builds on code and algorithms from the following
 third-party projects. Some research artifacts named below do not publish a
@@ -166,7 +166,7 @@ under contract DE-SC0022223.
 
 ---
 
-## cuSZ {#third_party_cusz}
+## cuSZ
 
 **Used by:** `LorenzoQuantStage`, `HuffmanStage`
 
