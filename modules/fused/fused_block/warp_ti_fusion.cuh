@@ -76,6 +76,103 @@ struct ThreadLorenzo1DPredictor {
     }
 };
 
+// ── FSZ AdaptiveLorenzo predictor (Phase 6) ──────────────────────────────────
+// One thread owns a whole tile (blocks_per_tile coder-blocks of 32). It runs FSZ's
+// multi-order prediction + exact 4-mode (LZ1 / LZ2 / ±centering) cost decision SERIALLY
+// in-register — the cross-warp reduction that blocks the warp-cooperative layout is gone.
+// Emits the chosen mode's residuals (for the tile's blocks), the 2-bit mode, and the mean.
+// Byte-identical to the staged AdaptiveLorenzo (same tile chain, same exact-cost decision).
+// FSZ default config: blocks_per_tile=8 (256-elem tile), order2 + centering enabled.
+namespace fsz_detail {
+    __device__ __host__ __forceinline__ uint32_t absu(int v) {
+        return (v < 0) ? static_cast<uint32_t>(-(long long)v) : static_cast<uint32_t>(v);
+    }
+    __device__ __host__ __forceinline__ int bitw(uint32_t x) {
+#ifdef __CUDA_ARCH__
+        return x ? (32 - __clz(x)) : 0;
+#else
+        int b = 0; while (x) { ++b; x >>= 1; } return b;
+#endif
+    }
+    // AdaptiveBitpack per-block encoded size: 0 if all-zero, else sign bitmap + r planes (4 B each).
+    __device__ __host__ __forceinline__ uint32_t blockCost(int r) {
+        return (r > 0) ? 4u * (static_cast<uint32_t>(r) + 1u) : 0u;
+    }
+    constexpr uint8_t kModeOrder2 = 0x1, kModeCentering = 0x2;
+}
+
+// TileElems = blocks_per_tile*32. Fixed to the FSZ default (256) for milestone 1.
+template<int BlocksPerTile>
+struct ThreadAdaptiveLorenzoPredictor {
+    static constexpr int TileElems = BlocksPerTile * 32;
+    const float* in;
+    size_t       n;
+    float        inv2eb;
+    __device__ static ThreadAdaptiveLorenzoPredictor fromParams(const float* in, size_t n, const void* pp) {
+        return ThreadAdaptiveLorenzoPredictor{in, n, static_cast<const warp::Lorenzo1DParams*>(pp)->inv2eb};
+    }
+    // Fill out[TileElems] with the chosen mode's residuals; set *mode and *mean. `base` is the
+    // tile's first global element index; `count` is the live element count in this tile.
+    __device__ __host__ __forceinline__ void predict_tile(size_t base, uint32_t count,
+                                                          int* __restrict__ out,
+                                                          uint8_t* __restrict__ mode_out,
+                                                          int* __restrict__ mean_out) const {
+        using namespace fsz_detail;
+        int v[TileElems], d1[TileElems], d2[TileElems];
+        for (int i = 0; i < TileElems; ++i) {
+            const size_t g = base + static_cast<size_t>(i);
+#ifdef __CUDA_ARCH__
+            v[i] = (g < n) ? __float2int_rn(in[g] * inv2eb) : 0;
+#else
+            v[i] = (g < n) ? (int)lrintf(in[g] * inv2eb) : 0;
+#endif
+        }
+        int pv = 0;  for (int i = 0; i < TileElems; ++i) { d1[i] = v[i] - pv; pv = v[i]; }
+        int pd = 0;  for (int i = 0; i < TileElems; ++i) { d2[i] = d1[i] - pd; pd = d1[i]; }
+
+        long long sum = 0; for (uint32_t i = 0; i < count; ++i) sum += v[i];
+        const long long cnt = count ? count : 1;
+        const int mu = static_cast<int>((sum >= 0) ? (sum + cnt / 2) / cnt : (sum - cnt / 2) / cnt);
+        const int c0 = v[0] - mu;
+
+        uint32_t acc1[BlocksPerTile] = {0}, acc2[BlocksPerTile] = {0};
+        for (uint32_t i = 0; i < count; ++i) { acc1[i >> 5] |= absu(d1[i]); acc2[i >> 5] |= absu(d2[i]); }
+        uint32_t acc1c0 = 0u, acc2c0 = 0u;
+        for (uint32_t i = 0; i < count && i < 32u; ++i) {
+            const int r1 = (i == 0) ? c0 : d1[i];
+            const int r2 = (i == 0) ? c0 : ((i == 1) ? (d1[1] - c0) : d2[i]);
+            acc1c0 |= absu(r1); acc2c0 |= absu(r2);
+        }
+
+        uint32_t c_lz1 = 0u, c_lz2 = 0u;
+        for (int w = 0; w < BlocksPerTile; ++w) {
+            c_lz1 += blockCost(bitw(acc1[w]));
+            c_lz2 += blockCost(bitw(acc2[w]));
+        }
+        const uint32_t mean_cost = 4u;
+        uint32_t costs[4];
+        costs[0] = c_lz1;
+        costs[1] = c_lz2;
+        costs[2] = c_lz1 - blockCost(bitw(acc1[0])) + blockCost(bitw(acc1c0)) + mean_cost;
+        costs[3] = c_lz2 - blockCost(bitw(acc2[0])) + blockCost(bitw(acc2c0)) + mean_cost;
+        int best = 0;
+        for (int i = 1; i < 4; ++i) if (costs[i] < costs[best]) best = i;
+        const uint8_t mode = static_cast<uint8_t>(((best & 1) ? kModeOrder2 : 0) |
+                                                  ((best & 2) ? kModeCentering : 0));
+        const bool ord2 = (mode & kModeOrder2) != 0;
+        const bool cent = (mode & kModeCentering) != 0;
+        for (int i = 0; i < TileElems; ++i) {
+            int o;
+            if (!ord2)      o = (cent && i == 0) ? c0 : d1[i];
+            else if (!cent) o = d2[i];
+            else            o = (i == 0) ? c0 : ((i == 1) ? (d1[1] - c0) : d2[i]);
+            out[i] = o;
+        }
+        *mode_out = mode;
+        *mean_out = mu;
+    }
+};
+
 // ── Coder policy interface (Phase 2) ─────────────────────────────────────────
 // A thread-independent coder consumes one thread's 32 block codes and works in-register
 // (no cross-lane ops). Byte-identical to AdaptiveBitpack so the staged inverse decodes it.
