@@ -50,12 +50,28 @@ struct ThreadLorenzo1DPredictor {
     }
     __device__ __forceinline__ void predict(size_t base, int (&d)[32]) const {
         int prev = 0;
-        #pragma unroll
-        for (int i = 0; i < 32; ++i) {
-            const size_t g = base + static_cast<size_t>(i);
-            const int q = (g < n) ? __float2int_rn(in[g] * inv2eb) : 0;
-            d[i] = q - prev;
-            prev = q;
+        if (base + 32u <= n) {
+            // Vectorized 128-bit loads (the block is 32 contiguous floats, in+base is 16 B
+            // aligned since base%4==0). Fewer load instructions + better MLP than 32 scalars;
+            // same float values ⇒ byte-identical codes.
+            const float4* in4 = reinterpret_cast<const float4*>(in + base);
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const float4 v = in4[j];
+                int q;
+                q = __float2int_rn(v.x * inv2eb); d[j*4+0] = q - prev; prev = q;
+                q = __float2int_rn(v.y * inv2eb); d[j*4+1] = q - prev; prev = q;
+                q = __float2int_rn(v.z * inv2eb); d[j*4+2] = q - prev; prev = q;
+                q = __float2int_rn(v.w * inv2eb); d[j*4+3] = q - prev; prev = q;
+            }
+        } else {   // partial tail block
+            #pragma unroll
+            for (int i = 0; i < 32; ++i) {
+                const size_t g = base + static_cast<size_t>(i);
+                const int q = (g < n) ? __float2int_rn(in[g] * inv2eb) : 0;
+                d[i] = q - prev;
+                prev = q;
+            }
         }
     }
 };

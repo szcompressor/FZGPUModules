@@ -121,7 +121,7 @@ static bool tiEnabled(const WarpFusionSpec& spec) {
 }
 static int tiBlocksPerThread() {   // blocks each thread owns; warp = 32*this blocks
     if (const char* e = std::getenv("FZ_TI_BPT")) { const int v = std::atoi(e); if (v >= 1 && v <= 256) return v; }
-    return 32;   // cuSZp default (block_num=32 → 32768 elems/warp)
+    return 8;   // measured optimum with float4 loads (more warps + less local mem than cuSZp's 32)
 }
 
 static bool singlePassEnabled() {
