@@ -73,6 +73,79 @@ struct ThreadLorenzo1DPredictor {
 //                                 const uint8_t* meta, uint8_t* out);
 //   };
 
+// Thread-independent AdaptiveBitpack: one thread owns all 32 block codes, so the warp-
+// cooperative ballot/shfl of AdaptiveBitpackCoder becomes serial in-register loops. Emits
+// the IDENTICAL byte stream (same meta/selector/sign/plane layout, 32-bit = 4-byte words),
+// so the staged AdaptiveBitpack inverse decodes it. 32-element blocks only ⇒ word_bytes==4.
+struct ThreadFixedRateCoder {
+    static constexpr uint32_t meta_bytes = 2;
+
+    // Writes meta[0..1] and returns this block's payload byte length. Mirrors
+    // AdaptiveBitpackCoder::cost<1>: plain (fixed-rate over all) vs outlier (elem0 raw + rate
+    // over the rest), whichever is cheaper.
+    __device__ static __forceinline__ uint32_t cost(const int (&d)[32], uint32_t word_bytes,
+                                                    uint32_t count, uint8_t* __restrict__ meta) {
+        uint32_t acc_all = 0u, acc_rest = 0u;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t av = warp::absU_i32(d[i]);
+            acc_all |= av;
+            if (i > 0) acc_rest |= av;
+        }
+        const uint32_t mag0     = (count > 0) ? warp::absU_i32(d[0]) : 0u;
+        const int      fr_all   = warp::bitWidth32(acc_all);
+        const int      fr_rest  = warp::bitWidth32(acc_rest);
+        const uint32_t ob_bytes = static_cast<uint32_t>((warp::bitWidth32(mag0) + 7) / 8);
+        const uint32_t cost_plain = (fr_all  > 0) ? word_bytes * (fr_all  + 1u) : 0u;
+        const uint32_t cost_out   = ob_bytes + ((fr_rest > 0) ? word_bytes * (fr_rest + 1u) : word_bytes);
+        if (cost_plain <= cost_out) { meta[0] = static_cast<uint8_t>(fr_all); meta[1] = 0; return cost_plain; }
+        meta[0] = static_cast<uint8_t>(fr_rest);
+        meta[1] = static_cast<uint8_t>(1u | ((ob_bytes - 1u) << 1));
+        return cost_out;
+    }
+
+    // Writes the payload. Mirrors AdaptiveBitpackCoder::pack<1> byte-for-byte: sign mask (4 B
+    // LE, bit i = element i) then r bit-planes (4 B each); outlier prepends elem0's magnitude
+    // and drops elem0 from the planes.
+    __device__ static __forceinline__ void pack(const int (&d)[32], uint32_t word_bytes,
+                                                uint32_t count, const uint8_t* __restrict__ meta,
+                                                uint8_t* __restrict__ out) {
+        const int     r      = meta[0];
+        const uint8_t sel    = meta[1];
+        const bool    is_out = (sel & 1u) != 0;
+
+        if (!is_out) {
+            if (r == 0) return;
+            uint32_t sm = 0u;
+            for (uint32_t i = 0; i < count; ++i) if (d[i] < 0) sm |= (1u << i);
+            for (uint32_t k = 0; k < 4u; ++k) out[k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
+            for (int p = 0; p < r; ++p) {
+                uint32_t pm = 0u;
+                for (uint32_t i = 0; i < count; ++i)
+                    if ((warp::absU_i32(d[i]) >> p) & 1u) pm |= (1u << i);
+                for (uint32_t k = 0; k < 4u; ++k)
+                    out[word_bytes * (1u + p) + k] = static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+            }
+            return;
+        }
+        // Outlier: [ob_bytes elem0 magnitude LE][sign of all elems][r planes for elems 1..].
+        const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+        const uint32_t mag0     = (count > 0) ? warp::absU_i32(d[0]) : 0u;
+        for (uint32_t k = 0; k < ob_bytes; ++k) out[k] = static_cast<uint8_t>((mag0 >> (8u * k)) & 0xFFu);
+        uint8_t* sign   = out + ob_bytes;
+        uint8_t* planes = out + ob_bytes + word_bytes;
+        uint32_t sm = 0u;
+        for (uint32_t i = 0; i < count; ++i) if (d[i] < 0) sm |= (1u << i);
+        for (uint32_t k = 0; k < 4u; ++k) sign[k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
+        for (int p = 0; p < r; ++p) {
+            uint32_t pm = 0u;
+            for (uint32_t i = 1; i < count; ++i)
+                if ((warp::absU_i32(d[i]) >> p) & 1u) pm |= (1u << i);
+            for (uint32_t k = 0; k < 4u; ++k)
+                planes[word_bytes * p + k] = static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+        }
+    }
+};
+
 // ── Harness (Phase 3) ────────────────────────────────────────────────────────
 // CTA = 1 warp. Thread `lane` owns block (jb,lane) = linear index warp_block_base + jb*32 + lane
 // for jb in [0,BlocksPerWarp). Holds all codes, computes LINEAR-order byte offsets with a 2-D
