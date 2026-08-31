@@ -44,6 +44,11 @@ struct PhaseTimingJson {
     std::vector<double> host_wall_ms;   ///< per-rep host wall time (ms)
 };
 
+struct FusionGroupJson {
+    std::string implementation;
+    std::vector<std::string> stages;
+};
+
 /// Everything the JSON needs, in plain types decoupled from CLI internals.
 struct ReportData {
     // ── tool ──
@@ -100,6 +105,13 @@ struct ReportData {
     /// Emitted only when non-empty, so the common "nothing surprising happened"
     /// case costs no bytes and an absent key reads as "no notes".
     std::vector<std::pair<std::string, std::vector<std::string>>> run_notes;
+
+    // ── finalize-time compression fusion decision ──
+    bool                         has_fusion = false;
+    std::string                  fusion_policy;
+    size_t                       fusion_legal_group_count = 0;
+    std::vector<FusionGroupJson> fusion_installed_groups;
+    std::string                  fusion_fallback_reason;
 
     // ── graph mode (benchmark only; omitted entirely when graph_requested is false) ──
     bool        graph_requested = false;

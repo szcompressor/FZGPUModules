@@ -201,7 +201,7 @@ void write_report_json(const std::string& path, const ReportData& d) {
           << "\", \"device_ms\": " << num(s.device_ms) << " }";
     }
     o << (d.stages.empty() ? "]" : "\n  ]");
-    if (d.graph_requested || !d.stage_versions.empty() || !d.run_notes.empty()) o << ",";
+    if (d.graph_requested || !d.stage_versions.empty() || !d.run_notes.empty() || d.has_fusion) o << ",";
     o << "\n";
 
     // stage_versions: source fingerprint of each stage that ran.  Omitted entirely
@@ -216,7 +216,7 @@ void write_report_json(const std::string& path, const ReportData& d) {
             first = false;
         }
         o << "\n  }";
-        if (d.graph_requested || !d.run_notes.empty()) o << ",";
+        if (d.graph_requested || !d.run_notes.empty() || d.has_fusion) o << ",";
         o << "\n";
     }
 
@@ -236,6 +236,32 @@ void write_report_json(const std::string& path, const ReportData& d) {
             first = false;
         }
         o << "\n  }";
+        if (d.graph_requested || d.has_fusion) o << ",";
+        o << "\n";
+    }
+
+    if (d.has_fusion) {
+        size_t installed_stage_count = 0;
+        for (const auto& group : d.fusion_installed_groups)
+            installed_stage_count += group.stages.size();
+        o << "  \"fusion\": {\n";
+        o << "    \"policy\": \"" << esc(d.fusion_policy) << "\",\n";
+        o << "    \"legal_group_count\": " << d.fusion_legal_group_count << ",\n";
+        o << "    \"installed_group_count\": " << d.fusion_installed_groups.size() << ",\n";
+        o << "    \"installed_stage_count\": " << installed_stage_count << ",\n";
+        o << "    \"fallback_reason\": " << str_or_null(d.fusion_fallback_reason) << ",\n";
+        o << "    \"groups\": [";
+        for (size_t i = 0; i < d.fusion_installed_groups.size(); ++i) {
+            const auto& group = d.fusion_installed_groups[i];
+            o << (i ? "," : "") << "\n      { \"implementation\": \""
+              << esc(group.implementation) << "\", \"stages\": [";
+            for (size_t j = 0; j < group.stages.size(); ++j) {
+                o << (j ? ", " : "") << "\"" << esc(group.stages[j]) << "\"";
+            }
+            o << "] }";
+        }
+        o << (d.fusion_installed_groups.empty() ? "]\n" : "\n    ]\n");
+        o << "  }";
         if (d.graph_requested) o << ",";
         o << "\n";
     }

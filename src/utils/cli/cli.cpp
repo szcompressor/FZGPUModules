@@ -782,6 +782,15 @@ static std::string strategy_str(MemoryStrategy s) {
     return s == MemoryStrategy::MINIMAL ? "MINIMAL" : "PREALLOCATE";
 }
 
+static const char* fusion_policy_str(FusionPolicy p) {
+    switch (p) {
+        case FusionPolicy::Off:   return "off";
+        case FusionPolicy::Auto:  return "auto";
+        case FusionPolicy::Force: return "force";
+    }
+    return "off";
+}
+
 static const char* operation_str(CliOperation op) {
     switch (op) {
         case CliOperation::Compress:   return "compress";
@@ -827,6 +836,16 @@ static void fill_from_pipeline(fz::cli::ReportData& d, const Pipeline& p) {
     // key order would make otherwise-identical reports diff.
     std::sort(d.run_notes.begin(), d.run_notes.end(),
               [](const auto& a2, const auto& b2) { return a2.first < b2.first; });
+
+    const FusionInfo& fusion = p.getFusionInfo();
+    d.has_fusion = true;
+    d.fusion_policy = fusion_policy_str(fusion.policy);
+    d.fusion_legal_group_count = fusion.legal_group_count;
+    d.fusion_fallback_reason = fusion.fallback_reason;
+    d.fusion_installed_groups.clear();
+    for (const auto& group : fusion.installed_groups) {
+        d.fusion_installed_groups.push_back({group.implementation, group.stages});
+    }
 }
 
 // Append per-stage device timings from a perf result into the report.
