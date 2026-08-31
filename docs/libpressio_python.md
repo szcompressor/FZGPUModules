@@ -103,7 +103,7 @@ comp = lp.PressioCompressor.from_config({
     },
 })
 
-compressed   = comp.encode(data)
+compressed   = comp.encode(data)              # PressioDataCuda, even for this host `data` -- see below
 decompressed = comp.decode(compressed, data.copy())
 
 print(f"max error: {float(abs(data - decompressed).max()):.3e}")  # <= 1e-3
@@ -139,9 +139,21 @@ branches into one stage, direction-dependent stages, config-file mode) build
 `encode()`/`decode()` accept any object exposing `__cuda_array_interface__`
 version 3 (CuPy arrays, contiguous PyTorch CUDA tensors, etc.), not just NumPy
 arrays. Passed a device-resident input, libpressio constructs the underlying
-`pressio_data` directly in the `"cudamalloc"` domain — no host round-trip — and
-`encode()`/`decode()` hand back a `PressioDataCuda` (itself exposing
-`__cuda_array_interface__`) instead of a NumPy array:
+`pressio_data` directly in the `"cudamalloc"` domain — no host round-trip.
+
+**`encode()`'s return is always device-resident for `fzgpumodules`, regardless
+of input.** `compress_device()` (`fzgpumodules.cc`) unconditionally builds its
+output `pressio_data` in the `"cudamalloc"` domain, so `comp.encode(data)`
+hands back a `PressioDataCuda` — not a NumPy byte array — even when `data` is
+a plain host NumPy array. `PressioDataCuda` exposes `__cuda_array_interface__`
+plus `.shape`/`.dtype`; there is no `.nbytes`, so get the compressed size via
+`int(np.prod(compressed.shape)) * compressed.dtype.itemsize` (dtype is
+`uint8`, so this is just `compressed.shape[0]`) rather than
+`compressed.nbytes`. Passing it straight into `decode()` needs no conversion —
+`decode()` reads it via the same `cudamalloc` domain either way. `decode()`,
+by contrast, honors the domain of the `out` buffer *you* pass in — a
+device-resident `out` (CuPy, etc.) keeps the result on the GPU; a NumPy `out`
+(or `None`) copies back to host, as in Quick Start above:
 
 ```python
 import cupy as cp
@@ -162,11 +174,9 @@ out          = cp.empty_like(data)
 decompressed = comp.decode(compressed, out)            # stays on the GPU too
 ```
 
-Passing a device-resident `out` to `decode()` is what keeps the result on the
-GPU — passing `None` or a NumPy array (as in Quick Start above) still copies
-back to host, unchanged from before. `test/test_fzgm_python.py`'s
-GPU-resident-round-trip checks cover this without requiring CuPy (a minimal
-`__cuda_array_interface__` wrapper via `ctypes` + `libcudart` stands in).
+`test/test_fzgm_python.py`'s GPU-resident-round-trip checks cover this without
+requiring CuPy (a minimal `__cuda_array_interface__` wrapper via `ctypes` +
+`libcudart` stands in).
 
 Constraints: only contiguous, unmasked, interface-version-3 arrays — strided or
 masked device arrays raise `NotImplementedError`. Compression still stages
@@ -213,7 +223,7 @@ processed. Anything that creates those keys must go in `early_config`.
 ## Encode and Decode
 
 ```python
-compressed   = comp.encode(data)              # returns a numpy byte array
+compressed   = comp.encode(data)              # returns a PressioDataCuda, not a numpy array -- see "GPU-resident data" above
 decompressed = comp.decode(compressed, data.copy())
 ```
 
