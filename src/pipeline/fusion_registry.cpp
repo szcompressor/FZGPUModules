@@ -146,16 +146,15 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
     }
 
     // 3. Split-outlier producer? The quant Map declares "QuantSplitOutlier" and its
-    //    outlier ports arrive as escaping side outputs (vals=port 1, idxs=port 2, the
-    //    quant stage's getOutputNames() order). Hand the pre-allocated buffers to the
+    //    outlier ports arrive as named escaping side outputs. Hand the pre-allocated buffers to the
     //    launcher; it fills them and reports the outlier count. Absent side outputs
     //    (the common single-output chain), these stay null and the launcher no-ops it.
     FusedSideOutput* so_idxs = nullptr;
     FusedSideOutput* so_vals = nullptr;
     if (ctx.side_outputs) {
         for (auto& so : *ctx.side_outputs) {
-            if (so.output_index == 1)      so_vals = &so;
-            else if (so.output_index == 2) so_idxs = &so;
+            if (so.declaration.name == "outlier_vals")      so_vals = &so;
+            else if (so.declaration.name == "outlier_idxs") so_idxs = &so;
         }
     }
     uint32_t* d_side_idxs = nullptr;
@@ -196,15 +195,17 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
 }
 
 const FusedImpl kBuiltins[] = {
-    { "warp-register", &matchesWarpRegister,     &runWarpRegister     },
-    { "chunk-coop",    &matchesChunkCooperative, &runChunkCooperative },
+    { "warp-register",  true,  &matchesWarpRegister,     &runWarpRegister     },
+    { "chunk-coop",     true,  &matchesChunkCooperative, &runChunkCooperative },
 };
 
 } // namespace
 
-const FusedImpl* findFusedImpl(const std::vector<Stage*>& group) {
+const FusedImpl* findFusedImpl(
+    const std::vector<Stage*>& group, bool include_experimental) {
     for (const auto& impl : kBuiltins)
-        if (impl.matches(group)) return &impl;
+        if ((impl.auto_enabled || include_experimental) && impl.matches(group))
+            return &impl;
     return nullptr;
 }
 

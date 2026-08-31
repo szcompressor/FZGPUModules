@@ -37,14 +37,30 @@ namespace fz {
  */
 /**
  * Kernel-fusion policy for compress. `Off` (default) runs every stage staged.
- * `Auto` runs the fusion planner at finalize() and, for each fusable chain that
- * has a registered fused implementation, replaces the group's staged execute()s
- * with one fused kernel — a compress-only optimization that leaves the archive
- * byte-identical (decompress is unaffected). Groups with no registered impl stay
- * staged, so `Auto` is always safe. Enabling fusion disables CUDA graph capture.
- * Overridable at runtime with FZ_FUSION=off|auto. See CN-FUSE-PROOF/PLAN.
+ * `Auto` installs only registered implementations that have passed their
+ * profitability gate. `Force` also permits experimental implementations and is
+ * intended for correctness/performance diagnostics, not production selection.
+ * The planner may select non-overlapping partial groups from one larger compatible
+ * chain; a specialization need not consume the maximal chain. Decompression and
+ * archive semantics remain staged-compatible. Overridable at runtime with
+ * FZ_FUSION=off|auto|force ("experimental" aliases force).
  */
-enum class FusionPolicy { Off, Auto };
+enum class FusionPolicy { Off, Auto, Force };
+
+/// One finalize-time fusion specialization selected for compress execution.
+struct FusionGroupInfo {
+    std::string implementation;
+    std::vector<std::string> stages;
+};
+
+/// Resolved fusion decision for diagnostics and benchmark provenance.
+struct FusionInfo {
+    FusionPolicy policy = FusionPolicy::Off;
+    size_t legal_group_count = 0;
+    std::vector<FusionGroupInfo> installed_groups;
+    /// policy_off, no_legal_group, or no_profitable_implementation; empty on a hit.
+    std::string fallback_reason;
+};
 
 class Pipeline {
 public:
@@ -80,6 +96,8 @@ public:
     FusionPolicy getFusionPolicy() const { return fusion_policy_; }
     /** Number of fused groups installed at finalize() (0 unless Auto matched). */
     size_t getFusedGroupCount() const { return dag_ ? dag_->getFusedGroupCount() : 0; }
+    /** Resolved policy, legal-domain count, installed implementations, and fallback. */
+    const FusionInfo& getFusionInfo() const { return fusion_info_; }
 
     /** Number of parallel CUDA streams for level-based execution. Must be called before finalize(). */
     void setNumStreams(int num_streams);
@@ -843,8 +861,12 @@ private:
     // finalize() sub-steps
     void typeCheckConnections();
     void computeInputAlignment();
-    /// Run the fusion planner and install matched fused groups on the DAG
-    /// (Auto mode / FZ_FUSION=auto). No-op otherwise. May disable graph mode.
+    /// Bind exact one-hop semantic contracts (such as an adaptive selector's
+    /// downstream encoded-size oracle) independently of fusion policy.
+    void bindSemanticContracts();
+    /// Run the fusion planner and install matched fused groups on the DAG.
+    /// Auto admits profitability-approved implementations; Force also admits
+    /// experimental ones. Off is a no-op. May disable graph mode.
     void planAndInstallFusion();
     void notifyStagesFinalizeHooks();
     void refinePoolSize();
@@ -1087,6 +1109,7 @@ private:
     bool graph_mode_enabled_;
     bool graph_captured_;
     FusionPolicy fusion_policy_ = FusionPolicy::Off;
+    FusionInfo fusion_info_;
 
     // Fixed device input buffer whose address is baked into the captured graph.
     // compress() copies user input here before cudaGraphLaunch().

@@ -188,35 +188,95 @@ Stage* Pipeline::addRawStage(Stage* stage) {
 }
 
 void Pipeline::planAndInstallFusion() {
-    // Runtime override (FZ_FUSION=off|auto) wins over the programmatic mode.
+    // Runtime override (FZ_FUSION=off|auto|force) wins over the programmatic mode.
     FusionPolicy mode = fusion_policy_;
     if (const char* e = std::getenv("FZ_FUSION")) {
         const std::string v(e);
         if (v == "off" || v == "0")      mode = FusionPolicy::Off;
         else if (v == "auto" || v == "1") mode = FusionPolicy::Auto;
+        else if (v == "force" || v == "experimental" || v == "2")
+            mode = FusionPolicy::Force;
     }
-    if (mode != FusionPolicy::Auto) return;
+    fusion_info_ = {};
+    fusion_info_.policy = mode;
+    if (mode == FusionPolicy::Off) {
+        fusion_info_.fallback_reason = "policy_off";
+        return;
+    }
 
     std::vector<CompressionDAG::FusedGroupExec> installed;
-    for (auto& g : planFusionGroups(*dag_)) {
-        const FusedImpl* impl = findFusedImpl(g.stages);
-        if (!impl) continue;
-        CompressionDAG::FusedGroupExec fg;
-        fg.impl = impl;
-        fg.stages = g.stages;
-        bool ok = true;
-        for (Stage* s : g.stages) {
-            auto it = stage_to_node_.find(s);
-            if (it == stage_to_node_.end() || !it->second) { ok = false; break; }
-            fg.members.push_back(it->second);
+    const bool include_experimental = mode == FusionPolicy::Force;
+    auto maximal_groups = planFusionGroups(*dag_);
+    fusion_info_.legal_group_count = maximal_groups.size();
+    for (auto& maximal : maximal_groups) {
+        struct Candidate {
+            size_t begin = 0;
+            size_t end = 0; // exclusive
+            const FusedImpl* impl = nullptr;
+        };
+        std::vector<Candidate> candidates;
+        const size_t count = maximal.stages.size();
+        // A maximal legality chain is only the search domain. Registry matches
+        // decide which overlapping partial/full spans have executable plans.
+        for (size_t begin = 0; begin + 1 < count; ++begin) {
+            for (size_t end = count; end >= begin + 2; --end) {
+                std::vector<Stage*> span(
+                    maximal.stages.begin() + static_cast<std::ptrdiff_t>(begin),
+                    maximal.stages.begin() + static_cast<std::ptrdiff_t>(end));
+                if (const FusedImpl* impl = findFusedImpl(span, include_experimental))
+                    candidates.push_back(Candidate{begin, end, impl});
+                if (end == begin + 2) break; // avoid size_t underflow
+            }
         }
-        if (!ok) continue;
-        fg.head = fg.members.front();
-        fg.tail = fg.members.back();
-        FZ_LOG(INFO, "Fusion: installed '%s' over %zu stages", impl->name, g.stages.size());
-        installed.push_back(std::move(fg));
+
+        // Weighted interval selection. Weight = staged launches removed; every
+        // candidate was separately admitted by the evidence-gated registry.
+        std::vector<size_t> best(count + 1, 0);
+        std::vector<const Candidate*> choice(count, nullptr);
+        for (size_t ri = count; ri-- > 0;) {
+            best[ri] = best[ri + 1];
+            for (const Candidate& c : candidates) {
+                if (c.begin != ri) continue;
+                const size_t score = (c.end - c.begin - 1) + best[c.end];
+                if (score > best[ri]) {
+                    best[ri] = score;
+                    choice[ri] = &c;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < count;) {
+            const Candidate* c = choice[i];
+            if (!c) { ++i; continue; }
+            CompressionDAG::FusedGroupExec fg;
+            fg.impl = c->impl;
+            fg.stages.assign(maximal.stages.begin() + static_cast<std::ptrdiff_t>(c->begin),
+                             maximal.stages.begin() + static_cast<std::ptrdiff_t>(c->end));
+            bool ok = true;
+            for (Stage* s : fg.stages) {
+                auto it = stage_to_node_.find(s);
+                if (it == stage_to_node_.end() || !it->second) { ok = false; break; }
+                fg.members.push_back(it->second);
+            }
+            if (ok) {
+                fg.head = fg.members.front();
+                fg.tail = fg.members.back();
+                FusionGroupInfo info;
+                info.implementation = c->impl->name;
+                for (Stage* stage : fg.stages) info.stages.push_back(stage->getName());
+                fusion_info_.installed_groups.push_back(std::move(info));
+                FZ_LOG(INFO, "Fusion: installed '%s' over %zu/%zu compatible stages",
+                       c->impl->name, fg.stages.size(), count);
+                installed.push_back(std::move(fg));
+            }
+            i = c->end;
+        }
     }
-    if (installed.empty()) return;
+    if (installed.empty()) {
+        fusion_info_.fallback_reason = fusion_info_.legal_group_count == 0
+            ? "no_legal_group" : "no_profitable_implementation";
+        return;
+    }
 
     dag_->setFusedGroups(std::move(installed));
     if (graph_mode_enabled_) {
@@ -230,6 +290,25 @@ void Pipeline::planAndInstallFusion() {
     // (planAndInstallFusion runs before preallocateBuffers(), where coloring is
     // applied, so this takes effect.)
     dag_->setColoringEnabled(false);
+}
+
+void Pipeline::bindSemanticContracts() {
+    // Semantic binding is intentionally independent of FusionPolicy: the staged
+    // path must make the same algorithmic choice as a future fused path. For the
+    // initial local contract, require one unambiguous direct consumer. Broader
+    // side-output topology is handled by the later auxiliary-output checkpoint.
+    for (DAGNode* producer : dag_->getNodes()) {
+        if (!producer || !producer->stage || producer->dependents.size() != 1) continue;
+        DAGNode* consumer = producer->dependents.front();
+        if (!consumer || !consumer->stage) continue;
+        const EncodingOracleDecl decl = consumer->stage->getEncodingOracle();
+        if (!decl.valid()) continue;
+        if (producer->stage->bindDownstreamEncodingOracle(decl)) {
+            FZ_LOG(INFO, "Semantic binding: %s <- %s encoded-size oracle '%s'",
+                   producer->stage->getName().c_str(),
+                   consumer->stage->getName().c_str(), decl.op_name.c_str());
+        }
+    }
 }
 
 void Pipeline::finalize() {
@@ -246,6 +325,7 @@ void Pipeline::finalize() {
 
     validate();
     typeCheckConnections();
+    bindSemanticContracts();
 
     auto [sources, sinks] = identifyTopology();
     setupInputBuffers(sources);
