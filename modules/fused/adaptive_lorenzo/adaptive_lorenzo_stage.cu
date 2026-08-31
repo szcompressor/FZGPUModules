@@ -23,6 +23,7 @@
  */
 
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
+#include "coders/adaptive_bitpack/adaptive_bitpack_oracle.cuh"
 #include "stage/stage_registry.h"
 #include <cstring>
 #include <algorithm>
@@ -56,14 +57,33 @@ __device__ __forceinline__ typename std::make_unsigned<T>::type absU(T v) {
     return (v < 0) ? static_cast<U>(~uv + static_cast<U>(1)) : uv;
 }
 
-__device__ __forceinline__ int bitWidth32(uint32_t x) {
-    return x ? (32 - __clz(x)) : 0;
-}
+struct CoderStats {
+    uint32_t all;
+    uint32_t rest;
+    uint32_t first;
+};
 
-// AdaptiveBitpackStage's per-block encoded size: nothing when every residual is
-// zero, else a sign bitmap plus `r` bit-planes, one 32-bit word each.
-__device__ __forceinline__ uint32_t blockCost(int r) {
-    return (r > 0) ? 4u * (static_cast<uint32_t>(r) + 1u) : 0u;
+// Exact policy dispatch shared by staged selection and the future generated
+// tile harness. The quote carries the coder decision even though the staged
+// predictor needs only its payload length; the downstream staged coder will
+// recompute the same decision from the selected residuals.
+__device__ __forceinline__ uint32_t blockCost(
+    CoderStats stats, EncodingOracleKind oracle_kind)
+{
+    switch (oracle_kind) {
+        case EncodingOracleKind::AdaptiveFixedRateBitpack:
+            return adaptive_bitpack_oracle::quoteAdaptiveFixedRate(
+                stats.all, stats.rest, stats.first,
+                /*word_bytes=*/4u).payload_bytes;
+        case EncodingOracleKind::PlainFixedRateBitpack:
+            return adaptive_bitpack_oracle::quotePlainFixedRate(
+                stats.all, /*word_bytes=*/4u).payload_bytes;
+        default:
+            // Standalone/backward-compatible AdaptiveLorenzo uses the legacy
+            // plain policy. Unsupported downstream policies are not bound.
+            return adaptive_bitpack_oracle::quotePlainFixedRate(
+                stats.all, /*word_bytes=*/4u).payload_bytes;
+    }
 }
 
 // Modes are packed 2 bits per tile (4 tiles per byte): at one byte per tile the
@@ -131,14 +151,19 @@ __global__ void adaptive_lorenzo_forward_kernel(
     size_t n,
     uint32_t tile_size,
     bool enable_order2,
-    bool enable_centering)
+    bool enable_centering,
+    EncodingOracleKind oracle_kind)
 {
     // All shared state is now per-WARP, not per-element: nwarps <= 32 because a
     // tile is at most 32 coder blocks of 32. The tile-sized `s` staging buffer and
     // the tile-sized `red` reduction buffer are both gone, so this kernel needs no
     // dynamic shared memory at all (see the launch site).
-    __shared__ uint32_t  acc1[kMaxBlocksPerTile];    // per coder block, LZ1
-    __shared__ uint32_t  acc2[kMaxBlocksPerTile];    // per coder block, LZ2
+    __shared__ uint32_t  acc1[kMaxBlocksPerTile];    // all magnitudes, LZ1
+    __shared__ uint32_t  acc2[kMaxBlocksPerTile];    // all magnitudes, LZ2
+    __shared__ uint32_t  rest1[kMaxBlocksPerTile];   // lanes 1..31, LZ1
+    __shared__ uint32_t  rest2[kMaxBlocksPerTile];   // lanes 1..31, LZ2
+    __shared__ uint32_t  first1[kMaxBlocksPerTile];  // lane 0 magnitude, LZ1
+    __shared__ uint32_t  first2[kMaxBlocksPerTile];  // lane 0 magnitude, LZ2
     __shared__ long long red[kMaxBlocksPerTile];     // per-warp partial sums (mean)
     __shared__ T         sb_last[kMaxBlocksPerTile]; // v at lane 31 of each warp
     __shared__ T         sb_prev[kMaxBlocksPerTile]; // v at lane 30 of each warp
@@ -223,20 +248,33 @@ __global__ void adaptive_lorenzo_forward_kernel(
     const T q0 = s_q0;
 
     // ---- Per-coder-block magnitudes, uncentered ----
-    const uint32_t o1 = warpOr(live ? static_cast<uint32_t>(absU<T>(d1)) : 0u);
-    const uint32_t o2 = warpOr(live ? static_cast<uint32_t>(absU<T>(d2)) : 0u);
-    if (lane == 0) { acc1[warp] = o1; acc2[warp] = o2; }
+    const uint32_t m1 = live ? static_cast<uint32_t>(absU<T>(d1)) : 0u;
+    const uint32_t m2 = live ? static_cast<uint32_t>(absU<T>(d2)) : 0u;
+    const uint32_t o1 = warpOr(m1);
+    const uint32_t o2 = warpOr(m2);
+    const uint32_t r1rest = warpOr(lane > 0u ? m1 : 0u);
+    const uint32_t r2rest = warpOr(lane > 0u ? m2 : 0u);
+    if (lane == 0) {
+        acc1[warp] = o1;  rest1[warp] = r1rest; first1[warp] = m1;
+        acc2[warp] = o2;  rest2[warp] = r2rest; first2[warp] = m2;
+    }
 
     // ---- Centered variants: only coder block 0 can differ ----
-    uint32_t acc1c0 = 0u, acc2c0 = 0u;
+    CoderStats c1stats{0u, 0u, 0u}, c2stats{0u, 0u, 0u};
     if (enable_centering && warp == 0u) {
         const T c0 = static_cast<T>(q0 - mu);
-        const T r1 = (tid == 0u) ? c0 : d1;
-        T       r2 = d2;
-        if      (tid == 0u) r2 = c0;
-        else if (tid == 1u) r2 = static_cast<T>(d1 - c0);
-        acc1c0 = warpOr(live ? static_cast<uint32_t>(absU<T>(r1)) : 0u);
-        acc2c0 = warpOr(live ? static_cast<uint32_t>(absU<T>(r2)) : 0u);
+        const T cr1 = (tid == 0u) ? c0 : d1;
+        T       cr2 = d2;
+        if      (tid == 0u) cr2 = c0;
+        else if (tid == 1u) cr2 = static_cast<T>(d1 - c0);
+        const uint32_t cm1 = live ? static_cast<uint32_t>(absU<T>(cr1)) : 0u;
+        const uint32_t cm2 = live ? static_cast<uint32_t>(absU<T>(cr2)) : 0u;
+        c1stats.all   = warpOr(cm1);
+        c1stats.rest  = warpOr(lane > 0u ? cm1 : 0u);
+        c1stats.first = fz::backend::shfl(cm1, 0, 32);
+        c2stats.all   = warpOr(cm2);
+        c2stats.rest  = warpOr(lane > 0u ? cm2 : 0u);
+        c2stats.first = fz::backend::shfl(cm2, 0, 32);
     }
     __syncthreads();
 
@@ -244,8 +282,8 @@ __global__ void adaptive_lorenzo_forward_kernel(
     if (tid == 0) {
         uint32_t c_lz1 = 0, c_lz2 = 0;
         for (unsigned w = 0; w < nwarps; ++w) {
-            c_lz1 += blockCost(bitWidth32(acc1[w]));
-            c_lz2 += blockCost(bitWidth32(acc2[w]));
+            c_lz1 += blockCost(CoderStats{acc1[w], rest1[w], first1[w]}, oracle_kind);
+            c_lz2 += blockCost(CoderStats{acc2[w], rest2[w], first2[w]}, oracle_kind);
         }
         uint32_t costs[4];
         costs[0] = c_lz1;
@@ -259,11 +297,13 @@ __global__ void adaptive_lorenzo_forward_kernel(
             // genuinely saves those bytes. (The 2-bit mode is charged to nobody
             // because every tile pays it regardless of what it picks.)
             const uint32_t mean_cost = static_cast<uint32_t>(sizeof(T));
-            costs[2] = c_lz1 - blockCost(bitWidth32(acc1[0]))
-                             + blockCost(bitWidth32(acc1c0)) + mean_cost;
+            costs[2] = c_lz1
+                - blockCost(CoderStats{acc1[0], rest1[0], first1[0]}, oracle_kind)
+                + blockCost(c1stats, oracle_kind) + mean_cost;
             if (enable_order2)
-                costs[3] = c_lz2 - blockCost(bitWidth32(acc2[0]))
-                                 + blockCost(bitWidth32(acc2c0)) + mean_cost;
+                costs[3] = c_lz2
+                    - blockCost(CoderStats{acc2[0], rest2[0], first2[0]}, oracle_kind)
+                    + blockCost(c2stats, oracle_kind) + mean_cost;
         }
         uint32_t best = 0;
         for (uint32_t i = 1; i < 4; ++i)
@@ -384,7 +424,8 @@ template<typename T>
 void launchAdaptiveLorenzoForward(
     const T* d_input, T* d_residuals, uint8_t* d_modes_dense, T* d_means_dense,
     uint32_t* d_flags, size_t n, uint32_t tile_size,
-    bool enable_order2, bool enable_centering, cudaStream_t stream)
+    bool enable_order2, bool enable_centering, EncodingOracleKind oracle_kind,
+    cudaStream_t stream)
 {
     if (n == 0) return;
     const int grid = static_cast<int>((n + tile_size - 1) / tile_size);
@@ -392,7 +433,7 @@ void launchAdaptiveLorenzoForward(
     // (<= 32 entries each) and lives in static __shared__ arrays.
     adaptive_lorenzo_forward_kernel<T><<<grid, tile_size, 0, stream>>>(
         d_input, d_residuals, d_modes_dense, d_means_dense, d_flags, n, tile_size,
-        enable_order2, enable_centering);
+        enable_order2, enable_centering, oracle_kind);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -526,7 +567,8 @@ void AdaptiveLorenzoStage<T>::execute(
         launchAdaptiveLorenzoForward<T>(
             static_cast<const T*>(inputs[0]), static_cast<T*>(outputs[0]),
             d_modes_dense_, d_means_dense_, d_flags_,
-            n, tile, config_.enable_order2, config_.enable_centering, stream);
+            n, tile, config_.enable_order2, config_.enable_centering,
+            getBoundEncodingOracleKind(), stream);
 
         // flags[tiles] = 0 so offsets[tiles] lands on the total centered count.
         FZ_CUDA_CHECK(cudaMemsetAsync(d_flags_ + tiles, 0, sizeof(uint32_t), stream));
@@ -600,9 +642,11 @@ template class AdaptiveLorenzoStage<int16_t>;
 template class AdaptiveLorenzoStage<int32_t>;
 
 template void launchAdaptiveLorenzoForward<int16_t>(
-    const int16_t*, int16_t*, uint8_t*, int16_t*, uint32_t*, size_t, uint32_t, bool, bool, cudaStream_t);
+    const int16_t*, int16_t*, uint8_t*, int16_t*, uint32_t*, size_t, uint32_t,
+    bool, bool, EncodingOracleKind, cudaStream_t);
 template void launchAdaptiveLorenzoForward<int32_t>(
-    const int32_t*, int32_t*, uint8_t*, int32_t*, uint32_t*, size_t, uint32_t, bool, bool, cudaStream_t);
+    const int32_t*, int32_t*, uint8_t*, int32_t*, uint32_t*, size_t, uint32_t,
+    bool, bool, EncodingOracleKind, cudaStream_t);
 
 template void launchAdaptiveLorenzoCompact<int16_t>(
     const uint8_t*, const int16_t*, const uint32_t*, uint8_t*, int16_t*, size_t, cudaStream_t);

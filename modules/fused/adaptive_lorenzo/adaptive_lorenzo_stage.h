@@ -122,6 +122,46 @@ public:
         return config_.coder_block_size * config_.blocks_per_tile;
     }
 
+    /// Bind an exact additive fixed-rate policy exposed by a directly connected
+    /// AdaptiveBitpack stage. Both plain and element-0-outlier selection operate
+    /// independently on the same 32-element coder units.
+    bool bindDownstreamEncodingOracle(const EncodingOracleDecl& decl) override {
+        if (!decl.valid() || !decl.additive ||
+            (decl.kind != EncodingOracleKind::PlainFixedRateBitpack &&
+             decl.kind != EncodingOracleKind::AdaptiveFixedRateBitpack) ||
+            decl.input_data_type != static_cast<uint8_t>(getElementDataType()) ||
+            decl.unit_elems != config_.coder_block_size) {
+            return false;
+        }
+        bound_oracle_ = decl;
+        has_bound_oracle_ = true;
+        return true;
+    }
+
+    bool hasBoundEncodingOracle() const { return has_bound_oracle_; }
+    EncodingOracleKind getBoundEncodingOracleKind() const {
+        return has_bound_oracle_ ? bound_oracle_.kind
+                                 : EncodingOracleKind::PlainFixedRateBitpack;
+    }
+
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || !has_bound_oracle_) return {};
+        return FusionSpec{FusionAccess::TileAdaptive, getTileSize(),
+                          config_.coder_block_size};
+    }
+
+    std::vector<FusedAuxOutputDecl> getFusedAuxOutputs() const override {
+        if (!getFusionSpec().fusable()) return {};
+        return {
+            FusedAuxOutputDecl{1, "modes", FusedAuxSizeKind::FixedBitsPerUnit,
+                               static_cast<uint8_t>(DataType::UINT8), getTileSize(),
+                               2u, 0u},
+            FusedAuxOutputDecl{2, "means", FusedAuxSizeKind::CompactedElements,
+                               static_cast<uint8_t>(getElementDataType()), getTileSize(),
+                               0u, 1u},
+        };
+    }
+
     void execute(
         fz::stream_t stream,
         MemoryPool* pool,
@@ -185,6 +225,12 @@ public:
             ? actual_output_sizes_[index] : 0;
     }
 
+    void setFusedSideOutput(int output_index, size_t bytes) override {
+        if (actual_output_sizes_.size() < 3) actual_output_sizes_.resize(3, 0);
+        if (output_index == 1 || output_index == 2)
+            actual_output_sizes_[static_cast<size_t>(output_index)] = bytes;
+    }
+
     uint16_t getStageTypeId() const override {
         return static_cast<uint16_t>(StageType::ADAPTIVE_LORENZO);
     }
@@ -232,6 +278,8 @@ public:
 
 private:
     Config config_;
+    EncodingOracleDecl bound_oracle_;
+    bool has_bound_oracle_ = false;
     bool   is_inverse_ = false;
     size_t num_elements_ = 0;
     std::vector<size_t> actual_output_sizes_{0, 0, 0};
@@ -283,8 +331,8 @@ extern template class AdaptiveLorenzoStage<int32_t>;
 template<typename T>
 void launchAdaptiveLorenzoForward(
     const T* d_input, T* d_residuals, uint8_t* d_modes, T* d_means,
-    size_t n, uint32_t tile_size, bool enable_order2, bool enable_centering,
-    fz::stream_t stream);
+    uint32_t* d_flags, size_t n, uint32_t tile_size, bool enable_order2,
+    bool enable_centering, EncodingOracleKind oracle_kind, fz::stream_t stream);
 
 /// Inverse: replay each tile's recorded variant.
 template<typename T>

@@ -20,6 +20,9 @@
  *   AL14 MeansStoredWhenEveryTileCenters — all centered => one mean per tile
  *   AL15 MixedCompactionRoundTrip — inverse rebuilds offsets from packed modes
  *   AL16 CompactionSurvivesTileCountNotMultipleOfFour — ragged mode byte
+ *   AL17 BoundPlainOracleMatchesLegacy — explicit bound/fallback byte parity
+ *   AL18 DownstreamOracleChangesSelection — outlier policy changes chosen modes
+ *   AL19 OutlierOracleNeverWorseThanFixed — exact second-policy end-to-end gate
  */
 
 #include <gtest/gtest.h>
@@ -52,7 +55,7 @@ std::vector<int32_t> make_mixed(size_t n) {
 
 size_t compressed_size(const std::vector<int32_t>& data,
                        bool order2, bool centering, uint32_t bpt,
-                       cudaStream_t stream) {
+                       cudaStream_t stream, bool outlier = false) {
     AdaptiveLorenzoStage<int32_t>::Config c;
     c.blocks_per_tile  = bpt;
     c.enable_order2    = order2;
@@ -62,6 +65,7 @@ size_t compressed_size(const std::vector<int32_t>& data,
     auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>(c);
     auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
     ab->setBlockSize(32);
+    ab->setOutlierSelection(outlier);
     p.connect(ab, al);
     p.finalize();
 
@@ -152,6 +156,100 @@ TEST(AdaptiveLorenzoStage, PipelineIntegration) {
     // bound. The prediction stage itself is integer-lossless (see the round-trip
     // tests above, which assert exactly zero error).
     EXPECT_LE(res.max_error, 1e-3 * 1.01);
+}
+
+TEST(AdaptiveLorenzoStage, BoundPlainOracleMatchesLegacy) {
+    const size_t N = 8192 + 37;  // exercise a partial coder block and tile
+    const auto input = make_mixed(N);
+    const size_t bytes = input.size() * sizeof(int32_t);
+
+    int32_t* d_input = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_input, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_input, input.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto encode = [&](bool bind) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE);
+        auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>();
+        if (bind) {
+            AdaptiveBitpackStage<int32_t> plain;
+            plain.setBlockSize(32);
+            EXPECT_TRUE(al->bindDownstreamEncodingOracle(plain.getEncodingOracle()));
+        }
+        p.finalize();
+        EXPECT_EQ(al->hasBoundEncodingOracle(), bind);
+
+        void* d_archive = nullptr;
+        size_t archive_bytes = 0;
+        p.compress(d_input, bytes, &d_archive, &archive_bytes, 0);
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        std::vector<uint8_t> archive(archive_bytes);
+        EXPECT_EQ(cudaMemcpy(archive.data(), d_archive, archive_bytes,
+                             cudaMemcpyDeviceToHost), cudaSuccess);
+        return archive;
+    };
+
+    const auto legacy = encode(false);
+    const auto bound  = encode(true);
+    EXPECT_EQ(bound, legacy)
+        << "binding the exact plain policy changed residuals, modes, or compacted means";
+
+    EXPECT_EQ(cudaFree(d_input), cudaSuccess);
+}
+
+TEST(AdaptiveLorenzoStage, DownstreamOracleChangesSelection) {
+    // Plain fixed-rate strongly rewards centering a large tile offset. The
+    // outlier policy can instead store each coder block's element 0 compactly,
+    // so the exact downstream policy is capable of changing the selected mode.
+    const size_t N = 4096;
+    std::vector<int32_t> input(N);
+    for (size_t i = 0; i < N; ++i)
+        input[i] = 500000 + static_cast<int32_t>((i * 13) % 17);
+    const size_t bytes = input.size() * sizeof(int32_t);
+
+    int32_t* d_input = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_input, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_input, input.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto encode = [&](bool outlier) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE);
+        auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>();
+        AdaptiveBitpackStage<int32_t> coder;
+        coder.setBlockSize(32);
+        coder.setOutlierSelection(outlier);
+        EXPECT_TRUE(al->bindDownstreamEncodingOracle(coder.getEncodingOracle()));
+        p.finalize();
+
+        void* d_archive = nullptr;
+        size_t archive_bytes = 0;
+        p.compress(d_input, bytes, &d_archive, &archive_bytes, 0);
+        EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        std::vector<uint8_t> archive(archive_bytes);
+        EXPECT_EQ(cudaMemcpy(archive.data(), d_archive, archive_bytes,
+                             cudaMemcpyDeviceToHost), cudaSuccess);
+        return archive;
+    };
+
+    const auto plain    = encode(false);
+    const auto adaptive = encode(true);
+    EXPECT_NE(adaptive, plain)
+        << "the second policy witness did not affect any selected tile mode";
+
+    EXPECT_EQ(cudaFree(d_input), cudaSuccess);
+}
+
+TEST(AdaptiveLorenzoStage, OutlierOracleNeverWorseThanFixed) {
+    const size_t N = 8192 + 37;
+    auto input = make_mixed(N);
+    for (auto& v : input) v += 500000;  // exercise element-0 outlier decisions
+
+    CudaStream cs;
+    const size_t all   = compressed_size(input, true,  true,  8, cs.stream, true);
+    const size_t lz1c  = compressed_size(input, false, true,  8, cs.stream, true);
+    const size_t lz12  = compressed_size(input, true,  false, 8, cs.stream, true);
+    const size_t plain = compressed_size(input, false, false, 8, cs.stream, true);
+    EXPECT_LE(all, lz1c);
+    EXPECT_LE(all, lz12);
+    EXPECT_LE(all, plain);
 }
 
 TEST(AdaptiveLorenzoStage, SelectsCenteringOnOffset) {

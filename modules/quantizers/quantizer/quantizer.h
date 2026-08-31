@@ -342,10 +342,21 @@ public:
         return {};
     }
 
+    std::vector<FusedAuxOutputDecl> getFusedAuxOutputs() const override {
+        if (is_inverse_ || !isSplitOutlierFusable()) return {};
+        return {
+            FusedAuxOutputDecl{1, "outlier_vals", FusedAuxSizeKind::CompactedElements,
+                               static_cast<uint8_t>(getInputDataType()), 1u, 0u, 1u},
+            FusedAuxOutputDecl{2, "outlier_idxs", FusedAuxSizeKind::CompactedElements,
+                               static_cast<uint8_t>(DataType::UINT32), 1u, 0u, 1u},
+        };
+    }
+
     /// The fused runner bypasses forward execute(); prime the value-range scan so
     /// the fused kernel's scale and the reused inverse/header agree (covers NOA).
     void primeFusedForwardState(const FusedPrimeContext& c) override {
         fused_outlier_count_set_ = false;   // reset per fused compress; set by setFusedSideOutput
+        num_elements_ = c.input_bytes / sizeof(TInput);
         primeComputedAbsEb(c.d_input, c.input_bytes / sizeof(TInput), c.pool, c.stream);
     }
 
