@@ -185,24 +185,28 @@ template<> __device__ __forceinline__ long long quantRoundWide<double>(double v)
     return __double2ll_rn(v);
 }
 
-template<typename TInput, typename TCode>
+template<typename TInput, typename TCode, bool HighPrecision = false>
 __global__ void quantizer_linear_fwd_kernel(
     const TInput* __restrict__ in, size_t n,
-    TInput ebx2_r,          // 1 / (2 * abs_eb)
+    TInput ebx2_r,          // fast path: 1 / (2 * abs_eb) in TInput
+    double ebx2_r_f64,      // accurate path: reciprocal computed in double
     TCode* __restrict__ codes,
     uint32_t* __restrict__ overflow
 ) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
-    const TInput scaled = in[i] * ebx2_r;
+    using Scale = typename std::conditional<HighPrecision, double, TInput>::type;
+    const Scale scaled = HighPrecision
+        ? static_cast<double>(in[i]) * ebx2_r_f64
+        : static_cast<Scale>(in[i] * ebx2_r);
     using SCode = typename std::make_signed<TCode>::type;
     constexpr long long kWideGuard = std::numeric_limits<long long>::max() / 2;
-    if (!isfinite(scaled) || quantAbs(scaled) > static_cast<TInput>(kWideGuard)) {
+    if (!isfinite(scaled) || quantAbs(scaled) > static_cast<Scale>(kWideGuard)) {
         atomicExch(overflow, 1u);
         codes[i] = TCode(0);
         return;
     }
-    const long long q = quantRoundWide<TInput>(scaled);
+    const long long q = quantRoundWide<Scale>(scaled);
     if (q < static_cast<long long>(std::numeric_limits<SCode>::lowest()) ||
         q > static_cast<long long>(std::numeric_limits<SCode>::max())) {
         atomicExch(overflow, 1u);
@@ -210,6 +214,26 @@ __global__ void quantizer_linear_fwd_kernel(
         return;
     }
     codes[i] = static_cast<TCode>(static_cast<SCode>(q));
+}
+
+template<typename TInput, typename TCode, bool HighPrecision = false>
+__global__ void quantizer_linear_inv_kernel(
+    const TCode* __restrict__ codes, size_t n,
+    TInput ebx2,
+    double ebx2_f64,
+    TInput* __restrict__ out)
+{
+    size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    using SCode = typename std::make_signed<TCode>::type;
+    const SCode q = static_cast<SCode>(codes[i]);
+    if constexpr (HighPrecision) {
+        // Convert the integer directly to double. Casting q to float first loses
+        // low bits once |q| > 2^24; tight bounds can easily reach that regime.
+        out[i] = static_cast<TInput>(static_cast<double>(q) * ebx2_f64);
+    } else {
+        out[i] = static_cast<TInput>(q) * ebx2;
+    }
 }
 
 /**
@@ -502,6 +526,59 @@ QuantizerStage<TInput, TCode>::QuantizerStage(const Config& config)
 }
 
 template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::applyUniformBoundPolicy(
+    TInput data_abs_max, bool have_data_abs_max)
+{
+    if (!(computed_abs_eb_ > TInput(0)) || !std::isfinite(computed_abs_eb_))
+        throw std::runtime_error(
+            "QuantizerStage: resolved absolute error bound must be finite and positive");
+
+    const TInput requested_abs_eb = computed_abs_eb_;
+    if (config_.power_of_two_bound) {
+        computed_abs_eb_ = floorPowerOfTwo(computed_abs_eb_);
+        FZ_LOG(DEBUG,
+            "QuantizerStage power-of-two bound: requested_abs_eb=%.17g effective_abs_eb=%.17g",
+            static_cast<double>(requested_abs_eb),
+            static_cast<double>(computed_abs_eb_));
+        return;
+    }
+
+    if (!config_.linear_high_precision) return;
+    if (!have_data_abs_max)
+        throw std::runtime_error(
+            "QuantizerStage: linear_high_precision requires the data magnitude scan");
+
+    // The exact bin-centre error is at most the internal half-step. Converting
+    // that centre back to TInput can add at most half an ULP at the largest
+    // possible reconstruction magnitude. Reserve that amount, then move one
+    // representable value downward so host rounding cannot consume the margin.
+    const TInput extent = data_abs_max + requested_abs_eb;
+    const TInput next = std::nextafter(
+        extent, std::numeric_limits<TInput>::infinity());
+    const TInput reserve = (next - extent) / TInput(2);
+    if (reserve >= requested_abs_eb) {
+        char msg[512];
+        std::snprintf(msg, sizeof(msg),
+            "QuantizerStage linear_high_precision: requested abs_eb=%.17g cannot "
+            "absorb the %.17g reconstruction-rounding reserve at |x|max=%.17g. "
+            "Use a wider input type, a looser bound, or power_of_two_bound=true.",
+            static_cast<double>(requested_abs_eb),
+            static_cast<double>(reserve),
+            static_cast<double>(data_abs_max));
+        throw std::runtime_error(msg);
+    }
+    if (reserve > TInput(0)) {
+        computed_abs_eb_ = std::nextafter(
+            requested_abs_eb - reserve, TInput(0));
+    }
+    FZ_LOG(DEBUG,
+        "QuantizerStage high precision: requested_abs_eb=%.17g reserve=%.17g effective_abs_eb=%.17g",
+        static_cast<double>(requested_abs_eb),
+        static_cast<double>(reserve),
+        static_cast<double>(computed_abs_eb_));
+}
+
+template<typename TInput, typename TCode>
 QuantizerStage<TInput, TCode>::~QuantizerStage()
 {
     // Skip if the pool died first: `persistent_pool_` is a raw borrow, and only
@@ -595,6 +672,12 @@ void QuantizerStage<TInput, TCode>::execute(
         throw std::runtime_error(
             "QuantizerStage: dither is incompatible with linear_mode and "
             "inplace_outliers (neither has a per-element outlier-escalation path)");
+    if (config_.linear_high_precision && !isLinearMode())
+        throw std::runtime_error(
+            "QuantizerStage: linear_high_precision requires linear_mode=true");
+    if (config_.power_of_two_bound && config_.eb_mode == ErrorBoundMode::REL)
+        throw std::runtime_error(
+            "QuantizerStage: power_of_two_bound is incompatible with REL error-bound mode");
 
     // =========================================================================
     // DECOMPRESSION MODE — 3 inputs → 1 output (1 input in inplace mode)
@@ -620,14 +703,18 @@ void QuantizerStage<TInput, TCode>::execute(
         // (it reinterprets the unsigned code as signed) with no memset/scatter.
         if (isLinearMode()) {
             TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
+            double ebx2_f64 = 2.0 * static_cast<double>(computed_abs_eb_);
             constexpr int kBlk = 256;
             int g = static_cast<int>((num_elements + kBlk - 1) / kBlk);
-            quantizer_abs_inv_kernel<TInput, TCode, false, false><<<g, kBlk, 0, stream>>>(
-                static_cast<const TCode*>(inputs[0]),
-                num_elements, ebx2,
-                static_cast<TInput>(0), uint64_t(0),  // dither_amp/dither_seed unused (Dither=false)
-                static_cast<TCode>(config_.quant_radius),  // unused in non-zigzag path
-                static_cast<TInput*>(outputs[0]));
+            if (config_.linear_high_precision) {
+                quantizer_linear_inv_kernel<TInput, TCode, true><<<g, kBlk, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]), num_elements,
+                    ebx2, ebx2_f64, static_cast<TInput*>(outputs[0]));
+            } else {
+                quantizer_linear_inv_kernel<TInput, TCode, false><<<g, kBlk, 0, stream>>>(
+                    static_cast<const TCode*>(inputs[0]), num_elements,
+                    ebx2, ebx2_f64, static_cast<TInput*>(outputs[0]));
+            }
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TInput)};
             return;
@@ -818,9 +905,20 @@ void QuantizerStage<TInput, TCode>::execute(
     }
 
     // ── Resolve absolute error bound ──────────────────────────────────────────
+    TInput data_abs_max = TInput(0);
+    bool have_data_abs_max = false;
     if (config_.eb_mode == ErrorBoundMode::ABS) {
-        computed_abs_eb_     = static_cast<TInput>(config_.error_bound);
+        computed_abs_eb_     = resolveUniformBound();
         computed_value_base_ = static_cast<TInput>(0);
+        // Arbitrary-step high-precision mode needs a reconstruction-rounding
+        // reserve based on the field magnitude. Power-of-two reconstruction is
+        // exact for representable inputs, so that arm does not need this scan.
+        if (config_.linear_high_precision && !config_.power_of_two_bound) {
+            (void)computeValueBase<TInput>(
+                static_cast<const TInput*>(inputs[0]), scan_N,
+                ErrorBoundMode::PREL, stream, pool, &data_abs_max);
+            have_data_abs_max = true;
+        }
     } else if (config_.eb_mode == ErrorBoundMode::REL) {
         // REL: no abs_eb needed (log-space kernels use user_eb directly)
         computed_abs_eb_     = static_cast<TInput>(0);
@@ -832,21 +930,25 @@ void QuantizerStage<TInput, TCode>::execute(
         const char* mode_name =
             (config_.eb_mode == ErrorBoundMode::NOA) ? "NOA" : "PREL";
         TInput value_base = static_cast<TInput>(config_.precomputed_value_base);
-        TInput data_abs_max = TInput(0);
         if (value_base <= TInput(0)) {
             value_base = computeValueBase<TInput>(
                 static_cast<const TInput*>(inputs[0]),
                 scan_N, config_.eb_mode, stream, pool, &data_abs_max);
+            have_data_abs_max = true;
+        } else if (config_.linear_high_precision && !config_.power_of_two_bound) {
+            (void)computeValueBase<TInput>(
+                static_cast<const TInput*>(inputs[0]), scan_N,
+                ErrorBoundMode::PREL, stream, pool, &data_abs_max);
+            have_data_abs_max = true;
         }
         computed_value_base_ = value_base;
         if (value_base <= TInput(0)) {
             FZ_LOG(WARN,
                 "QuantizerStage %s: value base is zero (constant/empty data?); "
                 "falling back to ABS with user_eb", mode_name);
-            computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
+            computed_abs_eb_ = resolveUniformBound();
         } else {
-            computed_abs_eb_ = static_cast<TInput>(config_.error_bound)
-                               * static_cast<TInput>(value_base);
+            computed_abs_eb_ = resolveUniformBound(value_base);
         }
         FZ_LOG(DEBUG,
             "QuantizerStage %s: user_eb=%.6g value_base=%.6g -> abs_eb=%.6g",
@@ -866,6 +968,7 @@ void QuantizerStage<TInput, TCode>::execute(
         // cleanly into out-of-bound values.
         const TInput spacing = std::numeric_limits<TInput>::epsilon() * data_abs_max;
         if (data_abs_max > TInput(0) && computed_abs_eb_ > TInput(0)
+            && !config_.linear_high_precision && !config_.power_of_two_bound
             && spacing > computed_abs_eb_) {
             char msg[512];
             std::snprintf(msg, sizeof(msg),
@@ -883,12 +986,15 @@ void QuantizerStage<TInput, TCode>::execute(
         }
     }
 
+    if (config_.eb_mode != ErrorBoundMode::REL)
+        applyUniformBoundPolicy(data_abs_max, have_data_abs_max);
+
     // ── Launch forward kernel ─────────────────────────────────────────────────
     constexpr int kBlock = 256;
     int grid = static_cast<int>((num_elements + kBlock - 1) / kBlock);
 
     if (config_.eb_mode == ErrorBoundMode::REL) {
-        float epsilon    = config_.error_bound;
+        float epsilon    = static_cast<float>(config_.error_bound);
         float log2eb     = 2.0f * std::log2(1.0f + epsilon);
         float log2eb_r   = 1.0f / log2eb;
         float opp_eb     = 1.0f + epsilon;
@@ -932,15 +1038,24 @@ void QuantizerStage<TInput, TCode>::execute(
         // ABS / NOA
         TInput ebx2_r = static_cast<TInput>(1)
                         / (static_cast<TInput>(2) * computed_abs_eb_);
+        double ebx2_r_f64 = 1.0 / (2.0 * static_cast<double>(computed_abs_eb_));
         TInput ebx2   = static_cast<TInput>(2) * computed_abs_eb_;
 
         if (isLinearMode()) {
             // Linear / no-outlier: pure map, single codes output.
-            quantizer_linear_fwd_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r,
-                static_cast<TCode*>(outputs[0]),
-                d_linear_overflow_scratch_);
+            if (config_.linear_high_precision) {
+                quantizer_linear_fwd_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TInput*>(inputs[0]),
+                    num_elements, ebx2_r, ebx2_r_f64,
+                    static_cast<TCode*>(outputs[0]),
+                    d_linear_overflow_scratch_);
+            } else {
+                quantizer_linear_fwd_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
+                    static_cast<const TInput*>(inputs[0]),
+                    num_elements, ebx2_r, ebx2_r_f64,
+                    static_cast<TCode*>(outputs[0]),
+                    d_linear_overflow_scratch_);
+            }
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TCode)};
             return;
@@ -1134,7 +1249,7 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
     QuantizerConfig cfg;
     // Narrow copies are written for older readers; the f64 fields are authoritative.
     cfg.abs_error_bound  = static_cast<float>(computed_abs_eb_);
-    cfg.user_error_bound = config_.error_bound;
+    cfg.user_error_bound = static_cast<float>(config_.error_bound);
     cfg.value_base       = static_cast<float>(computed_value_base_);
     cfg.abs_error_bound_f64 = static_cast<double>(computed_abs_eb_);
     cfg.value_base_f64      = static_cast<double>(computed_value_base_);
@@ -1149,6 +1264,8 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
     cfg.inplace_outliers  = config_.inplace_outliers ? uint8_t{1} : uint8_t{0};
     cfg.linear_mode       = config_.linear_mode ? uint8_t{1} : uint8_t{0};
     cfg.dither            = config_.dither ? uint8_t{1} : uint8_t{0};
+    cfg.linear_high_precision = config_.linear_high_precision ? uint8_t{1} : uint8_t{0};
+    cfg.power_of_two_bound = config_.power_of_two_bound ? uint8_t{1} : uint8_t{0};
     cfg.dither_seed       = config_.dither_seed;
     cfg.dither_strength   = config_.dither_strength;
 
@@ -1209,9 +1326,13 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
     }
     if (size >= sizeof(QuantizerConfig)) {
         config_.dither_strength = cfg.dither_strength;
+        config_.linear_high_precision = (cfg.linear_high_precision != 0);
+        config_.power_of_two_bound = (cfg.power_of_two_bound != 0);
     } else {
         // Pre-dither_strength headers always meant full-amplitude dithering.
         config_.dither_strength = 1.0f;
+        config_.linear_high_precision = false;
+        config_.power_of_two_bound = false;
     }
 }
 
@@ -1225,8 +1346,9 @@ void QuantizerStage<TInput, TCode>::primeComputedAbsEb(
     const void* d_in, size_t scan_n, MemoryPool* pool, fz::stream_t stream)
 {
     if (config_.eb_mode == ErrorBoundMode::ABS) {
-        computed_abs_eb_     = static_cast<TInput>(config_.error_bound);
+        computed_abs_eb_     = resolveUniformBound();
         computed_value_base_ = static_cast<TInput>(0);
+        applyUniformBoundPolicy(TInput(0), false);
         return;
     }
     if (config_.eb_mode == ErrorBoundMode::REL) {
@@ -1244,15 +1366,18 @@ void QuantizerStage<TInput, TCode>::primeComputedAbsEb(
     if (scan_N == 0 || scan_N > scan_n) scan_N = scan_n;
 
     TInput value_base = static_cast<TInput>(config_.precomputed_value_base);
+    TInput data_abs_max = TInput(0);
+    bool have_data_abs_max = false;
     if (value_base <= TInput(0)) {
-        TInput data_abs_max = TInput(0);
         value_base = computeValueBase<TInput>(
             static_cast<const TInput*>(d_in), scan_N, config_.eb_mode, stream, pool, &data_abs_max);
+        have_data_abs_max = true;
     }
     computed_value_base_ = value_base;
     computed_abs_eb_ = (value_base <= TInput(0))
-        ? static_cast<TInput>(config_.error_bound)
-        : static_cast<TInput>(config_.error_bound) * value_base;
+        ? resolveUniformBound()
+        : resolveUniformBound(value_base);
+    applyUniformBoundPolicy(data_abs_max, have_data_abs_max);
 }
 
 template class QuantizerStage<float,  uint16_t>;

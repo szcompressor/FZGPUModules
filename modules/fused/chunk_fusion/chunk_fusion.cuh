@@ -29,6 +29,7 @@
 #include "fused/chunk_fusion/chunk_geometry.h"   // chunk geometry constants (no host deps)
 #include "fused/chunk_fusion/chunk_op_params.h"  // shared POD op Params (host/device agree)
 #include "coders/lc_common/lc_chunk_components.cuh"
+#include "coders/lc_common/lc_clog_components.cuh"   // d_CLOG / d_HCLOG
 #include "transforms/negabinary/negabinary.h"
 #include <cstdint>
 
@@ -181,6 +182,22 @@ struct RAZECoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
         return lc_detail::d_RAZE<byte, CHUNK_BYTES>(csize, in, out, temp);
+    }
+};
+
+// CLOG / HCLOG — LC leading-zero + bit-packing coders (byte-word, matching each stage's
+// word_size==1 dispatch → d_CLOG<uint8_t>). Same uniform LC signature, so they drop in with
+// no new glue: their stages declare getFusedOp() and any Map->Transform*->{CLOG|HCLOG} fuses.
+struct CLOGCoder {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
+        return lc_detail::d_CLOG<uint8_t, CHUNK_BYTES>(csize, in, out, temp);
+    }
+};
+struct HCLOGCoder {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
+        return lc_detail::d_HCLOG<uint8_t, CHUNK_BYTES>(csize, in, out, temp);
     }
 };
 

@@ -27,6 +27,9 @@ class MemoryPool;
  *                  chain (its per-block work consumes the block still in
  *                  registers); the cross-block offset prefix is handled by the
  *                  fused driver.
+ *  - `TileAdaptive` one cooperative selector owns a larger tile containing an
+ *                  integer number of downstream coder units. Its tile size and
+ *                  coder-unit size are separate legality constraints.
  *  - `Unfusable`   opaque kernel or a genuine global dependency (entropy coder
  *                  with a global codebook, whole-array scan). A fusion barrier.
  *
@@ -36,6 +39,7 @@ enum class FusionAccess : uint8_t {
     Unfusable = 0,
     Map,
     BlockLocal,
+    TileAdaptive,
     Cooperative,
 };
 
@@ -50,7 +54,11 @@ struct FusionSpec {
     FusionAccess access = FusionAccess::Unfusable;
     /// Reset/tile period in elements for `BlockLocal`/`Cooperative`; 0 = N/A.
     /// Block-local and cooperative members of one fused group must agree on this.
+    /// For TileAdaptive this is the selector tile size.
     uint32_t block_size = 0;
+    /// TileAdaptive only: immediate downstream coder unit in elements. Must
+    /// divide block_size. Zero for every other access class.
+    uint32_t coder_unit_size = 0;
 
     bool fusable() const { return access != FusionAccess::Unfusable; }
 };
@@ -66,7 +74,74 @@ struct FusionSpec {
  *  - `WarpRegister`     one warp owns a ≤64-element block, intermediates in
  *    registers and shuffles, no barriers (cuSZp-style).
  */
-enum class FusionStrategy : uint8_t { ChunkCooperative, WarpRegister };
+enum class FusionStrategy : uint8_t {
+    ChunkCooperative,
+    WarpRegister,
+};
+
+/**
+ * @brief Registered exact encoded-size policies used by an upstream adaptive
+ *        stage for an algorithmic mode decision.
+ *
+ * This is deliberately separate from fusion profitability: an encoding oracle
+ * changes which representation is selected and must therefore agree in staged
+ * and fused execution. `None` means the stage exposes no local exact oracle.
+ */
+enum class EncodingOracleKind : uint8_t {
+    None = 0,
+    PlainFixedRateBitpack,
+    AdaptiveFixedRateBitpack,
+};
+
+/**
+ * @brief Host-side declaration of a local, exact encoded-size oracle.
+ *
+ * The producer of the final encoded bytes exposes this declaration. A directly
+ * connected adaptive upstream stage may bind it during Pipeline::finalize().
+ * `params` uses the same versioned-POD convention as FusedOpDecl. The device
+ * quote itself is supplied by the registered policy named by `op_name`.
+ */
+struct EncodingOracleDecl {
+    EncodingOracleKind   kind = EncodingOracleKind::None;
+    std::string          op_name;
+    std::string          include_header;
+    std::vector<uint8_t> params;
+    uint8_t              input_data_type = 0xFF; ///< DataType value; 0xFF = unknown.
+    uint32_t             unit_elems = 0;
+    bool                 exact = false;
+    bool                 additive = false;
+
+    bool valid() const {
+        return kind != EncodingOracleKind::None && !op_name.empty() &&
+               unit_elems != 0 && exact;
+    }
+};
+
+/** How an escaping fused output's byte length is determined. */
+enum class FusedAuxSizeKind : uint8_t {
+    FixedBitsPerUnit = 0, ///< ceil(num_units * bits_per_unit / 8)
+    CompactedElements,   ///< runtime count * sizeof(element)
+};
+
+/**
+ * Declarative identity and sizing rule for a fused stage's escaping output.
+ * Transport remains FusedSideOutput; this removes runner dependence on numeric
+ * output positions and lets legality/sizing be checked before a kernel exists.
+ */
+struct FusedAuxOutputDecl {
+    int                  output_index = -1;
+    std::string          name;
+    FusedAuxSizeKind     size_kind = FusedAuxSizeKind::CompactedElements;
+    uint8_t              data_type = 0xFF;
+    uint32_t             unit_elems = 0;
+    uint32_t             bits_per_unit = 0;
+    uint32_t             count_group = 0; ///< stage-local shared compaction count; 0=none.
+
+    bool valid() const {
+        if (output_index < 0 || name.empty() || unit_elems == 0) return false;
+        return size_kind != FusedAuxSizeKind::FixedBitsPerUnit || bits_per_unit != 0;
+    }
+};
 
 /**
  * @brief A stage's contribution to a generated fused kernel — the device-op it
@@ -96,7 +171,6 @@ struct FusedOpDecl {
     /// leading `float inv2eb` slot (offset 0) the runner fills from the resolved bound.
     uint32_t             elems_per_lane = 0;
     size_t               n_ab = 0;
-
     bool valid() const { return !op_name.empty(); }
 };
 

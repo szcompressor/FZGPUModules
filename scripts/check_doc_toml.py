@@ -33,7 +33,13 @@ CONFIG_CPP = os.path.join(REPO, "src", "pipeline", "config.cpp")
 STRUCTURAL_STAGE_KEYS = {"name", "type", "inputs", "from", "port"}
 PIPELINE_KEYS = {
     "input_size", "dims", "memory_strategy", "pool_multiplier", "num_streams",
+    "primary_source",
 }
+# Reserved `from` value meaning "bind directly to the pipeline's raw input"
+# (Pipeline::bindExternalInput()) rather than another declared stage's output
+# -- never itself a declared stage name, so it's exempted from the dangling-
+# reference check below.
+EXTERNAL_INPUT_SENTINEL = "__external__"
 
 
 def parse_registry(src):
@@ -129,7 +135,7 @@ def check_block(block, registry, keys_by_type, errors, where):
     # fragment legitimately refers to stages defined elsewhere in the page.
     if head.strip():
         for ref in re.findall(r'from\s*=\s*"([^"]+)"', body):
-            if ref not in declared:
+            if ref not in declared and ref != EXTERNAL_INPUT_SENTINEL:
                 errors.append(f"{where}: inputs reference undefined stage \"{ref}\"")
 
 

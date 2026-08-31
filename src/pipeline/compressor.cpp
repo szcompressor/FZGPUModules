@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include <cstring>
 
@@ -187,35 +188,95 @@ Stage* Pipeline::addRawStage(Stage* stage) {
 }
 
 void Pipeline::planAndInstallFusion() {
-    // Runtime override (FZ_FUSION=off|auto) wins over the programmatic mode.
+    // Runtime override (FZ_FUSION=off|auto|force) wins over the programmatic mode.
     FusionPolicy mode = fusion_policy_;
     if (const char* e = std::getenv("FZ_FUSION")) {
         const std::string v(e);
         if (v == "off" || v == "0")      mode = FusionPolicy::Off;
         else if (v == "auto" || v == "1") mode = FusionPolicy::Auto;
+        else if (v == "force" || v == "experimental" || v == "2")
+            mode = FusionPolicy::Force;
     }
-    if (mode != FusionPolicy::Auto) return;
+    fusion_info_ = {};
+    fusion_info_.policy = mode;
+    if (mode == FusionPolicy::Off) {
+        fusion_info_.fallback_reason = "policy_off";
+        return;
+    }
 
     std::vector<CompressionDAG::FusedGroupExec> installed;
-    for (auto& g : planFusionGroups(*dag_)) {
-        const FusedImpl* impl = findFusedImpl(g.stages);
-        if (!impl) continue;
-        CompressionDAG::FusedGroupExec fg;
-        fg.impl = impl;
-        fg.stages = g.stages;
-        bool ok = true;
-        for (Stage* s : g.stages) {
-            auto it = stage_to_node_.find(s);
-            if (it == stage_to_node_.end() || !it->second) { ok = false; break; }
-            fg.members.push_back(it->second);
+    const bool include_experimental = mode == FusionPolicy::Force;
+    auto maximal_groups = planFusionGroups(*dag_);
+    fusion_info_.legal_group_count = maximal_groups.size();
+    for (auto& maximal : maximal_groups) {
+        struct Candidate {
+            size_t begin = 0;
+            size_t end = 0; // exclusive
+            const FusedImpl* impl = nullptr;
+        };
+        std::vector<Candidate> candidates;
+        const size_t count = maximal.stages.size();
+        // A maximal legality chain is only the search domain. Registry matches
+        // decide which overlapping partial/full spans have executable plans.
+        for (size_t begin = 0; begin + 1 < count; ++begin) {
+            for (size_t end = count; end >= begin + 2; --end) {
+                std::vector<Stage*> span(
+                    maximal.stages.begin() + static_cast<std::ptrdiff_t>(begin),
+                    maximal.stages.begin() + static_cast<std::ptrdiff_t>(end));
+                if (const FusedImpl* impl = findFusedImpl(span, include_experimental))
+                    candidates.push_back(Candidate{begin, end, impl});
+                if (end == begin + 2) break; // avoid size_t underflow
+            }
         }
-        if (!ok) continue;
-        fg.head = fg.members.front();
-        fg.tail = fg.members.back();
-        FZ_LOG(INFO, "Fusion: installed '%s' over %zu stages", impl->name, g.stages.size());
-        installed.push_back(std::move(fg));
+
+        // Weighted interval selection. Weight = staged launches removed; every
+        // candidate was separately admitted by the evidence-gated registry.
+        std::vector<size_t> best(count + 1, 0);
+        std::vector<const Candidate*> choice(count, nullptr);
+        for (size_t ri = count; ri-- > 0;) {
+            best[ri] = best[ri + 1];
+            for (const Candidate& c : candidates) {
+                if (c.begin != ri) continue;
+                const size_t score = (c.end - c.begin - 1) + best[c.end];
+                if (score > best[ri]) {
+                    best[ri] = score;
+                    choice[ri] = &c;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < count;) {
+            const Candidate* c = choice[i];
+            if (!c) { ++i; continue; }
+            CompressionDAG::FusedGroupExec fg;
+            fg.impl = c->impl;
+            fg.stages.assign(maximal.stages.begin() + static_cast<std::ptrdiff_t>(c->begin),
+                             maximal.stages.begin() + static_cast<std::ptrdiff_t>(c->end));
+            bool ok = true;
+            for (Stage* s : fg.stages) {
+                auto it = stage_to_node_.find(s);
+                if (it == stage_to_node_.end() || !it->second) { ok = false; break; }
+                fg.members.push_back(it->second);
+            }
+            if (ok) {
+                fg.head = fg.members.front();
+                fg.tail = fg.members.back();
+                FusionGroupInfo info;
+                info.implementation = c->impl->name;
+                for (Stage* stage : fg.stages) info.stages.push_back(stage->getName());
+                fusion_info_.installed_groups.push_back(std::move(info));
+                FZ_LOG(INFO, "Fusion: installed '%s' over %zu/%zu compatible stages",
+                       c->impl->name, fg.stages.size(), count);
+                installed.push_back(std::move(fg));
+            }
+            i = c->end;
+        }
     }
-    if (installed.empty()) return;
+    if (installed.empty()) {
+        fusion_info_.fallback_reason = fusion_info_.legal_group_count == 0
+            ? "no_legal_group" : "no_profitable_implementation";
+        return;
+    }
 
     dag_->setFusedGroups(std::move(installed));
     if (graph_mode_enabled_) {
@@ -229,6 +290,25 @@ void Pipeline::planAndInstallFusion() {
     // (planAndInstallFusion runs before preallocateBuffers(), where coloring is
     // applied, so this takes effect.)
     dag_->setColoringEnabled(false);
+}
+
+void Pipeline::bindSemanticContracts() {
+    // Semantic binding is intentionally independent of FusionPolicy: the staged
+    // path must make the same algorithmic choice as a future fused path. For the
+    // initial local contract, require one unambiguous direct consumer. Broader
+    // side-output topology is handled by the later auxiliary-output checkpoint.
+    for (DAGNode* producer : dag_->getNodes()) {
+        if (!producer || !producer->stage || producer->dependents.size() != 1) continue;
+        DAGNode* consumer = producer->dependents.front();
+        if (!consumer || !consumer->stage) continue;
+        const EncodingOracleDecl decl = consumer->stage->getEncodingOracle();
+        if (!decl.valid()) continue;
+        if (producer->stage->bindDownstreamEncodingOracle(decl)) {
+            FZ_LOG(INFO, "Semantic binding: %s <- %s encoded-size oracle '%s'",
+                   producer->stage->getName().c_str(),
+                   consumer->stage->getName().c_str(), decl.op_name.c_str());
+        }
+    }
 }
 
 void Pipeline::finalize() {
@@ -245,6 +325,7 @@ void Pipeline::finalize() {
 
     validate();
     typeCheckConnections();
+    bindSemanticContracts();
 
     auto [sources, sinks] = identifyTopology();
     setupInputBuffers(sources);
@@ -295,10 +376,28 @@ void Pipeline::typeCheckConnections() {
     };
 
     constexpr uint8_t kUnknown = static_cast<uint8_t>(DataType::UNKNOWN);
+
     for (const auto& conn : connections_) {
+        // A connection's input port isn't stored explicitly -- connect() and
+        // bindExternalInput() both append to the dependent's DAGNode::
+        // input_buffer_ids in call order, so that vector's index of this
+        // connection's buffer id IS its real port position. Counting entries
+        // in connections_ alone (an earlier version of this fix did that)
+        // undercounts whenever bindExternalInput() also consumed a port on
+        // the same stage without adding to connections_ -- exactly
+        // Cdf97OutlierCorrectStage's shape (external field on port 0, this
+        // connection on port 1).
+        DAGNode* dep_node  = stage_to_node_.at(conn.dependent);
+        DAGNode* prod_node = stage_to_node_.at(conn.producer);
+        int buf_id = prod_node->output_index_to_buffer_id.at(conn.output_index);
+        auto pos_it = std::find(dep_node->input_buffer_ids.begin(), dep_node->input_buffer_ids.end(), buf_id);
+        if (pos_it == dep_node->input_buffer_ids.end())
+            throw std::runtime_error("typeCheckConnections: internal error -- connection buffer not found on dependent node");
+        const size_t input_index = static_cast<size_t>(pos_it - dep_node->input_buffer_ids.begin());
+
         const uint8_t prod_type = conn.producer->getOutputDataType(
             static_cast<size_t>(conn.output_index));
-        const uint8_t cons_type = conn.dependent->getInputDataType(0);
+        const uint8_t cons_type = conn.dependent->getInputDataType(input_index);
 
         if (prod_type == kUnknown || cons_type == kUnknown) continue;
 
@@ -597,26 +696,64 @@ void Pipeline::printPipeline() const {
 std::pair<std::vector<Stage*>, std::vector<Stage*>> Pipeline::identifyTopology() {
     auto sources = getSourceStages();
     auto sinks = getSinkStages();
-    
-    if (sources.empty() || sinks.empty()) {
-        throw std::runtime_error("Pipeline has no source or sink stages");
+
+    // A pipeline wired entirely through bindExternalInput() (every stage has
+    // some real dependency, e.g. a single mixed source+consumer stage) has
+    // no pure (dependencies.empty()) source -- that's still a valid topology.
+    if (sources.empty() && explicit_external_bindings_.empty()) {
+        throw std::runtime_error("Pipeline has no source stages");
     }
-    
+    if (sinks.empty()) {
+        throw std::runtime_error("Pipeline has no sink stages");
+    }
+
     return {sources, sinks};
 }
 
 void Pipeline::setupInputBuffers(const std::vector<Stage*>& sources) {
     input_nodes_.clear();
     input_buffer_ids_.clear();
+    const bool single = (sources.size() + explicit_external_bindings_.size()) == 1;
     for (size_t i = 0; i < sources.size(); i++) {
         DAGNode* src_node = stage_to_node_[sources[i]];
-        std::string tag = sources.size() == 1
+        // A stage that's both a pure source (dependencies.empty(), so
+        // getSourceStages() found it) AND was separately given an explicit
+        // bindExternalInput() call already has its external buffer -- binding
+        // it again here would give the same node two input-buffer entries
+        // for what's really one external input, corrupting its port count.
+        bool already_bound = std::any_of(explicit_external_bindings_.begin(), explicit_external_bindings_.end(),
+            [&](const auto& p) { return p.first == src_node; });
+        if (already_bound) continue;
+
+        std::string tag = single
             ? "pipeline_input"
             : "pipeline_input_" + std::to_string(i) + "_" + sources[i]->getName();
         dag_->setInputBuffer(src_node, 1, tag);
         input_nodes_.push_back(src_node);
         input_buffer_ids_.push_back(src_node->input_buffer_ids.back());
     }
+    // Stages bound via bindExternalInput() -- may have other real
+    // dependencies too, so getSourceStages() (dependencies.empty()) never
+    // finds them; the buffer id was already created at bindExternalInput()
+    // call time, just append it here.
+    for (const auto& [node, buf_id] : explicit_external_bindings_) {
+        input_nodes_.push_back(node);
+        input_buffer_ids_.push_back(buf_id);
+    }
+}
+
+void Pipeline::bindExternalInput(Stage* stage) {
+    if (is_finalized_) {
+        throw std::runtime_error("bindExternalInput(): cannot call after finalize()");
+    }
+    auto it = stage_to_node_.find(stage);
+    if (it == stage_to_node_.end()) {
+        throw std::runtime_error("bindExternalInput(): stage not added to this pipeline (call addStage() first)");
+    }
+    DAGNode* node = it->second;
+    std::string tag = "pipeline_input_ext_" + stage->getName();
+    dag_->setInputBuffer(node, 1, tag);   // size fixed up later via propagateBufferSizes
+    explicit_external_bindings_.emplace_back(node, node->input_buffer_ids.back());
 }
 
 int Pipeline::autoDetectUnconnectedOutputs() {
@@ -812,25 +949,35 @@ void Pipeline::validate() {
 
 std::vector<Stage*> Pipeline::getSourceStages() const {
     std::vector<Stage*> sources;
-    
-    for (const auto& [stage, node] : stage_to_node_) {
-        if (node->dependencies.empty()) {
-            sources.push_back(stage);
+
+    // Iterate dag_->getNodes() (deterministic insertion order), NOT
+    // stage_to_node_ (an unordered_map keyed by Stage*, whose iteration order
+    // depends on heap addresses / ASLR). With exactly one source this never
+    // mattered -- order of one element is irrelevant -- but with multiple
+    // source stages (see Pipeline::setPrimarySource()) this order becomes
+    // input_nodes_'s order, and index 0 is the default primary source when
+    // the caller hasn't called setPrimarySource(). An ASLR-dependent default
+    // would silently pick a different "primary" answer on different runs of
+    // the identical program. Same class of bug, same fix, as
+    // autoDetectUnconnectedOutputs()'s existing comment on this file.
+    for (DAGNode* node : dag_->getNodes()) {
+        if (node->stage && node->dependencies.empty()) {
+            sources.push_back(node->stage);
         }
     }
-    
+
     return sources;
 }
 
 std::vector<Stage*> Pipeline::getSinkStages() const {
     std::vector<Stage*> sinks;
-    
-    for (const auto& [stage, node] : stage_to_node_) {
-        if (node->dependents.empty()) {
-            sinks.push_back(stage);
+
+    for (DAGNode* node : dag_->getNodes()) {
+        if (node->stage && node->dependents.empty()) {
+            sinks.push_back(node->stage);
         }
     }
-    
+
     return sinks;
 }
 

@@ -90,6 +90,27 @@ public:
     int    getWordSize()        const { return static_cast<int>(word_size_); }
     uint32_t getCachedOrigBytes() const { return cached_orig_bytes_; }
 
+    // ── Fusion (chunk-cooperative coder sink) ────────────────────────────────
+    // Byte-word 16 KB shape only — matches the fused CLOGCoder device op
+    // (d_CLOG<uint8_t, 16384>, identical to word_size==1 execute()).
+    FusionSpec getFusionSpec() const override {
+        if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
+        return FusionSpec{FusionAccess::Cooperative, chunk_size_};
+    }
+    FusedOpDecl getFusedOp() const override {
+        if (!getFusionSpec().fusable()) return {};
+        return FusedOpDecl{FusionStrategy::ChunkCooperative, "CLOGCoder",
+                           "fused/chunk_fusion/chunk_fusion.cuh", {}};
+    }
+    void setFusedResult(size_t archive_bytes, size_t orig_bytes) {
+        actual_output_size_    = archive_bytes;
+        cached_orig_bytes_     = static_cast<uint32_t>(orig_bytes);
+        tail_readback_pending_ = false;
+    }
+    void setFusedArchiveResult(size_t archive_bytes, size_t orig_bytes) override {
+        setFusedResult(archive_bytes, orig_bytes);
+    }
+
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(
         cudaStream_t stream,

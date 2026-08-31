@@ -63,6 +63,14 @@ template<> struct make_unsigned<int>          { using type = unsigned int; };
 template<> struct make_unsigned<long>         { using type = unsigned long; };
 template<> struct make_unsigned<long long>    { using type = unsigned long long; };
 template<class T> using make_unsigned_t = typename make_unsigned<T>::type;
+template<class T> struct make_signed { using type = T; };
+template<> struct make_signed<unsigned char>      { using type = signed char; };
+template<> struct make_signed<char>               { using type = signed char; };
+template<> struct make_signed<unsigned short>     { using type = short; };
+template<> struct make_signed<unsigned int>       { using type = int; };
+template<> struct make_signed<unsigned long>      { using type = long; };
+template<> struct make_signed<unsigned long long> { using type = long long; };
+template<class T> using make_signed_t = typename make_signed<T>::type;
 }
 )H";
 

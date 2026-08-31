@@ -369,6 +369,135 @@ __device__ __forceinline__ void fused_pack_body(
                                        meta + Coder::meta_bytes * b, payload + offset[b]);
 }
 
+// ── Single-pass decoupled-lookback path ─────────────────────────────────────
+// The two-pass path (rate → host CUB scan → pack) recomputes the predictor delta
+// in BOTH kernels because the device-wide byte-offset prefix-sum forces a launch
+// boundary, and register-resident deltas don't survive it. This path collapses
+// cost + scan + pack into ONE kernel: each warp claims a logical tile via an
+// atomic counter (so logical order is decoupled from block scheduling → forward
+// progress), computes its deltas ONCE, publishes its byte cost as an aggregate,
+// derives its own exclusive byte offset by a warp-windowed look-back over
+// predecessor tiles, then packs from the still-live registers. Same policies,
+// same costs/offsets/packing as two-pass ⇒ byte-identical (reuses staged inverse).
+// This is cuSZp's single-pass design, reconstructed over our modular ops.
+//
+// Status protocol (per tile, three global arrays, device-scope fences): a tile
+// first publishes g_agg then flips g_state to AGG(1); after its look-back it
+// publishes g_incl then flips g_state to PREFIX(2). Separate agg/incl slots avoid
+// any overwrite race on a value a peer may still be reading. A reader spins on
+// g_state, fences, then reads incl (if PREFIX) or agg (if AGG). p<0 lanes act as
+// PREFIX-0 so the window terminates cleanly at tile 0.
+enum : uint32_t { LB_NONE = 0u, LB_AGG = 1u, LB_PREFIX = 2u };
+
+__device__ __forceinline__ uint32_t warp_decoupled_lookback(
+    uint32_t tile, volatile uint32_t* __restrict__ g_state,
+    volatile uint32_t* __restrict__ g_agg, volatile uint32_t* __restrict__ g_incl,
+    uint32_t lane)
+{
+    uint32_t excl = 0u;
+    int look = static_cast<int>(tile) - 1;   // highest predecessor index
+    while (look >= 0) {
+        const int p = look - static_cast<int>(lane);   // lane 0 = highest p in window
+        uint32_t st, vv;
+        if (p >= 0) {
+            while ((st = g_state[p]) == LB_NONE) { /* spin: predecessor not ready */ }
+            __threadfence();
+            vv = (st == LB_PREFIX) ? g_incl[p] : g_agg[p];
+        } else {
+            st = LB_PREFIX;   // out-of-range predecessor contributes an inclusive 0
+            vv = 0u;
+        }
+        const uint32_t prefix_ballot = __ballot_sync(0xffffffffu, st == LB_PREFIX);
+        uint32_t add;
+        bool done;
+        if (prefix_ballot) {
+            const int fpl = __ffs(prefix_ballot) - 1;   // lowest lane w/ PREFIX = highest such p
+            add  = (lane <= static_cast<uint32_t>(fpl)) ? vv : 0u;  // aggs above it + its inclusive
+            done = true;
+        } else {
+            add  = vv;      // whole window is AGG — sum it and slide down
+            done = false;
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            add += __shfl_xor_sync(0xffffffffu, add, off);
+        excl += add;
+        if (done) break;
+        look -= 32;
+    }
+    return excl;   // identical on all lanes
+}
+
+// Single kernel, cuSZp-style COARSE WARP granularity. CTA = 1 warp; each warp OWNS a run
+// of BlocksPerWarp consecutive blocks (BlocksPerWarp*32*EPL elements), computes+holds all
+// their deltas ONCE (no recompute, no 2nd input read), sums their byte costs, does ONE
+// warp-cooperative decoupled look-back over the per-WARP aggregate (scan elements =
+// num_blocks/BlocksPerWarp — coarse, so the look-back latency is hidden behind the warp's
+// large work), then packs every held block at base+intra-warp offset. This is the port of
+// cuSZp2/cuSZp3's fused kernel structure into our generic policy harness: the predictor/
+// coder stay swappable, only the scan/granularity is fixed. Byte-identical to two-pass.
+// (num_warps = grid; g_counter unused here — tile id is blockIdx, forward progress holds
+// because each warp publishes its aggregate before its own look-back, cuSZp-style.)
+template<int ElemsPerLane, int BlocksPerWarp, class Coder, class Pred, class... Transforms>
+__device__ __forceinline__ void fused_single_pass_body(
+    Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
+    uint8_t* __restrict__ meta, uint8_t* __restrict__ payload,
+    uint32_t* __restrict__ /*g_counter*/, uint32_t* __restrict__ g_state,
+    uint32_t* __restrict__ g_agg, uint32_t* __restrict__ g_incl, size_t num_warps)
+{
+    __shared__ uint32_t s_base[BlocksPerWarp];   // exclusive byte offset of each block in the warp
+
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t w    = blockIdx.x;            // CTA = 1 warp ⇒ global warp id = blockIdx
+    if (static_cast<size_t>(w) >= num_warps) return;
+
+    const size_t   b0         = static_cast<size_t>(w) * BlocksPerWarp;
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+
+    // ── Phase 1: compute + hold deltas for all my blocks; sum warp cost; block offsets.
+    int      dheld[BlocksPerWarp][ElemsPerLane];   // held across the look-back (local mem)
+    uint32_t warp_total = 0u;
+    #pragma unroll 1
+    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+        const size_t b = b0 + static_cast<size_t>(jb);
+        uint32_t c = 0u;
+        if (b < num_blocks) {
+            const size_t start = b * block_size;
+            const size_t count = min(static_cast<size_t>(block_size), n - start);
+            #pragma unroll
+            for (int m = 0; m < ElemsPerLane; ++m) dheld[jb][m] = pred.delta(lane, b, m);
+            applyTransforms<ElemsPerLane, Transforms...>(dheld[jb], lane);
+            Coder::template cost<ElemsPerLane>(dheld[jb], lane, word_bytes, count,
+                                               meta + Coder::meta_bytes * b, &c);
+            c = __shfl_sync(0xffffffffu, c, 0);
+        }
+        if (lane == 0u) s_base[jb] = warp_total;   // exclusive within this warp
+        warp_total += c;
+    }
+    __syncwarp();
+
+    // ── Phase 2: warp-cooperative decoupled look-back over per-warp aggregates → base.
+    if (lane == 0u) { g_agg[w] = warp_total; __threadfence(); g_state[w] = LB_AGG; }
+    const uint32_t base = warp_decoupled_lookback(w,
+        reinterpret_cast<volatile uint32_t*>(g_state),
+        reinterpret_cast<volatile uint32_t*>(g_agg),
+        reinterpret_cast<volatile uint32_t*>(g_incl), lane);
+    if (lane == 0u) { g_incl[w] = base + warp_total; __threadfence(); g_state[w] = LB_PREFIX; }
+
+    // ── Phase 3: pack every held block at its resolved offset (registers, no recompute).
+    #pragma unroll 1
+    for (int jb = 0; jb < BlocksPerWarp; ++jb) {
+        const size_t b = b0 + static_cast<size_t>(jb);
+        if (b < num_blocks) {
+            const size_t start = b * block_size;
+            const size_t count = min(static_cast<size_t>(block_size), n - start);
+            Coder::template pack<ElemsPerLane>(dheld[jb], lane, word_bytes, count,
+                                               meta + Coder::meta_bytes * b,
+                                               payload + base + s_base[jb]);
+        }
+    }
+}
+
 // ── Compile-time template kernels (the non-NVRTC path). The NVRTC path generates
 // equivalent extern "C" kernels over the same bodies. ────────────────────────
 template<int ElemsPerLane, class Coder, class Pred, class... Transforms>

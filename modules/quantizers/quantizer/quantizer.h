@@ -43,7 +43,9 @@ struct QuantizerConfig {
     uint8_t  inplace_outliers;  ///< 1 if outliers are encoded in-place in the codes array.
     uint8_t  linear_mode;       ///< 1 if linear/no-outlier mode (signed codes, no outlier ports).
     uint8_t  dither;            ///< 1 if "_R"-style dithered reconstruction is enabled (LC QUANT_*_R).
-    uint8_t  _pad[5];           ///< Alignment padding (dither_seed needs 8-byte alignment) — must be zero.
+    uint8_t  linear_high_precision; ///< 1 if linear coordinates are evaluated in double precision.
+    uint8_t  power_of_two_bound;    ///< 1 if the uniform absolute EB was rounded down to a power of two.
+    uint8_t  _pad[3];           ///< Alignment padding (dither_seed needs 8-byte alignment) — must be zero.
     uint64_t dither_seed;       ///< Deterministic per-element dither seed; meaningful only when dither.
     float    dither_strength;   ///< Dither offset amplitude as a fraction of abs_eb, in (0,1]; meaningful only when dither.
     uint32_t _pad2;             ///< Alignment padding (the f64 fields need 8-byte alignment) — must be zero.
@@ -61,12 +63,15 @@ struct QuantizerConfig {
           input_type(DataType::FLOAT32), code_type(DataType::UINT16),
           eb_mode(0), zigzag_codes(0),
           outlier_threshold(std::numeric_limits<float>::infinity()),
-          inplace_outliers(0), linear_mode(0), dither(0), _pad{}, dither_seed(0),
+          inplace_outliers(0), linear_mode(0), dither(0),
+          linear_high_precision(0), power_of_two_bound(0), _pad{}, dither_seed(0),
           dither_strength(1.0f), _pad2(0),
           abs_error_bound_f64(0.0), value_base_f64(0.0) {}
 };
 static_assert(sizeof(QuantizerConfig) <= FZM_STAGE_CONFIG_SIZE,
               "QuantizerConfig must fit in FZM_STAGE_CONFIG_SIZE");
+static_assert(sizeof(QuantizerConfig) == 72,
+              "QuantizerConfig archive layout changed; add an explicit compatibility path");
 
 /**
  * Direct-value quantizer with error-bounded coding and lossless outlier fallback.
@@ -132,7 +137,7 @@ class QuantizerStage : public Stage {
 public:
     /** Construction parameters. */
     struct Config {
-        float  error_bound           = 1e-4f;   ///< Error bound (interpretation set by `eb_mode`).
+        double error_bound           = 1e-4;    ///< Error bound (interpretation set by `eb_mode`).
         int    quant_radius          = 32768;   ///< Quantization radius.
         float  outlier_capacity      = 0.05f;   ///< Fraction of input size reserved for outliers.
         ErrorBoundMode eb_mode       = ErrorBoundMode::ABS;
@@ -150,10 +155,21 @@ public:
         /// ABS/NOA: linear / no-outlier mode (cuSZp-style). Emits raw signed codes
         /// (q = round(x / 2·eb), stored two's-complement in TCode and *declared* as the
         /// signed DataType), with NO radius clamp, NO outlier ports, NO zigzag — a value
-        /// outside TCode range simply wraps, so size TCode wide enough (use uint32_t).
+        /// outside TCode range is rejected, so size TCode wide enough (use uint32_t).
         /// Intended front-end for `→ LorenzoStage(blockSize=32) → AdaptiveBitpackStage`.
         /// Mutually exclusive with REL, inplace_outliers, and zigzag_codes.
         bool  linear_mode            = false;
+        /// Linear mode only: evaluate x/(2*abs_eb) with a precomputed double
+        /// reciprocal and double multiply. For non-power-of-two bounds the stage
+        /// also tightens its internal bound enough to absorb final TInput
+        /// reconstruction rounding, making the user bound a strict guarantee.
+        bool  linear_high_precision  = false;
+        /// Uniform ABS/NOA/PREL modes: round the resolved absolute half-bound
+        /// downward to the nearest power of two. This is between 1x and 2x
+        /// tighter than requested and makes scaling an exact binary exponent
+        /// shift. Inspired by SLEEK (IPDPS 2026), Sec. III-A. REL is unsupported
+        /// because it quantizes in log space.
+        bool  power_of_two_bound     = false;
         /// ABS/NOA/REL: reconstruct to a deterministic pseudo-random point within
         /// the bin/error-bound interval instead of always the bin center (LC's
         /// QUANT_*_R vs. QUANT_*_0). Decorrelates reconstruction error from the
@@ -178,7 +194,7 @@ public:
         Config() = default;
         Config(TInput eb, ErrorBoundMode mode = ErrorBoundMode::ABS,
                int radius = 32768, float outlier_cap = 0.05f)
-            : error_bound(static_cast<float>(eb)), quant_radius(radius),
+            : error_bound(static_cast<double>(eb)), quant_radius(radius),
               outlier_capacity(outlier_cap), eb_mode(mode) {}
     };
 
@@ -247,7 +263,8 @@ public:
     /// 3-port outlier mode scatters to side buffers and is not a map.
     FusionSpec getFusionSpec() const override {
         if (is_inverse_) return {};
-        if (isLinearMode()) return FusionSpec{FusionAccess::Map, 0};
+        if (isLinearMode() && !config_.linear_high_precision)
+            return FusionSpec{FusionAccess::Map, 0};
         if (isInplaceMode() && config_.zigzag_codes &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
             return FusionSpec{FusionAccess::Map, 0};
@@ -264,8 +281,11 @@ public:
     /// computed_abs_eb_, normally set during forward execute(); a fused pipeline
     /// reuses this stage object for decompress, so it must be primed. ABS only.
     void primeAbsEbForFusion() {
-        if (config_.eb_mode == ErrorBoundMode::ABS)
-            computed_abs_eb_ = static_cast<TInput>(config_.error_bound);
+        if (config_.eb_mode == ErrorBoundMode::ABS) {
+            computed_abs_eb_ = resolveUniformBound();
+            if (config_.power_of_two_bound)
+                computed_abs_eb_ = floorPowerOfTwo(computed_abs_eb_);
+        }
     }
 
     /// Resolve computed_abs_eb_ (and value_base) for a fused runner, covering NOA:
@@ -285,7 +305,7 @@ public:
         // (both resolve to one uniform-step absolute bound — the runner primes the NOA
         // range scan and passes the resolved abs_eb). REL is excluded: it is log-domain
         // per-value quant, not a single abs_eb, so it can't ride the fused kernel.
-        if (isLinearMode() &&
+        if (isLinearMode() && !config_.linear_high_precision &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
             return FusedOpDecl{FusionStrategy::WarpRegister, "LinearQuant", "", {}};
         // Chunk-cooperative (PFPL): inplace+zigzag ABS/NOA float quant.
@@ -322,10 +342,21 @@ public:
         return {};
     }
 
+    std::vector<FusedAuxOutputDecl> getFusedAuxOutputs() const override {
+        if (is_inverse_ || !isSplitOutlierFusable()) return {};
+        return {
+            FusedAuxOutputDecl{1, "outlier_vals", FusedAuxSizeKind::CompactedElements,
+                               static_cast<uint8_t>(getInputDataType()), 1u, 0u, 1u},
+            FusedAuxOutputDecl{2, "outlier_idxs", FusedAuxSizeKind::CompactedElements,
+                               static_cast<uint8_t>(DataType::UINT32), 1u, 0u, 1u},
+        };
+    }
+
     /// The fused runner bypasses forward execute(); prime the value-range scan so
     /// the fused kernel's scale and the reused inverse/header agree (covers NOA).
     void primeFusedForwardState(const FusedPrimeContext& c) override {
         fused_outlier_count_set_ = false;   // reset per fused compress; set by setFusedSideOutput
+        num_elements_ = c.input_bytes / sizeof(TInput);
         primeComputedAbsEb(c.d_input, c.input_bytes / sizeof(TInput), c.pool, c.stream);
     }
 
@@ -397,7 +428,7 @@ public:
         actual_output_sizes_ = saved_actual_output_sizes_;
     }
 
-    void setErrorBound(TInput eb)            { config_.error_bound = static_cast<float>(eb); }
+    void setErrorBound(double eb)             { config_.error_bound = eb; }
     void setQuantRadius(int r)               { config_.quant_radius = r; }
     void setOutlierCapacity(float c)         { config_.outlier_capacity = c; }
     void setErrorBoundMode(ErrorBoundMode m) { config_.eb_mode = m; }
@@ -409,6 +440,10 @@ public:
     void setInplaceOutliers(bool enable)     { config_.inplace_outliers = enable; }
     /// ABS/NOA: linear / no-outlier mode (cuSZp-style signed codes; see Config::linear_mode).
     void setLinearMode(bool enable)          { config_.linear_mode = enable; }
+    /// Linear mode: use double coordinate arithmetic and a strict rounding reserve.
+    void setLinearHighPrecision(bool enable) { config_.linear_high_precision = enable; }
+    /// Uniform modes: tighten the resolved absolute EB to the next lower power of two.
+    void setPowerOfTwoBound(bool enable)     { config_.power_of_two_bound = enable; }
     /// ABS/NOA/REL: dithered ("_R"-style) reconstruction; see Config::dither.
     /// Throws at execute() if combined with linear_mode or inplace_outliers.
     void setDither(bool enable)              { config_.dither = enable; }
@@ -426,6 +461,8 @@ public:
     float          getOutlierThreshold()  const { return config_.outlier_threshold; }
     bool           getInplaceOutliers()   const { return config_.inplace_outliers; }
     bool           getLinearMode()        const { return config_.linear_mode; }
+    bool           getLinearHighPrecision() const { return config_.linear_high_precision; }
+    bool           getPowerOfTwoBound()   const { return config_.power_of_two_bound; }
     bool           getDither()            const { return config_.dither; }
     uint64_t       getDitherSeed()        const { return config_.dither_seed; }
     float          getDitherStrength()    const { return config_.dither_strength; }
@@ -483,6 +520,28 @@ private:
     }
 
     bool isLinearMode() const { return config_.linear_mode; }
+
+    static TInput floorPowerOfTwo(TInput value) {
+        if (!(value > TInput(0)) || !std::isfinite(value))
+            throw std::runtime_error(
+                "QuantizerStage: power_of_two_bound requires a finite positive absolute bound");
+        int exponent = 0;
+        std::frexp(value, &exponent);
+        return std::ldexp(TInput(1), exponent - 1);
+    }
+
+    TInput resolveUniformBound(TInput scale = TInput(1)) const {
+        const double resolved = config_.error_bound * static_cast<double>(scale);
+        TInput bound = static_cast<TInput>(resolved);
+        // The strict path must never loosen a decimal/TOML request merely because
+        // its TInput representation rounded upward. f64 compares equal here;
+        // this primarily protects f32.
+        if (config_.linear_high_precision && static_cast<double>(bound) > resolved)
+            bound = std::nextafter(bound, TInput(0));
+        return bound;
+    }
+
+    void applyUniformBoundPolicy(TInput data_abs_max, bool have_data_abs_max);
 
     /// True when this stage is a fusable 3-port split-outlier Map: standard outlier
     /// mode (not inplace, not linear), zigzag codes, ABS or NOA (uniform step), no

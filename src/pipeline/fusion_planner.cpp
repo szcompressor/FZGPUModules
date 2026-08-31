@@ -20,13 +20,62 @@ bool linearFusableEdge(const DAGNode* prod, const DAGNode* cons) {
     return true;
 }
 
-// Block sizes agree if neither constrains (Map, block 0) or both name the same.
-bool blockCompatible(uint32_t group_bs, const FusionSpec& s) {
-    if (s.access == FusionAccess::Map || s.block_size == 0) return true;
-    return group_bs == 0 || group_bs == s.block_size;
+} // namespace
+
+FusionCompatibility extendFusionGeometry(
+    FusionGeometry& geometry, const FusionSpec& next)
+{
+    if (!next.fusable()) return FusionCompatibility::UnfusableStage;
+    if (next.access == FusionAccess::Map) {
+        return geometry.tileAdaptive()
+            ? FusionCompatibility::TileInteriorStageUnsupported
+            : FusionCompatibility::Compatible;
+    }
+
+    if (next.access == FusionAccess::TileAdaptive) {
+        if (next.block_size == 0 || next.coder_unit_size == 0 ||
+            next.block_size % next.coder_unit_size != 0) {
+            return FusionCompatibility::InvalidTileGeometry;
+        }
+        if (geometry.block_size != 0)
+            return FusionCompatibility::TileAfterBlockLocal;
+        if (geometry.tileAdaptive())
+            return FusionCompatibility::MultipleTileSelectors;
+        geometry.selector_tile_size = next.block_size;
+        geometry.coder_unit_size = next.coder_unit_size;
+        return FusionCompatibility::Compatible;
+    }
+
+    if (geometry.tileAdaptive()) {
+        if (next.access != FusionAccess::Cooperative)
+            return FusionCompatibility::TileInteriorStageUnsupported;
+        if (next.block_size != geometry.coder_unit_size)
+            return FusionCompatibility::TileCoderUnitMismatch;
+        return FusionCompatibility::Compatible;
+    }
+
+    if (next.block_size != 0) {
+        if (geometry.block_size != 0 && geometry.block_size != next.block_size)
+            return FusionCompatibility::StandardBlockMismatch;
+        geometry.block_size = next.block_size;
+    }
+    return FusionCompatibility::Compatible;
 }
 
-} // namespace
+const char* fusionCompatibilityName(FusionCompatibility result) {
+    switch (result) {
+        case FusionCompatibility::Compatible: return "compatible";
+        case FusionCompatibility::UnfusableStage: return "unfusable_stage";
+        case FusionCompatibility::InvalidTileGeometry: return "invalid_tile_geometry";
+        case FusionCompatibility::TileAfterBlockLocal: return "tile_after_block_local";
+        case FusionCompatibility::MultipleTileSelectors: return "multiple_tile_selectors";
+        case FusionCompatibility::TileInteriorStageUnsupported:
+            return "tile_interior_stage_unsupported";
+        case FusionCompatibility::StandardBlockMismatch: return "standard_block_mismatch";
+        case FusionCompatibility::TileCoderUnitMismatch: return "tile_coder_unit_mismatch";
+    }
+    return "unknown";
+}
 
 std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
     std::vector<FusionGroup> groups;
@@ -50,25 +99,32 @@ std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
 
         FusionGroup g;
         DAGNode* cur = start;
-        uint32_t bs = (sspec.block_size ? sspec.block_size : 0u);
+        FusionGeometry geometry;
+        if (extendFusionGeometry(geometry, sspec) != FusionCompatibility::Compatible)
+            continue;
         bool coder = false;
         for (;;) {
             g.stages.push_back(cur->stage);
             g.stage_names.push_back(cur->name);
             const FusionSpec cs = cur->stage->getFusionSpec();
-            if (cs.block_size) bs = cs.block_size;
             consumed.insert(cur);
             if (cs.access == FusionAccess::Cooperative) { coder = true; break; }  // coder terminates
 
             if (cur->dependents.size() != 1) break;
             DAGNode* nxt = cur->dependents[0];
             if (!linearFusableEdge(cur, nxt)) break;
-            if (!blockCompatible(bs, nxt->stage->getFusionSpec())) break;
+            FusionGeometry extended = geometry;
+            if (extendFusionGeometry(extended, nxt->stage->getFusionSpec()) !=
+                FusionCompatibility::Compatible) break;
+            geometry = extended;
             cur = nxt;
         }
 
         if (g.stages.size() >= 2) {
-            g.block_size = bs;
+            g.block_size = geometry.block_size;
+            g.selector_tile_size = geometry.selector_tile_size;
+            g.coder_unit_size = geometry.coder_unit_size;
+            g.has_tile_adaptive = geometry.tileAdaptive();
             g.has_coder  = coder;
             groups.push_back(std::move(g));
         }

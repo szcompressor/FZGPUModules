@@ -314,6 +314,26 @@ public:
     virtual FusedOpDecl getFusedOp() const { return {}; }
 
     /**
+     * Exact local encoded-size policy exposed to a directly connected adaptive
+     * producer. This is an algorithmic semantic contract, not a fusion-cost
+     * estimate: staged and fused paths must make the same decision from it.
+     * Default = no oracle.
+     */
+    virtual EncodingOracleDecl getEncodingOracle() const { return {}; }
+
+    /**
+     * Bind an immediate downstream encoder's exact oracle during finalize().
+     * Adaptive stages override this and return true only when type, unit size,
+     * exactness, and additivity are compatible. Default rejects the contract.
+     */
+    virtual bool bindDownstreamEncodingOracle(const EncodingOracleDecl& /*decl*/) {
+        return false;
+    }
+
+    /** Escaping outputs a generated fused op can produce beside its main port. */
+    virtual std::vector<FusedAuxOutputDecl> getFusedAuxOutputs() const { return {}; }
+
+    /**
      * Establish forward-computed state this stage's own INVERSE will read, for a
      * fused runner that bypasses forward `execute()`. Default no-op; a quantizer
      * overrides it to run its value-range scan. Called once per fused group member

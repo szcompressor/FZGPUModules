@@ -423,13 +423,22 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 std::vector<FusedSideOutput> side;
                 std::vector<int>             side_ids;
                 for (DAGNode* m : fg.members) {
+                    const auto declarations = m->stage->getFusedAuxOutputs();
                     for (const auto& kv : m->output_index_to_buffer_id) {
                         const int buf_id = kv.second;
                         if (buf_id == main_out_id) continue;
                         BufferInfo& b = buffers_.at(buf_id);
                         if (!b.consumer_stage_ids.empty()) continue;   // internal to the group
+                        FusedAuxOutputDecl declaration;
+                        const auto declared = std::find_if(
+                            declarations.begin(), declarations.end(),
+                            [&](const FusedAuxOutputDecl& d) {
+                                return d.output_index == kv.first;
+                            });
+                        if (declared != declarations.end()) declaration = *declared;
                         side.push_back(FusedSideOutput{
-                            m->stage, kv.first, b.d_ptr, b.allocated_size, 0});
+                            m->stage, kv.first, b.d_ptr, b.allocated_size, 0,
+                            std::move(declaration)});
                         side_ids.push_back(buf_id);
                     }
                 }

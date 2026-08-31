@@ -60,6 +60,18 @@
       "type": "bool",
       "default": false,
       "description": "ABS/NOA: linear/no-outlier mode (cuSZp-style). Emits raw signed codes q=round(x/2·eb), no radius clamp, no outlier ports. Pair with LorenzoStage(setBlockSize) → AdaptiveBitpackStage."
+    },
+    {
+      "name": "linearHighPrecision",
+      "type": "bool",
+      "default": false,
+      "description": "Linear mode only: double coordinate and reconstruction arithmetic plus an internal rounding reserve for a strict TInput error bound."
+    },
+    {
+      "name": "powerOfTwoBound",
+      "type": "bool",
+      "default": false,
+      "description": "ABS/NOA/PREL: round the resolved absolute half-bound downward to a power of two (1x to 2x tighter than requested), following SLEEK's bound policy."
     }
   ],
 

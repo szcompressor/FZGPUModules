@@ -123,6 +123,25 @@ public:
         return d;
     }
 
+    /// Exact local encoded-size policy for an immediately upstream adaptive
+    /// selector. Unlike getFusedOp(), this semantic declaration is available in
+    /// plain mode: AdaptiveLorenzo needs the staged coder's exact byte formula
+    /// even when no fused implementation has been selected.
+    EncodingOracleDecl getEncodingOracle() const override {
+        if (is_inverse_ || block_size_ == 0) return {};
+        EncodingOracleDecl d;
+        d.kind = outlier_selection_
+            ? EncodingOracleKind::AdaptiveFixedRateBitpack
+            : EncodingOracleKind::PlainFixedRateBitpack;
+        d.op_name = outlier_selection_ ? "AdaptiveBitpackCoder" : "PlainBitpackCoder";
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        d.input_data_type = static_cast<uint8_t>(getElementDataType());
+        d.unit_elems = block_size_;
+        d.exact = true;
+        d.additive = true;
+        return d;
+    }
+
     /// Choose the warp coder policy the fused path composes (default
     /// "AdaptiveBitpackCoder"). Any policy in warp_fusion.cuh that emits an
     /// AdaptiveBitpack-decodable archive works — e.g. "PlainBitpackCoder" for an
@@ -138,6 +157,9 @@ public:
     void setFusedResult(size_t num_elements, size_t archive_bytes) {
         num_elements_       = num_elements;
         actual_output_size_ = archive_bytes;
+    }
+    void setFusedArchiveResult(size_t archive_bytes, size_t orig_bytes) override {
+        setFusedResult(orig_bytes / sizeof(T), archive_bytes);
     }
 
     /// Enable cuSZp2 per-block plain/outlier selection: each block may instead

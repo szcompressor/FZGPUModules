@@ -40,6 +40,22 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── GPU SPERR bound-guarantee pipeline (bindExternalInput + Cdf97OutlierCorrect)
+fz_add_test(
+    NAME    test_sperr_gpu_bounded
+    SOURCES test_sperr_gpu_bounded.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
+# ─── Multi-source pipelines (Pipeline::setPrimarySource()) ───────────────────
+fz_add_test(
+    NAME    test_multi_source_pipeline
+    SOURCES test_multi_source_pipeline.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
 # ─── Pipeline error-handling / invalid-usage guards ───────────────────────────
 fz_add_test(
     NAME    test_pipeline_errors

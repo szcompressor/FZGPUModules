@@ -65,6 +65,18 @@ constexpr size_t FZM_MAX_NAME_LEN     = 64;   ///< Maximum output port name leng
 constexpr size_t FZM_STAGE_CONFIG_SIZE = 128; ///< Per-stage serialized config slot (bytes)
 constexpr size_t FZM_MAX_SOURCES      = 4;    ///< Maximum source stages per pipeline
 
+/// FZMStageInfo::stage_flags bits.
+/// Set on exactly the stage Pipeline::setPrimarySource() designated (or, if
+/// unset, the pipeline's sole/first-discovered source) -- see buildHeader()
+/// and Pipeline::buildSourceSizesFromHeader(). Needed because a stage bound
+/// via bindExternalInput() alongside other real connections (e.g.
+/// Cdf97OutlierCorrectStage) is invisible to the plain "no other stage
+/// produces any of my inputs" source test buildSourceSizesFromHeader() uses
+/// for everything else -- decompressFromFile() has no live Pipeline to ask.
+/// Absent (0) on any archive written before this flag existed; the
+/// old is-source heuristic remains the fallback for those.
+constexpr uint16_t FZM_STAGE_FLAG_PRIMARY_SOURCE = 0x1;
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -108,6 +120,13 @@ enum class StageType : uint16_t {
     ROIBIN_SPLIT = 35, ///< Region-of-interest / binned-background split (ROIBIN-style dual-error-bound branching)
     SZX        = 36,   ///< SZx ultrafast EB compressor: per-block constant/non-constant classification + fixed-length residuals (fused, no entropy coder)
     SZP        = 37,   ///< SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack (fused, no entropy coder)
+    // 38 (TEE, SPERR-branch-only) never shipped on main -- bindExternalInput()
+    // replaced the fan-out/duplicate-copy stage it would have been for before
+    // this branch merged. Not reused -- a future stage type reading an old
+    // archive that used it should fail loudly, not silently collide.
+    CDF97      = 39,   ///< CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half)
+    SPECK2D    = 40,   ///< GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format
+    CDF97_OUTLIER_CORRECT = 41, ///< Sparse outlier correction, guarantees the GPU SPERR pipeline's pointwise bound
 };
 
 /**
@@ -150,7 +169,7 @@ struct FZMStageInfo {
     uint16_t  stage_version;  ///< Config format version (2B)
     uint8_t   num_inputs;     ///< Number of input ports (1B)
     uint8_t   num_outputs;    ///< Number of output ports (1B)
-    uint16_t  reserved1;      ///< Padding (2B)
+    uint16_t  stage_flags;    ///< FZM_STAGE_FLAG_* bits; 0 on pre-flag archives (2B, was reserved1)
 
     uint16_t input_buffer_ids[FZM_MAX_STAGE_INPUTS];   ///< Input buffer indices (16B); 0xFFFF = unused
     uint16_t output_buffer_ids[FZM_MAX_STAGE_OUTPUTS]; ///< Output buffer indices (16B); 0xFFFF = unused
@@ -172,7 +191,7 @@ struct FZMStageInfo {
         stage_version = 0;
         num_inputs   = 0;
         num_outputs  = 0;
-        reserved1    = 0;
+        stage_flags  = 0;
         memset(input_buffer_ids,  0xFF, sizeof(input_buffer_ids));
         memset(output_buffer_ids, 0xFF, sizeof(output_buffer_ids));
         memset(stage_config, 0, FZM_STAGE_CONFIG_SIZE);
@@ -365,6 +384,9 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::GPULZ:  return "GPULZ";
         case StageType::LOG_TRANSFORM: return "LogTransform";
         case StageType::ADAPTIVE_LORENZO: return "AdaptiveLorenzo";
+        case StageType::CDF97: return "CDF97";
+        case StageType::SPECK2D: return "SPECK2D";
+        case StageType::CDF97_OUTLIER_CORRECT: return "Cdf97OutlierCorrect";
         default:                     return "Unknown";
     }
 }

@@ -37,14 +37,30 @@ namespace fz {
  */
 /**
  * Kernel-fusion policy for compress. `Off` (default) runs every stage staged.
- * `Auto` runs the fusion planner at finalize() and, for each fusable chain that
- * has a registered fused implementation, replaces the group's staged execute()s
- * with one fused kernel — a compress-only optimization that leaves the archive
- * byte-identical (decompress is unaffected). Groups with no registered impl stay
- * staged, so `Auto` is always safe. Enabling fusion disables CUDA graph capture.
- * Overridable at runtime with FZ_FUSION=off|auto. See CN-FUSE-PROOF/PLAN.
+ * `Auto` installs only registered implementations that have passed their
+ * profitability gate. `Force` also permits experimental implementations and is
+ * intended for correctness/performance diagnostics, not production selection.
+ * The planner may select non-overlapping partial groups from one larger compatible
+ * chain; a specialization need not consume the maximal chain. Decompression and
+ * archive semantics remain staged-compatible. Overridable at runtime with
+ * FZ_FUSION=off|auto|force ("experimental" aliases force).
  */
-enum class FusionPolicy { Off, Auto };
+enum class FusionPolicy { Off, Auto, Force };
+
+/// One finalize-time fusion specialization selected for compress execution.
+struct FusionGroupInfo {
+    std::string implementation;
+    std::vector<std::string> stages;
+};
+
+/// Resolved fusion decision for diagnostics and benchmark provenance.
+struct FusionInfo {
+    FusionPolicy policy = FusionPolicy::Off;
+    size_t legal_group_count = 0;
+    std::vector<FusionGroupInfo> installed_groups;
+    /// policy_off, no_legal_group, or no_profitable_implementation; empty on a hit.
+    std::string fallback_reason;
+};
 
 class Pipeline {
 public:
@@ -80,6 +96,8 @@ public:
     FusionPolicy getFusionPolicy() const { return fusion_policy_; }
     /** Number of fused groups installed at finalize() (0 unless Auto matched). */
     size_t getFusedGroupCount() const { return dag_ ? dag_->getFusedGroupCount() : 0; }
+    /** Resolved policy, legal-domain count, installed implementations, and fallback. */
+    const FusionInfo& getFusionInfo() const { return fusion_info_; }
 
     /** Number of parallel CUDA streams for level-based execution. Must be called before finalize(). */
     void setNumStreams(int num_streams);
@@ -116,6 +134,31 @@ public:
     int connect(Stage* dependent, const std::vector<Stage*>& producers);
 
     /**
+     * Bind the pipeline's external input buffer directly to a stage's next
+     * input port, even when that stage has OTHER inputs wired normally via
+     * connect(). Unlike a pure source stage (see setPrimarySource()), a
+     * stage bound this way may also depend on other stages -- it just needs
+     * one of its own ports to see the untouched original input alongside
+     * whatever else it computes from.
+     *
+     * Input port position follows the same call-order convention connect()
+     * already uses: call this before any connect() call that targets the
+     * SAME stage's other ports, or the external buffer lands on the wrong
+     * port. Must be called before finalize(). Does not by itself make
+     * decompress() return this stage's answer -- pair with
+     * setPrimarySource(stage) when this stage's inverse output should be
+     * the one returned.
+     *
+     * Existed to remove a fan-out/duplicate-copy stage (formerly TeeStage)
+     * that was needed only because Pipeline treated "receives the external
+     * buffer" and "has no other dependencies" as the same thing. A stage
+     * like an outlier-correction stage needs the raw input on one port and
+     * a normal upstream connection (e.g. a paired quantizer's codes) on
+     * another -- this binds exactly that one port, nothing else.
+     */
+    void bindExternalInput(Stage* stage);
+
+    /**
      * Finalize the pipeline: validate topology, assign execution levels, and
      * (for PREALLOCATE) allocate all buffers. Must be called before compress/decompress.
      * If setWarmupOnFinalize(true) was set and input_size_hint > 0, runs warmup() automatically.
@@ -141,6 +184,40 @@ public:
      */
     void setPoolManagedDecompOutput(bool enable) { pool_managed_decomp_ = enable; }
     bool isPoolManagedDecompOutput() const { return pool_managed_decomp_; }
+
+    /**
+     * Designate which source stage's inverse output decompress() returns, for
+     * pipelines with more than one source stage (see "Multi-source pipelines"
+     * below). Must be a stage with zero forward inputs (a true source) that was
+     * already added via addStage(). Optional for single-source pipelines.
+     *
+     * ## Multi-source pipelines
+     *
+     * A pipeline may have more than one source stage — more than one stage
+     * with no forward inputs, each independently reading the same external
+     * buffer passed to compress(). This exists for stages that need to see
+     * the *original* input directly, alongside another branch that transforms
+     * it (e.g. an outlier-correction stage that diffs a trial reconstruction
+     * against the untouched original). All source stages receive the exact
+     * same device pointer/size passed to compress() — read-only, never a
+     * duplicate copy — so add a genuine second source stage instead of a
+     * fan-out/tee node when a stage's only reason for existing mid-graph is
+     * to hand a second copy of the raw input to a downstream consumer.
+     *
+     * decompress()'s single returned buffer must still come from exactly one
+     * stage, so with N>1 sources you must call setPrimarySource() to say
+     * which one's inverse output is authoritative; the other source(s)'
+     * inverse outputs are still computed (their results may feed other
+     * stages) but are not directly returned. Defaults to whichever source
+     * stage was added first via addStage() (getSourceStages() walks nodes in
+     * deterministic insertion order), which is almost never what you want
+     * for N>1 — set this explicitly whenever there is more than one source
+     * stage.
+     *
+     * Incompatible with CUDA Graph mode, which still requires exactly one
+     * source stage (enableGraphMode(true) throws otherwise).
+     */
+    void setPrimarySource(Stage* stage) { primary_source_stage_ = stage; }
 
     /**
      * Return the worst-case compressed output size in bytes for the given input.
@@ -784,8 +861,12 @@ private:
     // finalize() sub-steps
     void typeCheckConnections();
     void computeInputAlignment();
-    /// Run the fusion planner and install matched fused groups on the DAG
-    /// (Auto mode / FZ_FUSION=auto). No-op otherwise. May disable graph mode.
+    /// Bind exact one-hop semantic contracts (such as an adaptive selector's
+    /// downstream encoded-size oracle) independently of fusion policy.
+    void bindSemanticContracts();
+    /// Run the fusion planner and install matched fused groups on the DAG.
+    /// Auto admits profitability-approved implementations; Force also admits
+    /// experimental ones. Off is a no-op. May disable graph mode.
     void planAndInstallFusion();
     void notifyStagesFinalizeHooks();
     void refinePoolSize();
@@ -948,6 +1029,18 @@ private:
     PipelinePerfResult last_perf_result_;
 
     std::vector<DAGNode*> input_nodes_;
+    // Explicit choice of which input_nodes_ entry decompress() returns, for
+    // pipelines with more than one source stage. Null = default to
+    // input_nodes_[0]. Set via setPrimarySource(); resolved to an index lazily
+    // (source stages aren't wired into input_nodes_ until finalize()).
+    Stage* primary_source_stage_ = nullptr;
+    // (node, buffer_id) pairs registered by bindExternalInput(), captured
+    // immediately (before any later connect() calls add more buffer ids to
+    // the same node). setupInputBuffers() appends these to input_nodes_/
+    // input_buffer_ids_ after its own auto-discovery pass, since it clears
+    // both first and auto-discovery alone would miss any stage that also
+    // has real dependencies (getSourceStages() requires dependencies.empty()).
+    std::vector<std::pair<DAGNode*, int>> explicit_external_bindings_;
     std::vector<DAGNode*> output_nodes_;
     std::vector<int>      input_buffer_ids_;
     std::vector<int>      output_buffer_ids_;
@@ -1016,6 +1109,7 @@ private:
     bool graph_mode_enabled_;
     bool graph_captured_;
     FusionPolicy fusion_policy_ = FusionPolicy::Off;
+    FusionInfo fusion_info_;
 
     // Fixed device input buffer whose address is baked into the captured graph.
     // compress() copies user input here before cudaGraphLaunch().

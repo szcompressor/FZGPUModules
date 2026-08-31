@@ -18,6 +18,38 @@ using namespace fz;
 
 namespace {
 
+// Planner-only Map that deliberately has no generated op. It extends the
+// maximal legality chain but cannot belong to an executable specialization,
+// exercising selection of a valid interior subspan.
+class PlannerOnlyMapStage final : public Stage {
+public:
+    void execute(fz::stream_t, MemoryPool*, const std::vector<void*>&,
+                 const std::vector<void*>&, const std::vector<size_t>& sizes) override {
+        actual_ = sizes.empty() ? 0 : sizes[0];
+    }
+    std::string getName() const override { return "PlannerOnlyMap"; }
+    size_t getNumInputs() const override { return 1; }
+    size_t getNumOutputs() const override { return 1; }
+    std::vector<size_t> estimateOutputSizes(
+        const std::vector<size_t>& inputs) const override {
+        return {inputs.empty() ? 0 : inputs[0]};
+    }
+    std::unordered_map<std::string, size_t>
+    getActualOutputSizesByName() const override { return {{"output", actual_}}; }
+    uint16_t getStageTypeId() const override { return 0xffffu; }
+    uint8_t getOutputDataType(size_t) const override {
+        return static_cast<uint8_t>(DataType::FLOAT32);
+    }
+    uint8_t getInputDataType(size_t) const override {
+        return static_cast<uint8_t>(DataType::FLOAT32);
+    }
+    FusionSpec getFusionSpec() const override {
+        return FusionSpec{FusionAccess::Map, 0};
+    }
+private:
+    size_t actual_ = 0;
+};
+
 // Build the cuszp2 fast pipeline: Quantizer(linear) -> Lorenzo(32) -> AdaptiveBitpack(32).
 void buildCuszp2(Pipeline& p, size_t n) {
     p.setDims(n, 1, 1);
@@ -43,6 +75,20 @@ void buildCuszp3(Pipeline& p, size_t dx, size_t dy) {
     p.connect(a, tl);
 }
 
+void buildFsz(Pipeline& p, size_t n, bool outlier) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f);
+    q->setErrorBoundMode(ErrorBoundMode::ABS);
+    q->setLinearMode(true);
+    auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>();
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    ab->setOutlierSelection(outlier);
+    p.connect(al, q, "codes");
+    p.connect(ab, al);
+}
+
 } // namespace
 
 // The whole cuszp2 front is one block-local fusable group ending in the coder.
@@ -56,6 +102,39 @@ TEST(FusionPlanner, Cuszp2ChainIsOneGroup) {
     EXPECT_EQ(groups[0].stages.size(), 3u);
     EXPECT_EQ(groups[0].block_size, 32u);
     EXPECT_TRUE(groups[0].has_coder);
+}
+
+TEST(FusionPlanner, AutoSelectsExecutableSubspanOfMaximalChain) {
+    Pipeline p(1024 * sizeof(float), MemoryStrategy::PREALLOCATE, 3.0f);
+    p.setFusionPolicy(FusionPolicy::Auto);
+    p.setDims(1024, 1, 1);
+    auto* prefix = p.addStage<PlannerOnlyMapStage>();
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f);
+    q->setErrorBoundMode(ErrorBoundMode::ABS);
+    q->setLinearMode(true);
+    auto* l = p.addStage<LorenzoStage<int32_t>>();
+    l->setBlockSize(32);
+    auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    a->setBlockSize(32);
+    a->setOutlierSelection(true);
+    p.connect(q, prefix);
+    p.connect(l, q, "codes");
+    p.connect(a, l);
+    p.finalize();
+
+    const auto maximal = planFusionGroups(*p.getDAG());
+    ASSERT_EQ(maximal.size(), 1u);
+    EXPECT_EQ(maximal[0].stages.size(), 4u);
+    // The four-stage span has no registry match; the interior q->lz->AB span does.
+    EXPECT_EQ(p.getFusedGroupCount(), 1u);
+    const auto& info = p.getFusionInfo();
+    EXPECT_EQ(info.policy, FusionPolicy::Auto);
+    EXPECT_EQ(info.legal_group_count, 1u);
+    ASSERT_EQ(info.installed_groups.size(), 1u);
+    EXPECT_EQ(info.installed_groups[0].implementation, "warp-register");
+    EXPECT_EQ(info.installed_groups[0].stages.size(), 3u);
+    EXPECT_TRUE(info.fallback_reason.empty());
 }
 
 // A quantizer in the default (outlier) mode is not a pure Map, so it is not
@@ -98,6 +177,247 @@ TEST(FusionPlanner, StageFusionSpecs) {
     AdaptiveBitpackStage<int32_t> ab; ab.setBlockSize(32);
     EXPECT_EQ(ab.getFusionSpec().access, FusionAccess::Cooperative);
     EXPECT_EQ(ab.getFusionSpec().block_size, 32u);
+}
+
+// Encoded-size oracles are semantic declarations, independent of whether a
+// particular coder configuration currently participates in kernel fusion.
+TEST(FusionPlanner, AdaptiveBitpackEncodingOracleDeclarations) {
+    AdaptiveBitpackStage<int32_t> plain;
+    plain.setBlockSize(32);
+    const EncodingOracleDecl p = plain.getEncodingOracle();
+    ASSERT_TRUE(p.valid());
+    EXPECT_EQ(p.kind, EncodingOracleKind::PlainFixedRateBitpack);
+    EXPECT_EQ(p.input_data_type, static_cast<uint8_t>(DataType::INT32));
+    EXPECT_EQ(p.unit_elems, 32u);
+    EXPECT_TRUE(p.exact);
+    EXPECT_TRUE(p.additive);
+    EXPECT_FALSE(plain.getFusedOp().valid())
+        << "plain staged semantics must not imply current warp-fusion eligibility";
+
+    plain.setOutlierSelection(true);
+    const EncodingOracleDecl adaptive = plain.getEncodingOracle();
+    ASSERT_TRUE(adaptive.valid());
+    EXPECT_EQ(adaptive.kind, EncodingOracleKind::AdaptiveFixedRateBitpack);
+}
+
+TEST(FusionPlanner, FinalizeBindsPlainOracleToAdaptiveLorenzo) {
+    Pipeline p(4096 * sizeof(int32_t), MemoryStrategy::PREALLOCATE);
+    auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>();
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    p.connect(ab, al);
+
+    EXPECT_FALSE(al->hasBoundEncodingOracle());
+    p.finalize();
+    EXPECT_TRUE(al->hasBoundEncodingOracle());
+    EXPECT_EQ(al->getBoundEncodingOracleKind(),
+              EncodingOracleKind::PlainFixedRateBitpack);
+}
+
+TEST(FusionPlanner, FinalizeBindsAdaptiveOutlierOracleToAdaptiveLorenzo) {
+    Pipeline p(4096 * sizeof(int32_t), MemoryStrategy::PREALLOCATE);
+    auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>();
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    ab->setOutlierSelection(true);
+    p.connect(ab, al);
+    p.finalize();
+
+    EXPECT_TRUE(al->hasBoundEncodingOracle());
+    EXPECT_EQ(al->getBoundEncodingOracleKind(),
+              EncodingOracleKind::AdaptiveFixedRateBitpack);
+}
+
+TEST(FusionPlanner, TileAdaptiveGeometryReportsExactLegalityFailures) {
+    FusionGeometry geometry;
+    EXPECT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::TileAdaptive, 250, 32}),
+              FusionCompatibility::InvalidTileGeometry);
+
+    geometry = {};
+    ASSERT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::TileAdaptive, 256, 32}),
+              FusionCompatibility::Compatible);
+    EXPECT_EQ(geometry.selector_tile_size, 256u);
+    EXPECT_EQ(geometry.coder_unit_size, 32u);
+    EXPECT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::Map, 0}),
+              FusionCompatibility::TileInteriorStageUnsupported);
+    EXPECT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::Cooperative, 64}),
+              FusionCompatibility::TileCoderUnitMismatch);
+
+    geometry = {};
+    ASSERT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::BlockLocal, 32}),
+              FusionCompatibility::Compatible);
+    EXPECT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::BlockLocal, 64}),
+              FusionCompatibility::StandardBlockMismatch);
+    EXPECT_EQ(extendFusionGeometry(
+                  geometry, FusionSpec{FusionAccess::TileAdaptive, 256, 32}),
+              FusionCompatibility::TileAfterBlockLocal);
+    EXPECT_STREQ(fusionCompatibilityName(
+                     FusionCompatibility::TileCoderUnitMismatch),
+                 "tile_coder_unit_mismatch");
+}
+
+TEST(FusionPlanner, FszLegalChainHasNoUnprofitableExecutionPlan) {
+    auto make = [](FusionPolicy policy) {
+        auto p = std::make_unique<Pipeline>(
+            4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+        p->setFusionPolicy(policy);
+        p->setDims(4096, 1, 1);
+        auto* q = p->addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(1e-3f);
+        q->setErrorBoundMode(ErrorBoundMode::ABS);
+        q->setLinearMode(true);
+        auto* al = p->addStage<AdaptiveLorenzoStage<int32_t>>();
+        auto* ab = p->addStage<AdaptiveBitpackStage<int32_t>>();
+        ab->setBlockSize(32);
+        p->connect(al, q, "codes");
+        p->connect(ab, al);
+        p->finalize();
+        return p;
+    };
+
+    auto automatic = make(FusionPolicy::Auto);
+    const auto groups = planFusionGroups(*automatic->getDAG());
+    ASSERT_EQ(groups.size(), 1u);
+    EXPECT_EQ(groups[0].stages.size(), 3u);
+    EXPECT_TRUE(groups[0].has_tile_adaptive);
+    EXPECT_EQ(groups[0].selector_tile_size, 256u);
+    EXPECT_EQ(groups[0].coder_unit_size, 32u);
+    EXPECT_EQ(groups[0].block_size, 0u);
+    EXPECT_TRUE(groups[0].has_coder);
+    EXPECT_EQ(automatic->getFusedGroupCount(), 0u);
+    EXPECT_EQ(automatic->getFusionInfo().fallback_reason,
+              "no_profitable_implementation");
+
+    auto forced = make(FusionPolicy::Force);
+    EXPECT_EQ(forced->getFusedGroupCount(), 0u);
+}
+
+TEST(FusionPlanner, FszAutoFallbackMatchesStagedAndRoundTrips) {
+    const size_t n = (1u << 16) + 37;
+    const size_t bytes = n * sizeof(float);
+    std::vector<float> input(n);
+    for (size_t i = 0; i < n; ++i)
+        input[i] = 50.0f + 0.4f * std::sin(i * 0.013f) +
+                   0.08f * std::cos(i * 0.071f);
+    float* d_input = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_input, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_input, input.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    for (bool outlier : {false, true}) {
+        auto compressCopy = [&](FusionPolicy policy, std::vector<uint8_t>& archive) {
+            Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 4.0f);
+            p.setFusionPolicy(policy);
+            buildFsz(p, n, outlier);
+            p.finalize();
+            EXPECT_EQ(p.getFusedGroupCount(), 0u);
+            void* d_compressed = nullptr;
+            size_t compressed_bytes = 0;
+            p.compress(d_input, bytes, &d_compressed, &compressed_bytes, 0);
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            archive.resize(compressed_bytes);
+            EXPECT_EQ(cudaMemcpy(archive.data(), d_compressed, compressed_bytes,
+                                 cudaMemcpyDeviceToHost), cudaSuccess);
+        };
+
+        std::vector<uint8_t> staged, fused;
+        compressCopy(FusionPolicy::Off, staged);
+        compressCopy(FusionPolicy::Auto, fused);
+        ASSERT_EQ(fused.size(), staged.size()) << "outlier=" << outlier;
+        EXPECT_EQ(fused, staged) << "outlier=" << outlier;
+
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 4.0f);
+        p.setFusionPolicy(FusionPolicy::Auto);
+        buildFsz(p, n, outlier);
+        p.finalize();
+        void* d_compressed = nullptr; size_t compressed_bytes = 0;
+        p.compress(d_input, bytes, &d_compressed, &compressed_bytes, 0);
+        void* d_reconstructed = nullptr; size_t reconstructed_bytes = 0;
+        p.decompress(d_compressed, compressed_bytes, &d_reconstructed,
+                     &reconstructed_bytes, 0);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        ASSERT_EQ(reconstructed_bytes, bytes);
+        std::vector<float> reconstructed(n);
+        ASSERT_EQ(cudaMemcpy(reconstructed.data(), d_reconstructed, bytes,
+                             cudaMemcpyDeviceToHost), cudaSuccess);
+        double max_error = 0.0;
+        for (size_t i = 0; i < n; ++i)
+            max_error = std::max(max_error,
+                                 static_cast<double>(std::abs(reconstructed[i] - input[i])));
+        EXPECT_LE(max_error, 1.01e-3) << "outlier=" << outlier;
+    }
+    cudaFree(d_input);
+}
+
+TEST(FusionPlanner, AdaptiveAuxiliaryOutputsAreDeclarative) {
+    AdaptiveLorenzoStage<int32_t> al;
+    EncodingOracleDecl oracle;
+    oracle.kind = EncodingOracleKind::PlainFixedRateBitpack;
+    oracle.op_name = "PlainBitpackCoder";
+    oracle.input_data_type = static_cast<uint8_t>(DataType::INT32);
+    oracle.unit_elems = 32;
+    oracle.exact = true;
+    oracle.additive = true;
+    ASSERT_TRUE(al.bindDownstreamEncodingOracle(oracle));
+
+    const auto al_aux = al.getFusedAuxOutputs();
+    ASSERT_EQ(al_aux.size(), 2u);
+    EXPECT_EQ(al_aux[0].name, "modes");
+    EXPECT_EQ(al_aux[0].size_kind, FusedAuxSizeKind::FixedBitsPerUnit);
+    EXPECT_EQ(al_aux[0].unit_elems, 256u);
+    EXPECT_EQ(al_aux[0].bits_per_unit, 2u);
+    EXPECT_EQ(al_aux[1].name, "means");
+    EXPECT_EQ(al_aux[1].size_kind, FusedAuxSizeKind::CompactedElements);
+    EXPECT_EQ(al_aux[1].count_group, 1u);
+
+    QuantizerStage<float, uint32_t> quant;
+    quant.setErrorBoundMode(ErrorBoundMode::ABS);
+    quant.setZigzagCodes(true);
+    const auto q_aux = quant.getFusedAuxOutputs();
+    ASSERT_EQ(q_aux.size(), 2u);
+    EXPECT_EQ(q_aux[0].name, "outlier_vals");
+    EXPECT_EQ(q_aux[1].name, "outlier_idxs");
+    EXPECT_EQ(q_aux[0].count_group, q_aux[1].count_group);
+}
+
+TEST(FusionPlanner, AdaptiveSelectorRejectsNonAdditiveOrMismatchedOracle) {
+    AdaptiveLorenzoStage<int32_t> al;
+    EncodingOracleDecl oracle;
+    oracle.kind = EncodingOracleKind::PlainFixedRateBitpack;
+    oracle.op_name = "PlainBitpackCoder";
+    oracle.input_data_type = static_cast<uint8_t>(DataType::INT32);
+    oracle.unit_elems = 32;
+    oracle.exact = true;
+
+    oracle.additive = false;
+    EXPECT_FALSE(al.bindDownstreamEncodingOracle(oracle));
+    oracle.additive = true;
+    oracle.unit_elems = 64;
+    EXPECT_FALSE(al.bindDownstreamEncodingOracle(oracle));
+    EXPECT_EQ(al.getFusionSpec().access, FusionAccess::Unfusable);
+}
+
+TEST(FusionPlanner, AmbiguousAdaptiveConsumerTopologyStaysUnfusable) {
+    Pipeline p(4096 * sizeof(int32_t), MemoryStrategy::PREALLOCATE);
+    auto* al = p.addStage<AdaptiveLorenzoStage<int32_t>>();
+    auto* ab0 = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    auto* ab1 = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab0->setBlockSize(32);
+    ab1->setBlockSize(32);
+    p.connect(ab0, al);
+    p.connect(ab1, al);
+    p.finalize();
+
+    EXPECT_FALSE(al->hasBoundEncodingOracle());
+    EXPECT_EQ(al->getFusionSpec().access, FusionAccess::Unfusable);
+    for (const auto& group : planFusionGroups(*p.getDAG()))
+        for (Stage* stage : group.stages)
+            EXPECT_NE(stage, static_cast<Stage*>(al));
 }
 
 // End-to-end: fusion (Auto) must produce a byte-identical archive to the staged
