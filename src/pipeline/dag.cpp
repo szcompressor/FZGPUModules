@@ -384,9 +384,30 @@ void CompressionDAG::setFusedGroups(std::vector<FusedGroupExec> groups) {
     fused_groups_ = std::move(groups);
     fused_head_.clear();
     fused_member_.clear();
+    fused_internal_buffers_.clear();
     for (size_t i = 0; i < fused_groups_.size(); ++i) {
-        fused_head_[fused_groups_[i].head] = i;
-        for (DAGNode* m : fused_groups_[i].members) fused_member_.insert(m);
+        const FusedGroupExec& fg = fused_groups_[i];
+        fused_head_[fg.head] = i;
+        std::unordered_set<int> member_ids;
+        for (DAGNode* m : fg.members) {
+            fused_member_.insert(m);
+            member_ids.insert(m->id);
+        }
+
+        // An edge produced and consumed entirely inside the group is only a
+        // staged materialization point. The fused runner never dereferences it,
+        // so preserve its logical metadata but omit its device allocation.
+        // Escaping outputs and side outputs remain materialized.
+        for (DAGNode* m : fg.members) {
+            for (int buffer_id : m->output_buffer_ids) {
+                const BufferInfo& buffer = buffers_.at(buffer_id);
+                if (buffer.consumer_stage_ids.empty()) continue;
+                const bool internal = std::all_of(
+                    buffer.consumer_stage_ids.begin(), buffer.consumer_stage_ids.end(),
+                    [&](int consumer_id) { return member_ids.count(consumer_id) != 0; });
+                if (internal) fused_internal_buffers_.insert(buffer_id);
+            }
+        }
     }
 }
 
@@ -410,6 +431,9 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 const FusedGroupExec& fg = fused_groups_[head_it->second];
                 for (auto* dep : node->dependencies)
                     FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
+
+                if (profiling_enabled_ && node->start_event && !capture_mode_)
+                    FZ_CUDA_CHECK(cudaEventRecord(node->start_event, stream));
 
                 const BufferInfo& in_buf  = buffers_.at(node->input_buffer_ids[0]);
                 const int   main_out_id = fg.tail->output_buffer_ids[0];
@@ -443,14 +467,34 @@ void CompressionDAG::execute(cudaStream_t stream) {
                     }
                 }
 
+                // Collect every input entering the group from outside it except
+                // the head's first/main input (already exposed as d_input). This
+                // is primarily for inverse groups whose tail quantizer consumes
+                // separately archived outlier values and indices.
+                std::unordered_set<int> member_ids;
+                for (DAGNode* m : fg.members) member_ids.insert(m->id);
+                std::vector<FusedSideInput> side_inputs;
+                for (DAGNode* m : fg.members) {
+                    for (size_t input_index = 0; input_index < m->input_buffer_ids.size(); ++input_index) {
+                        if (m == fg.head && input_index == 0) continue;
+                        const BufferInfo& b = buffers_.at(m->input_buffer_ids[input_index]);
+                        if (b.producer_stage_id >= 0 && member_ids.count(b.producer_stage_id))
+                            continue;
+                        side_inputs.push_back(FusedSideInput{
+                            m->stage, static_cast<int>(input_index), b.d_ptr, b.size});
+                    }
+                }
+
                 FusedRunContext ctx;
                 ctx.stages       = &fg.stages;
                 ctx.d_input      = in_buf.d_ptr;
                 ctx.input_bytes  = in_buf.size;
                 ctx.d_output     = out_buf.d_ptr;
+                ctx.output_capacity = out_buf.allocated_size;
                 ctx.pool         = mem_pool_;
                 ctx.stream       = stream;
                 ctx.side_outputs = side.empty() ? nullptr : &side;
+                ctx.side_inputs  = side_inputs.empty() ? nullptr : &side_inputs;
                 const size_t archive_bytes = fg.impl->run(ctx);
                 out_buf.size = archive_bytes;
                 if (out_buf.allocated_size != 0 && archive_bytes > out_buf.allocated_size)
@@ -738,6 +782,10 @@ void CompressionDAG::updateBufferSize(int buffer_id, size_t new_size) {
 
 void CompressionDAG::allocateBuffer(int buffer_id, cudaStream_t stream) {
     BufferInfo& buffer = buffers_[buffer_id];
+
+    if (fused_internal_buffers_.count(buffer_id)) {
+        return;  // Logical staged edge eliminated by the installed fused group.
+    }
 
     if (buffer.is_external) {
         return;  // External buffer, don't allocate/free

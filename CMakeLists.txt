@@ -350,6 +350,10 @@ target_compile_definitions(fzgmod_compile_settings INTERFACE
 target_include_directories(fzgmod_compile_settings INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules>
+  # Quarantined experimental/reference compressors (not public modules): included
+  # so their FZM factories stay linked for archive back-compat. See
+  # experimental/reference_compressors/.
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/experimental>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomlplusplus/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzgmod>
@@ -423,7 +427,10 @@ add_library(fzgmod_modules
     modules/fused/lorenzo_quant/lorenzo_quant.cu
   modules/fused/lorenzo_quant/lorenzo_quant_nd.cu
   modules/fused/szx/szx_stage.cu
-  modules/fused/szp/szp_stage.cu
+  # Quarantined: monolithic SZp reference compressor. Compiled ONLY so its
+  # StageType::SZP FZM header factory stays linked (pre-existing archives must
+  # still decode). Not a public module — see experimental/reference_compressors/szp.
+  experimental/reference_compressors/szp/szp_stage.cu
   # Huffman (PHF CPU layer + GPU kernels + stage wrapper)
   modules/coders/huffman/phf/hf_buf.cc
   modules/coders/huffman/phf/hf_hl.cc

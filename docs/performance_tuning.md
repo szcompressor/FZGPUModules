@@ -14,6 +14,7 @@ guessing — treat those rows as open questions, not settled defaults.
 | Lever | Level | Effect (measured) |
 |---|---|---|
 | `AdaptiveBitpack`/`TiledLorenzo` warp-cooperative kernels | built-in (always on for `block_size` 32/64) | cuszp2 decompress **1.47x**, cuszp3 compress **1.31x** — see below |
+| **Pipeline Specialization** (auto kernel fusion, compress **and** decompress) | `setSpecializationPolicy(Auto)` / `FZ_SPECIALIZE=auto` | SZp `szp_composed.toml` **2.8× compress / 4.7× decompress** vs staged; cuSZp2 **1.9× / 1.7×**. Also lowers peak pool memory (elides fused-internal buffers). See [Pipeline Specialization](pipeline_specialization.md). |
 | `MemoryStrategy::PREALLOCATE` vs `MINIMAL` | pipeline | Not yet quantified — see [Memory Strategy](#pt_memory_strategy) |
 | `enableGraphMode` + `captureGraph` | pipeline | ~3% on one measured pipeline — see [CUDA Graph Mode](#pt_graph_mode) (caveat below) |
 | `AdaptiveBitpack` block size (32/64 vs. other) | stage | Selects the warp-cooperative fast path — see [AdaptiveBitpack](#pt_adaptive_bitpack) |
@@ -32,6 +33,13 @@ guessing — treat those rows as open questions, not settled defaults.
 |---|---|---|
 | `MemoryStrategy::MINIMAL` | Allocate on demand, free at last consumer | Lowest peak memory. Not yet quantified against PREALLOCATE. |
 | `MemoryStrategy::PREALLOCATE` | Allocate everything at `finalize()`, enables buffer coloring | Required for CUDA Graph capture (`MINIMAL` throws — see `AGENTS.md`). Not yet quantified. |
+
+Buffer coloring under `PREALLOCATE` is **specialization-aware**: with
+[Pipeline Specialization](pipeline_specialization.md) on, a fused group's
+fully-internal intermediate buffers are not allocated at all and the group is one
+liveness point, so `Auto` reduces peak pool memory as well as runtime (on both the
+compress and decompress DAG). `setColoringEnabled(false)` disables coloring
+entirely — trades that memory back for easier `compute-sanitizer` debugging.
 
 `pool_multiplier` (third `Pipeline` constructor argument, default `3.0f`) sizes the
 memory pool as `input_size × multiplier`. Too low risks a mid-run pool growth

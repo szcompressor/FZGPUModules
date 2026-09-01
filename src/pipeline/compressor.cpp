@@ -188,9 +188,12 @@ Stage* Pipeline::addRawStage(Stage* stage) {
 }
 
 void Pipeline::planAndInstallFusion() {
-    // Runtime override (FZ_FUSION=off|auto|force) wins over the programmatic mode.
+    // Runtime override wins over the programmatic mode. FZ_SPECIALIZE is the
+    // current name; FZ_FUSION is a deprecated alias kept for existing scripts.
     FusionPolicy mode = fusion_policy_;
-    if (const char* e = std::getenv("FZ_FUSION")) {
+    const char* e = std::getenv("FZ_SPECIALIZE");
+    if (!e) e = std::getenv("FZ_FUSION");
+    if (e) {
         const std::string v(e);
         if (v == "off" || v == "0")      mode = FusionPolicy::Off;
         else if (v == "auto" || v == "1") mode = FusionPolicy::Auto;
@@ -283,13 +286,10 @@ void Pipeline::planAndInstallFusion() {
         FZ_LOG(WARN, "Fusion active — disabling CUDA graph mode (fused runner synchronises).");
         graph_mode_enabled_ = false;
     }
-    // Buffer coloring aliases buffers by the STAGED liveness (the group's input
-    // dies after the first stage). A fused kernel keeps that input live across
-    // the whole group while writing the group's output, so an aliased
-    // input/output region would corrupt. Disable coloring for fused pipelines.
-    // (planAndInstallFusion runs before preallocateBuffers(), where coloring is
-    // applied, so this takes effect.)
-    dag_->setColoringEnabled(false);
+    // setFusedGroups() marks internal staged edges non-materialized, and the
+    // coloring pass collapses every group to one synthetic liveness point. This
+    // keeps the fused input and output distinct while allowing safe aliases with
+    // buffers outside the group.
 }
 
 void Pipeline::bindSemanticContracts() {

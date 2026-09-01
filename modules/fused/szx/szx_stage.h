@@ -67,8 +67,10 @@ static_assert(sizeof(SZxConfig) <= FZM_STAGE_CONFIG_SIZE,
  *   2. **classifies** the block as *constant* when `max - min <= 2*eb`
  *      (the whole block is representable by one value within the bound) or
  *      *non-constant* otherwise — a 2-bit type code per block;
- *   3. **constant** blocks emit only a block reference value (the mean);
- *   4. **non-constant** blocks subtract the block reference, quantize the
+ *   3. **constant** blocks emit only a block reference value (the midpoint of the
+ *      block's min/max range, stored at T precision — this minimises worst-case
+ *      reconstruction error, unlike the arithmetic mean);
+ *   4. **non-constant** blocks subtract the same block reference, quantize the
  *      residuals to fixed-length integers within `[-2^b, 2^b)` where `b` is the
  *      block's required bit width, and bit-pack them (no Huffman).
  *

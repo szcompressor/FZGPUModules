@@ -23,7 +23,8 @@
 #include "helpers/fz_test_utils.h"
 #include "helpers/stage_harness.h"
 #include "fzgpumodules.h"
-#include "fused/szp/szp_stage.h"
+// Quarantined experimental reference compressor — direct-include the header.
+#include "reference_compressors/szp/szp_stage.h"
 
 #include <cmath>
 #include <cstdint>

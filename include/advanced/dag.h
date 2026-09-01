@@ -212,6 +212,8 @@ public:
     /** Install fused groups (from Pipeline::finalize) that execute() will honor. */
     void setFusedGroups(std::vector<FusedGroupExec> groups);
     size_t getFusedGroupCount() const { return fused_groups_.size(); }
+    const std::vector<FusedGroupExec>& getFusedGroups() const { return fused_groups_; }
+    size_t getFusedInternalBufferCount() const { return fused_internal_buffers_.size(); }
 
     void printDAG() const;
     void printBufferLifetimes() const;
@@ -290,6 +292,9 @@ private:
     std::vector<FusedGroupExec>          fused_groups_;
     std::unordered_map<DAGNode*, size_t> fused_head_;   ///< head node → index in fused_groups_
     std::unordered_set<DAGNode*>         fused_member_; ///< every node covered by a group
+    /// Logical edges wholly contained inside a fused group. They retain size and
+    /// topology metadata for serialization/debugging but need no device storage.
+    std::unordered_set<int>              fused_internal_buffers_;
 
     void assignLevels();
     void assignStreams();

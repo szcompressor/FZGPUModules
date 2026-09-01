@@ -49,18 +49,32 @@ struct FusedSideOutput {
     FusedAuxOutputDecl declaration; ///< semantic identity/sizing rule, if declared
 };
 
+/// An input entering a fused group from outside its main linear chain. Forward
+/// fusion currently only needs one main input, while inverse groups may also
+/// consume archive side streams (for example quantizer outlier values/indices).
+struct FusedSideInput {
+    Stage* consumer;       ///< group member that owns this input
+    int    input_index;    ///< position in that stage's inverse input list
+    const void* d_ptr;     ///< externally produced/device-resident input
+    size_t size;           ///< bytes available at d_ptr
+};
+
 /// Everything a fused runner needs to compress one group in place.
 struct FusedRunContext {
     const std::vector<Stage*>* stages;   ///< group stages, producer→consumer
     const void* d_input;                 ///< the group's input buffer
     size_t      input_bytes;             ///< bytes of d_input
     void*       d_output;                ///< the group's MAIN output buffer (tail port 0, >= worst case)
+    size_t      output_capacity = 0;     ///< allocated bytes available at d_output
     MemoryPool* pool;                    ///< pool for the runner's scratch
     fz::stream_t stream;                 ///< stream (runner may synchronise)
     /// Escaping side outputs of group members (e.g. outlier lists), in member/port
     /// order. nullptr or empty for single-output pipelines. The runner writes each
     /// `d_ptr` and fills each `size`; a runner that produces none leaves them alone.
     std::vector<FusedSideOutput>* side_outputs = nullptr;
+    /// Non-main inputs entering any member from outside the fused chain. Used by
+    /// inverse fusion for side archives; empty for ordinary linear compression.
+    const std::vector<FusedSideInput>* side_inputs = nullptr;
 };
 
 /// A registered fused implementation and its matcher.

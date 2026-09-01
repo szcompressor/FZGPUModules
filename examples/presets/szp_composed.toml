@@ -1,16 +1,19 @@
 [pipeline]
-# SZp / fZ-light (composed) — Quantizer(linear) → Lorenzo(block) → AdaptiveBitpack
+# SZp / fZ-light — the SUPPORTED expression of the SZp algorithm.
+#   Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)
 #
 # SZp's inner loop is 1-D Lorenzo prediction + error-bound quantization +
 # per-block fixed-length residual packing, with NO entropy coder. That is exactly
 # this three-stage chain — the same structure as cuszp.toml, but at SZp's default
 # block size of 128. This preset reproduces SZp *behavior* (an error-bounded,
-# entropy-coder-free, fixed-length-packed archive) with ZERO new code.
+# entropy-coder-free, fixed-length-packed archive) with ZERO new code, and the
+# automatic-fusion planner fuses the whole chain into one warp-register kernel.
 #
 # It is NOT byte-compatible with the reference SZp container (compressors/SZp).
-# For a format-faithful, single-launch port use the fused `SZp` stage
-# (modules/fused/szp) once its kernels are filled in — this preset is the
-# behavioral baseline to validate that stage against.
+# The monolithic `SZpStage` reference implementation is quarantined under
+# experimental/reference_compressors/szp/ (and its legacy preset at
+# experimental/reference_compressors/szp/szp.toml); it is a GPU point of
+# comparison only, not a supported module. Use THIS preset for the SZp algorithm.
 #
 # SZp / fZ-light: Huang, Di, et al., SC'24. hZCCL adds compressed-domain
 # collectives on top of this container (not expressible as a preset).

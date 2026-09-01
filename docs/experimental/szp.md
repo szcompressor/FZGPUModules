@@ -1,11 +1,28 @@
-# SZpStage {#stage_szp}
+# SZpStage (experimental reference compressor) {#experimental_szp}
 
-**Header:** `modules/fused/szp/szp_stage.h`
+> **NOT a supported composable module.** `SZpStage` is a quarantined GPU
+> reference implementation kept only as a point of comparison. It is **absent**
+> from `<fzgpumodules.h>`, from the stage catalog, and from the automatic-fusion
+> planner, and lives under `experimental/reference_compressors/szp/`. Its
+> `StageType::SZP = 37` FZM factory stays linked so pre-existing archives still
+> decode, and `type = "SZp"` still loads from legacy TOML configs, but neither is
+> a supported surface.
+>
+> **The supported expression of the SZp algorithm is
+> `examples/presets/szp_composed.toml`:**
+> `Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)`.
+> That chain reproduces SZp behaviour with zero new code and byte-identical
+> compressed sizes (verified on CLDHGH).
+
+**Header:** `experimental/reference_compressors/szp/szp_stage.h` (direct-include only)
 **Class:** `fz::SZpStage<TData>` — `TData` is `float` or `double`
-**Category:** Fused (lossy, whole compressor)
+**Category:** Experimental / reference compressor (lossy, whole compressor)
 
 **Common instantiation:**
+<!-- doc-check: skip — quarantined stage, intentionally absent from <fzgpumodules.h>; direct-include only -->
 ```cpp
+#include "reference_compressors/szp/szp_stage.h"   // not in <fzgpumodules.h>
+
 auto* szp = p.addStage<fz::SZpStage<float>>();
 szp->setBlockSize(128);                 // elements per block (SZp default)
 szp->setErrorBound(1e-3);
@@ -101,8 +118,9 @@ error_bound = 1e-3
 error_bound_mode = "ABS"
 ```
 
-`examples/presets/szp.toml` (native) and `examples/presets/szp_composed.toml`
-(the zero-new-code equivalent) are both shipped.
+`examples/presets/szp_composed.toml` (the supported zero-new-code equivalent) is
+shipped under `examples/presets/`. The legacy native preset is retained only at
+`experimental/reference_compressors/szp/szp.toml`.
 
 ## hZCCL (not implemented)
 

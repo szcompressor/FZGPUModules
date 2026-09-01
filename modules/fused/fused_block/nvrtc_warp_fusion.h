@@ -54,5 +54,18 @@ size_t launchNvrtcWarpFused(
     const uint8_t* pred_params, size_t params_bytes,
     uint8_t* d_out, MemoryPool* pool, fz::stream_t stream);
 
+/// The inverse: NVRTC-composes a single warp-per-block decode kernel over `spec`
+/// (coder decode + reverse transforms + predictor prefix-sum + linear dequant),
+/// preceded by the per-block payload cost pass + CUB exclusive-scan. `d_archive`
+/// is the fused/staged-identical AdaptiveBitpack archive; `ebx2` = 2 * abs_eb
+/// resolved from the deserialized quantizer bound. Writes `n_elems` floats to
+/// `d_out`; returns `n_elems * sizeof(float)`. Bit-exact vs the staged
+/// AB-decode -> Lorenzo-prefix-sum -> linear-dequant chain.
+size_t launchNvrtcWarpInverseFused(
+    const WarpFusionSpec& spec, const uint8_t* d_archive, size_t archive_bytes,
+    size_t n_elems, float ebx2, float* d_out, MemoryPool* pool, fz::stream_t stream);
+
+std::string generateWarpInverseSource(const WarpFusionSpec& spec);
+
 } // namespace fused
 } // namespace fz

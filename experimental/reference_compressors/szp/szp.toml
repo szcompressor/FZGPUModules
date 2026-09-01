@@ -1,4 +1,9 @@
 [pipeline]
+# LEGACY / EXPERIMENTAL preset for the quarantined monolithic SZp reference
+# compressor. `type = "SZp"` still loads (kLegacyStageRegistry) for back-compat
+# only. For the SUPPORTED expression of the SZp algorithm use
+# examples/presets/szp_composed.toml instead.
+#
 # SZp / fZ-light — extreme-fast error-bounded compressor (native fused stage).
 #
 # One stage, whole compressor: quantize + 1-D Lorenzo delta (block reset) +

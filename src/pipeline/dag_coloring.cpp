@@ -52,12 +52,21 @@ void CompressionDAG::preallocateBuffers(cudaStream_t stream) {
                color_region_sizes_.size(), colored_total / 1024.0);
     } else {
         for (auto& [buffer_id, buffer] : buffers_) {
+            if (fused_internal_buffers_.count(buffer_id)) continue;
             allocateBuffer(buffer_id, stream);
         }
     }
 }
 
 void CompressionDAG::colorBuffers() {
+    // The current coloring implementation deliberately avoids introducing
+    // cross-stream anti-dependencies. Fused groups execute on the caller stream,
+    // so retain the conservative uncolored fallback for a branching DAG.
+    if (!fused_groups_.empty() && streams_.size() > 1) {
+        FZ_LOG(DEBUG, "Buffer coloring disabled: fused group in multi-stream DAG");
+        return;
+    }
+
     // Step 1: compute live ranges.
     // A buffer is born at the level of its producer and dies at the level of
     // its last consumer.  Pipeline-output buffers (no consumers) live until
@@ -71,8 +80,17 @@ void CompressionDAG::colorBuffers() {
     for (const auto* node : nodes_)
         node_level[node->id] = node->level;
 
+    // A fused group is one synthetic operation at its head. Its final output is
+    // born there, and every external input remains live through that same point.
+    // Inclusive ranges then prevent input/output aliasing within the kernel.
+    for (const FusedGroupExec& fg : fused_groups_) {
+        const int fused_level = fg.head->level;
+        for (const DAGNode* member : fg.members)
+            node_level[member->id] = fused_level;
+    }
+
     for (const auto& [buf_id, buf] : buffers_) {
-        if (buf.is_external) continue;
+        if (buf.is_external || fused_internal_buffers_.count(buf_id)) continue;
 
         int born = (buf.producer_stage_id < 0) ? 0 : node_level[buf.producer_stage_id];
 

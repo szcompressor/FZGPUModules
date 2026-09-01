@@ -43,21 +43,51 @@ __device__ __forceinline__ int bitWidth32(uint32_t x) { return x ? (32 - __clz(x
 // state, no spills. `fromParams` reconstructs the policy from the launch input +
 // the packed config blob (the uniform NVRTC factory).
 
-// cuSZp2: linear-ABS quant + 1-D Lorenzo delta, reset per 32-block. All lanes call
-// delta() so the intra-warp __shfl_up_sync is collective.
+// cuSZp2 / SZp: linear-ABS quant + 1-D Lorenzo delta, reset per BLOCK (32*epl
+// elements). All lanes call delta() so the intra-warp shuffles are collective.
+// For epl == 1 this is exactly cuSZp2's per-32 reset; for epl > 1 the delta chain
+// runs across the whole block, element `32*m + lane` of block `b`, resetting only
+// at (lane 0, m 0). Byte-identical to staged Quantizer(linear) -> Lorenzo(32*epl).
 struct Lorenzo1DPredictor {
     const float* in;
     size_t n;
     float inv2eb;
+    uint32_t epl;
     __device__ static Lorenzo1DPredictor fromParams(const float* in, size_t n, const void* pp) {
-        return Lorenzo1DPredictor{in, n, static_cast<const Lorenzo1DParams*>(pp)->inv2eb};
+        const Lorenzo1DParams p = *static_cast<const Lorenzo1DParams*>(pp);
+        return Lorenzo1DPredictor{in, n, p.inv2eb, p.epl ? p.epl : 1u};
     }
-    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int /*m*/) const {
-        const size_t gidx = b * 32u + lane;
-        const bool active = gidx < n;
-        const int q = active ? __float2int_rn(in[gidx] * inv2eb) : 0;
-        const int qprev = __shfl_up_sync(0xffffffffu, q, 1);
-        return (lane == 0) ? q : (q - qprev);
+    __device__ __forceinline__ int q_at(size_t gidx) const {
+        return (gidx < n) ? __float2int_rn(in[gidx] * inv2eb) : 0;
+    }
+    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+        const size_t base = b * (32ull * epl) + 32ull * static_cast<uint32_t>(m);
+        const int q      = q_at(base + lane);
+        const int q_up   = __shfl_up_sync(0xffffffffu, q, 1);            // predecessor in this row
+        int q_row_prev   = (m > 0 && lane == 31u) ? q_at(base - 1ull) : 0;  // last elem of previous row
+        q_row_prev       = __shfl_sync(0xffffffffu, q_row_prev, 31);
+        if (lane != 0u)  return q - q_up;
+        return (m == 0) ? q : (q - q_row_prev);
+    }
+
+    // INVERSE: block-reset inclusive prefix sum of the per-lane delta array `d`
+    // (elements `32*m + lane` of the block), in place. Exactly reverses delta():
+    // a warp scan per 32-lane row, then a running carry across rows. Integer add
+    // is associative so this matches the staged Hillis-Steele scan bit-for-bit.
+    template<int EPL>
+    __device__ static void undelta(int (&d)[EPL], uint32_t lane) {
+        int carry = 0;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            int s = d[m];
+            #pragma unroll
+            for (int off = 1; off < 32; off <<= 1) {
+                const int y = __shfl_up_sync(0xffffffffu, s, off);
+                if (lane >= static_cast<uint32_t>(off)) s += y;
+            }
+            d[m] = s + carry;
+            carry += __shfl_sync(0xffffffffu, s, 31);   // row total (pre-carry) to all lanes
+        }
     }
 };
 
@@ -254,6 +284,57 @@ struct AdaptiveBitpackCoder {
             }
         }
     }
+
+    // INVERSE: decode a plain- OR outlier-mode block into `d`. Mirrors
+    // decode_unpack_outlier_kernel. meta = [rate][selector]; selector bit0 =
+    // outlier, bits1-2 = ob_bytes-1. Plain path == PlainRateCoder::decode; the
+    // outlier path pulls element 0's magnitude from the raw leading bytes and
+    // reads the r planes after the ob_bytes + sign region.
+    template<int EPL>
+    __device__ static void decode(const uint8_t* __restrict__ meta_b,
+                                  const uint8_t* __restrict__ base,
+                                  uint32_t word_bytes, size_t count,
+                                  uint32_t lane, int (&d)[EPL]) {
+        const int r = meta_b[0];
+        const uint8_t sel = meta_b[1];
+        const bool is_out = (sel & 1u) != 0;
+        const uint32_t q = lane >> 3, j = lane & 7u;
+        if (!is_out) {
+            #pragma unroll
+            for (int m = 0; m < EPL; ++m) {
+                const size_t idx = static_cast<size_t>(lane) + 32u * m;
+                if (idx >= count || r == 0) { d[m] = 0; continue; }
+                const uint32_t k = 4u * m + q;
+                const uint8_t sgn = base[k];
+                uint32_t av = 0;
+                for (int p = 0; p < r; ++p)
+                    av |= ((static_cast<uint32_t>(base[word_bytes*(1u+p) + k]) >> j) & 1u) << p;
+                d[m] = ((sgn >> j) & 1u) ? static_cast<int>(0u - av) : static_cast<int>(av);
+            }
+            return;
+        }
+        const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+        const uint8_t* sign   = base + ob_bytes;
+        const uint8_t* planes = base + ob_bytes + word_bytes;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx >= count) { d[m] = 0; continue; }
+            if (idx == 0) {
+                uint32_t mag0 = 0;
+                for (uint32_t k = 0; k < ob_bytes; ++k)
+                    mag0 |= static_cast<uint32_t>(base[k]) << (8u * k);
+                d[m] = (sign[0] & 1u) ? static_cast<int>(0u - mag0) : static_cast<int>(mag0);
+                continue;
+            }
+            const uint32_t k = 4u * m + q;
+            const uint8_t sgn = sign[k];
+            uint32_t av = 0;
+            for (int p = 0; p < r; ++p)
+                av |= ((static_cast<uint32_t>(planes[word_bytes*p + k]) >> j) & 1u) << p;
+            d[m] = ((sgn >> j) & 1u) ? static_cast<int>(0u - av) : static_cast<int>(av);
+        }
+    }
 };
 
 // PlainBitpack: AdaptiveBitpack with the outlier mode disabled — every block is packed
@@ -311,6 +392,90 @@ struct PlainBitpackCoder {
                 if (lane < 4)
                     base[word_bytes*(1u+p) + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
             }
+        }
+    }
+};
+
+// PlainRateCoder: the TRUE staged plain-mode AdaptiveBitpack format — a single
+// rate byte per block (meta_bytes == 1, no selector byte), payload = sign region
+// + `rate` bit-planes. Identical cost + payload layout to PlainBitpackCoder; the
+// ONLY difference is the 1-byte meta stride, which matches AdaptiveBitpackStage
+// with outlier_selection == false (its inverse reads a 1-byte rate region). This
+// is the coder SZp's composed chain (Quantizer -> Lorenzo -> AdaptiveBitpack,
+// plain) fuses through, byte-identical to the staged plain path.
+struct PlainRateCoder {
+    static constexpr uint32_t meta_bytes = 1;   // [rate]
+
+    template<int EPL>
+    __device__ static void cost(const int (&d)[EPL], uint32_t lane, uint32_t word_bytes,
+                                size_t count, uint8_t* __restrict__ meta_b,
+                                uint32_t* __restrict__ cost_b) {
+        uint32_t acc_all = 0;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            acc_all |= (idx < count) ? absU_i32(d[m]) : 0u;
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            acc_all |= __shfl_xor_sync(0xffffffffu, acc_all, off);
+        if (lane == 0) {
+            const int fr = bitWidth32(acc_all);
+            meta_b[0] = static_cast<uint8_t>(fr);
+            *cost_b = (fr > 0) ? word_bytes * (fr + 1u) : 0u;
+        }
+    }
+
+    template<int EPL>
+    __device__ static void pack(const int (&d)[EPL], uint32_t lane, uint32_t word_bytes,
+                                size_t count, const uint8_t* __restrict__ meta_b,
+                                uint8_t* __restrict__ base) {
+        const int r = meta_b[0];
+        if (r == 0) return;
+        uint32_t av[EPL]; bool active[EPL];
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            active[m] = idx < count;
+            av[m]     = active[m] ? absU_i32(d[m]) : 0u;
+        }
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
+            if (lane < 4) base[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
+        }
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < EPL; ++m) {
+                const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
+                if (lane < 4)
+                    base[word_bytes*(1u+p) + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
+            }
+        }
+    }
+
+    // INVERSE: decode block `base` (payload at the block's scanned offset) into
+    // the per-lane delta array `d`. Mirrors decode_unpack_kernel_warp's O(rate)
+    // gather: lane l reads byte group q = l>>3, bit j = l&7 of each of the `r`
+    // plane words + the sign word. `r` comes from the 1-byte meta.
+    template<int EPL>
+    __device__ static void decode(const uint8_t* __restrict__ meta_b,
+                                  const uint8_t* __restrict__ base,
+                                  uint32_t word_bytes, size_t count,
+                                  uint32_t lane, int (&d)[EPL]) {
+        const int r = meta_b[0];
+        const uint32_t q = lane >> 3, j = lane & 7u;
+        #pragma unroll
+        for (int m = 0; m < EPL; ++m) {
+            const size_t idx = static_cast<size_t>(lane) + 32u * m;
+            if (idx >= count || r == 0) { d[m] = 0; continue; }
+            const uint32_t k = 4u * m + q;
+            const uint8_t sgn = base[k];
+            uint32_t av = 0;
+            for (int p = 0; p < r; ++p)
+                av |= ((static_cast<uint32_t>(base[word_bytes*(1u+p) + k]) >> j) & 1u) << p;
+            // two's-complement negate via unsigned wrap — matches applySign<int32_t>
+            d[m] = ((sgn >> j) & 1u) ? static_cast<int>(0u - av) : static_cast<int>(av);
         }
     }
 };
@@ -498,6 +663,45 @@ __device__ __forceinline__ void fused_single_pass_body(
     }
 }
 
+// ── Inverse (decompress) harness ────────────────────────────────────────────
+// One warp owns one block. Reverses the forward chain, register-resident: the
+// coder decodes the block's payload into the per-lane delta array `d`, transforms
+// are undone in reverse, the predictor prefix-sums the deltas back to quant codes
+// (block-reset), and the codes are dequantized to floats. The per-block payload
+// offsets come from a preceding cost pass + CUB scan (host-orchestrated, like the
+// forward two-pass) so this kernel never syncs. Bit-exact vs the staged
+// AB-decode -> Lorenzo-prefix-sum -> linear-dequant kernels.
+template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
+__device__ __forceinline__ void fused_unpack_body(
+    size_t n, uint32_t word_bytes, size_t num_blocks, float ebx2,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload, float* __restrict__ out)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), n - start);
+
+    int d[ElemsPerLane];
+    Coder::template decode<ElemsPerLane>(meta + Coder::meta_bytes * b,
+                                         payload + offset[b], word_bytes, count, lane, d);
+    // Transforms are size-preserving register maps; the forward applied
+    // Transforms... in order after the predictor, so the inverse chain undoes
+    // them before the predictor. (No inverse-transform ops registered yet — the
+    // pack is empty for the cuSZp/SZp chains.)
+    Pred::template undelta<ElemsPerLane>(d, lane);
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const size_t idx = static_cast<size_t>(lane) + 32u * m;
+        if (idx < count) out[start + idx] = static_cast<float>(d[m]) * ebx2;
+    }
+}
+
 // ── Compile-time template kernels (the non-NVRTC path). The NVRTC path generates
 // equivalent extern "C" kernels over the same bodies. ────────────────────────
 template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
@@ -506,6 +710,16 @@ __global__ void fused_rate_kernel(
     uint8_t* __restrict__ meta, uint32_t* __restrict__ cost)
 {
     fused_rate_body<ElemsPerLane, Coder, Pred, Transforms...>(pred, n, word_bytes, num_blocks, meta, cost);
+}
+
+template<int ElemsPerLane, class Coder, class Pred, class... Transforms>
+__global__ void fused_unpack_kernel(
+    size_t n, uint32_t word_bytes, size_t num_blocks, float ebx2,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload, float* __restrict__ out)
+{
+    fused_unpack_body<ElemsPerLane, Coder, Pred, Transforms...>(
+        n, word_bytes, num_blocks, ebx2, meta, offset, payload, out);
 }
 
 template<int ElemsPerLane, class Coder, class Pred, class... Transforms>

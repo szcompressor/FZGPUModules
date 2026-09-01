@@ -44,7 +44,7 @@ value or expands to fixed-length residuals depending on its own range — and no
 composition of the existing block-local stages reproduces that branch. The
 classification is also SZx's whole point: on smooth or piecewise-flat fields it
 is where the compression comes from. See
-\ref stage_szp "SZpStage" for the sibling that has no constant-block path (and is
+\ref experimental_szp "SZpStage" for the sibling that has no constant-block path (and is
 therefore composable).
 
 ## Archive layout
@@ -112,7 +112,7 @@ SZx is a whole compressor, so it is normally the only stage in the pipeline
 ## Measured behaviour
 
 On SDRBench CLDHGH (`3600×1800` f32, `eb = 1e-3` ABS) SZx reaches **5.38×** vs.
-the composable \ref stage_szp "SZp" configuration's 3.98× at the same bound — the
+the composable \ref experimental_szp "SZp" configuration's 3.98× at the same bound — the
 gap is entirely the constant-block classification paying off on the smooth
 field. The reconstruction max-abs-error equals the bound in both.
 

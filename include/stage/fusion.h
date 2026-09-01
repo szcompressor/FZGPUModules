@@ -71,8 +71,9 @@ struct FusionSpec {
  * deliberately different execution models (see the two-axis taxonomy):
  *  - `ChunkCooperative` one CTA owns a fixed byte-chunk, intermediates in shared
  *    memory, `__syncthreads` between ops (LC/PFPL-style).
- *  - `WarpRegister`     one warp owns a ≤64-element block, intermediates in
- *    registers and shuffles, no barriers (cuSZp-style).
+ *  - `WarpRegister`     one warp owns a small block (block_size = 32·EPL, EPL up
+ *    to `fused::warp::kMaxWarpElemsPerLane`), intermediates in registers and
+ *    shuffles, no barriers (cuSZp / SZp-style).
  */
 enum class FusionStrategy : uint8_t {
     ChunkCooperative,

@@ -21,6 +21,14 @@ CMAKE = ROOT / "CMakeLists.txt"
 # Historical/reserved IDs that intentionally have no shipped implementation.
 RESERVED = {"UNKNOWN", "SCALE", "PASSTHROUGH", "SPLIT"}
 
+# Quarantined experimental/reference compressors: their StageType ID and FZM
+# header factory stay compiled (so pre-existing archives decode), but they are
+# deliberately NOT public modules — absent from kStageRegistry, the umbrella
+# header, and the module catalogs. Their factory lives under experimental/, not
+# modules/. Keep the ID here forever once quarantined; never reuse it.
+EXPERIMENTAL = {"SZP"}
+EXPERIMENTAL_DIR = ROOT / "experimental"
+
 
 def require_match(pattern, text, label, flags=0):
     match = re.search(pattern, text, flags)
@@ -51,6 +59,13 @@ def main():
     for cu_path in MODULES.rglob("*.cu"):
         factory_cases.update(registrar_pattern.findall(cu_path.read_text(encoding="utf-8")))
 
+    experimental_factories = set()
+    if EXPERIMENTAL_DIR.is_dir():
+        for cu_path in EXPERIMENTAL_DIR.rglob("*.cu"):
+            experimental_factories.update(
+                registrar_pattern.findall(cu_path.read_text(encoding="utf-8"))
+            )
+
     enum_body = require_match(
         r"enum\s+class\s+StageType[^\{]*\{(.*?)\};", fmt, "StageType", re.S
     ).group(1)
@@ -74,10 +89,18 @@ def main():
     registry_dirs = [row[4] for row in registry_rows]
 
     string_cases = set(re.findall(r"case\s+StageType::([A-Z0-9_]+)", fmt))
-    implemented_enums = set(enum_names) - RESERVED
+    implemented_enums = set(enum_names) - RESERVED - EXPERIMENTAL
     registered_enums = set(registry_enums)
 
     errors = []
+    for name in sorted(EXPERIMENTAL):
+        if name not in factory_cases and name not in experimental_factories:
+            errors.append(
+                f"quarantined StageType::{name} has no FZ_REGISTER factory under "
+                f"experimental/ — pre-existing archives would fail to decode"
+            )
+        if name in registered_enums:
+            errors.append(f"quarantined StageType::{name} must not be in the public kStageRegistry")
     for value in duplicates(enum_names):
         errors.append(f"duplicate StageType token {value}")
     for value in duplicates(enum_ids):

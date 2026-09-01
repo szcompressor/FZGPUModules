@@ -19,7 +19,8 @@ FZGPUModules is a CUDA library for building composable, high-throughput compress
 
 **Key properties:**
 - **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, Bitshuffle, Huffman, ANS, …)
-- **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
+- **Pipeline Specialization** — at `finalize()` the library transparently replaces staged execution with an optimized specialized implementation (kernel fusion + runtime optimizations), byte-identical to staged on both compress and decompress. Opt in with `setSpecializationPolicy(Auto)` / `FZ_SPECIALIZE=auto`. See [docs/pipeline_specialization.md](docs/pipeline_specialization.md).
+- **High throughput** — parallel level execution, persistent scratch, stream-ordered allocation (plus optional CUDA Graph capture)
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **Self-describing files** — FZM format embeds full stage config with CRC32 checksums
 
@@ -125,7 +126,6 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 | `ANSStage` | GPU rANS entropy coding (dietGPU port) |
 | `BitplaneRZEStage` | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | `SZxStage<T>` | SZx constant-block classification + fixed-length residual whole compressor |
-| `SZpStage<T>` | SZp/fZ-light quantize + block-local delta + fixed-length whole compressor |
 | `MergeStage` | Concatenate N producer ports into one buffer / split back (structural) |
 | `ROIBinSplitStage<T>` | Split detector fields into full-resolution ROI, binned background, and peak-table branches |
 
@@ -200,7 +200,7 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 | [FSZ](https://github.com/JiajunHuang1999/FSZ) — Jiajun Huang, SC '26 (arXiv:2607.15413) — *algorithmic attribution only; written from the paper, before FSZ 1.0.0 was released* | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | Liang, Di, Tao, Chen, Cappello — IEEE CLUSTER 2018 — *algorithmic attribution only* | `LogTransformStage` |
 | [ROIBIN-SZ](https://arxiv.org/abs/2206.11297) — Underwood, Yoon, Gok, Di, Cappello — *independent GPU/DAG implementation of the published design* | `ROIBinSplitStage` |
-| [SZp / fZ-light](https://github.com/szcompressor/SZp) — Huang, Di et al. (MIT) | `SZpStage` |
+| [SZp / fZ-light](https://github.com/szcompressor/SZp) — Huang, Di et al. (MIT) | `szp_composed.toml` (`Quantizer → Lorenzo → AdaptiveBitpack`); `experimental/reference_compressors/szp` (quarantined reference impl) |
 | [SZx](https://github.com/szcompressor/SZx) — Yu, Di et al. — *algorithmic attribution only; no source copied* | `SZxStage` |
 
 For per-stage attribution details, copyright notices, relationship types (direct port, algorithmic reimplementation, or vendored), and paper citations, see [`docs/acknowledgements.md`](docs/acknowledgements.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).

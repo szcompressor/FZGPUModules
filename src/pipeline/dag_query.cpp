@@ -1,4 +1,5 @@
 #include "advanced/dag.h"
+#include "advanced/fusion_registry.h"
 #include "stage/stage.h"
 #include "mem/mempool.h"
 #include "log.h"
@@ -46,10 +47,18 @@ std::vector<StageTimingResult> CompressionDAG::collectTimings() {
     results.reserve(nodes_.size());
 
     for (auto* node : nodes_) {
+        // A fused group has one measured execution interval at its head. Its
+        // other logical stages are retained for topology/archive semantics but
+        // never record start events, so reporting them as individual timings is
+        // both misleading and an invalid CUDA event query.
+        if (fused_member_.count(node) && !fused_head_.count(node)) continue;
         if (!node->start_event || !node->completion_event) continue;
 
         StageTimingResult r;
-        r.name       = node->name;
+        auto fused_it = fused_head_.find(node);
+        r.name = fused_it == fused_head_.end()
+            ? node->name
+            : std::string("fused:") + fused_groups_[fused_it->second].impl->name;
         r.level      = node->level;
         r.elapsed_ms = 0.0f;
 
@@ -89,6 +98,7 @@ std::vector<StageTimingResult> CompressionDAG::collectTimings() {
 size_t CompressionDAG::getTotalBufferSize() const {
     size_t total = 0;
     for (const auto& [buffer_id, buffer] : buffers_) {
+        if (fused_internal_buffers_.count(buffer_id)) continue;
         total += buffer.size;
     }
     return total;
@@ -116,7 +126,7 @@ size_t CompressionDAG::computeTopoPoolSize() const {
             for (size_t sz : color_region_sizes_) total += sz;
         } else {
             for (const auto& [buf_id, buf_info] : buffers_) {
-                if (!buf_info.is_external)
+                if (!buf_info.is_external && !fused_internal_buffers_.count(buf_id))
                     total += buf_info.size;
             }
         }
@@ -135,6 +145,11 @@ size_t CompressionDAG::computeTopoPoolSize() const {
     node_level.reserve(nodes_.size());
     for (const auto* node : nodes_)
         node_level[node->id] = node->level;
+    for (const FusedGroupExec& fg : fused_groups_) {
+        const int fused_level = fg.head->level;
+        for (const DAGNode* member : fg.members)
+            node_level[member->id] = fused_level;
+    }
 
     // For each non-external buffer, compute the level after which it is freed.
     // A buffer is freed when all its consumers have executed, i.e. after the
@@ -142,7 +157,7 @@ size_t CompressionDAG::computeTopoPoolSize() const {
     // until the last level.
     std::unordered_map<int, int> free_after_level;
     for (const auto& [buf_id, buf_info] : buffers_) {
-        if (buf_info.is_external) continue;
+        if (buf_info.is_external || fused_internal_buffers_.count(buf_id)) continue;
         if (buf_info.consumer_stage_ids.empty()) {
             free_after_level[buf_id] = max_level_;
         } else {
@@ -166,7 +181,8 @@ size_t CompressionDAG::computeTopoPoolSize() const {
             for (const auto* node : levels_[lvl]) {
                 for (int buf_id : node->output_buffer_ids) {
                     auto it = buffers_.find(buf_id);
-                    if (it != buffers_.end() && !it->second.is_external)
+                    if (it != buffers_.end() && !it->second.is_external &&
+                        !fused_internal_buffers_.count(buf_id))
                         running += it->second.size;
                 }
                 if (node->stage)
@@ -236,9 +252,10 @@ void CompressionDAG::printDAG() const {
 
     FZ_PRINT("Buffers (%zu):", buffers_.size());
     for (const auto& [buffer_id, buffer] : buffers_) {
-        FZ_PRINT("  [%d] %s (%.1f KB)%s",
+        FZ_PRINT("  [%d] %s (%.1f KB)%s%s",
                  buffer_id, buffer.tag.c_str(), buffer.size / 1024.0,
-                 buffer.is_persistent ? " [PERSISTENT]" : "");
+                 buffer.is_persistent ? " [PERSISTENT]" : "",
+                 fused_internal_buffers_.count(buffer_id) ? " [FUSED-VIRTUAL]" : "");
         FZ_PRINT("      producer: %d, consumers: [%s]",
                  buffer.producer_stage_id,
                  fmt_ids(buffer.consumer_stage_ids).c_str());

@@ -203,10 +203,15 @@ size_t launchNvrtcWarpFused(
 {
     if (n_ab == 0) return 0;
     const uint32_t block_size = 32u * static_cast<uint32_t>(spec.elems_per_lane);
-    const ab::Config cfg = ab::configure(n_ab, block_size, /*outlier=*/true);
+    // "PlainRateCoder" emits the true 1-byte-meta plain AdaptiveBitpack format;
+    // every other warp coder ("AdaptiveBitpackCoder"/"PlainBitpackCoder") emits
+    // the 2-byte selector ("outlier") format. The coder policy's own meta_bytes
+    // is the source of truth; mirror it here for the archive geometry.
+    const bool plain_meta = (spec.coder == "PlainRateCoder");
+    const ab::Config cfg = ab::configure(n_ab, block_size, /*outlier=*/!plain_meta);
     const size_t num_blocks = cfg.num_blocks;
     if (num_blocks == 0) return 0;
-    const size_t meta_region = 2u * num_blocks;   // outlier meta_bytes == 2
+    const size_t meta_region = static_cast<size_t>(cfg.meta_bytes) * num_blocks;
 
     auto* d_cost   = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_blocks, stream, "warp_cost"));
     auto* d_offset = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_blocks, stream, "warp_offset"));
@@ -270,6 +275,10 @@ size_t launchNvrtcWarpFused(
     bool use_single_pass = singlePassEnabled();
     if (use_single_pass && !std::getenv("FZ_SP_BPW") && num_blocks < (1u << 20))
         use_single_pass = false;
+    // The single-pass body holds BlocksPerWarp*EPL deltas per lane in local
+    // memory across the look-back; for EPL > 2 that spills badly. The two-pass
+    // path (recompute in pack, only EPL registers live) is the right choice there.
+    if (spec.elems_per_lane > 2) use_single_pass = false;
     if (use_single_pass) {
         // cuSZp-style coarse warp granularity: CTA = 1 warp, each warp owns BPW blocks, so
         // the scan runs over num_warps = ceil(num_blocks/BPW) elements.
@@ -334,6 +343,69 @@ size_t launchNvrtcWarpFused(
     pool->free(d_offset, stream);
     pool->free(d_cost, stream);
     return meta_region + static_cast<size_t>(h_off) + h_cost;
+}
+
+// ── Inverse (decompress) ────────────────────────────────────────────────────
+
+std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
+    const std::string P = spec.predictor, C = spec.coder;
+    std::string targs = std::to_string(spec.elems_per_lane) + ", " + C + ", " + P;
+    for (const auto& t : spec.transforms) targs += ", " + t;   // reverse-transform ops (none yet)
+    std::string src;
+    src += "#include \"fused/fused_block/warp_fusion.cuh\"\n";
+    src += "using namespace fz::fused::warp;\n";
+    src += "extern \"C\" __global__ void fz_fused_warp_unpack(\n";
+    src += "    unsigned long long n, unsigned word_bytes, unsigned long long num_blocks,\n";
+    src += "    float ebx2, const unsigned char* meta, const unsigned* offset,\n";
+    src += "    const unsigned char* payload, float* out) {\n";
+    src += "  fused_unpack_body<" + targs + ">((size_t)n, word_bytes, (size_t)num_blocks,\n";
+    src += "      ebx2, meta, offset, payload, out);\n";
+    src += "}\n";
+    return src;
+}
+
+size_t launchNvrtcWarpInverseFused(
+    const WarpFusionSpec& spec, const uint8_t* d_archive, size_t /*archive_bytes*/,
+    size_t n_elems, float ebx2, float* d_out, MemoryPool* pool, cudaStream_t stream)
+{
+    if (n_elems == 0) return 0;
+    const uint32_t block_size = 32u * static_cast<uint32_t>(spec.elems_per_lane);
+    const bool plain_meta = (spec.coder == "PlainRateCoder");
+    const ab::Config cfg = ab::configure(n_elems, block_size, /*outlier=*/!plain_meta);
+    const size_t num_blocks = cfg.num_blocks;
+    if (num_blocks == 0) return 0;
+    const size_t meta_region = static_cast<size_t>(cfg.meta_bytes) * num_blocks;
+
+    const uint8_t* d_meta    = d_archive;
+    const uint8_t* d_payload = d_archive + meta_region;
+
+    auto* d_cost   = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_blocks, stream, "warp_inv_cost"));
+    auto* d_offset = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_blocks, stream, "warp_inv_offset"));
+
+    // Pass A: per-block payload byte cost from the meta region (reuse the staged
+    // decode-cost kernels — plain reads [rate], outlier also consults the selector).
+    if (plain_meta) ab::launchDecodeCost(d_meta, cfg, d_cost, stream);
+    else            ab::launchDecodeCostOutlier(d_meta, cfg, d_cost, stream);
+    auto d_tmp = fz::backend::withTempStorage(pool, stream, "warp_inv_cub",
+        [&](void* tmp, size_t& b) {
+            cub::DeviceScan::ExclusiveSum(tmp, b, d_cost, d_offset, num_blocks, stream);
+        });
+
+    // Pass B: one warp per block — decode + undelta + dequant, register-resident.
+    const std::string src = generateWarpInverseSource(spec);
+    CUfunction k = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_warp_unpack"));
+    const int WPB = 8, THREADS = WPB * 32;
+    const unsigned grid = static_cast<unsigned>((num_blocks + WPB - 1) / WPB);
+    unsigned long long n_arg = n_elems, nb_arg = num_blocks;
+    unsigned wb_arg = cfg.word_bytes;
+    void* args[] = { (void*)&n_arg, (void*)&wb_arg, (void*)&nb_arg, (void*)&ebx2,
+                     (void*)&d_meta, (void*)&d_offset, (void*)&d_payload, (void*)&d_out };
+    CU_CHECK(cuLaunchKernel(k, grid,1,1, (unsigned)THREADS,1,1, 0, (CUstream)stream, args, nullptr));
+
+    fz::backend::freeTempStorage(pool, d_tmp, stream);
+    pool->free(d_offset, stream);
+    pool->free(d_cost, stream);
+    return n_elems * sizeof(float);
 }
 
 } // namespace fused

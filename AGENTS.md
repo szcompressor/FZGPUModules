@@ -140,6 +140,8 @@ Do not add entries for documentation-only or comment-only edits.
 | Performance tuning (every lever, when to use each, measured effect sizes) | [docs/performance_tuning.md](docs/performance_tuning.md) |
 | Full API reference (lifecycle, enums, all setters) | [docs/api_reference.md](docs/api_reference.md) |
 | Per-stage reference (ports, constraints, TOML keys) | [docs/stages/index.md](docs/stages/index.md) |
+| Pipeline Specialization (auto fusion + runtime optimization: using it) | [docs/pipeline_specialization.md](docs/pipeline_specialization.md) |
+| Making a stage specialization-compatible (fusion declaration contract) | [docs/pipeline_specialization_internals.md](docs/pipeline_specialization_internals.md) |
 | Adding a new stage | [docs/how_to_add_a_stage.md](docs/how_to_add_a_stage.md) |
 | Longform rationale: measurements, postmortems, tuning evidence | [docs/codebase_notes.md](docs/codebase_notes.md) |
 | FZM binary file format | [docs/fzm_format.md](docs/fzm_format.md) |

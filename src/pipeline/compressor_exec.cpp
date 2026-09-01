@@ -1,5 +1,6 @@
 // compressor_exec.cpp — in-memory compress / decompress execution
 #include "pipeline/compressor.h"
+#include "advanced/fusion_registry.h"
 #include "pipeline_utils.h"
 #include "dag_event_timer.h"
 #include "log.h"
@@ -601,7 +602,9 @@ void Pipeline::buildOrReuseInvCache(
 
         auto [inv_dag_up, inv_result_map_new] = buildInverseDAG(
             fwd_topology, po_map, mem_pool_.get(), strategy_,
-            source_sizes, profiling_enabled_);
+            source_sizes, profiling_enabled_,
+            fusion_info_.policy != FusionPolicy::Off &&
+                strategy_ == MemoryStrategy::PREALLOCATE);
 
         std::unordered_map<int, int> fwd_to_inv_ext_buf;
         for (auto* node : inv_dag_up->getNodes()) {
@@ -621,6 +624,13 @@ void Pipeline::buildOrReuseInvCache(
         inv_cache_->inv_result_map     = std::move(inv_result_map_new);
         inv_cache_->fwd_to_inv_ext_buf = std::move(fwd_to_inv_ext_buf);
         inv_cache_->source_sizes       = source_sizes;
+        fusion_info_.installed_inverse_groups.clear();
+        for (const auto& fg : inv_cache_->inv_dag->getFusedGroups()) {
+            FusionGroupInfo info;
+            info.implementation = fg.impl ? fg.impl->name : "unknown";
+            for (Stage* stage : fg.stages) info.stages.push_back(stage->getName());
+            fusion_info_.installed_inverse_groups.push_back(std::move(info));
+        }
         FZ_LOG(DEBUG, "decompress: built and cached inverse DAG (%zu ext buffers mapped)",
                inv_cache_->fwd_to_inv_ext_buf.size());
     } else {

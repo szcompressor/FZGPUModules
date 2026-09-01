@@ -1,11 +1,13 @@
 // compressor_inverse_dag.cpp — builds the inverse (decompression) DAG from a
 // forward-topology description.
 #include "pipeline/compressor.h"
+#include "advanced/fusion_registry.h"
 #include "log.h"
 #include <stdexcept>
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include <unordered_set>
 
 namespace fz {
 
@@ -16,7 +18,8 @@ Pipeline::buildInverseDAG(
     MemoryPool*                               pool,
     MemoryStrategy                            strategy,
     const std::unordered_map<Stage*, size_t>& source_sizes,
-    bool                                      enable_profiling
+    bool                                      enable_profiling,
+    bool                                      enable_inverse_fusion
 ) {
     auto inv_dag = std::make_unique<CompressionDAG>(pool, strategy);
     if (enable_profiling) inv_dag->enableProfiling(true);
@@ -120,6 +123,54 @@ Pipeline::buildInverseDAG(
     if (inv_result_map.empty()) {
         throw std::runtime_error(
             "buildInverseDAG: no source stages found in forward topology");
+    }
+
+    // Install evidence-gated inverse implementations over linear inverse chains.
+    // Registry matching, not the topology walker, owns semantic eligibility.
+    if (enable_inverse_fusion) {
+        std::vector<CompressionDAG::FusedGroupExec> installed;
+        std::unordered_set<DAGNode*> claimed;
+        for (DAGNode* start : inv_dag->getNodes()) {
+            if (!start || !start->dependencies.empty() || claimed.count(start)) continue;
+            std::vector<DAGNode*> chain;
+            for (DAGNode* cur = start; cur && !claimed.count(cur);) {
+                chain.push_back(cur);
+                if (cur->dependents.size() != 1 ||
+                    cur->dependents[0]->dependencies.size() != 1) break;
+                cur = cur->dependents[0];
+            }
+            for (size_t begin = 0; begin + 1 < chain.size();) {
+                const FusedImpl* selected = nullptr;
+                size_t selected_end = begin;
+                for (size_t end = chain.size(); end >= begin + 2; --end) {
+                    std::vector<Stage*> stages;
+                    for (size_t i = begin; i < end; ++i) stages.push_back(chain[i]->stage);
+                    if (const FusedImpl* impl = findFusedImpl(stages, false)) {
+                        selected = impl;
+                        selected_end = end;
+                        break;
+                    }
+                    if (end == begin + 2) break;
+                }
+                if (!selected) { ++begin; continue; }
+                CompressionDAG::FusedGroupExec fg;
+                fg.head = chain[begin];
+                fg.tail = chain[selected_end - 1];
+                fg.impl = selected;
+                for (size_t i = begin; i < selected_end; ++i) {
+                    fg.members.push_back(chain[i]);
+                    fg.stages.push_back(chain[i]->stage);
+                    claimed.insert(chain[i]);
+                }
+                FZ_LOG(INFO, "Inverse fusion: installed '%s' over %zu stages",
+                       selected->name, fg.stages.size());
+                installed.push_back(std::move(fg));
+                begin = selected_end;
+            }
+        }
+        if (!installed.empty()) {
+            inv_dag->setFusedGroups(std::move(installed));
+        }
     }
 
     // Step 4: Finalize — assigns levels and streams.

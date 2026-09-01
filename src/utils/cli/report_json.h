@@ -111,6 +111,7 @@ struct ReportData {
     std::string                  fusion_policy;
     size_t                       fusion_legal_group_count = 0;
     std::vector<FusionGroupJson> fusion_installed_groups;
+    std::vector<FusionGroupJson> fusion_installed_inverse_groups;
     std::string                  fusion_fallback_reason;
 
     // ── graph mode (benchmark only; omitted entirely when graph_requested is false) ──

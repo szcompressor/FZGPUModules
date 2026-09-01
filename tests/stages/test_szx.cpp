@@ -18,6 +18,13 @@
  *   SZX9  GraphCompatFlags        — ABS fwd true, inverse false, NOA fwd false
  *   SZX10 SetBlockSizeRejects     — 0 and >4096 throw
  *   SZX11 CompressionRatio        — smooth data compresses below input
+ *
+ *   SZX-SEM1..4  Checkpoint-1 characterization: classification boundary
+ *               (inclusive at range == 2*eb), midpoint (not mean) reference
+ *               value, non-constant path just over the boundary, and the mixed /
+ *               partial-tail / f64 / NOA matrix. Oracle for the future modular
+ *               conditional-representation graph — see
+ *               docs/szx_conditional_representation.md.
  */
 
 #include <gtest/gtest.h>
@@ -160,4 +167,99 @@ TEST(SZxStage, CompressionRatio) {
     double cr = 0;
     EXPECT_LE(szx_round_trip<float>(in, EB, 128, SZxErrorMode::ABS, &cr), EB * 1.01);
     EXPECT_GT(cr, 1.0) << "smooth data should compress below input size, cr=" << cr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Checkpoint-1 / Checkpoint-4 characterization tests. These pin the SZx block
+// classification + reference-value semantics that the future modular
+// BlockClassifier -> ConditionalSplit -> {const,residual} -> ConditionalMerge
+// graph must reproduce byte-for-byte. Spec: docs/szx_conditional_representation.md.
+// The monolithic SZxStage is the oracle; do not relax these without updating the
+// spec doc.
+// ─────────────────────────────────────────────────────────────────────────────
+namespace {
+template <typename T>
+std::vector<T> szx_reconstruct(const std::vector<T>& in, double eb, uint32_t block,
+                               SZxErrorMode mode) {
+    Pipeline p(in.size() * sizeof(T), MemoryStrategy::PREALLOCATE);
+    auto* s = p.addStage<SZxStage<T>>();
+    s->setBlockSize(block);
+    s->setErrorBound(eb);
+    s->setErrorMode(mode);
+    p.finalize();
+    CudaStream cs;
+    return pipeline_round_trip<T>(p, in, cs.stream).data;
+}
+}  // namespace
+
+// SZX-SEM1: classification boundary is inclusive — a block whose range is
+// EXACTLY 2*eb is constant, so every element reconstructs to the single block
+// reference value.
+TEST(SZxStage, Sem_ClassificationBoundaryInclusive) {
+    constexpr double EB = 1.0;
+    const uint32_t B = 128;
+    std::vector<float> in(B, 5.0f);
+    // range = max-min = 2.0 == 2*eb  -> constant
+    in[0]      = 4.0f;   // min
+    in[B - 1]  = 6.0f;   // max, range exactly 2*eb
+    for (uint32_t i = 1; i < B - 1; ++i) in[i] = 4.0f + 2.0f * (float(i) / float(B - 1));
+
+    auto out = szx_reconstruct<float>(in, EB, B, SZxErrorMode::ABS);
+    ASSERT_EQ(out.size(), in.size());
+    // Constant path: all outputs identical and equal to the range midpoint (5.0),
+    // NOT the arithmetic mean.
+    for (float v : out) EXPECT_FLOAT_EQ(v, out[0]);
+    EXPECT_NEAR(out[0], 5.0f, 1e-5f) << "constant-block reference must be the min/max midpoint";
+}
+
+// SZX-SEM2: a block whose range is just OVER 2*eb takes the non-constant
+// (residual) path and tracks the input within the bound rather than collapsing.
+TEST(SZxStage, Sem_JustOverBoundaryIsNonConstant) {
+    constexpr double EB = 1.0;
+    const uint32_t B = 128;
+    std::vector<float> in(B);
+    for (uint32_t i = 0; i < B; ++i) in[i] = float(i) * (2.05f / float(B - 1));  // range ~2.05 > 2*eb
+
+    auto out = szx_reconstruct<float>(in, EB, B, SZxErrorMode::ABS);
+    ASSERT_EQ(out.size(), in.size());
+    for (uint32_t i = 0; i < B; ++i)
+        EXPECT_LE(std::abs(double(out[i]) - double(in[i])), EB + 1e-4);
+    EXPECT_GT(std::abs(out[B - 1] - out[0]), 0.5f) << "non-constant block must not collapse";
+}
+
+// SZX-SEM3: reference value is the range midpoint, not the mean — a heavily
+// skewed constant block still reconstructs to (min+max)/2.
+TEST(SZxStage, Sem_ReferenceIsMidpointNotMean) {
+    constexpr double EB = 1.0;
+    const uint32_t B = 128;
+    std::vector<float> in(B, 0.0f);       // 127 values at the min
+    in[B - 1] = 2.0f;                     // one value at the max; range 2.0 == 2*eb -> constant
+    // mean ~= 0.0156, midpoint == 1.0
+    auto out = szx_reconstruct<float>(in, EB, B, SZxErrorMode::ABS);
+    for (float v : out) EXPECT_NEAR(v, 1.0f, 1e-5f);
+}
+
+// SZX-SEM4: mixed constant + non-constant blocks in one archive, partial final
+// block, f64, NOA — the full matrix the modular graph must round-trip.
+TEST(SZxStage, Sem_MixedBlocksPartialTail_F64_NOA) {
+    const uint32_t B = 64;
+    std::vector<double> in;
+    for (int blk = 0; blk < 5; ++blk) {
+        const bool constant = (blk % 2 == 0);
+        for (uint32_t i = 0; i < B; ++i)
+            in.push_back(constant ? 3.0 : 3.0 + 0.5 * std::sin(0.3 * (blk * B + i)));
+    }
+    for (uint32_t i = 0; i < 20; ++i) in.push_back(7.0 + 0.01 * i);   // partial tail block
+
+    const double USER_EB = 1e-3;
+    double range = 0.0;
+    {
+        double mn = in[0], mx = in[0];
+        for (double v : in) { mn = std::min(mn, v); mx = std::max(mx, v); }
+        range = mx - mn;
+    }
+    auto out = szx_reconstruct<double>(in, USER_EB, B, SZxErrorMode::NOA);
+    ASSERT_EQ(out.size(), in.size());
+    for (size_t i = 0; i < in.size(); ++i)
+        EXPECT_LE(std::abs(out[i] - in[i]), USER_EB * range * 1.02);
 }

@@ -5,6 +5,9 @@
 #include "predictors/lorenzo/lorenzo_stage.h"
 #include "predictors/tiled_lorenzo/tiled_lorenzo_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
+#include "coders/rze/rze_stage.h"
+#include "shufflers/bitshuffle/bitshuffle_stage.h"
+#include "predictors/diff/diff.h"
 #include "fused/fused_block/nvrtc_warp_fusion.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 
@@ -194,9 +197,125 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
     return archive_bytes;
 }
 
+// ── Generic chunk-cooperative inverse, first admitted shape: PFPL/RZE. ────────
+// Stage order is inverse execution order: Coder -> reverse transforms -> Map.
+// The kernel harness remains chunk-based and stage-agnostic internally; this
+// matcher is deliberately evidence-gated to the exact RZE/PFPL operation set
+// until additional inverse device ops have correctness/performance coverage.
+bool matchesChunkCooperativeInverse(const std::vector<Stage*>& g) {
+    if (g.size() != 4) return false;
+    auto* rze = dynamic_cast<RZEStage*>(g[0]);
+    auto* bs  = dynamic_cast<BitshuffleStage*>(g[1]);
+    auto* df  = dynamic_cast<DifferenceStage<int32_t, uint32_t>*>(g[2]);
+    auto* q   = dynamic_cast<QuantizerStage<float, uint32_t>*>(g[3]);
+    return rze && bs && df && q &&
+           rze->isInverse() && bs->isInverse() && df->isInverse() && q->isInverse() &&
+           rze->getWordSize() == 1 && rze->getChunkSize() == 16384u &&
+           bs->getElementWidth() == 4u && bs->getBlockSize() == 16384u &&
+           df->getChunkSize() == 16384u && q->supportsChunkInverseFusion();
+}
+
+size_t runChunkCooperativeInverse(const FusedRunContext& ctx) {
+    const auto& g = *ctx.stages;
+    auto* rze = static_cast<RZEStage*>(g[0]);
+    auto* q   = static_cast<QuantizerStage<float, uint32_t>*>(g[3]);
+
+    const float* outlier_vals = nullptr;
+    const uint32_t* outlier_idxs = nullptr;
+    if (ctx.side_inputs) {
+        for (const FusedSideInput& in : *ctx.side_inputs) {
+            if (in.consumer != q) continue;
+            if (in.input_index == 1) outlier_vals = static_cast<const float*>(in.d_ptr);
+            else if (in.input_index == 2)
+                outlier_idxs = static_cast<const uint32_t*>(in.d_ptr);
+        }
+    }
+
+    const size_t output_bytes = static_cast<size_t>(rze->getCachedOrigBytes());
+    const size_t written = fused::launchFusedChunkPfplInverse(
+        static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes, output_bytes,
+        2.0f * static_cast<float>(q->getComputedAbsEb()),
+        q->getInplaceOutliers(), static_cast<uint32_t>(q->getQuantRadius()),
+        outlier_vals, outlier_idxs, q->getActualOutlierCount(),
+        static_cast<float*>(ctx.d_output), ctx.pool,
+        static_cast<fz::stream_t>(ctx.stream));
+    q->setFusedInverseResult(written);
+    return written;
+}
+
+// ── Warp-register inverse (cuSZp / SZp decompress). Reverses the warp forward
+//    chain in one warp-per-block kernel: coder decode -> block-local predictor
+//    undelta (block-reset prefix sum) -> linear dequant, register-resident, no
+//    DRAM round-trip for the intermediate codes/deltas. Inverse stage order is
+//    Coder⁻¹ -> Predictor⁻¹ -> Quantizer⁻¹ (buildInverseDAG walks forward-reverse).
+//    Bit-exact vs the staged inverse kernels.
+//
+//    ROLE-BASED, mirroring matchesWarpRegister/runWarpRegister on the compress
+//    side: the stages declare WarpRegister inverse fused-ops
+//    (getInverseFusionSpec/getInverseFusedOp) in the Cooperative / BlockLocal /
+//    Map roles, and this matcher/runner read those declarations by role and build
+//    a WarpFusionSpec from op names — no dynamic_cast to concrete stage types and
+//    no hardcoded predictor/coder. A new warp predictor/coder that declares
+//    forward+inverse ops fuses in BOTH directions with no edits here.
+//    CORE scope: interior register transforms are not yet composed on the inverse
+//    (the inverse harness has no invert() ops registered), so the chain is
+//    exactly Coder -> Predictor -> Quant (size 3). See the CHANGELOG note.
+bool matchesWarpRegisterInverse(const std::vector<Stage*>& g) {
+    if (g.size() != 3) return false;                 // CORE: coder -> predictor -> quant
+    for (Stage* s : g) {
+        if (!s->isInverse()) return false;
+        const FusedOpDecl op = s->getInverseFusedOp();
+        if (!op.valid() || op.strategy != FusionStrategy::WarpRegister) return false;
+    }
+    const FusionSpec coder = g.front()->getInverseFusionSpec();  // reverse-forward order
+    const FusionSpec pred  = g[1]->getInverseFusionSpec();
+    const FusionSpec quant = g.back()->getInverseFusionSpec();
+    if (coder.access != FusionAccess::Cooperative) return false;
+    if (pred.access  != FusionAccess::BlockLocal)  return false;
+    if (quant.access != FusionAccess::Map)         return false;
+    // Coder and predictor must agree on the warp block size (Map/quant carries 0).
+    return coder.block_size != 0 && pred.block_size == coder.block_size;
+}
+
+size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
+    const auto& g = *ctx.stages;
+    Stage* coder = nullptr;
+    Stage* predictor = nullptr;
+    Stage* quant = nullptr;
+    for (Stage* s : g) {
+        switch (s->getInverseFusionSpec().access) {
+            case FusionAccess::Cooperative: coder     = s; break;
+            case FusionAccess::BlockLocal:  predictor = s; break;
+            case FusionAccess::Map:         quant     = s; break;
+            default: break;
+        }
+    }
+    if (!coder || !predictor || !quant) return 0;   // matcher guarantees this
+
+    fused::WarpFusionSpec spec;
+    spec.coder          = coder->getInverseFusedOp().op_name;
+    spec.predictor      = predictor->getInverseFusedOp().op_name;
+    spec.elems_per_lane = static_cast<int>(coder->getInverseFusedOp().elems_per_lane);
+
+    const size_t n_elems = coder->getFusedInverseElementCount();
+    const float  ebx2    = static_cast<float>(quant->getFusedInverseDequantStep());
+
+    const size_t written = fused::launchNvrtcWarpInverseFused(
+        spec, static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes,
+        n_elems, ebx2, static_cast<float*>(ctx.d_output), ctx.pool,
+        static_cast<fz::stream_t>(ctx.stream));
+
+    quant->setFusedInverseResult(written);
+    return written;
+}
+
 const FusedImpl kBuiltins[] = {
     { "warp-register",  true,  &matchesWarpRegister,     &runWarpRegister     },
     { "chunk-coop",     true,  &matchesChunkCooperative, &runChunkCooperative },
+    { "chunk-coop-inverse", true, &matchesChunkCooperativeInverse,
+                                      &runChunkCooperativeInverse },
+    { "warp-register-inverse", true, &matchesWarpRegisterInverse,
+                                      &runWarpRegisterInverse },
 };
 
 } // namespace

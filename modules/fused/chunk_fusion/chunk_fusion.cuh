@@ -162,6 +162,9 @@ struct RZECoder {
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
         return lc_detail::d_RZE<byte, CHUNK_BYTES>(csize, in, out, temp);
     }
+    __device__ static void decode(int& csize, byte* in, byte* out, byte* temp) {
+        lc_detail::d_iRZE<byte, CHUNK_BYTES>(csize, in, out, temp);
+    }
 };
 struct RRECoder {
     using Params = EmptyParams;
@@ -294,6 +297,126 @@ chunk_fused_kernel(const float* __restrict__ in, size_t n,
                    byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
                    ChunkSideCtx side = ChunkSideCtx{}) {
     chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, params, scratch, sizes, side);
+}
+
+// ── Inverse chunk harness (initial RZE evidence-gated path). ─────────────────
+// One CTA consumes one packed LC chunk, keeps every intermediate in the same
+// shared-memory ping-pong buffers as compression, and writes reconstructed
+// floats once. `offsets` are payload-relative exclusive offsets computed from
+// the archive's flagged size table by the launcher.
+template<class Coder>
+__device__ __forceinline__ void
+chunk_inverse_pfpl_body(const byte* __restrict__ archive,
+                        const uint32_t* __restrict__ entries,
+                        const uint32_t* __restrict__ offsets,
+                        size_t output_bytes, float ebx2,
+                        bool inplace_outliers, uint32_t quant_radius,
+                        float* __restrict__ out) {
+    __shared__ __align__(16) uint32_t sA[NELEM];
+    __shared__ __align__(16) uint32_t sB[NELEM];
+    __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
+
+    const uint32_t cid = blockIdx.x;
+    const size_t base_bytes = static_cast<size_t>(cid) * CHUNK_BYTES;
+    if (base_bytes >= output_bytes) return;
+    const int out_bytes = static_cast<int>(min(static_cast<size_t>(CHUNK_BYTES),
+                                               output_bytes - base_bytes));
+    const int cnt = out_bytes / static_cast<int>(sizeof(uint32_t));
+    const bool full = out_bytes == CHUNK_BYTES;
+    const uint32_t entry = entries[cid];
+    const uint32_t stored = entry & 0x7fffffffu;
+    const bool raw = (entry & 0x80000000u) != 0;
+    const uint32_t nchunks = static_cast<uint32_t>(
+        (output_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES);
+    const size_t header = 8u + static_cast<size_t>(nchunks) * sizeof(uint32_t);
+    const byte* payload = archive + header + offsets[cid];
+
+    for (uint32_t i = threadIdx.x; i < stored; i += blockDim.x)
+        reinterpret_cast<byte*>(sA)[i] = payload[i];
+    __syncthreads();
+
+    uint32_t* cur = sA;
+    uint32_t* alt = sB;
+    if (!raw) {
+        int csize = static_cast<int>(stored);
+        Coder::decode(csize, reinterpret_cast<byte*>(sA),
+                      reinterpret_cast<byte*>(sB), sTemp);
+        __syncthreads();
+        cur = sB;
+        alt = sA;
+    }
+
+    // Bitshuffle is self-inverse but its read/write indexing is reversed.
+    if (full) {
+        const int lane = threadIdx.x & 31;
+        for (int i = threadIdx.x; i < NELEM; i += blockDim.x) {
+            const unsigned a = cur[i / 32 + lane * NPP];
+            alt[i] = butterfly32(a, lane);
+        }
+        __syncthreads();
+        uint32_t* tmp = cur; cur = alt; alt = tmp;
+    }
+
+    // Inverse negabinary + chunk-local inclusive scan. Each 512-value tile is
+    // scanned warp-wise, with 16 warp totals and one carry in the coder scratch
+    // (the LC decoder is finished with it by this point).
+    int32_t* qout = reinterpret_cast<int32_t*>(alt);
+    int32_t* scan = reinterpret_cast<int32_t*>(sTemp);
+    if (threadIdx.x == 0) scan[16] = 0;
+    __syncthreads();
+    for (int tile = 0; tile < cnt; tile += TPB) {
+        const int idx = tile + threadIdx.x;
+        const bool valid = idx < cnt;
+        int32_t v = valid ? Negabinary<int32_t>::decode(cur[idx]) : 0;
+        const int lane = threadIdx.x & 31;
+        const int warp = threadIdx.x >> 5;
+        for (int delta = 1; delta < 32; delta <<= 1) {
+            const int32_t up = __shfl_up_sync(0xffffffffu, v, delta);
+            if (lane >= delta) v += up;
+        }
+        if (lane == 31) scan[warp] = v;
+        __syncthreads();
+        if (warp == 0) {
+            int32_t w = lane < 16 ? scan[lane] : 0;
+            for (int delta = 1; delta < 32; delta <<= 1) {
+                const int32_t up = __shfl_up_sync(0xffffffffu, w, delta);
+                if (lane >= delta) w += up;
+            }
+            if (lane < 16) scan[lane] = w;
+        }
+        __syncthreads();
+        const int32_t q = v + (warp ? scan[warp - 1] : 0) + scan[16];
+        if (valid) qout[idx] = q;
+        __syncthreads();
+        if (threadIdx.x == 0) scan[16] += scan[15];
+        __syncthreads();
+    }
+
+    const size_t base_elem = base_bytes / sizeof(uint32_t);
+    for (int i = threadIdx.x; i < cnt; i += blockDim.x) {
+        // Difference reconstructs the quantizer's *zigzag code* stream. Undo
+        // that final map before scaling back to the reconstructed float.
+        const uint32_t code = static_cast<uint32_t>(qout[i]);
+        if (inplace_outliers && (code >> 1) >= quant_radius) {
+            out[base_elem + static_cast<size_t>(i)] = __uint_as_float(code);
+        } else {
+            const int32_t q = static_cast<int32_t>(
+                (code >> 1) ^ (0u - (code & 1u)));
+            out[base_elem + static_cast<size_t>(i)] = static_cast<float>(q) * ebx2;
+        }
+    }
+}
+
+template<class Coder>
+__global__ void __launch_bounds__(TPB)
+chunk_inverse_pfpl_kernel(const byte* __restrict__ archive,
+                          const uint32_t* __restrict__ entries,
+                          const uint32_t* __restrict__ offsets,
+                          size_t output_bytes, float ebx2,
+                          bool inplace_outliers, uint32_t quant_radius,
+                          float* __restrict__ out) {
+    chunk_inverse_pfpl_body<Coder>(archive, entries, offsets, output_bytes, ebx2,
+                                   inplace_outliers, quant_radius, out);
 }
 
 } // namespace chunk

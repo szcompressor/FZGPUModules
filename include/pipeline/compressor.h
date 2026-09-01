@@ -36,31 +36,52 @@ namespace fz {
  *    Call setPoolManagedDecompOutput(false) to receive a caller-owned pointer instead.
  */
 /**
- * Kernel-fusion policy for compress. `Off` (default) runs every stage staged.
- * `Auto` installs only registered implementations that have passed their
- * profitability gate. `Force` also permits experimental implementations and is
- * intended for correctness/performance diagnostics, not production selection.
- * The planner may select non-overlapping partial groups from one larger compatible
- * chain; a specialization need not consume the maximal chain. Decompression and
- * archive semantics remain staged-compatible. Overridable at runtime with
- * FZ_FUSION=off|auto|force ("experimental" aliases force).
+ * @brief Pipeline Specialization policy.
+ *
+ * Pipeline Specialization is the finalize-time layer that inspects the DAG and
+ * transparently replaces staged, stage-by-stage execution with an optimized
+ * specialized implementation — kernel fusion (warp-register and chunk-cooperative
+ * strategies), single-pass decoupled-lookback, NVRTC codegen — while keeping the
+ * DAG semantics and the archive bytes identical. Kernel fusion is the
+ * specialization strategy it currently applies; the umbrella name leaves room for
+ * further runtime optimizations.
+ *
+ * `Off` (default) runs every stage staged. `Auto` installs only registered
+ * specializations that have passed their profitability gate ("knows when not to
+ * fuse"). `Force` also permits experimental specializations and is intended for
+ * correctness/performance diagnostics, not production selection. The planner may
+ * select non-overlapping partial groups from one larger compatible chain; a
+ * specialization need not consume the maximal chain. Decompression is specialized
+ * on the same policy and stays byte-exact vs the staged inverse. Overridable at
+ * runtime with FZ_SPECIALIZE=off|auto|force (FZ_FUSION is a deprecated alias;
+ * "experimental" aliases force).
+ *
+ * See docs/pipeline_specialization.md.
  */
-enum class FusionPolicy { Off, Auto, Force };
+enum class SpecializationPolicy { Off, Auto, Force };
 
-/// One finalize-time fusion specialization selected for compress execution.
-struct FusionGroupInfo {
-    std::string implementation;
-    std::vector<std::string> stages;
+/// @deprecated Pipeline Specialization was formerly called "fusion". Kept as an
+/// alias so existing callers compile unchanged; prefer SpecializationPolicy.
+using FusionPolicy = SpecializationPolicy;
+
+/// One finalize-time specialization selected for execution (compress or inverse).
+struct SpecializationGroupInfo {
+    std::string implementation;              ///< strategy impl name, e.g. "warp-register"
+    std::vector<std::string> stages;         ///< the stages it replaced
 };
+using FusionGroupInfo = SpecializationGroupInfo;   ///< @deprecated
 
-/// Resolved fusion decision for diagnostics and benchmark provenance.
-struct FusionInfo {
-    FusionPolicy policy = FusionPolicy::Off;
+/// Resolved specialization decision for diagnostics and benchmark provenance.
+struct SpecializationInfo {
+    SpecializationPolicy policy = SpecializationPolicy::Off;
     size_t legal_group_count = 0;
-    std::vector<FusionGroupInfo> installed_groups;
+    std::vector<SpecializationGroupInfo> installed_groups;
+    /// Lazily populated after the first decompress builds its inverse DAG.
+    std::vector<SpecializationGroupInfo> installed_inverse_groups;
     /// policy_off, no_legal_group, or no_profitable_implementation; empty on a hit.
     std::string fallback_reason;
 };
+using FusionInfo = SpecializationInfo;   ///< @deprecated
 
 class Pipeline {
 public:
@@ -91,13 +112,19 @@ public:
     /** Must be called before finalize(). */
     void setMemoryStrategy(MemoryStrategy strategy);
 
-    /** Kernel-fusion policy (default Off). Must be called before finalize(). */
-    void setFusionPolicy(FusionPolicy mode) { fusion_policy_ = mode; }
-    FusionPolicy getFusionPolicy() const { return fusion_policy_; }
-    /** Number of fused groups installed at finalize() (0 unless Auto matched). */
-    size_t getFusedGroupCount() const { return dag_ ? dag_->getFusedGroupCount() : 0; }
-    /** Resolved policy, legal-domain count, installed implementations, and fallback. */
-    const FusionInfo& getFusionInfo() const { return fusion_info_; }
+    /** Pipeline Specialization policy (default Off). Must be called before finalize(). */
+    void setSpecializationPolicy(SpecializationPolicy mode) { fusion_policy_ = mode; }
+    SpecializationPolicy getSpecializationPolicy() const { return fusion_policy_; }
+    /** Number of specializations installed at finalize() (0 unless Auto/Force matched). */
+    size_t getSpecializedGroupCount() const { return dag_ ? dag_->getFusedGroupCount() : 0; }
+    /** Resolved policy, legal-domain count, installed specializations, and fallback. */
+    const SpecializationInfo& getSpecializationInfo() const { return fusion_info_; }
+
+    /// @deprecated Renamed for Pipeline Specialization. Forward to the new names.
+    void setFusionPolicy(SpecializationPolicy mode) { setSpecializationPolicy(mode); }
+    SpecializationPolicy getFusionPolicy() const { return getSpecializationPolicy(); }
+    size_t getFusedGroupCount() const { return getSpecializedGroupCount(); }
+    const SpecializationInfo& getFusionInfo() const { return fusion_info_; }
 
     /** Number of parallel CUDA streams for level-based execution. Must be called before finalize(). */
     void setNumStreams(int num_streams);
@@ -969,7 +996,8 @@ private:
         MemoryPool*                               pool,
         MemoryStrategy                            strategy,
         const std::unordered_map<Stage*, size_t>& source_sizes,
-        bool                                      enable_profiling
+        bool                                      enable_profiling,
+        bool                                      enable_inverse_fusion = false
     );
 
     // ── Concat helpers ────────────────────────────────────────────────────────

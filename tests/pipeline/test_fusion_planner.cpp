@@ -3,6 +3,7 @@
 
 #include "fzgpumodules.h"
 #include "advanced/fusion_planner.h"
+#include "advanced/fusion_registry.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 #include "fused/chunk_fusion/chunk_op_params.h"
 #include "fused/fused_block/nvrtc_warp_fusion.h"
@@ -75,6 +76,20 @@ void buildCuszp3(Pipeline& p, size_t dx, size_t dy) {
     p.connect(a, tl);
 }
 
+// Build a 1-D warp-register chain: Quantizer(linear) -> Lorenzo(block) ->
+// AdaptiveBitpack(block). `block` = 32*EPL; `outlier` picks the adaptive coder
+// vs the 1-byte-meta PlainRateCoder. Exercises the generalized warp-register
+// backend across EPL (block 128 = SZp's szp_composed.toml, plain).
+void buildWarp1D(Pipeline& p, size_t n, uint32_t block, bool outlier) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+    auto* l = p.addStage<LorenzoStage<int32_t>>(); l->setBlockSize(block);
+    p.connect(l, q, "codes");
+    auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    a->setBlockSize(block); a->setOutlierSelection(outlier);
+    p.connect(a, l);
+}
 void buildFsz(Pipeline& p, size_t n, bool outlier) {
     p.setDims(n, 1, 1);
     auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
@@ -191,8 +206,12 @@ TEST(FusionPlanner, AdaptiveBitpackEncodingOracleDeclarations) {
     EXPECT_EQ(p.unit_elems, 32u);
     EXPECT_TRUE(p.exact);
     EXPECT_TRUE(p.additive);
-    EXPECT_FALSE(plain.getFusedOp().valid())
-        << "plain staged semantics must not imply current warp-fusion eligibility";
+    // Plain mode now fuses too — through the 1-byte-meta PlainRateCoder policy,
+    // which emits exactly the staged plain AdaptiveBitpack archive format.
+    const FusedOpDecl plain_op = plain.getFusedOp();
+    ASSERT_TRUE(plain_op.valid());
+    EXPECT_EQ(plain_op.op_name, "PlainRateCoder");
+    EXPECT_EQ(plain_op.strategy, FusionStrategy::WarpRegister);
 
     plain.setOutlierSelection(true);
     const EncodingOracleDecl adaptive = plain.getEncodingOracle();
@@ -763,6 +782,15 @@ TEST(FusionPlanner, PfplSplitOutlierFusesAndRoundTrips) {
         void* d_decomp = nullptr; size_t dsz = 0;
         p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
         cudaDeviceSynchronize();
+        if (pol == FusionPolicy::Auto) {
+            ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u);
+            EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
+                      "chunk-coop-inverse");
+            EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].stages,
+                      (std::vector<std::string>{"RZE", "Bitshuffle", "Difference", "Quantizer"}));
+        } else {
+            EXPECT_TRUE(p.getFusionInfo().installed_inverse_groups.empty());
+        }
         recon.assign(n, 0.0f);
         cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
     };
@@ -942,6 +970,13 @@ TEST(FusionPlanner, WarpNvrtcCodegenComposesSpecOps) {
     const std::string src5 = fused::generateWarpFusionSource(s5);
     EXPECT_NE(src5.find("fused_rate_body<1, AdaptiveBitpackCoder, Lorenzo1DPredictor, ZigzagTransform>"),
               std::string::npos);
+
+    // The inverse composes the same spec into one warp-per-block decode kernel.
+    fused::WarpFusionSpec si;
+    si.predictor = "Lorenzo1DPredictor"; si.coder = "PlainRateCoder"; si.elems_per_lane = 4;
+    const std::string srci = fused::generateWarpInverseSource(si);
+    EXPECT_NE(srci.find("fused_unpack_body<4, PlainRateCoder, Lorenzo1DPredictor>"), std::string::npos);
+    EXPECT_NE(srci.find("fz_fused_warp_unpack"), std::string::npos);
 }
 
 // Warp transform chain: a register→register op (Zigzag/TCMS) composed BETWEEN the
@@ -1242,4 +1277,288 @@ TEST(FusionPlanner, Cuszp3EndToEndFusedMatchesStaged) {
     EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged";
 
     cudaFree(d_in);
+}
+
+// The generalized warp-register backend must fuse the 1-D Quantizer -> Lorenzo ->
+// AdaptiveBitpack chain (forward AND inverse) byte-identically to the staged
+// path, and round-trip within the bound, across every supported EPL (block =
+// 32*EPL, EPL 1..4) and both coder modes (plain -> PlainRateCoder / 1-byte meta;
+// outlier -> adaptive / 2-byte meta). block 128 plain == SZp's szp_composed.toml.
+// block 32 outlier == cuSZp2 (regression). EPL >= 3 exercises the forced two-pass
+// path. `n` deliberately gives a partial final block for every block size.
+TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
+    const size_t n = (1u << 20) + 77;   // partial final block for 32/64/96/128
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i)
+        h[i] = 0.5f * std::sin(i * 0.001f) + 0.2f * std::cos(i * 0.017f);
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+
+    for (uint32_t block : {32u, 64u, 96u, 128u}) {
+        for (bool outlier : {false, true}) {
+            const std::string tag =
+                "block=" + std::to_string(block) + " outlier=" + std::to_string(outlier);
+
+            auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+                Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+                p.setFusionPolicy(pol);
+                buildWarp1D(p, n, block, outlier);
+                p.finalize();
+                EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u) << tag;
+                void* d_comp = nullptr; size_t sz = 0;
+                p.compress(d_in, bytes, &d_comp, &sz, 0);
+                cudaDeviceSynchronize();
+                out.resize(sz);
+                EXPECT_EQ(cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost), cudaSuccess);
+                return sz;
+            };
+            std::vector<uint8_t> staged, fused;
+            const size_t sz_staged = compressCopy(FusionPolicy::Off, staged);
+            const size_t sz_fused  = compressCopy(FusionPolicy::Auto, fused);
+            ASSERT_EQ(sz_staged, sz_fused) << tag;
+            EXPECT_EQ(staged, fused) << "fused archive not byte-identical to staged: " << tag;
+
+            auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+                Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+                p.setFusionPolicy(pol);
+                buildWarp1D(p, n, block, outlier);
+                p.finalize();
+                void* d_comp = nullptr; size_t sz = 0;
+                p.compress(d_in, bytes, &d_comp, &sz, 0);
+                void* d_decomp = nullptr; size_t dsz = 0;
+                p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+                cudaDeviceSynchronize();
+                recon.assign(n, 0.0f);
+                cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+            };
+            std::vector<float> rs, rf;
+            roundtrip(FusionPolicy::Off, rs);
+            roundtrip(FusionPolicy::Auto, rf);
+            EXPECT_LE(maxErr(rs), eb * 1.001) << "staged exceeds bound: " << tag;
+            EXPECT_LE(maxErr(rf), eb * 1.001) << "fused exceeds bound: " << tag;
+            EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged: " << tag;
+
+            // Isolate the INVERSE: decompress the identical (staged) archive with
+            // fusion off vs auto (warp-register-inverse). Must be byte-exact.
+            auto decompressCopy = [&](FusionPolicy pol, std::vector<float>& recon) {
+                Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+                p.setFusionPolicy(pol);
+                buildWarp1D(p, n, block, outlier);
+                p.finalize();
+                p.prepareInverse(bytes);
+                void* d_comp = nullptr;
+                ASSERT_EQ(cudaMalloc(&d_comp, staged.size()), cudaSuccess);
+                ASSERT_EQ(cudaMemcpy(d_comp, staged.data(), staged.size(),
+                                     cudaMemcpyHostToDevice), cudaSuccess);
+                void* d_decomp = nullptr; size_t dsz = 0;
+                p.decompress(d_comp, staged.size(), &d_decomp, &dsz, 0);
+                cudaDeviceSynchronize();
+                if (pol == FusionPolicy::Auto) {
+                    ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u) << tag;
+                    EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
+                              "warp-register-inverse") << tag;
+                } else {
+                    EXPECT_TRUE(p.getFusionInfo().installed_inverse_groups.empty()) << tag;
+                }
+                recon.assign(n, 0.0f);
+                cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+                cudaFree(d_comp);
+            };
+            std::vector<float> ds, df;
+            decompressCopy(FusionPolicy::Off, ds);
+            decompressCopy(FusionPolicy::Auto, df);
+            EXPECT_EQ(ds, df) << "fused inverse differs from staged inverse: " << tag;
+        }
+    }
+    cudaFree(d_in);
+}
+
+// Installed fusion groups are one physical operation: their internal DAG edges
+// retain logical size/topology metadata but must not consume device storage.
+// Coloring uses the collapsed operation lifetime, keeping the fused input and
+// output distinct while permitting safe aliases outside the group.
+TEST(FusionPlanner, FusedGroupsPruneInternalBuffersAndRetainColoring) {
+    constexpr size_t n = 1u << 20;
+    const size_t bytes = n * sizeof(float);
+
+    Pipeline staged(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+    staged.setFusionPolicy(FusionPolicy::Off);
+    buildWarp1D(staged, n, 128, /*outlier=*/false);
+    staged.finalize();
+
+    Pipeline fused(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+    fused.setFusionPolicy(FusionPolicy::Auto);
+    buildWarp1D(fused, n, 128, /*outlier=*/false);
+    fused.finalize();
+
+    ASSERT_EQ(fused.getDAG()->getFusedGroupCount(), 1u);
+    EXPECT_EQ(fused.getDAG()->getFusedInternalBufferCount(), 2u);
+    EXPECT_TRUE(fused.isColoringEnabled());
+    EXPECT_LT(fused.getDAG()->computeTopoPoolSize(),
+              staged.getDAG()->computeTopoPoolSize());
+
+    const auto& group = fused.getDAG()->getFusedGroups().front();
+    ASSERT_EQ(group.members.size(), 3u);
+    for (size_t i = 0; i + 1 < group.members.size(); ++i) {
+        ASSERT_FALSE(group.members[i]->output_buffer_ids.empty());
+        EXPECT_EQ(fused.getDAG()->getBuffer(group.members[i]->output_buffer_ids[0]), nullptr);
+    }
+    ASSERT_FALSE(group.tail->output_buffer_ids.empty());
+    EXPECT_NE(fused.getDAG()->getBuffer(group.tail->output_buffer_ids[0]), nullptr);
+}
+
+// ── Warp-register INVERSE fusion is role/declaration-based (host-only, no GPU). ──
+// Mirrors WarpStagesDeclareFusedOps / PfplStagesDeclareFusedOps for the decompress
+// side: each inverse stage declares its WarpRegister fused-op in the right role
+// (Cooperative coder / BlockLocal predictor / Map quant) via getInverseFusionSpec()
+// + getInverseFusedOp(), plus the two generic scalar hooks the runner needs. Locks
+// the declaration contract so a new warp predictor/coder inherits inverse fusion.
+TEST(FusionPlanner, WarpInverseStagesDeclareOps) {
+    // Coder — plain mode -> PlainRateCoder, EPL = block/32.
+    {
+        AdaptiveBitpackStage<int32_t> ab;
+        ab.setInverse(true);
+        ab.setBlockSize(128);
+        ab.setOutlierSelection(false);
+        EXPECT_EQ(ab.getInverseFusionSpec().access, FusionAccess::Cooperative);
+        EXPECT_EQ(ab.getInverseFusionSpec().block_size, 128u);
+        const FusedOpDecl op = ab.getInverseFusedOp();
+        EXPECT_TRUE(op.valid());
+        EXPECT_EQ(op.strategy, FusionStrategy::WarpRegister);
+        EXPECT_EQ(op.op_name, "PlainRateCoder");
+        EXPECT_EQ(op.elems_per_lane, 4u);
+    }
+    // Coder — outlier mode -> AdaptiveBitpackCoder.
+    {
+        AdaptiveBitpackStage<int32_t> ab;
+        ab.setInverse(true);
+        ab.setBlockSize(32);
+        ab.setOutlierSelection(true);
+        EXPECT_EQ(ab.getInverseFusedOp().op_name, "AdaptiveBitpackCoder");
+        EXPECT_EQ(ab.getInverseFusedOp().elems_per_lane, 1u);
+    }
+    // Forward-mode instance declares NO inverse op (surface is inverse-only).
+    {
+        AdaptiveBitpackStage<int32_t> abf;
+        abf.setBlockSize(128);
+        EXPECT_FALSE(abf.getInverseFusedOp().valid());
+        EXPECT_FALSE(abf.getInverseFusionSpec().fusable());
+    }
+    // Predictor — 1-D block Lorenzo -> BlockLocal + Lorenzo1DPredictor.
+    {
+        LorenzoStage<int32_t> lz;
+        lz.setInverse(true);
+        lz.setBlockSize(128);
+        EXPECT_EQ(lz.getInverseFusionSpec().access, FusionAccess::BlockLocal);
+        EXPECT_EQ(lz.getInverseFusionSpec().block_size, 128u);
+        const FusedOpDecl op = lz.getInverseFusedOp();
+        EXPECT_TRUE(op.valid());
+        EXPECT_EQ(op.strategy, FusionStrategy::WarpRegister);
+        EXPECT_EQ(op.op_name, "Lorenzo1DPredictor");
+        EXPECT_EQ(op.elems_per_lane, 4u);
+    }
+    // N-D Lorenzo (block_size 0) declares no inverse op.
+    {
+        LorenzoStage<int32_t> lz;
+        lz.setInverse(true);
+        EXPECT_FALSE(lz.getInverseFusedOp().valid());
+    }
+    // Quant — linear ABS float/uint32 -> Map + LinearDequant marker + dequant step.
+    {
+        QuantizerStage<float, uint32_t> q;
+        q.setErrorBound(1e-3);
+        q.setErrorBoundMode(ErrorBoundMode::ABS);
+        q.setLinearMode(true);
+        q.setInverse(true);
+        q.primeAbsEbForFusion();
+        EXPECT_EQ(q.getInverseFusionSpec().access, FusionAccess::Map);
+        EXPECT_EQ(q.getInverseFusionSpec().block_size, 0u);
+        const FusedOpDecl op = q.getInverseFusedOp();
+        EXPECT_TRUE(op.valid());
+        EXPECT_EQ(op.strategy, FusionStrategy::WarpRegister);
+        EXPECT_EQ(op.op_name, "LinearDequant");
+        EXPECT_NEAR(q.getFusedInverseDequantStep(), 2.0 * 1e-3, 1e-9);
+    }
+    // Non-linear (outlier/zigzag) quant does NOT declare a warp inverse op.
+    {
+        QuantizerStage<float, uint32_t> q;
+        q.setErrorBound(1e-3);
+        q.setErrorBoundMode(ErrorBoundMode::ABS);
+        q.setInverse(true);
+        EXPECT_FALSE(q.getInverseFusionSpec().fusable());
+        EXPECT_FALSE(q.getInverseFusedOp().valid());
+    }
+}
+
+// ── The generic inverse matcher selects `warp-register-inverse` purely from the
+// stages' role declarations — no dynamic_cast to concrete types (host-only). ──
+TEST(FusionPlanner, WarpInverseMatcherIsRoleBased) {
+    auto makeChain = [](AdaptiveBitpackStage<int32_t>& ab, LorenzoStage<int32_t>& lz,
+                        QuantizerStage<float, uint32_t>& q, uint32_t block, bool outlier,
+                        bool linear_quant) {
+        ab.setInverse(true); ab.setBlockSize(block); ab.setOutlierSelection(outlier);
+        lz.setInverse(true); lz.setBlockSize(block);
+        q.setErrorBound(1e-3); q.setErrorBoundMode(ErrorBoundMode::ABS);
+        q.setLinearMode(linear_quant); q.setInverse(true); q.primeAbsEbForFusion();
+        // Inverse execution order from buildInverseDAG: coder -> predictor -> quant.
+        return std::vector<Stage*>{&ab, &lz, &q};
+    };
+
+    // Canonical AB⁻¹ -> Lorenzo⁻¹ -> Quant⁻¹ chain matches.
+    {
+        AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
+        QuantizerStage<float, uint32_t> q;
+        auto chain = makeChain(ab, lz, q, 128, /*outlier=*/false, /*linear=*/true);
+        const FusedImpl* impl = findFusedImpl(chain, /*include_experimental=*/false);
+        ASSERT_NE(impl, nullptr);
+        EXPECT_STREQ(impl->name, "warp-register-inverse");
+    }
+    // Same but block 32 outlier (cuSZp2 shape).
+    {
+        AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
+        QuantizerStage<float, uint32_t> q;
+        auto chain = makeChain(ab, lz, q, 32, /*outlier=*/true, /*linear=*/true);
+        const FusedImpl* impl = findFusedImpl(chain, false);
+        ASSERT_NE(impl, nullptr);
+        EXPECT_STREQ(impl->name, "warp-register-inverse");
+    }
+    // Non-linear quant tail -> no match (quant declares no Map inverse op).
+    {
+        AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
+        QuantizerStage<float, uint32_t> q;
+        auto chain = makeChain(ab, lz, q, 128, false, /*linear=*/false);
+        EXPECT_EQ(findFusedImpl(chain, false), nullptr);
+    }
+    // Missing the quant tail -> no match (need Cooperative + BlockLocal + Map).
+    {
+        AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
+        QuantizerStage<float, uint32_t> q;
+        auto full = makeChain(ab, lz, q, 128, false, true);
+        std::vector<Stage*> chain{full[0], full[1]};
+        EXPECT_EQ(findFusedImpl(chain, false), nullptr);
+    }
+    // Forward-mode stages (not inverse) -> no match.
+    {
+        AdaptiveBitpackStage<int32_t> ab; ab.setBlockSize(128);
+        LorenzoStage<int32_t> lz; lz.setBlockSize(128);
+        QuantizerStage<float, uint32_t> q;
+        q.setErrorBound(1e-3); q.setErrorBoundMode(ErrorBoundMode::ABS); q.setLinearMode(true);
+        std::vector<Stage*> chain{&ab, &lz, &q};
+        EXPECT_EQ(findFusedImpl(chain, false), nullptr);
+    }
+    // Block-size disagreement between coder and predictor -> no match.
+    {
+        AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
+        QuantizerStage<float, uint32_t> q;
+        auto chain = makeChain(ab, lz, q, 128, false, true);
+        lz.setBlockSize(64);
+        EXPECT_EQ(findFusedImpl(chain, false), nullptr);
+    }
 }

@@ -295,6 +295,49 @@ public:
     void primeComputedAbsEb(const void* d_in, size_t scan_n,
                             MemoryPool* pool, fz::stream_t stream);
     TInput getComputedAbsEb() const { return computed_abs_eb_; }
+    uint32_t getActualOutlierCount() const { return actual_outlier_count_; }
+    bool supportsChunkInverseFusion() const {
+        return std::is_same<TInput, float>::value &&
+               std::is_same<TCode, uint32_t>::value &&
+               !isLinearMode() && config_.zigzag_codes && !config_.dither &&
+               (config_.eb_mode == ErrorBoundMode::ABS ||
+                config_.eb_mode == ErrorBoundMode::NOA);
+    }
+    /// The warp-register inverse tail: linear (cuSZp / SZp) dequant is just
+    /// `code * 2*abs_eb` in float, which the fused unpack kernel does inline.
+    /// High-precision (double) linear reconstruction stays staged.
+    bool supportsWarpInverseFusion() const {
+        return std::is_same<TInput, float>::value &&
+               std::is_same<TCode, uint32_t>::value &&
+               isLinearMode() && !config_.linear_high_precision &&
+               (config_.eb_mode == ErrorBoundMode::ABS ||
+                config_.eb_mode == ErrorBoundMode::NOA);
+    }
+    void setFusedInverseResult(size_t output_bytes) override {
+        actual_output_sizes_ = {output_bytes};
+    }
+
+    /// Inverse-mode warp quant declaration — the Map role (linear dequant tail)
+    /// of the warp decompress chain. Gated exactly on supportsWarpInverseFusion()
+    /// (linear, non-high-precision, ABS/NOA, float, uint32 code), the inverse
+    /// mirror of the forward getFusionSpec() Map declaration.
+    FusionSpec getInverseFusionSpec() const override {
+        if (!is_inverse_ || !supportsWarpInverseFusion()) return {};
+        return FusionSpec{FusionAccess::Map, 0};
+    }
+    FusedOpDecl getInverseFusedOp() const override {
+        if (!getInverseFusionSpec().fusable()) return {};
+        // Marker op: the linear `code * 2*abs_eb` dequant is a built-in tail of the
+        // warp inverse harness, not a composed device policy. The generic runner
+        // reads the step from getFusedInverseDequantStep(), not from this name.
+        FusedOpDecl d;
+        d.strategy = FusionStrategy::WarpRegister;
+        d.op_name  = "LinearDequant";
+        return d;
+    }
+    double getFusedInverseDequantStep() const override {
+        return 2.0 * static_cast<double>(computed_abs_eb_);
+    }
 
     /// Fused-op identity for the chunk-cooperative harness: the inplace+zigzag
     /// ABS/NOA float quant maps to the `QuantInplaceZigzag` Map op. Params are

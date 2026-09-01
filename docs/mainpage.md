@@ -11,7 +11,8 @@ connected and executed entirely on the GPU with stream-ordered memory management
 
 **Key properties:**
 - **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, RRE, Bitshuffle, TUPL, Huffman, ANS, …)
-- **High throughput** — parallel level execution, persistent scratch, CUDA Graph support
+- **[Pipeline Specialization](#mainpage_specialization)** — at `finalize()` the library transparently replaces staged execution with an optimized specialized implementation (kernel fusion + runtime optimizations), **byte-identical** to staged on both compress and decompress. Up to ~3× compress / ~5× decompress on cuSZp/SZp-class pipelines. See [docs/pipeline_specialization.md](pipeline_specialization.md).
+- **High throughput** — parallel level execution, persistent scratch, stream-ordered allocation
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **File format** — FZM format with CRC32 checksums and full stage config serialization
 
@@ -111,7 +112,6 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
 | \ref stage_szx "SZxStage<T>"                      | `modules/fused/szx/szx_stage.h`                    | SZx constant-block / fixed-residual whole compressor |
-| \ref stage_szp "SZpStage<T>"                      | `modules/fused/szp/szp_stage.h`                    | SZp/fZ-light quantize + delta + fixed-rate whole compressor |
 | \ref stage_merge "MergeStage"                     | `modules/structural/merge/merge_stage.h`           | Concatenate N producer ports into one buffer / split back (structural) |
 | \ref stage_roibin_split "ROIBinSplitStage"        | `modules/structural/roibin_split/roibin_split_stage.h` | Split a field into ROI boxes + binned background for dual-error-bound branches (structural) |
 | \ref stage_cdf97 "Cdf97Stage<TInput>"              | `modules/transforms/cdf97/cdf97_stage.h`           | CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half) |
@@ -123,7 +123,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | Strategy      | Description                                                                                                               |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `MINIMAL`     | Allocate on demand, free at last consumer. Lowest peak GPU memory.                                                        |
-| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring for efficient buffer reuse. |
+| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring (liveness-based memory reuse) — which is [Pipeline Specialization](#mainpage_specialization)-aware, so specialization lowers peak pool memory as well as runtime. |
 
 
 ---
@@ -161,10 +161,38 @@ See `examples/ownership_example.cpp` for a minimal end-to-end example.
 
 ---
 
+### Pipeline Specialization {#mainpage_specialization}
+
+The pipeline you build is a general, modular DAG — one kernel per stage, each
+intermediate round-tripped through DRAM. **Pipeline Specialization** is the
+finalize-time layer that inspects that DAG and, where a fast path exists,
+transparently swaps the staged execution for an optimized *specialized*
+implementation: compatible stages fused into a single kernel (keeping
+intermediates in registers/shared memory), single-pass decoupled-lookback, and
+NVRTC-generated code — **without changing the DAG, the results, or the archive
+bytes**. It runs on both compress and decompress.
+
+Turn it on with one call (default is `Off`):
+
+```cpp
+fz::Pipeline p(input_bytes, fz::MemoryStrategy::PREALLOCATE, 4.0f);
+// ... addStage, connect ...
+p.setSpecializationPolicy(fz::SpecializationPolicy::Auto);   // opt in
+p.finalize();
+p.compress(d_input, input_bytes, &d_comp, &comp_sz, stream);  // fused where profitable
+```
+
+or at runtime with `FZ_SPECIALIZE=auto`, or `--report-json` from the CLI to see
+what was installed. Full guide, guarantees, and how to make your own stages
+specialization-compatible: **[docs/pipeline_specialization.md](pipeline_specialization.md)**.
+
 ### CUDA Graph Support
 
 For throughput-critical workloads, enable CUDA Graph capture to eliminate
-CPU-side kernel launch overhead on repeated compress calls:
+CPU-side kernel launch overhead on repeated compress calls (note: Graph capture
+and Pipeline Specialization are mutually exclusive — the specializer synchronizes
+to read data-dependent archive lengths, so enabling `Auto`/`Force` disables graph
+mode):
 
 ```cpp
 fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE, 2.0f);

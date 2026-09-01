@@ -846,6 +846,10 @@ static void fill_from_pipeline(fz::cli::ReportData& d, const Pipeline& p) {
     for (const auto& group : fusion.installed_groups) {
         d.fusion_installed_groups.push_back({group.implementation, group.stages});
     }
+    d.fusion_installed_inverse_groups.clear();
+    for (const auto& group : fusion.installed_inverse_groups) {
+        d.fusion_installed_inverse_groups.push_back({group.implementation, group.stages});
+    }
 }
 
 // Append per-stage device timings from a perf result into the report.

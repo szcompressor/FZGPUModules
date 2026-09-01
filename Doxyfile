@@ -18,11 +18,16 @@ INPUT                  = include/ \
                          docs/mainpage.md \
                          docs/building.md \
                          docs/stages/ \
+                         docs/experimental/ \
+                         docs/szx_conditional_representation.md \
                          docs/config_file.md \
                          docs/cli.md \
                          docs/api_reference.md \
                          docs/architecture.md \
                          docs/performance_tuning.md \
+                         docs/pipeline_specialization.md \
+                         docs/pipeline_specialization_internals.md \
+                         docs/developing_stages_deep_dive.md \
                          docs/how_to_add_a_stage.md \
                          docs/fzm_format.md \
                          docs/docker.md \

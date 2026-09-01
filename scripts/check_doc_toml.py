@@ -44,14 +44,22 @@ EXTERNAL_INPUT_SENTINEL = "__external__"
 
 def parse_registry(src):
     """type_name -> loader function name, from kStageRegistry."""
-    table = re.search(r"kStageRegistry\[\]\s*=\s*\{(.*?)\n\};", src, re.S)
+    table = re.search(r"\bkStageRegistry\[\]\s*=\s*\{(.*?)\n\};", src, re.S)
     if not table:
         sys.exit("could not locate kStageRegistry in config.cpp")
     out = {}
-    for type_name, load_fn in re.findall(
-        r'\{\s*"([A-Za-z0-9_]+)"\s*,\s*StageType::[A-Z0-9_]+\s*,\s*(\w+)\s*,', table.group(1)
-    ):
-        out[type_name] = load_fn
+    bodies = [table.group(1)]
+    # Legacy/experimental constructors kept for back-compat but out of the public
+    # catalog (e.g. quarantined reference compressors). Their documented TOML must
+    # still validate, so include them here.
+    legacy = re.search(r"\bkLegacyStageRegistry\[\]\s*=\s*\{(.*?)\n\};", src, re.S)
+    if legacy:
+        bodies.append(legacy.group(1))
+    for body in bodies:
+        for type_name, load_fn in re.findall(
+            r'\{\s*"([A-Za-z0-9_]+)"\s*,\s*StageType::[A-Z0-9_]+\s*,\s*(\w+)\s*,', body
+        ):
+            out[type_name] = load_fn
     return out
 
 

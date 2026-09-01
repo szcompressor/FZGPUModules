@@ -193,6 +193,17 @@ the cuszp hot path — trading some modularity (for that path) to eliminate the
 inter-stage DRAM round-trips. This is a deliberate design tension (fusion vs.
 recomposability) and the natural next investigation.
 
+**Update (2026-08): done, and without giving up modularity.** The warp-register
+fusion planner now installs a fused *inverse* over the `AdaptiveBitpack⁻¹ →
+Lorenzo⁻¹ → Quantizer⁻¹` chain automatically under `FusionPolicy::Auto` — the DAG
+nodes are unchanged, execution is swapped (`fused_unpack_body`: decode → undelta
+warp-scan → linear dequant, register-resident). Measured decompress, CLDHGH
+3600×1800 / H100 / eb 1e-3: SZp `szp_composed.toml` 94 → **437 GB/s (4.7×)**,
+cuSZp2 233 → **393 GB/s (1.7×)** — closing most of the structural gap this section
+predicted. Byte-exact vs staged. cuSZp3's `TiledLorenzo⁻¹` still runs staged
+(needs a 2-D separable warp `undelta`). See CHANGELOG and
+`fusion_registry.cpp:matchesWarpRegisterInverse`.
+
 Separately unaddressed: the **1-D plain-Lorenzo path used by HACC** goes through the same
 `lorenzo_scan_1d_warp32_kernel` now, but HACC's cuszp3_1d pipeline also has other stages;
 and **cuSZ-Hi cr** remains gated on host-blocking syncs in GInterpStage (a different root

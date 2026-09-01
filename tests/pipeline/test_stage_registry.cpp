@@ -27,8 +27,13 @@ TEST(StageRegistry, EveryShippedStageTypeHasAFactory) {
         StageType::TILED_LORENZO, StageType::RRE, StageType::RARE,
         StageType::RAZE, StageType::CLOG, StageType::HCLOG, StageType::TUPL,
         StageType::GPULZ, StageType::LOG_TRANSFORM, StageType::ADAPTIVE_LORENZO,
-        StageType::ROIBIN_SPLIT, StageType::SZX, StageType::SZP,
+        StageType::ROIBIN_SPLIT, StageType::SZX,
         StageType::CDF97, StageType::SPECK2D, StageType::CDF97_OUTLIER_CORRECT,
+        // SZP is a quarantined experimental reference compressor
+        // (experimental/reference_compressors/szp) — no longer a public module,
+        // but its header factory MUST stay linked so pre-existing FZM archives
+        // remain decodable. This is the regression guard for that guarantee.
+        StageType::SZP,
     };
     for (StageType t : shipped) {
         EXPECT_TRUE(hasStageHeaderFactory(t))

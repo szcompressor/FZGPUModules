@@ -244,24 +244,48 @@ void write_report_json(const std::string& path, const ReportData& d) {
         size_t installed_stage_count = 0;
         for (const auto& group : d.fusion_installed_groups)
             installed_stage_count += group.stages.size();
-        o << "  \"fusion\": {\n";
-        o << "    \"policy\": \"" << esc(d.fusion_policy) << "\",\n";
-        o << "    \"legal_group_count\": " << d.fusion_legal_group_count << ",\n";
-        o << "    \"installed_group_count\": " << d.fusion_installed_groups.size() << ",\n";
-        o << "    \"installed_stage_count\": " << installed_stage_count << ",\n";
-        o << "    \"fallback_reason\": " << str_or_null(d.fusion_fallback_reason) << ",\n";
-        o << "    \"groups\": [";
-        for (size_t i = 0; i < d.fusion_installed_groups.size(); ++i) {
-            const auto& group = d.fusion_installed_groups[i];
-            o << (i ? "," : "") << "\n      { \"implementation\": \""
-              << esc(group.implementation) << "\", \"stages\": [";
-            for (size_t j = 0; j < group.stages.size(); ++j) {
-                o << (j ? ", " : "") << "\"" << esc(group.stages[j]) << "\"";
+        size_t inverse_stage_count = 0;
+        for (const auto& group : d.fusion_installed_inverse_groups)
+            inverse_stage_count += group.stages.size();
+        // Pipeline Specialization decision. Emitted under "specialization" (the
+        // current name); ALSO emitted under the legacy "fusion" key, byte-identical
+        // body, so existing benchmark parsers keep working. Drop the "fusion" alias
+        // once all consumers read "specialization".
+        auto emit_block = [&](const char* key) {
+            o << "  \"" << key << "\": {\n";
+            o << "    \"policy\": \"" << esc(d.fusion_policy) << "\",\n";
+            o << "    \"legal_group_count\": " << d.fusion_legal_group_count << ",\n";
+            o << "    \"installed_group_count\": " << d.fusion_installed_groups.size() << ",\n";
+            o << "    \"installed_stage_count\": " << installed_stage_count << ",\n";
+            o << "    \"inverse_installed_group_count\": "
+              << d.fusion_installed_inverse_groups.size() << ",\n";
+            o << "    \"inverse_installed_stage_count\": " << inverse_stage_count << ",\n";
+            o << "    \"fallback_reason\": " << str_or_null(d.fusion_fallback_reason) << ",\n";
+            o << "    \"groups\": [";
+            for (size_t i = 0; i < d.fusion_installed_groups.size(); ++i) {
+                const auto& group = d.fusion_installed_groups[i];
+                o << (i ? "," : "") << "\n      { \"implementation\": \""
+                  << esc(group.implementation) << "\", \"stages\": [";
+                for (size_t j = 0; j < group.stages.size(); ++j)
+                    o << (j ? ", " : "") << "\"" << esc(group.stages[j]) << "\"";
+                o << "] }";
             }
-            o << "] }";
-        }
-        o << (d.fusion_installed_groups.empty() ? "]\n" : "\n    ]\n");
-        o << "  }";
+            o << (d.fusion_installed_groups.empty() ? "],\n" : "\n    ],\n");
+            o << "    \"inverse_groups\": [";
+            for (size_t i = 0; i < d.fusion_installed_inverse_groups.size(); ++i) {
+                const auto& group = d.fusion_installed_inverse_groups[i];
+                o << (i ? "," : "") << "\n      { \"implementation\": \""
+                  << esc(group.implementation) << "\", \"stages\": [";
+                for (size_t j = 0; j < group.stages.size(); ++j)
+                    o << (j ? ", " : "") << "\"" << esc(group.stages[j]) << "\"";
+                o << "] }";
+            }
+            o << (d.fusion_installed_inverse_groups.empty() ? "]\n" : "\n    ]\n");
+            o << "  }";
+        };
+        emit_block("specialization");
+        o << ",\n";
+        emit_block("fusion");
         if (d.graph_requested) o << ",";
         o << "\n";
     }

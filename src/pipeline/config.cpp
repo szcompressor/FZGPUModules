@@ -54,7 +54,9 @@
 #include "structural/merge/merge_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
 #include "fused/szx/szx_stage.h"
-#include "fused/szp/szp_stage.h"
+// Quarantined experimental reference compressor — kept here only for the legacy
+// `type = "SZp"` TOML constructor (kLegacyStageRegistry, not the public catalog).
+#include "reference_compressors/szp/szp_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
@@ -627,6 +629,11 @@ static Stage* addSZxStage(Pipeline& p, const toml::table& t) {
     throw std::runtime_error("loadConfig: unsupported SZx data_type (use float32/float64)");
 }
 
+// LEGACY / EXPERIMENTAL — the monolithic SZp reference compressor is quarantined
+// (experimental/reference_compressors/szp). This constructor is reachable only
+// through kLegacyStageRegistry, NOT the public kStageRegistry catalog, and exists
+// purely so pre-existing `type = "SZp"` configs and saved archives still load.
+// New pipelines should use examples/presets/szp_composed.toml instead.
 static Stage* addSZpStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "data_type", "float32"));
     uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 128));
@@ -1256,8 +1263,34 @@ static const StageEntry kStageRegistry[] = {
     { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage, "modules/coders/adaptive_bitpack" },
     { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage, "modules/predictors/tiled_lorenzo" },
     { "SZx",          StageType::SZX,          addSZxStage,          saveSZxStage,          "modules/fused/szx" },
-    { "SZp",          StageType::SZP,          addSZpStage,          saveSZpStage,          "modules/fused/szp" },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy / experimental stage constructors — deliberately NOT in kStageRegistry.
+//
+// These are quarantined whole-compressor reference implementations. They are not
+// part of the public module catalog (registeredStageTypes(), stageFingerprints(),
+// the docs, the integration checkers), and no automatic-fusion rule targets them.
+// They remain constructible from TOML (`type = "..."`) and re-serializable ONLY so
+// that pre-existing configs and FZM archives written before the quarantine keep
+// working. The supported modular equivalents:
+//   SZp  ->  examples/presets/szp_composed.toml
+// ─────────────────────────────────────────────────────────────────────────────
+static const StageEntry kLegacyStageRegistry[] = {
+    { "SZp",          StageType::SZP,          addSZpStage,          saveSZpStage,          "experimental/reference_compressors/szp" },
+};
+
+static const StageEntry* findStageEntry(const std::string& type_name) {
+    for (const auto& e : kStageRegistry)       if (type_name == e.type_name) return &e;
+    for (const auto& e : kLegacyStageRegistry) if (type_name == e.type_name) return &e;
+    return nullptr;
+}
+
+static const StageEntry* findStageEntry(StageType stype) {
+    for (const auto& e : kStageRegistry)       if (e.enum_val == stype) return &e;
+    for (const auto& e : kLegacyStageRegistry) if (e.enum_val == stype) return &e;
+    return nullptr;
+}
 
 // Declared in include/pipeline/config.h.  Deliberately derived from the registry
 // above rather than maintained separately — see the header for why.
@@ -1370,9 +1403,10 @@ void Pipeline::loadConfig(const std::string& path) {
             throw std::runtime_error("loadConfig: duplicate stage name \"" + name + "\"");
 
         Stage* s = nullptr;
-        for (const auto& entry : kStageRegistry) {
-            if (type == entry.type_name) { s = entry.load_fn(*this, *t); break; }
-        }
+        // NB: a local `struct StageEntry` is declared below in this function;
+        // use the deduced type so this resolves to the file-scope registry entry.
+        if (const auto* entry = findStageEntry(type))
+            s = entry->load_fn(*this, *t);
         if (!s)
             throw std::runtime_error("loadConfig: unknown stage type \"" + type + "\"");
 
@@ -1476,10 +1510,7 @@ void Pipeline::saveConfig(const std::string& path) const {
         uint16_t type_id = s->getStageTypeId();
         StageType stype  = static_cast<StageType>(type_id);
 
-        const StageEntry* entry = nullptr;
-        for (const auto& e : kStageRegistry) {
-            if (e.enum_val == stype) { entry = &e; break; }
-        }
+        const StageEntry* entry = findStageEntry(stype);
 
         out << "[[stage]]\n";
         out << "name = \"" << tomlEscape(local_name) << "\"\n";

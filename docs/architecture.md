@@ -109,6 +109,17 @@ Two strategies control when allocations happen:
 buffers have non-overlapping lifetimes and assigns them to the same backing memory,
 reducing total allocation footprint without affecting correctness.
 
+Coloring is **specialization-aware** (see
+[pipeline_specialization.md](pipeline_specialization.md)). When a fused group is
+installed, (1) any intermediate buffer produced *and* consumed entirely inside the
+group is never allocated at all — the fused kernel keeps it in registers/shared
+memory — and (2) the whole group is treated as a single synthetic operation for
+liveness, so its inputs and final output are the only live buffers and anything
+outside the group can alias around it. Net effect: specialization *lowers* peak
+pool memory on both the compress and decompress DAG, on top of the throughput win.
+The one exception is a multi-stream DAG that also has a fused group, where coloring
+stays conservative to avoid cross-stream anti-dependencies.
+
 **Persistent allocations** are a second tier for stage-internal scratch that must live
 for the stage's full lifetime (codebook tables, histograms, partition metadata), via
 `pool->allocatePersistentDevice()` / `allocatePersistentPinned()`. They are not

@@ -14,6 +14,7 @@
 #include <thrust/iterator/transform_iterator.h>
 
 #include <cstdlib>   // getenv — FZ_FUSION_NVRTC toggle
+#include <stdexcept>
 
 namespace fz {
 namespace fused {
@@ -33,6 +34,14 @@ __global__ void chunk_pack(const byte* __restrict__ scratch, byte* __restrict__ 
 }
 
 struct StripFlag { __host__ __device__ uint32_t operator()(uint32_t x) const { return x & 0x7FFFFFFFu; } };
+
+__global__ void scatter_pfpl_outliers(const float* __restrict__ vals,
+                                      const uint32_t* __restrict__ idxs,
+                                      uint32_t count, size_t n,
+                                      float* __restrict__ out) {
+    const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count && static_cast<size_t>(idxs[i]) < n) out[idxs[i]] = vals[i];
+}
 
 bool useNvrtcFusion() {
     const char* e = std::getenv("FZ_FUSION_NVRTC");
@@ -187,6 +196,53 @@ size_t launchGenericChunkFusion(
     }
     pool->free(d_params, stream);
     return out_bytes;
+}
+
+size_t launchFusedChunkPfplInverse(
+    const uint8_t* d_archive, size_t archive_bytes, size_t output_bytes,
+    float ebx2, bool inplace_outliers, uint32_t quant_radius,
+    const float* d_outlier_vals, const uint32_t* d_outlier_idxs,
+    uint32_t outlier_count, float* d_out, MemoryPool* pool, cudaStream_t stream)
+{
+    if (output_bytes == 0) return 0;
+    if (!d_archive || !d_out || !pool || output_bytes % sizeof(uint32_t) != 0)
+        throw std::invalid_argument("launchFusedChunkPfplInverse: invalid buffer/size");
+    if (!inplace_outliers && outlier_count > 0 &&
+        (!d_outlier_vals || !d_outlier_idxs))
+        throw std::runtime_error(
+            "launchFusedChunkPfplInverse: missing split-outlier side inputs");
+
+    const size_t nc = (output_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES;
+    const size_t header_bytes = 8u + nc * sizeof(uint32_t);
+    if (archive_bytes < header_bytes)
+        throw std::runtime_error("launchFusedChunkPfplInverse: truncated RZE header");
+
+    const auto* d_entries = reinterpret_cast<const uint32_t*>(d_archive + 8);
+    auto* d_offsets = static_cast<uint32_t*>(
+        pool->allocate(nc * sizeof(uint32_t), stream, "chunk_inv_offsets"));
+    auto strip = thrust::make_transform_iterator(d_entries, StripFlag{});
+    auto tmp = fz::backend::withTempStorage(pool, stream, "chunk_inv_scan",
+        [&](void* t, size_t& b) {
+            cub::DeviceScan::ExclusiveSum(t, b, strip, d_offsets, static_cast<int>(nc), stream);
+        });
+
+    chunk_inverse_pfpl_kernel<RZECoder><<<static_cast<unsigned>(nc), TPB, 0, stream>>>(
+        d_archive, d_entries, d_offsets, output_bytes, ebx2,
+        inplace_outliers, quant_radius, d_out);
+    FZ_CUDA_CHECK(cudaGetLastError());
+
+    if (!inplace_outliers && outlier_count > 0) {
+        constexpr int kBlock = 256;
+        const int grid = static_cast<int>((outlier_count + kBlock - 1) / kBlock);
+        scatter_pfpl_outliers<<<grid, kBlock, 0, stream>>>(
+            d_outlier_vals, d_outlier_idxs, outlier_count,
+            output_bytes / sizeof(float), d_out);
+        FZ_CUDA_CHECK(cudaGetLastError());
+    }
+
+    fz::backend::freeTempStorage(pool, tmp, stream);
+    pool->free(d_offsets, stream);
+    return output_bytes;
 }
 
 } // namespace fused

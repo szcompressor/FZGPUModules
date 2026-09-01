@@ -221,6 +221,7 @@ def main():
     incdirs = [
         os.path.join(REPO, "include"),
         os.path.join(REPO, "modules"),
+        os.path.join(REPO, "experimental"),  # quarantined reference compressors
         os.path.join(REPO, "src"),
         REPO,
         cuda_inc,

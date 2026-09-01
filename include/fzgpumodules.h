@@ -55,4 +55,9 @@
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
 #include "fused/szx/szx_stage.h"
-#include "fused/szp/szp_stage.h"
+// SZpStage is quarantined as an experimental/reference compressor and is
+// intentionally NOT part of this umbrella header. Existing FZM archives still
+// decode (its StageType::SZP factory stays linked); the supported expression of
+// the SZp algorithm is examples/presets/szp_composed.toml. To use the reference
+// implementation directly, include
+// "reference_compressors/szp/szp_stage.h" explicitly.

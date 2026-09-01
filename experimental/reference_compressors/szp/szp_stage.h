@@ -5,6 +5,17 @@
  * @brief SZp (a.k.a. fZ-light) — extreme-fast error-bounded compressor, as a
  *        fused stage.
  *
+ * EXPERIMENTAL / REFERENCE COMPRESSOR — NOT a supported composable library
+ * module. This monolithic implementation lives under `experimental/
+ * reference_compressors/szp/` as a GPU point of comparison only. It is deliberately
+ * absent from the umbrella header `<fzgpumodules.h>` and from the ordinary stage
+ * catalog (`kStageRegistry`). Its FZM factory (`StageType::SZP = 37`) stays
+ * compiled so pre-existing archives remain decodable, and a legacy TOML
+ * constructor (`type = "SZp"`) is kept out of the normal catalog for
+ * back-compat only. The SUPPORTED expression of the SZp algorithm is the modular
+ * chain in `examples/presets/szp_composed.toml`:
+ *   Quantizer(linear) -> Lorenzo(block_size=128) -> AdaptiveBitpack(block_size=128).
+ *
  * Reference: SZp / fZ-light (Huang, Di, et al., SC'24). The upstream CPU/OpenMP
  * reference at https://github.com/szcompressor/SZp is MIT-licensed; this stage
  * independently reimplements its forward/inverse and copies no upstream source.

@@ -649,7 +649,7 @@ void Pipeline::decompressFromFile(
         bool do_profile = (perf_out != nullptr);
         auto [inv_dag, inv_result_map] = buildInverseDAG(
             fwd_topology, po_map, &local_pool, MemoryStrategy::MINIMAL,
-            source_sizes, do_profile);
+            source_sizes, do_profile, false);
 
         FZ_LOG(DEBUG, "Inverse DAG (file): %zu levels, max_parallelism=%d",
                inv_dag->getLevels().size(), inv_dag->getMaxParallelism());

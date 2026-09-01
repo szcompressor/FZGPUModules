@@ -520,14 +520,19 @@ Assumes bounded quantization codes (small diffs from a per-block center) — see
 diffs exceed that capacity raises a clean exception (this used to corrupt device
 memory instead, since the guard was compiled out in Release builds; fixed).
 
-### SZx / SZp (fused lossy compressors)
+### SZx (fused lossy compressor)
 
 ```python
-"szx:float", "szx:double", "szp:float", "szp:double"
+"szx:float", "szx:double"
 ```
 
-Ultrafast block-local error-bounded compressors (SZx and SZp/fZ-light), each a
-self-contained fused stage rather than a Lorenzo+quantize+code pipeline.
+Ultrafast block-local error-bounded compressor, a self-contained fused stage
+rather than a Lorenzo+quantize+code pipeline.
+
+> **SZp is no longer a supported stage.** The monolithic `SZpStage` is quarantined
+> as an experimental reference compressor. Express the SZp algorithm as the
+> modular chain `Quantizer(linear) → Lorenzo(block_size=128) →
+> AdaptiveBitpack(block_size=128)` (see `examples/presets/szp_composed.toml`).
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -987,7 +992,7 @@ metrics = comp.get_metrics()
 | `quantizer:*` | `codes`, `outlier_idxs` | code type, uint32 |
 | `diff:*`, `zigzag:*`, `negabinary:*`, `adm:*` | `output` | same as output type |
 | `rle:*`, `bitpack:*`, `bitshuffle`, `rze`, `rre`, `rare`, `raze`, `clog`, `hclog`, `gpulz`, `tupl`, `bitplane_rze`, `ans`, `huffman:*` | `output` | uint8 |
-| `szx:*`, `szp:*` | `output` | uint8 |
+| `szx:*` | `output` | uint8 |
 | `cdf97:*` | `output` | same as input |
 | `speck2d` | `output` | uint8 |
 | `cdf97_outlier_correct` | `correction`, `codes` | uint8, int32 |

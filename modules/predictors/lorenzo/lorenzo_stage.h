@@ -131,16 +131,45 @@ public:
     /// runner fills it from the resolved quantizer bound (see warp_op_params.h). n_ab
     /// left 0 ⇒ the runner uses the input element count (1-D needs no padding).
     FusedOpDecl getFusedOp() const override {
-        if (isInverse() || block_size_ != 32u) return {};
+        // 1-D block-reset Lorenzo fuses for any block_size that is a multiple of
+        // 32 up to the warp-register cap (block_size = 32*EPL). EPL == 1 is
+        // cuSZp2; EPL == 4 (block 128) is SZp's composed chain. The device policy
+        // runs the delta chain across the whole block for EPL > 1.
+        if (isInverse() || block_size_ == 0 || block_size_ % 32u != 0 ||
+            block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
+        const uint32_t epl = block_size_ / 32u;
         FusedOpDecl d;
         d.strategy       = FusionStrategy::WarpRegister;
         d.op_name        = "Lorenzo1DPredictor";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
-        d.elems_per_lane = 1;
+        d.elems_per_lane = epl;
         d.n_ab           = 0;
-        fused::warp::Lorenzo1DParams p{0.0f};
+        fused::warp::Lorenzo1DParams p{0.0f, epl};
         d.params.resize(sizeof(p));
         std::memcpy(d.params.data(), &p, sizeof(p));
+        return d;
+    }
+
+    /// Inverse-mode warp predictor declaration — the BlockLocal role of the warp
+    /// decompress chain. Same block-size gating as the forward getFusedOp() so
+    /// forward/inverse eligibility stay in lockstep. Per-block mean centering has
+    /// no warp inverse harness (the `undelta` policy is plain first-difference), so
+    /// exclude it explicitly; N-D Lorenzo is already excluded by the block_size_
+    /// gate. The inverse harness needs no params (the dequant step comes from the
+    /// quant stage), so params stay empty.
+    FusionSpec getInverseFusionSpec() const override {
+        if (!isInverse() || centeringActive() || block_size_ == 0 ||
+            block_size_ % 32u != 0 ||
+            block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
+        return FusionSpec{FusionAccess::BlockLocal, block_size_};
+    }
+    FusedOpDecl getInverseFusedOp() const override {
+        if (!getInverseFusionSpec().fusable()) return {};
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::WarpRegister;
+        d.op_name        = "Lorenzo1DPredictor";
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        d.elems_per_lane = block_size_ / 32u;
         return d;
     }
 

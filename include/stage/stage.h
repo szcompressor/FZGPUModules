@@ -314,6 +314,43 @@ public:
     virtual FusedOpDecl getFusedOp() const { return {}; }
 
     /**
+     * Inverse-mode fusion role + geometry (valid only when isInverse()). The
+     * decompress-DAG analogue of getFusionSpec(): a stage that can participate in
+     * a fused inverse kernel overrides this to return a non-Unfusable spec.
+     * Kept a SEPARATE surface from getFusionSpec() (rather than un-gating it) so
+     * the forward fusion planner can never see an inverse stage. Default {} =
+     * not inverse-fusable.
+     */
+    virtual FusionSpec getInverseFusionSpec() const { return {}; }
+
+    /**
+     * Inverse-mode device-op identity (valid only when isInverse()). Mirrors
+     * getFusedOp() for the decompress DAG: op_name is the device policy the
+     * inverse harness composes — the SAME policy class as the forward op, which
+     * carries decode()/undelta()/invert() alongside cost()/pack()/delta()/apply().
+     * The generic inverse matcher/runner read these declarations by role, so a new
+     * warp predictor/coder that declares forward+inverse ops fuses in BOTH
+     * directions with no matcher edits. Default {} = not an inverse fused op.
+     */
+    virtual FusedOpDecl getInverseFusedOp() const { return {}; }
+
+    /**
+     * Coder (Cooperative) inverse hook: the element count the archive
+     * reconstructs to, so a generic inverse runner never downcasts the coder
+     * stage for it. Default 0; the warp coder stage overrides it.
+     */
+    virtual size_t getFusedInverseElementCount() const { return 0; }
+
+    /**
+     * Quant (Map) inverse hook: the linear dequant step (2*abs_eb) the warp
+     * inverse harness multiplies reconstructed codes by, so a generic inverse
+     * runner never downcasts the quantizer stage for it. Linear-quant only —
+     * the same generality ceiling as the forward warp path. Default 0; the
+     * linear quantizer stage overrides it.
+     */
+    virtual double getFusedInverseDequantStep() const { return 0.0; }
+
+    /**
      * Exact local encoded-size policy exposed to a directly connected adaptive
      * producer. This is an algorithmic semantic contract, not a fusion-cost
      * estimate: staged and fused paths must make the same decision from it.
@@ -351,6 +388,10 @@ public:
      * overload to avoid colliding with unrelated `(size_t,size_t)` signatures.
      */
     virtual void setFusedArchiveResult(size_t /*archive_bytes*/, size_t /*orig_bytes*/) {}
+
+    /// A fused inverse runner bypasses execute(); let its tail stage publish the
+    /// reconstructed byte count for postStreamSync/output-size refinement.
+    virtual void setFusedInverseResult(size_t /*output_bytes*/) {}
 
     /**
      * Side-output hook: a fused runner that filled one of this stage's escaping

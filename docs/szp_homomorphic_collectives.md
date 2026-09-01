@@ -4,7 +4,7 @@ Scoping note for adding **homomorphic operations on SZp-compressed buffers** —
 the capability behind hZCCL ("Accelerating Collective Communication with
 Co-Designed Homomorphic Compression", Huang/Di et al., SC '24). This is a design
 sketch and a phased plan, **not** an implemented feature. It is the natural
-follow-on to \ref stage_szp "SZpStage".
+follow-on to \ref experimental_szp "SZpStage".
 
 Status: **not started.** Owner: TBD. Companion: `docs/stages/szp.md`,
 `THIRD_PARTY.md` (SZp entry).
@@ -32,7 +32,7 @@ not inside the DAG.
 
 ## 2. Why SZp specifically
 
-SZp's archive (see \ref stage_szp "SZpStage") is, per block: a width byte plus
+SZp's archive (see \ref experimental_szp "SZpStage") is, per block: a width byte plus
 fixed-length zigzag-packed **1-D Lorenzo deltas of quantized integers**. Three
 properties make it homomorphic-friendly:
 

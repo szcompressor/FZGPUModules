@@ -22,8 +22,24 @@ namespace fz {
 namespace fused {
 namespace warp {
 
-/// cuSZp2: linear-ABS quant + 1-D Lorenzo. Only inv2eb (dims are implicit in n).
-struct Lorenzo1DParams { float inv2eb; };
+/// Largest block a warp-register fused kernel accepts, in elements-per-lane
+/// (block_size = 32 * EPL). Shared by the predictor + coder stages (which gate
+/// their fused-op declarations on it) and the launcher (which forces the
+/// two-pass path for EPL > 2 — the single-pass body holds BlocksPerWarp*EPL
+/// deltas in local memory).
+///
+/// Set to 4 (block 128) by measurement: on CLDHGH 3600x1800 / H100 / eb 1e-3 the
+/// fused Quantizer->Lorenzo(1-D)->AdaptiveBitpack compress throughput climbs
+/// 201 (EPL 1) -> 245 (2) -> 255 (3) -> 275 (4) GB/s and then PLATEAUS
+/// (~266-271 GB/s for EPL 5-8) while per-lane register/local-memory pressure
+/// keeps rising. EPL 4 also covers every natural block size (32 = cuSZp2,
+/// 64 = cuSZp3 / 1-D, 128 = SZp). Bump only with a measured throughput win.
+constexpr uint32_t kMaxWarpElemsPerLane = 4;   // block_size <= 128
+
+/// cuSZp2 / SZp: linear-ABS quant + 1-D Lorenzo, block reset every 32*epl
+/// elements. `epl` (= block_size/32) lets the policy address element `32*m+lane`
+/// of block `b` for epl > 1; the delta chain runs across the whole block.
+struct Lorenzo1DParams { float inv2eb; uint32_t epl; };
 
 /// cuSZp3: linear-ABS quant + 2-D separable tiled Lorenzo (tz == 1).
 struct TiledLorenzo2DParams {

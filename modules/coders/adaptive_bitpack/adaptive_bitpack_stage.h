@@ -11,6 +11,7 @@
 #include "stage/stage.h"
 #include "fzm_format.h"
 #include "backend/types.h"
+#include "fused/fused_block/warp_op_params.h"   // kMaxWarpElemsPerLane
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -103,25 +104,56 @@ public:
     /// A per-block fixed-length coder: warp-cooperative reduce+pack whose only
     /// cross-block dependency is the payload offset prefix, which the fused
     /// driver owns. Fuses as the tail of a block-local chain of the same block
-    /// size. Only the warp-cooperative block sizes (32/64) are fusable.
+    /// size — any multiple of 32 up to 32·kMaxWarpElemsPerLane (block 32 = cuSZp2,
+    /// block 128 = SZp). Both plain and outlier modes fuse.
     FusionSpec getFusionSpec() const override {
-        if (is_inverse_ || (block_size_ != 32u && block_size_ != 64u)) return {};
+        if (is_inverse_ || block_size_ == 0 || block_size_ % 32u != 0 ||
+            block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
         return FusionSpec{FusionAccess::Cooperative, block_size_};
     }
 
     /// Warp-register coder op (the fixed-rate Cooperative sink of the warp chain). The
     /// op name is the device coder policy the fused kernel composes — the runner reads
     /// it and the codegen instantiates the rate/pack bodies with it, so the coder is
-    /// swappable (see setFusedCoder). Only the outlier block-32/64 shape fuses (the
-    /// warp block format the coders emit).
+    /// swappable (see setFusedCoder). Any block = 32·EPL (EPL ≤ cap) fuses; outlier
+    /// mode → the (swappable) adaptive coder, plain mode → PlainRateCoder.
     FusedOpDecl getFusedOp() const override {
-        if (!getFusionSpec().fusable() || !outlier_selection_) return {};
+        if (!getFusionSpec().fusable()) return {};
         FusedOpDecl d;
         d.strategy       = FusionStrategy::WarpRegister;
-        d.op_name        = fused_coder_;
+        // Outlier mode -> the (swappable) adaptive coder; plain mode -> the true
+        // 1-byte-meta plain format its own inverse reads. Either composes into
+        // the warp chain with no other change.
+        d.op_name        = outlier_selection_ ? fused_coder_ : "PlainRateCoder";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         return d;
     }
+
+    /// Inverse-mode warp coder declaration — the Cooperative role of the warp
+    /// decompress chain. Mirrors getFusionSpec()/getFusedOp() with the identical
+    /// block-size gating, so forward and inverse eligibility stay in lockstep. Only
+    /// the int32_t coder policy is instantiated by the warp inverse harness, so the
+    /// op is gated to T = int32_t (the runner reconstructs int32 codes).
+    FusionSpec getInverseFusionSpec() const override {
+        if (!is_inverse_ || !std::is_same<T, int32_t>::value ||
+            block_size_ == 0 || block_size_ % 32u != 0 ||
+            block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
+        return FusionSpec{FusionAccess::Cooperative, block_size_};
+    }
+    FusedOpDecl getInverseFusedOp() const override {
+        if (!getInverseFusionSpec().fusable()) return {};
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::WarpRegister;
+        // Inverse decode reads the true archive format: outlier -> adaptive 2-byte
+        // meta, plain -> PlainRateCoder 1-byte meta. (fused_coder_ is a
+        // forward-only encode choice; the archive it emits is AdaptiveBitpack-
+        // decodable, i.e. the adaptive path.)
+        d.op_name        = outlier_selection_ ? "AdaptiveBitpackCoder" : "PlainRateCoder";
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        d.elems_per_lane = block_size_ / 32u;
+        return d;
+    }
+    size_t getFusedInverseElementCount() const override { return num_elements_; }
 
     /// Exact local encoded-size policy for an immediately upstream adaptive
     /// selector. Unlike getFusedOp(), this semantic declaration is available in

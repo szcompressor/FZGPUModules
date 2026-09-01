@@ -180,9 +180,15 @@ example `setBlockSize(32)` is `block_size = 32`).
 | `GInterp` | `GInterpStage` | \ref stage_ginterp "GInterpStage" |
 | `BitplaneRZE` | `BitplaneRZEStage` | \ref stage_bitplane_rze "BitplaneRZEStage" |
 | `SZx` | `SZxStage` | \ref stage_szx "SZxStage" |
-| `SZp` | `SZpStage` | \ref stage_szp "SZpStage" |
 | `Merge` | `MergeStage` | \ref stage_merge "MergeStage" |
 | `ROIBinSplit` | `ROIBinSplitStage` | \ref stage_roibin_split "ROIBinSplitStage" |
+
+> **Legacy / experimental types.** `type = "SZp"` still loads (and re-saves) for
+> backward compatibility with configs and archives written before SZp was
+> quarantined as an experimental reference compressor, but it is not a supported
+> module and is absent from the catalog above. New pipelines should express the
+> SZp algorithm with `examples/presets/szp_composed.toml`
+> (`Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)`).
 
 For a cuSZp-style `Quantizer` with a strict requested bound, set
 `linear_mode = true` and `linear_high_precision = true`. The optional
