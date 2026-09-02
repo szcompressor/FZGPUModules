@@ -347,13 +347,34 @@ size_t launchNvrtcWarpFused(
 
 // ── Inverse (decompress) ────────────────────────────────────────────────────
 
+static bool isTiledPredictor(const WarpFusionSpec& spec) {
+    return spec.predictor.rfind("TiledLorenzo", 0) == 0;   // cuSZp3 2-D / 3-D
+}
+
 std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
     const std::string P = spec.predictor, C = spec.coder;
-    std::string targs = std::to_string(spec.elems_per_lane) + ", " + C + ", " + P;
-    for (const auto& t : spec.transforms) targs += ", " + t;   // reverse-transform ops (none yet)
     std::string src;
     src += "#include \"fused/fused_block/warp_fusion.cuh\"\n";
     src += "using namespace fz::fused::warp;\n";
+
+    if (isTiledPredictor(spec)) {
+        // cuSZp3: the predictor carries tile geometry (pp) and the body reconstructs
+        // the tile then SCATTERS to natural row-major, so this kernel takes pp + writes
+        // dx*dy*dz outputs. `n` is the padded tile-major count (coder block math).
+        const std::string EPL = std::to_string(spec.elems_per_lane);
+        src += "extern \"C\" __global__ void fz_fused_warp_unpack(\n";
+        src += "    unsigned long long n, unsigned word_bytes, unsigned long long num_blocks,\n";
+        src += "    float ebx2, const unsigned char* meta, const unsigned* offset,\n";
+        src += "    const unsigned char* payload, float* out, const unsigned char* pp) {\n";
+        src += "  " + P + " pred = " + P + "::fromParams((const float*)0, (size_t)n, pp);\n";
+        src += "  fused_unpack_tiled_body<" + EPL + ", " + C + ", " + P + ">(\n";
+        src += "      pred, (size_t)n, word_bytes, (size_t)num_blocks, ebx2, meta, offset, payload, out);\n";
+        src += "}\n";
+        return src;
+    }
+
+    std::string targs = std::to_string(spec.elems_per_lane) + ", " + C + ", " + P;
+    for (const auto& t : spec.transforms) targs += ", " + t;   // reverse-transform ops (none yet)
     src += "extern \"C\" __global__ void fz_fused_warp_unpack(\n";
     src += "    unsigned long long n, unsigned word_bytes, unsigned long long num_blocks,\n";
     src += "    float ebx2, const unsigned char* meta, const unsigned* offset,\n";
@@ -366,9 +387,13 @@ std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
 
 size_t launchNvrtcWarpInverseFused(
     const WarpFusionSpec& spec, const uint8_t* d_archive, size_t /*archive_bytes*/,
-    size_t n_elems, float ebx2, float* d_out, MemoryPool* pool, cudaStream_t stream)
+    size_t n_elems, size_t n_out, float ebx2,
+    const uint8_t* pred_params, size_t params_bytes,
+    float* d_out, MemoryPool* pool, cudaStream_t stream)
 {
     if (n_elems == 0) return 0;
+    const bool tiled = isTiledPredictor(spec);
+    if (n_out == 0) n_out = n_elems;   // 1-D: no padding, natural == padded
     const uint32_t block_size = 32u * static_cast<uint32_t>(spec.elems_per_lane);
     const bool plain_meta = (spec.coder == "PlainRateCoder");
     const ab::Config cfg = ab::configure(n_elems, block_size, /*outlier=*/!plain_meta);
@@ -391,21 +416,37 @@ size_t launchNvrtcWarpInverseFused(
             cub::DeviceScan::ExclusiveSum(tmp, b, d_cost, d_offset, num_blocks, stream);
         });
 
-    // Pass B: one warp per block — decode + undelta + dequant, register-resident.
+    // Pass B: one warp per block. 1-D: decode + undelta + block-major dequant, all in
+    // registers. Tiled (cuSZp3): decode + shared-staged separable reconstruction +
+    // scatter to natural row-major (needs the geometry blob `pp` and a small per-warp
+    // shared scratch); output is dx*dy*dz, not the padded tile-major count.
     const std::string src = generateWarpInverseSource(spec);
     CUfunction k = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_warp_unpack"));
     const int WPB = 8, THREADS = WPB * 32;
     const unsigned grid = static_cast<unsigned>((num_blocks + WPB - 1) / WPB);
     unsigned long long n_arg = n_elems, nb_arg = num_blocks;
     unsigned wb_arg = cfg.word_bytes;
-    void* args[] = { (void*)&n_arg, (void*)&wb_arg, (void*)&nb_arg, (void*)&ebx2,
-                     (void*)&d_meta, (void*)&d_offset, (void*)&d_payload, (void*)&d_out };
-    CU_CHECK(cuLaunchKernel(k, grid,1,1, (unsigned)THREADS,1,1, 0, (CUstream)stream, args, nullptr));
+
+    if (tiled) {
+        uint8_t* d_pp = static_cast<uint8_t*>(pool->allocate(params_bytes ? params_bytes : 1, stream, "warp_inv_pp"));
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_pp, pred_params, params_bytes,
+                                      cudaMemcpyHostToDevice, stream));
+        const unsigned shmem = static_cast<unsigned>(WPB) * block_size * sizeof(int);
+        void* args[] = { (void*)&n_arg, (void*)&wb_arg, (void*)&nb_arg, (void*)&ebx2,
+                         (void*)&d_meta, (void*)&d_offset, (void*)&d_payload, (void*)&d_out,
+                         (void*)&d_pp };
+        CU_CHECK(cuLaunchKernel(k, grid,1,1, (unsigned)THREADS,1,1, shmem, (CUstream)stream, args, nullptr));
+        pool->free(d_pp, stream);   // stream-ordered — reclaimed after the kernel, no host sync
+    } else {
+        void* args[] = { (void*)&n_arg, (void*)&wb_arg, (void*)&nb_arg, (void*)&ebx2,
+                         (void*)&d_meta, (void*)&d_offset, (void*)&d_payload, (void*)&d_out };
+        CU_CHECK(cuLaunchKernel(k, grid,1,1, (unsigned)THREADS,1,1, 0, (CUstream)stream, args, nullptr));
+    }
 
     fz::backend::freeTempStorage(pool, d_tmp, stream);
     pool->free(d_offset, stream);
     pool->free(d_cost, stream);
-    return n_elems * sizeof(float);
+    return n_out * sizeof(float);
 }
 
 } // namespace fused

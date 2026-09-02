@@ -58,12 +58,21 @@ size_t launchNvrtcWarpFused(
 /// (coder decode + reverse transforms + predictor prefix-sum + linear dequant),
 /// preceded by the per-block payload cost pass + CUB exclusive-scan. `d_archive`
 /// is the fused/staged-identical AdaptiveBitpack archive; `ebx2` = 2 * abs_eb
-/// resolved from the deserialized quantizer bound. Writes `n_elems` floats to
-/// `d_out`; returns `n_elems * sizeof(float)`. Bit-exact vs the staged
-/// AB-decode -> Lorenzo-prefix-sum -> linear-dequant chain.
+/// resolved from the deserialized quantizer bound.
+///
+/// `n_elems` is the coder's block-covering count (1-D: the natural element count;
+/// tiled/cuSZp3: the padded tile-major count). `n_out` is the natural output
+/// element count — pass 0 for the 1-D path (there is no padding, natural ==
+/// `n_elems`); for a tiled predictor pass dx*dy*dz. A tiled predictor also needs
+/// its geometry via `pred_params`/`params_bytes` (empty for 1-D), because its
+/// body reconstructs each tile and SCATTERS to natural row-major. Writes `n_out`
+/// floats to `d_out`; returns `n_out * sizeof(float)`. Bit-exact vs the staged
+/// AB-decode -> {Lorenzo prefix | tiled separable scan} -> linear-dequant chain.
 size_t launchNvrtcWarpInverseFused(
     const WarpFusionSpec& spec, const uint8_t* d_archive, size_t archive_bytes,
-    size_t n_elems, float ebx2, float* d_out, MemoryPool* pool, fz::stream_t stream);
+    size_t n_elems, size_t n_out, float ebx2,
+    const uint8_t* pred_params, size_t params_bytes,
+    float* d_out, MemoryPool* pool, fz::stream_t stream);
 
 std::string generateWarpInverseSource(const WarpFusionSpec& spec);
 

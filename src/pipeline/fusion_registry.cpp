@@ -292,17 +292,24 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
     }
     if (!coder || !predictor || !quant) return 0;   // matcher guarantees this
 
+    const FusedOpDecl pdecl = predictor->getInverseFusedOp();
     fused::WarpFusionSpec spec;
     spec.coder          = coder->getInverseFusedOp().op_name;
-    spec.predictor      = predictor->getInverseFusedOp().op_name;
+    spec.predictor      = pdecl.op_name;
     spec.elems_per_lane = static_cast<int>(coder->getInverseFusedOp().elems_per_lane);
 
+    // n_elems: the coder's block-covering count. 1-D: the natural count. Tiled
+    // (cuSZp3): the padded tile-major count — so n_out (the predictor's natural
+    // dx*dy*dz) is the real output size, and the predictor's geometry blob drives
+    // the tile→natural scatter. A 1-D predictor declares no inverse op/params.
     const size_t n_elems = coder->getFusedInverseElementCount();
+    const size_t n_out   = predictor->getFusedInverseElementCount();   // 0 for 1-D
     const float  ebx2    = static_cast<float>(quant->getFusedInverseDequantStep());
 
     const size_t written = fused::launchNvrtcWarpInverseFused(
         spec, static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes,
-        n_elems, ebx2, static_cast<float*>(ctx.d_output), ctx.pool,
+        n_elems, n_out, ebx2, pdecl.params.data(), pdecl.params.size(),
+        static_cast<float*>(ctx.d_output), ctx.pool,
         static_cast<fz::stream_t>(ctx.stream));
 
     quant->setFusedInverseResult(written);

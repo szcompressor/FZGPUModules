@@ -199,6 +199,54 @@ public:
         return d;
     }
 
+    // ── Inverse (decompress) fusion — cuSZp3 warp-register decode ─────────────
+    // Mirror of getFusionSpec/getFusedOp for the reversed chain. The warp inverse
+    // body reconstructs each tile by the same separable prefix sum as the staged
+    // tiled_lorenzo_scan_kernel_rows and scatters to natural row-major, so it also
+    // subsumes the tile→natural remap. Same tile_elems==64 (EPL=2) gate.
+    FusionSpec getInverseFusionSpec() const override {
+        const auto t = effectiveTile();
+        if (!is_inverse_ || t[0] * t[1] * t[2] != 64u) return {};
+        return FusionSpec{FusionAccess::BlockLocal, 64u};
+    }
+
+    FusedOpDecl getInverseFusedOp() const override {
+        if (!getInverseFusionSpec().fusable()) return {};
+        const auto t = effectiveTile();
+        const uint32_t dx = static_cast<uint32_t>(dims_[0]);
+        const uint32_t dy = static_cast<uint32_t>(dims_[1]);
+        const uint32_t dz = static_cast<uint32_t>(dims_[2]);
+        const uint32_t tx = t[0], ty = t[1], tz = t[2];
+        const uint32_t ntx = (dx + tx - 1u) / tx;
+        const uint32_t nty = (dy + ty - 1u) / ty;
+        const uint32_t ntz = (dz + tz - 1u) / tz;
+        FusedOpDecl d;
+        d.strategy       = FusionStrategy::WarpRegister;
+        d.include_header = "fused/fused_block/warp_fusion.cuh";
+        d.elems_per_lane = 2;
+        if (tz == 1u) {   // 2-D
+            d.op_name = "TiledLorenzo2DPredictor";
+            d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
+            fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};  // inv2eb unused on decode
+            d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
+        } else {          // 3-D
+            d.op_name = "TiledLorenzo3DPredictor";
+            d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
+            fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
+            d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
+        }
+        return d;
+    }
+
+    /// Natural (row-major, unpadded) output element count of the tiled inverse —
+    /// what the fused warp decode writes after the tile→natural scatter. The
+    /// generic runner passes this as `n_out` so the coder's padded tile-major
+    /// count is not mistaken for the output size.
+    size_t getFusedInverseElementCount() const override {
+        if (!getInverseFusionSpec().fusable()) return 0;
+        return static_cast<size_t>(dims_[0]) * dims_[1] * dims_[2];
+    }
+
     std::vector<size_t> estimateOutputSizes(
         const std::vector<size_t>& input_sizes
     ) const override {

@@ -120,6 +120,18 @@ struct TiledLorenzo2DPredictor {
         else             pred = 0;                                             // tile origin
         return cur - pred;
     }
+    // INVERSE: natural row-major index for tile-major local element `local` of tile
+    // `b`; ~0 marks a padding element (no write). tz == 1 for the 2-D predictor.
+    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        if (gx >= dx || gy >= dy) return ~static_cast<size_t>(0);
+        return static_cast<size_t>(gy) * dx + gx;
+    }
 };
 
 // ── Transform ops (optional, between predictor and coder) ────────────────────
@@ -184,6 +196,21 @@ struct TiledLorenzo3DPredictor {
         else if (lz > 0) pred = __float2int_rn(in[gidx - static_cast<size_t>(dx) * dy] * inv2eb); // Z
         else             pred = 0;                                                             // origin
         return cur - pred;
+    }
+    // INVERSE: natural row-major index for tile-major local element `local` of tile `b`;
+    // ~0 marks a padding element (no write).
+    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lz = local / (tx * ty);
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
+        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gz = tiz * tz + lz;
+        if (gx >= dx || gy >= dy || gz >= dz) return ~static_cast<size_t>(0);
+        return (static_cast<size_t>(gz) * dy + gy) * dx + gx;
     }
 };
 
@@ -700,6 +727,68 @@ __device__ __forceinline__ void fused_unpack_body(
         const size_t idx = static_cast<size_t>(lane) + 32u * m;
         if (idx < count) out[start + idx] = static_cast<float>(d[m]) * ebx2;
     }
+}
+
+// ── Inverse (decompress) harness — TILED predictors (cuSZp3) ────────────────
+// One warp owns one tile (block_size == tile_elems == 64, EPL == 2). The coder
+// decodes the tile's tile-major deltas; the warp stages them in shared, then each
+// lane reconstructs its EPL elements by the SAME separable prefix sum the staged
+// tiled_lorenzo_scan_kernel_rows uses:
+//   code(lx,ly,lz) = Σ_{k≤lz} d(0,0,k) + Σ_{1≤k≤ly} d(0,k,lz) + Σ_{1≤k≤lx} d(k,ly,lz)
+// and SCATTERS the dequantized value to its natural row-major position (the
+// tile→natural remap the staged inverse also performs). Bit-exact vs staged:
+// integer adds in the same order, and padding deltas are 0 and never written.
+// Shared use is a `int[warps_per_cta * block_size]` scratch + one __syncwarp().
+template<int ElemsPerLane, class Coder, class Pred>
+__device__ __forceinline__ void fused_unpack_tiled_body(
+    Pred pred, size_t n_pad, uint32_t word_bytes, size_t num_blocks, float ebx2,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload, float* __restrict__ out)
+{
+    const uint32_t lane          = threadIdx.x & 31u;
+    const uint32_t warp_in_block = threadIdx.x >> 5;
+    const uint32_t warps_per_cta = blockDim.x >> 5;
+    const size_t b = static_cast<size_t>(blockIdx.x) * warps_per_cta + warp_in_block;
+    if (b >= num_blocks) return;
+
+    constexpr uint32_t block_size = static_cast<uint32_t>(ElemsPerLane) * 32u;
+    const size_t start = b * block_size;
+    const size_t count = min(static_cast<size_t>(block_size), n_pad - start);
+
+    int d[ElemsPerLane];
+    Coder::template decode<ElemsPerLane>(meta + Coder::meta_bytes * b,
+                                         payload + offset[b], word_bytes, count, lane, d);
+
+    extern __shared__ int s_tile_raw[];
+    int* s = s_tile_raw + static_cast<size_t>(warp_in_block) * block_size;
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) s[lane + 32u * static_cast<uint32_t>(m)] = d[m];
+    __syncwarp();
+
+    const uint32_t tx = pred.tx, ty = pred.ty;
+    #pragma unroll
+    for (int m = 0; m < ElemsPerLane; ++m) {
+        const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lz = local / (tx * ty);
+        int code = 0;
+        for (uint32_t k = 0; k <= lz; ++k) code += s[(k * ty) * tx];                 // z-spine
+        for (uint32_t k = 1; k <= ly; ++k) code += s[(lz * ty + k) * tx];            // y-spine
+        for (uint32_t k = 1; k <= lx; ++k) code += s[(lz * ty + ly) * tx + k];       // x-row
+        const size_t g = pred.inv_gidx(b, local);
+        if (g != ~static_cast<size_t>(0)) out[g] = static_cast<float>(code) * ebx2;
+    }
+}
+
+template<int ElemsPerLane, class Coder, class Pred>
+__global__ void fused_unpack_tiled_kernel(
+    Pred pred, size_t n_pad, uint32_t word_bytes, size_t num_blocks, float ebx2,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload, float* __restrict__ out)
+{
+    fused_unpack_tiled_body<ElemsPerLane, Coder, Pred>(
+        pred, n_pad, word_bytes, num_blocks, ebx2, meta, offset, payload, out);
 }
 
 // ── Compile-time template kernels (the non-NVRTC path). The NVRTC path generates

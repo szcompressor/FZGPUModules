@@ -1208,14 +1208,22 @@ TEST(FusionPlanner, Cuszp3ChainIsOneGroup) {
     EXPECT_TRUE(groups[0].has_coder);
 }
 
-// TiledLorenzo declares BlockLocal(tile_elems) forward, Unfusable inverse.
+// TiledLorenzo declares BlockLocal(tile_elems) both directions: forward via
+// getFusionSpec, inverse (cuSZp3 warp decode) via getInverseFusionSpec. The
+// forward getFusionSpec stays Unfusable on an inverse instance (the inverse
+// contract lives on the *Inverse* hooks).
 TEST(FusionPlanner, TiledLorenzoFusionSpec) {
     TiledLorenzoStage<int32_t> tl; tl.setTileShape(8, 8);
     EXPECT_EQ(tl.getFusionSpec().access, FusionAccess::BlockLocal);
     EXPECT_EQ(tl.getFusionSpec().block_size, 64u);
+    EXPECT_EQ(tl.getInverseFusionSpec().access, FusionAccess::Unfusable);  // forward instance
 
     TiledLorenzoStage<int32_t> tli; tli.setTileShape(8, 8); tli.setInverse(true);
-    EXPECT_EQ(tli.getFusionSpec().access, FusionAccess::Unfusable);
+    EXPECT_EQ(tli.getFusionSpec().access, FusionAccess::Unfusable);        // inverse instance
+    EXPECT_EQ(tli.getInverseFusionSpec().access, FusionAccess::BlockLocal);
+    EXPECT_EQ(tli.getInverseFusionSpec().block_size, 64u);
+    EXPECT_EQ(tli.getInverseFusedOp().op_name, "TiledLorenzo2DPredictor");
+    EXPECT_EQ(tli.getInverseFusedOp().strategy, FusionStrategy::WarpRegister);
 }
 
 // End-to-end for cuszp3: fusion must be byte-identical to staged and round-trip
@@ -1275,6 +1283,39 @@ TEST(FusionPlanner, Cuszp3EndToEndFusedMatchesStaged) {
     EXPECT_LE(maxErr(rs), eb * 1.001) << "staged baseline exceeds bound (data/config issue)";
     EXPECT_LE(maxErr(rf), eb * 1.001) << "fused round-trip exceeds bound";
     EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged";
+
+    // Isolate the INVERSE: decompress the identical (staged) archive with fusion
+    // off vs auto. Auto must install warp-register-inverse over the tiled chain
+    // (TiledLorenzo2DPredictor: separable in-shared reconstruction + tile->natural
+    // scatter) and reconstruct byte-exact vs the staged inverse.
+    auto decompressCopy = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildCuszp3(p, dx, dy);
+        p.finalize();
+        p.prepareInverse(bytes);
+        void* d_comp = nullptr;
+        ASSERT_EQ(cudaMalloc(&d_comp, staged.size()), cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(d_comp, staged.data(), staged.size(),
+                             cudaMemcpyHostToDevice), cudaSuccess);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, staged.size(), &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        if (pol == FusionPolicy::Auto) {
+            ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u);
+            EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
+                      "warp-register-inverse");
+        } else {
+            EXPECT_TRUE(p.getFusionInfo().installed_inverse_groups.empty());
+        }
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+        cudaFree(d_comp);
+    };
+    std::vector<float> ds, df;
+    decompressCopy(FusionPolicy::Off,  ds);
+    decompressCopy(FusionPolicy::Auto, df);
+    EXPECT_EQ(ds, df) << "fused tiled inverse differs from staged inverse on the same archive";
 
     cudaFree(d_in);
 }
