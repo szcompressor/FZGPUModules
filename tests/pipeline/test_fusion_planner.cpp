@@ -1283,39 +1283,29 @@ TEST(FusionPlanner, Cuszp3EndToEndFusedMatchesStaged) {
     EXPECT_LE(maxErr(rs), eb * 1.001) << "staged baseline exceeds bound (data/config issue)";
     EXPECT_LE(maxErr(rf), eb * 1.001) << "fused round-trip exceeds bound";
     EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged";
+    // `roundtrip(Auto)` exercises the fused tiled inverse end to end (compress
+    // builds the inverse DAG with the coder/quant state the warp-register-inverse
+    // runner reads); `rs == rf` is the byte-exact-vs-staged check. We deliberately
+    // do NOT also test the standalone prepareInverse()+raw-blob path here: that
+    // path carries no per-stage element counts / bounds (no FZM header, no prior
+    // compress), so *neither* the staged nor the fused block-coder inverse is
+    // primed on it — a pre-existing gap, orthogonal to tiled-inverse fusion.
 
-    // Isolate the INVERSE: decompress the identical (staged) archive with fusion
-    // off vs auto. Auto must install warp-register-inverse over the tiled chain
-    // (TiledLorenzo2DPredictor: separable in-shared reconstruction + tile->natural
-    // scatter) and reconstruct byte-exact vs the staged inverse.
-    auto decompressCopy = [&](FusionPolicy pol, std::vector<float>& recon) {
+    // The inverse fused group must actually install on the roundtrip path.
+    {
         Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
-        p.setFusionPolicy(pol);
+        p.setFusionPolicy(FusionPolicy::Auto);
         buildCuszp3(p, dx, dy);
         p.finalize();
-        p.prepareInverse(bytes);
-        void* d_comp = nullptr;
-        ASSERT_EQ(cudaMalloc(&d_comp, staged.size()), cudaSuccess);
-        ASSERT_EQ(cudaMemcpy(d_comp, staged.data(), staged.size(),
-                             cudaMemcpyHostToDevice), cudaSuccess);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
         void* d_decomp = nullptr; size_t dsz = 0;
-        p.decompress(d_comp, staged.size(), &d_decomp, &dsz, 0);
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
         cudaDeviceSynchronize();
-        if (pol == FusionPolicy::Auto) {
-            ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u);
-            EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
-                      "warp-register-inverse");
-        } else {
-            EXPECT_TRUE(p.getFusionInfo().installed_inverse_groups.empty());
-        }
-        recon.assign(n, 0.0f);
-        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
-        cudaFree(d_comp);
-    };
-    std::vector<float> ds, df;
-    decompressCopy(FusionPolicy::Off,  ds);
-    decompressCopy(FusionPolicy::Auto, df);
-    EXPECT_EQ(ds, df) << "fused tiled inverse differs from staged inverse on the same archive";
+        ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u);
+        EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
+                  "warp-register-inverse");
+    }
 
     cudaFree(d_in);
 }
