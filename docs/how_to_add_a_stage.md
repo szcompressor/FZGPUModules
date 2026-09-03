@@ -12,6 +12,11 @@ scripts/new_stage.sh MyStageName <category>            # auto-assign StageType I
 scripts/new_stage.sh MyStageName <category> 42         # pin StageType ID explicitly
 ```
 
+Prototyping a stage in your own repository, or not ready to publish it yet? See
+\ref out_of_tree_stage "Adding a stage outside the main repo" — the class is
+written the same way, but you link against an installed FZGPUModules instead of
+editing its shared files.
+
 ---
 
 ## Overview

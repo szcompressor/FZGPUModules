@@ -5,13 +5,11 @@ GPU-accelerated graph composable compression pipeline builder for analytical wor
 ## Overview
 
 FZGPUModules is a CUDA library for building composable, high-throughput compression
-pipelines. Each pipeline is a directed acyclic graph (DAG) of stages - coders,
-predictors, quantizers, shufflers, transforms, fused stages, and external stages -
-connected and executed entirely on the GPU with stream-ordered memory management.
+pipelines. Each pipeline is a directed acyclic graph (DAG) of stages, connected and executed entirely on the GPU with stream-ordered memory management.
 
 **Key properties:**
 - **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, RRE, Bitshuffle, TUPL, Huffman, ANS, …)
-- **[Pipeline Specialization](#mainpage_specialization)** — at `finalize()` the library transparently replaces staged execution with an optimized specialized implementation (kernel fusion + runtime optimizations), **byte-identical** to staged on both compress and decompress. Up to ~3× compress / ~5× decompress on cuSZp/SZp-class pipelines. See [docs/pipeline_specialization.md](pipeline_specialization.md).
+- **[Pipeline Specialization](#mainpage_specialization)** — at `finalize()` the library compiles, caches, and constructs a new optimized pipeline automatically that is equivalent to the original DAG
 - **High throughput** — parallel level execution, persistent scratch, stream-ordered allocation
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
 - **File format** — FZM format with CRC32 checksums and full stage config serialization
@@ -122,8 +120,8 @@ usage notes — see the \ref stages_overview "Stage Reference".
 
 | Strategy      | Description                                                                                                               |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `MINIMAL`     | Allocate on demand, free at last consumer. Lowest peak GPU memory.                                                        |
-| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring (liveness-based memory reuse) — which is [Pipeline Specialization](#mainpage_specialization)-aware, so specialization lowers peak pool memory as well as runtime. |
+| `MINIMAL`     | Allocate on demand, free at last consumer.                                                         |
+| `PREALLOCATE` | Allocate everything at `finalize()`. Enables buffer coloring (liveness-based memory reuse). |
 
 
 ---
@@ -163,8 +161,7 @@ See `examples/ownership_example.cpp` for a minimal end-to-end example.
 
 ### Pipeline Specialization {#mainpage_specialization}
 
-The pipeline you build is a general, modular DAG — one kernel per stage, each
-intermediate round-tripped through DRAM. **Pipeline Specialization** is the
+**Pipeline Specialization** is the
 finalize-time layer that inspects that DAG and, where a fast path exists,
 transparently swaps the staged execution for an optimized *specialized*
 implementation: compatible stages fused into a single kernel (keeping
@@ -184,11 +181,11 @@ p.compress(d_input, input_bytes, &d_comp, &comp_sz, stream);  // fused where pro
 
 or at runtime with `FZ_SPECIALIZE=auto`, or `--report-json` from the CLI to see
 what was installed. Full guide, guarantees, and how to make your own stages
-specialization-compatible: **[docs/pipeline_specialization.md](pipeline_specialization.md)**.
+specialization-compatible: **[pipeline_specialization.md](pipeline_specialization.md)**.
 
 ### CUDA Graph Support
 
-For throughput-critical workloads, enable CUDA Graph capture to eliminate
+Enable CUDA Graph capture to eliminate
 CPU-side kernel launch overhead on repeated compress calls (note: Graph capture
 and Pipeline Specialization are mutually exclusive — the specializer synchronizes
 to read data-dependent archive lengths, so enabling `Auto`/`Force` disables graph
@@ -216,7 +213,7 @@ effect sizes where available.
 
 ### Compressor Config File 
 
-For complex pipelines, you can also load the stage graph from a TOML config file:
+You can also load the stage graph from a TOML config file:
 
 ```bash
 fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --report

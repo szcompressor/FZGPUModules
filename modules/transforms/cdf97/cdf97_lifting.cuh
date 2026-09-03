@@ -11,21 +11,18 @@
  * @brief CDF 9/7 biorthogonal wavelet — single-line lifting primitive.
  *
  * This header holds *only* the 1-D lifting kernel that every dimension of the
- * separable multi-level DWT is built from. It is deliberately isolated from the
- * pipeline/stage machinery so the numerically sensitive part can be validated
- * bit-for-bit against a reference before it is wired into a `Stage`.
+ * separable multi-level DWT is built from.
  *
- * ### Provenance (must stay bit-exact)
+ * ### Provenance 
  *
  * The lifting constants and the forward analysis sweep are a 1:1 port of
  * `sperr::CDF97::QccWAVCDF97AnalysisSymmetric` in NCAR/SPERR
  * (https://github.com/NCAR/SPERR, `src/CDF97.cpp` / `include/CDF97.h`). We port
- * the *computed* constant path (derived from the Cohen–Daubechies–Feauveau 9/7
- * filter bank `h[]`), NOT the commented-out QccPack literals — SPERR uses the
+ * the computed constant path (derived from the CDF 9/7
+ * filter bank `h[]`), not the commented-out QccPack literals — SPERR uses the
  * former, so only the former reproduces its coefficients. Matching SPERR
  * exactly matters because the downstream SPECK bit-plane coder is defined on
- * *these* coefficients; any drift here is invisible until SPECK fails to
- * validate against reference SPERR.
+ * these coefficients
  *
  * The GPU parallelization (shared-memory line, clamped-index boundaries) follows
  * the JPEG2000 lifting-DWT literature:

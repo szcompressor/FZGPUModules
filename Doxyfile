@@ -27,8 +27,10 @@ INPUT                  = include/ \
                          docs/performance_tuning.md \
                          docs/pipeline_specialization.md \
                          docs/pipeline_specialization_internals.md \
+                         docs/extending.md \
                          docs/developing_stages_deep_dive.md \
                          docs/how_to_add_a_stage.md \
+                         docs/out_of_tree_stage.md \
                          docs/fzm_format.md \
                          docs/docker.md \
                          docs/libpressio_python.md \

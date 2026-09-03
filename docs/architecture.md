@@ -55,7 +55,9 @@ Every stage implements a small set of virtual methods — `execute()` (dispatch 
 kernel), `estimateOutputSizes()` / `estimateScratchBytes()` (buffer sizing), `setInverse()`
 (forward vs. inverse), `serializeHeader()` / `deserializeHeader()` (FZM round-trips), and
 `setDims()` (dimension-aware stages). The full contract, and how to implement each, is in
-\ref how_to_add_a_stage "How to Add a New Stage".
+\ref how_to_add_a_stage "How to Add a New Stage"; \ref extending "Extending FZGPUModules"
+collects that page together with the out-of-tree build pattern, the specialization
+declaration contract, and the design notes behind the non-linear stages.
 
 Stages declare *named* outputs (e.g. `"codes"`, `"outlier_errors"`) so the pipeline
 can route individual outputs by name rather than by position. Most stages have a single
@@ -201,6 +203,7 @@ At runtime, `Logger::setMinLevel()` can filter within the compiled-in range, and
 | Topic | Page |
 |-------|------|
 | Full stage list with constraints and options | \ref stages_overview "Stage Reference" |
+| Writing a new stage (in-tree, out-of-tree, fusion, design notes) | \ref extending "Extending FZGPUModules" |
 | FZM binary file format specification | \ref fzm_format "FZM File Format" |
 | Build options and CMake presets | \ref building_from_source "Building from Source" |
 | CLI usage and TOML config syntax | \ref cli_overview "CLI & Config File" |

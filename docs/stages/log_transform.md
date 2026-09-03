@@ -165,8 +165,8 @@ outlier_capacity = 0.05
 
 ## See also
 
-- \subpage stage_quantizer — `ErrorBoundMode::REL`, the exact-but-uncompressed alternative
-- \subpage stage_lorenzo_quant — `ErrorBoundMode::PREL`, and why it is not a relative bound
+- \ref stage_quantizer — `ErrorBoundMode::REL`, the exact-but-uncompressed alternative
+- \ref stage_lorenzo_quant — `ErrorBoundMode::PREL`, and why it is not a relative bound
 - `examples/eb_mode_analysis.cpp` — measures all of the above on your own data
 
 ## Acknowledgements
