@@ -1,15 +1,16 @@
 [pipeline]
 # LEGACY / EXPERIMENTAL preset for the quarantined monolithic SZp reference
 # compressor. `type = "SZp"` still loads (kLegacyStageRegistry) for back-compat
-# only. For the SUPPORTED expression of the SZp algorithm use
+# only. For the supported SZp-inspired modular composition use
 # examples/presets/szp_composed.toml instead.
 #
 # SZp / fZ-light — extreme-fast error-bounded compressor (native fused stage).
 #
 # One stage, whole compressor: quantize + 1-D Lorenzo delta (block reset) +
-# fixed-length bitpack, no entropy stage. GPU reimplementation of the SZp forward/
-# inverse (Huang, Di, et al., SC'24). Not byte-compatible with the reference SZp
-# container; for a zero-new-code equivalent see szp_composed.toml.
+# fixed-length bitpack, no entropy stage. GPU adaptation of the SZp structure
+# (Huang, Di, et al., SC'24), with FZGM quantization and block-reset conventions.
+# It is not byte-compatible with the reference SZp container; for the supported
+# modular analogue see szp_composed.toml.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/szp.toml \

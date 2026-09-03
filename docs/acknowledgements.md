@@ -438,12 +438,13 @@ three-port layout, and inverse scatter are FZGPUModules code.
 
 **License:** MIT
 
-**Relationship:** `SZpStage` is a GPU reimplementation of the published
-predict-quantize-pack algorithm. No upstream source is copied and the FZGM
-archive is not byte-compatible with the upstream container.
+**Relationship:** `SZpStage` and `szp_composed.toml` are GPU adaptations of the
+published predict-quantize-pack structure. No upstream source is copied. FZGM
+uses different quantization and predictor-partition conventions, and its archive
+is not byte-compatible with the upstream container.
 
-Jiajun Huang, Sheng Di, et al. *SZp/fZ-light: An Ultra-fast Error-bounded
-Lossy Compressor*, SC '24.
+Jiajun Huang, Sheng Di, et al. *hZCCL: Accelerating Collective Communication
+with Co-Designed Homomorphic Compression*, SC '24.
 
 ---
 

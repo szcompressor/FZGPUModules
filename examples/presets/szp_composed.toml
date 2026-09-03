@@ -1,22 +1,24 @@
 [pipeline]
-# SZp / fZ-light — the SUPPORTED expression of the SZp algorithm.
+# SZp / fZ-light-inspired modular composition.
 #   Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)
 #
-# SZp's inner loop is 1-D Lorenzo prediction + error-bound quantization +
-# per-block fixed-length residual packing, with NO entropy coder. That is exactly
-# this three-stage chain — the same structure as cuszp.toml, but at SZp's default
-# block size of 128. This preset reproduces SZp *behavior* (an error-bounded,
-# entropy-coder-free, fixed-length-packed archive) with ZERO new code, and the
-# automatic-fusion planner fuses the whole chain into one warp-register kernel.
+# This matches the published high-level structure: scalar quantization, 1-D
+# Lorenzo differences, sign bits, and per-block fixed-width packing, with no
+# entropy coder. It is not an exact upstream reconstruction: the CPU SZp code
+# truncates x/eb, stores one seed per OpenMP partition, and carries prediction
+# across its small-block boundaries. FZGM uses its generic round(x/(2eb))
+# quantizer and resets Lorenzo at each 128-value block. Treat this as a related
+# GPU composition whose staged/auto performance isolates FZGM specialization.
 #
-# It is NOT byte-compatible with the reference SZp container (compressors/SZp).
-# The monolithic `SZpStage` reference implementation is quarantined under
+# It is NOT byte-compatible with the reference SZp container. The monolithic
+# `SZpStage` FZGM implementation is quarantined under
 # experimental/reference_compressors/szp/ (and its legacy preset at
 # experimental/reference_compressors/szp/szp.toml); it is a GPU point of
-# comparison only, not a supported module. Use THIS preset for the SZp algorithm.
+# comparison only, not a supported module.
 #
-# SZp / fZ-light: Huang, Di, et al., SC'24. hZCCL adds compressed-domain
-# collectives on top of this container (not expressible as a preset).
+# SZp / fZ-light: Huang, Di, et al., SC'24. The homomorphic collective
+# operations are a separate communication-system capability, not expressed by
+# this compression preset.
 #
 # Usage:
 #   fzgmod-cli -c examples/presets/szp_composed.toml \

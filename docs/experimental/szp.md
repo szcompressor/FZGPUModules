@@ -8,11 +8,11 @@
 > decode, and `type = "SZp"` still loads from legacy TOML configs, but neither is
 > a supported surface.
 >
-> **The supported expression of the SZp algorithm is
+> **The supported SZp-inspired modular composition is
 > `examples/presets/szp_composed.toml`:**
 > `Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)`.
-> That chain reproduces SZp behaviour with zero new code and byte-identical
-> compressed sizes (verified on CLDHGH).
+> It matches the upstream algorithm's high-level stages but does not reproduce
+> its exact quantization, partition seeding, predictor boundaries, or container.
 
 **Header:** `experimental/reference_compressors/szp/szp_stage.h` (direct-include only)
 **Class:** `fz::SZpStage<TData>` — `TData` is `float` or `double`
@@ -24,7 +24,7 @@
 #include "reference_compressors/szp/szp_stage.h"   // not in <fzgpumodules.h>
 
 auto* szp = p.addStage<fz::SZpStage<float>>();
-szp->setBlockSize(128);                 // elements per block (SZp default)
+szp->setBlockSize(128);                 // elements per block (FZGM default)
 szp->setErrorBound(1e-3);
 szp->setErrorMode(fz::SZpErrorMode::ABS);
 ```
@@ -50,18 +50,19 @@ Per block of `block_size` elements:
 
 ## Relationship to the composable chain
 
-SZp's inner loop is exactly the FZGM chain
-`Quantizer(linear, ABS) → Lorenzo(block reset) → AdaptiveBitpack` —
-`AdaptiveBitpack`'s plain mode *is* per-block fixed-length residual packing. The
-native `SZpStage` exists for (a) a single-launch whole compressor and (b) a
-named, format-stable SZp target; the composed preset
-`examples/presets/szp_composed.toml` reproduces the same behaviour with **zero
-new code**, and the two produce **byte-identical compressed sizes** (verified on
-CLDHGH), which is how the native stage is validated against the composition.
+SZp and the FZGM composition share the same broad structure:
+`quantize → 1-D Lorenzo differences → sign bits + per-block fixed-width packing`.
+The upstream CPU/OpenMP implementation truncates `x/eb`, stores an initial seed
+per OpenMP partition, and carries its predictor across the smaller packing-block
+boundaries inside that partition. The FZGM composition instead uses the generic
+`round(x/(2·eb))` quantizer and resets Lorenzo at every 128-value block. The
+quarantined `SZpStage` mirrors the FZGM convention and validates the composition;
+neither is a behavioral or byte-compatible reproduction of upstream SZp.
 
-Unlike \ref stage_szx "SZx", SZp has **no constant-block escape** — every element
-pays the block's bit width even when its delta is zero — so it is fully
-composable and is provided as a stage only for convenience and throughput.
+Unlike \ref stage_szx "SZx", the quarantined implementation has **no
+constant-block escape** — every element pays the block's bit width even when its
+delta is zero. Its high-level operations can be expressed as the supported
+composition above; the monolithic stage itself remains unsupported.
 
 ## Archive layout
 
@@ -91,11 +92,12 @@ Reconstruction prefix-sums the per-block deltas to recover `q_i`, then scales by
 graph-capturable; `ABS` defers its size readback to `postStreamSync()` and stays
 capturable. SZp is lossy: a resolved `abs_eb ≤ 0` throws.
 
-> **Ratio note:** the block-reset delta makes each block's first residual the
-> absolute quantized level at the block head, which sets the block width and caps
-> the ratio on ramps and high-offset data. This is inherent to SZp's block-local
-> 1-D prediction, not a defect — and it is exactly what \ref stage_szx "SZx"'s
-> reference-value scheme avoids on flat regions.
+> **Ratio note:** in the quarantined FZGM stage and supported composition, the
+> block-reset delta makes each block's first residual the absolute quantized level
+> at the block head, which sets the block width and caps the ratio on ramps and
+> high-offset data. This is an FZGM composition detail, not a claim about the
+> upstream CPU/OpenMP partitioning; \ref stage_szx "SZx" instead uses a
+> reference-value scheme for flat regions.
 
 ## Stage settings
 
@@ -118,7 +120,7 @@ error_bound = 1e-3
 error_bound_mode = "ABS"
 ```
 
-`examples/presets/szp_composed.toml` (the supported zero-new-code equivalent) is
+`examples/presets/szp_composed.toml` (the supported modular analogue) is
 shipped under `examples/presets/`. The legacy native preset is retained only at
 `experimental/reference_compressors/szp/szp.toml`.
 
@@ -135,7 +137,7 @@ transform). See the future-work scoping note
 
 SZp / fZ-light: Jiajun Huang, Sheng Di, et al., SC '24. The upstream CPU/OpenMP
 reference is available at https://github.com/szcompressor/SZp under the MIT
-license. This stage is a GPU reimplementation of its predict-quantize-pack
-forward/inverse; no upstream source was copied. The FZM archive layout, CUB
+license. This stage is a GPU adaptation of its predict-quantize-pack structure;
+no upstream source was copied. The FZM archive layout, quantization convention, CUB
 offset scan, and MemoryPool scaffolding are FZGPUModules code. See
 `THIRD_PARTY.md`.

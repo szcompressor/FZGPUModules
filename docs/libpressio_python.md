@@ -530,8 +530,8 @@ Ultrafast block-local error-bounded compressor, a self-contained fused stage
 rather than a Lorenzo+quantize+code pipeline.
 
 > **SZp is no longer a supported stage.** The monolithic `SZpStage` is quarantined
-> as an experimental reference compressor. Express the SZp algorithm as the
-> modular chain `Quantizer(linear) → Lorenzo(block_size=128) →
+> as an experimental reference compressor. Use the SZp-inspired modular chain
+> `Quantizer(linear) → Lorenzo(block_size=128) →
 > AdaptiveBitpack(block_size=128)` (see `examples/presets/szp_composed.toml`).
 
 | Option | Type | Default | Description |

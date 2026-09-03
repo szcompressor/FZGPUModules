@@ -186,8 +186,8 @@ example `setBlockSize(32)` is `block_size = 32`).
 > **Legacy / experimental types.** `type = "SZp"` still loads (and re-saves) for
 > backward compatibility with configs and archives written before SZp was
 > quarantined as an experimental reference compressor, but it is not a supported
-> module and is absent from the catalog above. New pipelines should express the
-> SZp algorithm with `examples/presets/szp_composed.toml`
+> module and is absent from the catalog above. New pipelines can use the
+> SZp-inspired modular composition in `examples/presets/szp_composed.toml`
 > (`Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)`).
 
 For a cuSZp-style `Quantizer` with a strict requested bound, set
