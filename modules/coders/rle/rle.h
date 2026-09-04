@@ -11,6 +11,7 @@
 #include "backend/types.h"
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <type_traits>
 
 namespace fz {
@@ -176,10 +177,12 @@ public:
     
     std::unordered_map<std::string, size_t> getActualOutputSizesByName() const override {
         completePendingSync();
+        completePendingDecodeSync();
         return {{"output", actual_output_sizes_.empty() ? 0 : actual_output_sizes_[0]}};
     }
     size_t getActualOutputSize(int index) const override {
         completePendingSync();
+        completePendingDecodeSync();
         return (index == 0 && !actual_output_sizes_.empty()) ? actual_output_sizes_[0] : 0;
     }
 
@@ -254,14 +257,37 @@ private:
     size_t      fwd_scratch_n_        = 0;        ///< Current scratch capacity (elements).
     MemoryPool* fwd_scratch_pool_     = nullptr;
     bool        fwd_from_pool_        = false;
+    std::weak_ptr<const void> fwd_scratch_alive_; ///< See MemoryPool::lifetimeToken().
 
     // Pinned host buffer for async D2H of num_runs.
     // mutable so getActualOutputSizesByName() can complete the pending
     // readback even when called on a const Stage reference.
     mutable uint32_t*           h_num_runs_          = nullptr;
+    mutable MemoryPool*         h_num_runs_pool_     = nullptr;
+    mutable std::weak_ptr<const void> h_num_runs_alive_; ///< See MemoryPool::lifetimeToken().
     mutable bool                fwd_sync_pending_    = false;
     mutable fz::stream_t        fwd_last_stream_     = nullptr;
     mutable std::vector<size_t> actual_output_sizes_;
+
+    // Pinned host buffer for the decode path's deferred total-output-size
+    // readback (the decompress kernel launch itself only needs num_runs, which
+    // is already synced earlier — this second D2H was previously blocking
+    // *before* that kernel launch for no operational reason; deferring it here
+    // removes a host stall from the decode critical path, same pattern as the
+    // forward path's h_num_runs_ above).
+    mutable uint32_t*           h_dec_total_size_       = nullptr;
+    mutable MemoryPool*         h_dec_total_size_pool_  = nullptr;
+    mutable std::weak_ptr<const void> h_dec_total_size_alive_; ///< See MemoryPool::lifetimeToken().
+    mutable bool                dec_sync_pending_       = false;
+    mutable fz::stream_t        dec_last_stream_        = nullptr;
+
+    void completePendingDecodeSync() const {
+        if (!dec_sync_pending_) return;
+        cudaStreamSynchronize(dec_last_stream_);
+        const uint32_t total_output_size = *h_dec_total_size_;
+        actual_output_sizes_ = {static_cast<size_t>(total_output_size) * sizeof(T)};
+        dec_sync_pending_ = false;
+    }
 
     // Complete a pending forward-path readback (if any) by syncing the stream
     // that was used and computing actual_output_sizes_.  Safe to call from

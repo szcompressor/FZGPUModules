@@ -11,6 +11,7 @@
 
 #include "coders/speck2d/speck2d_stage.h"
 #include "coders/speck2d/speck2d_kernels.cuh"
+#include "mem/mempool.h"
 #include "cuda_check.h"
 #include "stage/stage_registry.h"
 #include <cub/cub.cuh>
@@ -51,13 +52,45 @@ struct Speck2DStage::Impl {
     uint8_t* d_stream = nullptr; size_t cap_stream = 0;
     uint32_t* d_decoeff = nullptr; uint8_t* d_desgn = nullptr;
 
-    ~Impl() { freeAll(); }
+    // Every allocation above (and I.d_out below) is routed through the pipeline's
+    // MemoryPool when one is supplied, falling back to raw cudaMalloc/cudaFree
+    // only when this stage is used standalone. This keeps peak-usage reporting
+    // and PREALLOCATE/MINIMAL/buffer-coloring accounting accurate for pipelines
+    // that include Speck2DStage. One pool is assumed for the Impl's lifetime.
+    MemoryPool* pool_owner_ = nullptr;
+    bool        from_pool_  = false;
+    /// Expires if the pool is destroyed before this Impl. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> pool_alive_;
+
+    template <typename T>
+    T* palloc(MemoryPool* pool, cudaStream_t stream, size_t count, const char* tag) {
+        size_t bytes = count * sizeof(T);
+        if (pool) {
+            void* p = pool->allocate(bytes, stream, tag, /*persistent=*/true);
+            if (!p && bytes > 0)
+                throw std::runtime_error(std::string("Speck2DStage: failed to allocate '") + tag + "' from MemoryPool");
+            pool_owner_ = pool; from_pool_ = true;
+            pool_alive_ = pool->lifetimeToken();
+            return static_cast<T*>(p);
+        }
+        void* p = nullptr;
+        FZ_CUDA_CHECK(cudaMalloc(&p, bytes ? bytes : 1));
+        pool_owner_ = nullptr; from_pool_ = false;
+        return static_cast<T*>(p);
+    }
+    void pfree(void* p, cudaStream_t stream) {
+        if (!p) return;
+        if (from_pool_ && pool_owner_ && !pool_alive_.expired()) pool_owner_->free(p, stream);
+        else if (!from_pool_) FZ_CUDA_CHECK_WARN(cudaFree(p));
+    }
+
+    ~Impl() { freeAll(0); }
 
     // NOTE: must NOT reset via `*this = Impl{}` -- that would construct a
     // temporary, assign it, then destroy the temporary, which (having a
     // user-declared destructor that itself calls freeAll()) recurses without
     // ever terminating. Reset every field explicitly instead.
-    void freeAll() {
+    void freeAll(cudaStream_t stream) {
         void** ptrs[] = {
             (void**)&d_par, (void**)&d_lf, (void**)&d_px, (void**)&d_c0, (void**)&d_c1, (void**)&d_c2, (void**)&d_c3,
             (void**)&d_levelnodes, (void**)&d_lvl_starts, (void**)&d_lvl_counts, (void**)&d_leaves,
@@ -66,7 +99,7 @@ struct Speck2DStage::Impl {
             (void**)&d_present, (void**)&d_flag, (void**)&d_rank, (void**)&d_gaps, (void**)&d_len, (void**)&d_off,
             (void**)&d_bflag, (void**)&d_brank, (void**)&d_ones, (void**)&d_tmpLevel, (void**)&d_tmpBit,
             (void**)&d_cursor, (void**)&d_stream, (void**)&d_decoeff, (void**)&d_desgn };
-        for (void** p : ptrs) { if (*p) FZ_CUDA_CHECK_WARN(cudaFree(*p)); *p = nullptr; }
+        for (void** p : ptrs) { pfree(*p, stream); *p = nullptr; }
         nx = ny = nn = nl = maxL = nFused = 0; n = 0;
         level_start.clear(); level_count.clear();
         tmpbA = tmpbB = 0; out_words_cap = 0;
@@ -76,15 +109,15 @@ struct Speck2DStage::Impl {
 
     bool sameShape(int nx_, int ny_) const { return nx == nx_ && ny == ny_ && n > 0; }
 
-    void ensureShape(int nx_, int ny_) {
+    void ensureShape(int nx_, int ny_, MemoryPool* pool, cudaStream_t stream) {
         if (sameShape(nx_, ny_)) return;
-        freeAll();
+        freeAll(stream);
         nx = nx_; ny = ny_; n = (size_t)nx * ny;
 
         Tree t = buildTree(nx, ny);
         nn = t.nnodes(); maxL = t.max_level;
         auto up = [&](int** dp, const std::vector<int>& h) {
-            FZ_CUDA_CHECK(cudaMalloc(dp, nn * 4));
+            *dp = palloc<int>(pool, stream, nn, "speck2d_tree_geom");
             FZ_CUDA_CHECK(cudaMemcpy(*dp, h.data(), nn * 4, cudaMemcpyHostToDevice));
         };
         up(&d_par, t.parent); up(&d_lf, t.is_leaf); up(&d_px, t.pixel);
@@ -98,56 +131,55 @@ struct Speck2DStage::Impl {
             level_start[L] = (int)flatL.size(); level_count[L] = (int)bl[L].size();
             for (int idn : bl[L]) flatL.push_back(idn);
         }
-        FZ_CUDA_CHECK(cudaMalloc(&d_levelnodes, flatL.size() * 4));
+        d_levelnodes = palloc<int>(pool, stream, flatL.size(), "speck2d_levelnodes");
         FZ_CUDA_CHECK(cudaMemcpy(d_levelnodes, flatL.data(), flatL.size() * 4, cudaMemcpyHostToDevice));
-        FZ_CUDA_CHECK(cudaMalloc(&d_lvl_starts, (maxL + 1) * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_lvl_counts, (maxL + 1) * 4));
+        d_lvl_starts = palloc<int>(pool, stream, (size_t)maxL + 1, "speck2d_lvl_starts");
+        d_lvl_counts = palloc<int>(pool, stream, (size_t)maxL + 1, "speck2d_lvl_counts");
         FZ_CUDA_CHECK(cudaMemcpy(d_lvl_starts, level_start.data(), (maxL + 1) * 4, cudaMemcpyHostToDevice));
         FZ_CUDA_CHECK(cudaMemcpy(d_lvl_counts, level_count.data(), (maxL + 1) * 4, cudaMemcpyHostToDevice));
         nFused = chooseShallowLevels(level_count);
 
         std::vector<int> leaves; for (int i = 0; i < nn; ++i) if (t.is_leaf[i]) leaves.push_back(i);
         nl = (int)leaves.size();
-        FZ_CUDA_CHECK(cudaMalloc(&d_leaves, nl * 4));
+        d_leaves = palloc<int>(pool, stream, nl, "speck2d_leaves");
         FZ_CUDA_CHECK(cudaMemcpy(d_leaves, leaves.data(), nl * 4, cudaMemcpyHostToDevice));
 
         // encode scratch
-        FZ_CUDA_CHECK(cudaMalloc(&d_mag, n * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_sgn, n));
-        FZ_CUDA_CHECK(cudaMalloc(&d_msb, n * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_on, nn * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_vis, nn));
-        FZ_CUDA_CHECK(cudaMalloc(&d_bitsA, nn * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_offA, nn * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_bitsB, nl * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_offB, nl * 4));
-        cub::DeviceScan::ExclusiveSum(d_tmpA, tmpbA, d_bitsA, d_offA, nn); FZ_CUDA_CHECK(cudaMalloc(&d_tmpA, tmpbA));
-        cub::DeviceScan::ExclusiveSum(d_tmpB, tmpbB, d_bitsB, d_offB, nl); FZ_CUDA_CHECK(cudaMalloc(&d_tmpB, tmpbB));
+        d_mag = palloc<uint32_t>(pool, stream, n, "speck2d_mag"); d_sgn = palloc<uint8_t>(pool, stream, n, "speck2d_sgn");
+        d_msb = palloc<int>(pool, stream, n, "speck2d_msb");
+        d_on = palloc<int>(pool, stream, nn, "speck2d_on"); d_vis = palloc<uint8_t>(pool, stream, nn, "speck2d_vis");
+        d_bitsA = palloc<int>(pool, stream, nn, "speck2d_bitsA"); d_offA = palloc<int>(pool, stream, nn, "speck2d_offA");
+        d_bitsB = palloc<int>(pool, stream, nl, "speck2d_bitsB"); d_offB = palloc<int>(pool, stream, nl, "speck2d_offB");
+        cub::DeviceScan::ExclusiveSum(d_tmpA, tmpbA, d_bitsA, d_offA, nn); d_tmpA = palloc<uint8_t>(pool, stream, tmpbA, "speck2d_cub_tmpA");
+        cub::DeviceScan::ExclusiveSum(d_tmpB, tmpbB, d_bitsB, d_offB, nl); d_tmpB = palloc<uint8_t>(pool, stream, tmpbB, "speck2d_cub_tmpB");
 
         // decode scratch (present/onset reuse d_vis/d_on's SIZE but decode needs
         // its own onset array distinct from encode's -- share d_on since encode
         // and decode never run concurrently for one Impl/shape).
-        FZ_CUDA_CHECK(cudaMalloc(&d_present, nn));
-        FZ_CUDA_CHECK(cudaMalloc(&d_flag, nn * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_rank, nn * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_len, nl * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_off, nl * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_decoeff, n * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_desgn, n));
+        d_present = palloc<uint8_t>(pool, stream, nn, "speck2d_present");
+        d_flag = palloc<int>(pool, stream, nn, "speck2d_flag"); d_rank = palloc<int>(pool, stream, nn, "speck2d_rank");
+        d_len = palloc<int>(pool, stream, nl, "speck2d_len"); d_off = palloc<int>(pool, stream, nl, "speck2d_off");
+        d_decoeff = palloc<uint32_t>(pool, stream, n, "speck2d_decoeff"); d_desgn = palloc<uint8_t>(pool, stream, n, "speck2d_desgn");
         cub::DeviceScan::ExclusiveSum(d_tmpLevel, tmpbLevel, d_flag, d_rank, nn);
-        FZ_CUDA_CHECK(cudaMalloc(&d_tmpLevel, tmpbLevel));
+        d_tmpLevel = palloc<uint8_t>(pool, stream, tmpbLevel, "speck2d_cub_tmpLevel");
         cub::DeviceScan::ExclusiveSum(d_tmpBit, tmpbBit, d_len, d_off, nl);
-        FZ_CUDA_CHECK(cudaMalloc(&d_tmpBit, tmpbBit));
-        FZ_CUDA_CHECK(cudaMalloc(&d_cursor, 4));
+        d_tmpBit = palloc<uint8_t>(pool, stream, tmpbBit, "speck2d_cub_tmpBit");
+        d_cursor = palloc<int>(pool, stream, 1, "speck2d_cursor");
     }
 
-    void ensureParseCap(uint64_t nbitsA) {
+    void ensureParseCap(uint64_t nbitsA, MemoryPool* pool, cudaStream_t stream) {
         if (nbitsA <= cap_nbitsA) return;
-        for (void* p : {(void*)d_bflag, (void*)d_brank, (void*)d_ones, (void*)d_gaps})
-            if (p) FZ_CUDA_CHECK_WARN(cudaFree(p));
+        for (void* p : {(void*)d_bflag, (void*)d_brank, (void*)d_ones, (void*)d_gaps}) pfree(p, stream);
         d_bflag = nullptr; d_brank = nullptr; d_ones = nullptr; d_gaps = nullptr;
-        FZ_CUDA_CHECK(cudaMalloc(&d_bflag, nbitsA * 4)); FZ_CUDA_CHECK(cudaMalloc(&d_brank, nbitsA * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_ones, nbitsA * 8)); FZ_CUDA_CHECK(cudaMalloc(&d_gaps, nbitsA * 4));
+        d_bflag = palloc<int>(pool, stream, nbitsA, "speck2d_bflag"); d_brank = palloc<int>(pool, stream, nbitsA, "speck2d_brank");
+        d_ones = palloc<uint64_t>(pool, stream, nbitsA, "speck2d_ones"); d_gaps = palloc<int>(pool, stream, nbitsA, "speck2d_gaps");
         cap_nbitsA = nbitsA;
     }
-    void ensureStreamCap(size_t nbytes) {
+    void ensureStreamCap(size_t nbytes, MemoryPool* pool, cudaStream_t stream) {
         if (nbytes <= cap_stream) return;
-        if (d_stream) FZ_CUDA_CHECK_WARN(cudaFree(d_stream));
+        pfree(d_stream, stream); d_stream = nullptr;
         size_t nb = nbytes ? nbytes : 1;
-        FZ_CUDA_CHECK(cudaMalloc(&d_stream, nb));
+        d_stream = palloc<uint8_t>(pool, stream, nb, "speck2d_stream");
         cap_stream = nb;
     }
 };
@@ -164,7 +196,7 @@ void Speck2DStage::postStreamSync(cudaStream_t /*stream*/) {
     pending_ = false;
 }
 
-void Speck2DStage::execute(cudaStream_t stream, MemoryPool* /*pool*/,
+void Speck2DStage::execute(cudaStream_t stream, MemoryPool* pool,
                            const std::vector<void*>& inputs,
                            const std::vector<void*>& outputs,
                            const std::vector<size_t>& sizes)
@@ -180,7 +212,7 @@ void Speck2DStage::execute(cudaStream_t stream, MemoryPool* /*pool*/,
     const size_t n = (size_t)nx * ny;
 
     if (!impl_) impl_ = new Impl();
-    impl_->ensureShape(nx, ny);
+    impl_->ensureShape(nx, ny, pool, stream);
     Impl& I = *impl_;
     auto g = [&](int cnt) { return dim3((unsigned)((cnt + 255) / 256)); };
 
@@ -223,8 +255,8 @@ void Speck2DStage::execute(cudaStream_t stream, MemoryPool* /*pool*/,
         // leaf-slots) words, each <=32 bits. Safe regardless of data.
         size_t words_ub = (size_t)I.nn + (size_t)I.nl + 4;
         if (words_ub > I.out_words_cap) {
-            if (I.d_out) FZ_CUDA_CHECK(cudaFree(I.d_out));
-            FZ_CUDA_CHECK(cudaMalloc(&I.d_out, words_ub * 4));
+            I.pfree(I.d_out, stream);
+            I.d_out = I.palloc<uint32_t>(pool, stream, words_ub, "speck2d_out");
             I.out_words_cap = words_ub;
         }
         FZ_CUDA_CHECK(cudaMemsetAsync(I.d_out, 0, I.out_words_cap * 4, stream));
@@ -257,15 +289,15 @@ void Speck2DStage::execute(cudaStream_t stream, MemoryPool* /*pool*/,
         FZ_CUDA_CHECK(cudaMemsetAsync(I.d_present, 0, I.nn, stream));
         if (B >= 0) {
             const size_t nbytes = sizes[0];
-            I.ensureStreamCap(nbytes);
+            I.ensureStreamCap(nbytes, pool, stream);
             FZ_CUDA_CHECK(cudaMemcpyAsync(I.d_stream, inputs[0], nbytes, cudaMemcpyDeviceToDevice, stream));
 
-            I.ensureParseCap(nbitsA > 0 ? nbitsA : 1);
+            I.ensureParseCap(nbitsA > 0 ? nbitsA : 1, pool, stream);
             if (nbitsA > 0) {
                 k_bitflags<<<g((int)nbitsA), 256, 0, stream>>>(I.d_stream, nbitsA, I.d_bflag);
                 void* tmp2 = nullptr; size_t tmpb2 = 0;
                 cub::DeviceScan::ExclusiveSum(tmp2, tmpb2, I.d_bflag, I.d_brank, (int)nbitsA, stream);
-                FZ_CUDA_CHECK(cudaMalloc(&tmp2, tmpb2));
+                tmp2 = I.palloc<uint8_t>(pool, stream, tmpb2, "speck2d_decode_cub_tmp");
                 cub::DeviceScan::ExclusiveSum(tmp2, tmpb2, I.d_bflag, I.d_brank, (int)nbitsA, stream);
                 int last_r, last_f;
                 FZ_CUDA_CHECK(cudaMemcpyAsync(&last_r, I.d_brank + nbitsA - 1, 4, cudaMemcpyDeviceToHost, stream));
@@ -274,7 +306,7 @@ void Speck2DStage::execute(cudaStream_t stream, MemoryPool* /*pool*/,
                 int num_ones = last_r + last_f;
                 k_scatter_ones<<<g((int)nbitsA), 256, 0, stream>>>(I.d_bflag, I.d_brank, nbitsA, I.d_ones);
                 k_gaps<<<g(num_ones), 256, 0, stream>>>(I.d_ones, num_ones, I.d_gaps);
-                FZ_CUDA_CHECK(cudaFree(tmp2));
+                I.pfree(tmp2, stream);
             }
 
             int cursor = 0;

@@ -35,6 +35,7 @@
 #include "backend/types.h"
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -235,6 +236,8 @@ private:
     size_t    scratch_capacity_;
     MemoryPool* scratch_pool_owner_ = nullptr;
     bool        scratch_from_pool_ = false;
+    /// Expires if the pool is destroyed before this stage. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> scratch_alive_;
 };
 
 } // namespace fz

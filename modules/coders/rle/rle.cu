@@ -382,15 +382,29 @@ template<typename T>
 RLEStage<T>::~RLEStage() {
     auto dev_free = [&](void* p) {
         if (!p) return;
-        if (fwd_from_pool_ && fwd_scratch_pool_) fwd_scratch_pool_->free(p, 0);
-        else cudaFree(p);
+        if (fwd_from_pool_ && fwd_scratch_pool_ && !fwd_scratch_alive_.expired())
+            fwd_scratch_pool_->free(p, 0);
+        else if (!fwd_from_pool_) cudaFree(p);
     };
     dev_free(d_is_boundary_);
     dev_free(d_boundary_scan_);
     dev_free(d_boundary_positions_);
     dev_free(d_values_scratch_);
     dev_free(d_lengths_scratch_);
-    if (h_num_runs_) { cudaFreeHost(h_num_runs_); h_num_runs_ = nullptr; }
+    if (h_num_runs_) {
+        if (h_num_runs_pool_ && !h_num_runs_alive_.expired())
+            h_num_runs_pool_->freePersistentPinned(h_num_runs_);
+        else if (!h_num_runs_pool_)
+            cudaFreeHost(h_num_runs_);
+        h_num_runs_ = nullptr;
+    }
+    if (h_dec_total_size_) {
+        if (h_dec_total_size_pool_ && !h_dec_total_size_alive_.expired())
+            h_dec_total_size_pool_->freePersistentPinned(h_dec_total_size_);
+        else if (!h_dec_total_size_pool_)
+            cudaFreeHost(h_dec_total_size_);
+        h_dec_total_size_ = nullptr;
+    }
 }
 
 // ── execute() ─────────────────────────────────────────────────────────────────
@@ -466,11 +480,27 @@ void RLEStage<T>::execute(
                                               run_lengths, d_run_offsets, num_runs, stream);
             });
 
-        // Read total output size (last element of prefix sum)
-        uint32_t total_output_size;
-        FZ_CUDA_CHECK(cudaMemcpyAsync(&total_output_size, d_run_offsets + num_runs - 1,
+        // Total output size (last element of the prefix sum) is only needed for
+        // the size report, not to launch the decompress kernel below — read it
+        // into a pinned buffer async and defer the host wait to
+        // completePendingDecodeSync() (via postStreamSync() or the size
+        // getters) instead of blocking here before the kernel is even issued.
+        if (!h_dec_total_size_) {
+            if (pool) {
+                h_dec_total_size_ = static_cast<uint32_t*>(
+                    pool->allocatePersistentPinned(sizeof(uint32_t), "rle_dec_total_size"));
+                if (!h_dec_total_size_)
+                    throw std::runtime_error("RLEStage: failed to allocate pinned decode-size readback from MemoryPool");
+                h_dec_total_size_pool_  = pool;
+                h_dec_total_size_alive_ = pool->lifetimeToken();
+            } else {
+                FZ_CUDA_CHECK(cudaHostAlloc(&h_dec_total_size_, sizeof(uint32_t),
+                                            cudaHostAllocDefault));
+                h_dec_total_size_pool_ = nullptr;
+            }
+        }
+        FZ_CUDA_CHECK(cudaMemcpyAsync(h_dec_total_size_, d_run_offsets + num_runs - 1,
                        sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
         launchRLEDecompressKernel<T>(
             compressed_values, run_lengths, d_run_offsets,
@@ -479,12 +509,15 @@ void RLEStage<T>::execute(
         if (pool) {
             pool->free(d_run_offsets, stream);
         } else {
+            // No-pool fallback: raw cudaFree needs the stream idle first, which
+            // also completes the pinned readback above — no pending state needed.
             FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(d_run_offsets));
         }
         fz::backend::freeTempStorage(pool, d_temp, stream);
 
-        actual_output_sizes_ = {total_output_size * sizeof(T)};
+        dec_last_stream_  = stream;
+        dec_sync_pending_ = true;
 
     } else {
         // ── COMPRESSION (forward, CUDA Graph-capturable) ─────────────────────
@@ -507,8 +540,9 @@ void RLEStage<T>::execute(
             // Free previous allocations
             auto dev_free = [&](void* p) {
                 if (!p) return;
-                if (fwd_from_pool_ && fwd_scratch_pool_) fwd_scratch_pool_->free(p, 0);
-                else {
+                if (fwd_from_pool_ && fwd_scratch_pool_ && !fwd_scratch_alive_.expired())
+                    fwd_scratch_pool_->free(p, 0);
+                else if (!fwd_from_pool_) {
                     FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
                     cudaFree(p);
                 }
@@ -532,6 +566,7 @@ void RLEStage<T>::execute(
                     n * sizeof(uint32_t), stream, "rle_lengths_scratch", /*persistent=*/true));
                 fwd_scratch_pool_ = pool;
                 fwd_from_pool_    = true;
+                fwd_scratch_alive_ = pool->lifetimeToken();
             } else {
                 FZ_CUDA_CHECK(cudaMalloc(&d_is_boundary_,       n));
                 FZ_CUDA_CHECK(cudaMalloc(&d_boundary_scan_,     n * sizeof(uint32_t)));
@@ -543,8 +578,18 @@ void RLEStage<T>::execute(
             }
 
             if (!h_num_runs_) {
-                FZ_CUDA_CHECK(cudaHostAlloc(&h_num_runs_, sizeof(uint32_t),
-                                            cudaHostAllocDefault));
+                if (pool) {
+                    h_num_runs_ = static_cast<uint32_t*>(
+                        pool->allocatePersistentPinned(sizeof(uint32_t), "rle_num_runs"));
+                    if (!h_num_runs_)
+                        throw std::runtime_error("RLEStage: failed to allocate pinned num_runs readback from MemoryPool");
+                    h_num_runs_pool_  = pool;
+                    h_num_runs_alive_ = pool->lifetimeToken();
+                } else {
+                    FZ_CUDA_CHECK(cudaHostAlloc(&h_num_runs_, sizeof(uint32_t),
+                                                cudaHostAllocDefault));
+                    h_num_runs_pool_ = nullptr;
+                }
             }
             fwd_scratch_n_ = n;
         }
@@ -657,6 +702,7 @@ void RLEStage<T>::execute(
 template<typename T>
 void RLEStage<T>::postStreamSync(cudaStream_t /*stream*/) {
     completePendingSync();
+    completePendingDecodeSync();
 }
 
 // Explicit template instantiations

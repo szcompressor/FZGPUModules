@@ -11,9 +11,11 @@
 
 #include "outlier_correct_stage.h"
 #include "outlier_correct_kernels.cuh"
+#include "mem/mempool.h"
 #include "cuda_check.h"
 #include <cub/cub.cuh>
 #include <algorithm>
+#include <memory>
 #include <stdexcept>
 
 namespace fz {
@@ -25,24 +27,54 @@ struct OutlierCorrectStage<Reconstructor>::Impl {
     int* d_flag = nullptr; float* d_corrval = nullptr; int* d_rank = nullptr;
     void* d_tmp = nullptr; size_t tmpb = 0;
 
-    ~Impl() { freeAll(); }
+    MemoryPool* pool_owner_ = nullptr;
+    bool        from_pool_  = false;
+    /// Expires if the pool is destroyed before this Impl. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> pool_alive_;
 
-    void freeAll() {
-        void** ptrs[] = { (void**)&d_coeff, (void**)&d_flag, (void**)&d_corrval, (void**)&d_rank, &d_tmp };
-        for (void** p : ptrs) { if (*p) FZ_CUDA_CHECK_WARN(cudaFree(*p)); *p = nullptr; }
+    ~Impl() { freeAll(0); }
+
+    void freeAll(cudaStream_t stream) {
+        auto rel = [&](void* p) {
+            if (!p) return;
+            if (from_pool_ && pool_owner_ && !pool_alive_.expired()) pool_owner_->free(p, stream);
+            else if (!from_pool_) FZ_CUDA_CHECK_WARN(cudaFree(p));
+        };
+        rel(d_coeff); rel(d_flag); rel(d_corrval); rel(d_rank); rel(d_tmp);
+        d_coeff = nullptr; d_flag = nullptr; d_corrval = nullptr; d_rank = nullptr; d_tmp = nullptr;
         n = 0; tmpb = 0;
     }
 
-    void ensureShape(size_t n_) {
+    void ensureShape(size_t n_, MemoryPool* pool, cudaStream_t stream) {
         if (n == n_ && n > 0) return;
-        freeAll();
+        freeAll(stream);
         n = n_;
-        FZ_CUDA_CHECK(cudaMalloc(&d_coeff, n * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_flag, n * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_corrval, n * 4));
-        FZ_CUDA_CHECK(cudaMalloc(&d_rank, n * 4));
+        if (pool) {
+            d_coeff   = static_cast<float*>(pool->allocate(n * 4, stream, "outlier_coeff",   true));
+            d_flag    = static_cast<int*>  (pool->allocate(n * 4, stream, "outlier_flag",    true));
+            d_corrval = static_cast<float*>(pool->allocate(n * 4, stream, "outlier_corrval", true));
+            d_rank    = static_cast<int*>  (pool->allocate(n * 4, stream, "outlier_rank",    true));
+            if (!d_coeff || !d_flag || !d_corrval || !d_rank)
+                throw std::runtime_error("OutlierCorrectStage: failed to allocate persistent scratch from MemoryPool");
+            pool_owner_ = pool;
+            from_pool_  = true;
+            pool_alive_ = pool->lifetimeToken();
+        } else {
+            FZ_CUDA_CHECK(cudaMalloc(&d_coeff, n * 4));
+            FZ_CUDA_CHECK(cudaMalloc(&d_flag, n * 4));
+            FZ_CUDA_CHECK(cudaMalloc(&d_corrval, n * 4));
+            FZ_CUDA_CHECK(cudaMalloc(&d_rank, n * 4));
+            pool_owner_ = nullptr;
+            from_pool_  = false;
+        }
         cub::DeviceScan::ExclusiveSum(d_tmp, tmpb, d_flag, d_rank, (int)n);
-        FZ_CUDA_CHECK(cudaMalloc(&d_tmp, tmpb));
+        if (pool) {
+            d_tmp = pool->allocate(tmpb, stream, "outlier_cub_tmp", true);
+            if (!d_tmp)
+                throw std::runtime_error("OutlierCorrectStage: failed to allocate CUB temp storage from MemoryPool");
+        } else {
+            FZ_CUDA_CHECK(cudaMalloc(&d_tmp, tmpb));
+        }
     }
 };
 
@@ -50,7 +82,7 @@ template <typename Reconstructor>
 OutlierCorrectStage<Reconstructor>::~OutlierCorrectStage() { delete impl_; }
 
 template <typename Reconstructor>
-void OutlierCorrectStage<Reconstructor>::execute(cudaStream_t stream, MemoryPool* /*pool*/,
+void OutlierCorrectStage<Reconstructor>::execute(cudaStream_t stream, MemoryPool* pool,
                                                   const std::vector<void*>& inputs,
                                                   const std::vector<void*>& outputs,
                                                   const std::vector<size_t>& sizes)
@@ -64,7 +96,7 @@ void OutlierCorrectStage<Reconstructor>::execute(cudaStream_t stream, MemoryPool
     const size_t n = (size_t)nx * ny * (size_t)std::max(nz, 1);
     if (!impl_) impl_ = new Impl();
     Impl& I = *impl_;
-    I.ensureShape(n);
+    I.ensureShape(n, pool, stream);
     auto g = [&](int cnt) { return dim3((unsigned)((cnt + 255) / 256)); };
 
     // codes passthrough (output[1]) is identical in both directions: pure

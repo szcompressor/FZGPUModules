@@ -221,8 +221,9 @@ static void launchDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks, c
 RAZEStage::~RAZEStage() {
     auto fwd_free = [&](void* p) {
         if (!p) return;
-        if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(p, 0);
-        else cudaFree(p);
+        if (scratch_from_pool_ && scratch_pool_owner_ && !scratch_alive_.expired())
+            scratch_pool_owner_->free(p, 0);
+        else if (!scratch_from_pool_) cudaFree(p);
     };
     fwd_free(d_scratch_);
     fwd_free(d_sizes_dev_);
@@ -325,9 +326,9 @@ void RAZEStage::execute(
         if (n_chunks > scratch_capacity_) {
             auto fwd_free = [&](void* p) {
                 if (!p) return;
-                if (scratch_from_pool_ && scratch_pool_owner_)
+                if (scratch_from_pool_ && scratch_pool_owner_ && !scratch_alive_.expired())
                     scratch_pool_owner_->free(p, stream);
-                else { FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream)); cudaFree(p); }
+                else if (!scratch_from_pool_) { FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream)); cudaFree(p); }
             };
             fwd_free(d_scratch_);    d_scratch_    = nullptr;
             fwd_free(d_sizes_dev_);  d_sizes_dev_  = nullptr;
@@ -343,6 +344,7 @@ void RAZEStage::execute(
                     throw std::runtime_error("RAZEStage: failed to allocate persistent forward scratch from MemoryPool");
                 scratch_pool_owner_ = pool;
                 scratch_from_pool_  = true;
+                scratch_alive_      = pool->lifetimeToken();
             } else {
                 FZ_CUDA_CHECK(cudaMalloc(&d_scratch_,     n_chunks * (size_t)chunk_size_));
                 FZ_CUDA_CHECK(cudaMalloc(&d_sizes_dev_,   n_chunks * sizeof(uint32_t)));
