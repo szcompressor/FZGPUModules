@@ -44,6 +44,18 @@ static constexpr int kShift = 1;
 static constexpr int kMaxSignalBytesU16 = 2;
 static constexpr int kMaxSignalBytesU32 = 4;
 
+// ── Lower-bound guard rationale (shared by all four encode-side kernels) ───────
+// compress_u16, compress_u32, and the local re-encode step inside
+// decompress_u16/decompress_u32 each accumulate a per-lane `bit_offset` while
+// packing codes into `local_bits`. With extreme-magnitude input the
+// center/diff arithmetic upstream (uint32_t accumulator, int-cast unsigned
+// diff) can wrap and drive bit_offset negative — a distinct failure mode from
+// the "too many bits" overflow that's also checked alongside it. ADM's
+// algorithm assumes bounded quantization codes (kMaxSignalBytesU16/U32
+// above); the `if (bit_offset < 0) { ...; bit_offset = 0; }` guard in each
+// kernel only clamps to prevent the negative index from corrupting memory —
+// it does not make the output meaningful for such inputs.
+
 // ── Size helpers ──────────────────────────────────────────────────────────────
 
 inline size_t adm_gsize(size_t n) {

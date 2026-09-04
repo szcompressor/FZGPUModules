@@ -11,7 +11,8 @@
  * @brief Separable multi-level CDF 9/7 DWT built on the 1-D lifting primitive.
  *
  * STATUS: 1-D/2-D/3-D (both dyadic and wavelet-packet) implemented and validated
- * bit-exact vs SPERR (double). Long-line (> shared memory) fallback is TODO. See
+ * bit-exact vs SPERR (double). Long-line (> shared memory) fallback is TODO —
+ * see TODO(longline) near the end of this file. Design background:
  * memory/cdf97_dwt_design.md.
  *
  * Follows SPERR's separable dyadic (Mallat) decomposition: transform each axis,
@@ -592,7 +593,8 @@ inline void dwt1d(T* d, int nx, bool inverse, cudaStream_t stream)
  * Forward/inverse 2-D CDF 9/7 DWT on a row-major (ny x nx) field, in place.
  * Forward: per level, X-rows then Y-columns, recursing on the top-left corner.
  * Inverse: exact reverse (Y then X, levels descending). Bit-exact vs SPERR
- * (double). Assumes max(nx,ny)*sizeof(T) fits in shared memory (long-line TODO).
+ * (double). Assumes max(nx,ny)*sizeof(T) fits in shared memory — see
+ * TODO(longline) near the end of this file.
  */
 template <typename T>
 inline void dwt2d_multilaunch(T* d, int nx, int ny, bool inverse, cudaStream_t stream)

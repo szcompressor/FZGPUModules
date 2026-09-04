@@ -162,13 +162,7 @@ __global__ static void adm_map_thrust_u32(
         }
     }
 
-    // Lower-bound guard: with extreme-magnitude input the center/diff
-    // arithmetic above (uint32_t accumulator, int-cast unsigned diff) can
-    // wrap and drive bit_offset negative — a distinct failure mode from
-    // the overflow above. ADM's algorithm assumes bounded quantization
-    // codes (see the class doc comment); this only clamps to prevent the
-    // negative index from corrupting memory, it does not make the output
-    // meaningful for such inputs.
+    // Lower-bound guard — see "Lower-bound guard rationale" in adm_kernels.h.
     if (bit_offset < 0) {
         atomicOr(d_overflow_flag, 1u);
         bit_offset = 0;
@@ -300,13 +294,7 @@ __global__ static void adm_map_decoupled_u32(
         }
     }
 
-    // Lower-bound guard: with extreme-magnitude input the center/diff
-    // arithmetic above (uint32_t accumulator, int-cast unsigned diff) can
-    // wrap and drive bit_offset negative — a distinct failure mode from
-    // the overflow above. ADM's algorithm assumes bounded quantization
-    // codes (see the class doc comment); this only clamps to prevent the
-    // negative index from corrupting memory, it does not make the output
-    // meaningful for such inputs.
+    // Lower-bound guard — see "Lower-bound guard rationale" in adm_kernels.h.
     if (bit_offset < 0) {
         atomicOr(d_overflow_flag, 1u);
         bit_offset = 0;
