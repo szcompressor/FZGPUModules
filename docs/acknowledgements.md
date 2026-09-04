@@ -245,7 +245,7 @@ SPERR*. IPDPS 2023.
 
 **Stages:**
 
-- **`Cdf97Stage`** (`modules/transforms/cdf97/`) — direct port of the numerically
+- **Cdf97Stage** (`modules/transforms/cdf97/`) — direct port of the numerically
   load-bearing constants and rules from `sperr::CDF97` (`include/CDF97.h`,
   `src/CDF97.cpp`): the lifting constants (computed from the filter bank
   coefficients, not the commented QccPack literal values), the symmetric
@@ -255,7 +255,7 @@ SPERR*. IPDPS 2023.
   cooperative-groups level fusion) are FZGPUModules' own — none of that exists in
   SPERR, which runs single-threaded CPU.
 
-- **`Speck2DStage`** (`modules/coders/speck2d/`) — **algorithmic attribution only,
+- **Speck2DStage** (`modules/coders/speck2d/`) — **algorithmic attribution only,
   no SPERR code used.** Codes the same kind of information SPERR's `SPECK2D_INT`
   bit-plane coder does, but the bitstream, data structures, and encode/decode
   algorithms are an independent, from-scratch, GPU-parallel-decodable design.
@@ -264,8 +264,8 @@ SPERR*. IPDPS 2023.
   `memory/speck_algorithm_writeup.md` for the full derivation and novelty
   statement.
 
-- **`OutlierCorrectStage<Reconstructor>` / `Cdf97OutlierCorrectStage`**
-  (`modules/coders/outlier_correct/`, `modules/coders/cdf97_outlier_correct/`) —
+- **OutlierCorrectStage<Reconstructor> / Cdf97OutlierCorrectStage**
+  (modules/coders/outlier_correct/, modules/coders/cdf97_outlier_correct/) —
   **algorithmic attribution only, no SPERR code used.** Implements the same
   *mechanism* as SPERR's `Outlier_Coder` (dequantize + inverse-transform a trial
   reconstruction, diff against the original, exact-correct every point over

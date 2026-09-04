@@ -1,9 +1,6 @@
 # Extending FZGPUModules {#extending}
 
-Everything involved in adding a new stage, teaching it to fuse, and the design
-notes behind the stages that did not fit the plain-chain model. These pages used
-to sit loose at the top level of the manual; they are collected here so the
-top-level navigation stays focused on *using* the library.
+Everything involved in adding a new stage.
 
 ## Adding a stage
 
@@ -23,7 +20,7 @@ top-level navigation stays focused on *using* the library.
   implements to become eligible for [Pipeline Specialization](\ref pipeline_specialization)
   (fusion + finalize-time optimization).
 
-## Design notes
+<!-- ## Design notes
 
 Working notes for stages whose representation is not a plain linear chain. These
 are specifications and scoping documents, not user-facing stage references.
@@ -31,4 +28,4 @@ are specifications and scoping documents, not user-facing stage references.
 - \subpage szx_conditional_representation — SZx as a conditional per-block
   representation, and why it cannot be decomposed into ordinary stages.
 - \subpage experimental_szp — `SZpStage`, the quarantined GPU reference
-  compressor, and the supported `szp_composed.toml` chain that replaces it.
+  compressor, and the supported `szp_composed.toml` chain that replaces it. -->

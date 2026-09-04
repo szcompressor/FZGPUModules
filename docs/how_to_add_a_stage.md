@@ -25,13 +25,11 @@ A stage is a single transformation in the pipeline (predictor, coder, transform,
 The pipeline interacts with every stage exclusively through the `Stage` base class interface —
 there is no casting or type-name branching anywhere in pipeline or DAG code.
 
-> To make pipelines that use your stage eligible for [Pipeline
-> Specialization](pipeline_specialization.md) (automatic kernel fusion +
-> optimizations, both compress and decompress), implement the declaration contract
-> in [pipeline_specialization_internals.md](pipeline_specialization_internals.md)
-> after the staged stage round-trips. For the design judgment behind a stage's
-> shape and access pattern, see the (WIP) deep-dive:
-> [developing_stages_deep_dive.md](developing_stages_deep_dive.md).
+To make pipelines that use your stage eligible for [Pipeline
+Specialization](pipeline_specialization.md) (automatic kernel fusion +
+optimizations, both compress and decompress), implement the declaration contract
+in [pipeline_specialization_internals.md](pipeline_specialization_internals.md)
+after the staged stage round-trips.
 
 **Files you will touch for a new stage.** `scripts/new_stage.sh` scaffolds and
 edits the ones marked *(script)*, so a hand-written stage really only fills in the

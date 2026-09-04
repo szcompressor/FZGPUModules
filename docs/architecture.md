@@ -1,10 +1,7 @@
 # Architecture Overview {#architecture}
 
 This page explains how FZGPUModules is structured internally: how stages, pipelines,
-and memory management fit together. You don't need to understand all of this to use
-the library — the \ref mainpage "Quick Start" is a better first stop. Read this if
-you want to understand *why* the API works the way it does, or if you're extending
-the library.
+and memory management fit together.
 
 ---
 
