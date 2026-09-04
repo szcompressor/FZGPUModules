@@ -12,6 +12,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include "fused/common/data_type_of.h"
+
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -315,13 +317,7 @@ private:
                 + std::to_string(config_.blocks_per_tile));
     }
 
-    static DataType getElementDataType() {
-        if (std::is_same<T, int8_t>::value)  return DataType::INT8;
-        if (std::is_same<T, int16_t>::value) return DataType::INT16;
-        if (std::is_same<T, int32_t>::value) return DataType::INT32;
-        if (std::is_same<T, int64_t>::value) return DataType::INT64;
-        return DataType::INT32;
-    }
+    static DataType getElementDataType() { return fused::dataTypeOf<T>(); }
 };
 
 extern template class AdaptiveLorenzoStage<int16_t>;

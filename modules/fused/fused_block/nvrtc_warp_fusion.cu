@@ -25,13 +25,7 @@ namespace fused {
 namespace ab = fz::adaptive_bitpack;
 
 namespace {
-[[noreturn]] void cuThrow(CUresult r, const char* what) {
-    const char* name = nullptr; cuGetErrorName(r, &name);
-    const char* str  = nullptr; cuGetErrorString(r, &str);
-    throw std::runtime_error(std::string("NVRTC-warp: ") + what + ": " +
-                             (name ? name : "?") + " (" + (str ? str : "") + ")");
-}
-#define CU_CHECK(call) do { CUresult _r = (call); if (_r != CUDA_SUCCESS) cuThrow(_r, #call); } while (0)
+#define CU_CHECK(call) FZ_CU_CHECK(call, "NVRTC-warp")
 } // namespace
 
 std::string generateWarpFusionSource(const WarpFusionSpec& spec) {
@@ -122,11 +116,49 @@ static bool envOn(const char* name) {
     const char* e = std::getenv(name);
     return e && (e[0] == '1' || e[0] == 'o' || e[0] == 'O' || e[0] == 't' || e[0] == 'T');
 }
-static float adaptiveThreshold() {   // avg fixed-rate crossover: <= → TI, > → warp-coop
-    if (const char* e = std::getenv("FZ_ADAPTIVE_THRESH")) { const float v = std::atof(e); if (v > 0) return v; }
-    return 16.0f;   // measured crossover: xx r~14 (TI wins 393 vs 236), vx r~17.6 (warp-coop wins);
-                    // provisional 2-point fit — retune with more fields.
-}
+
+/**
+ * All `FZ_*` tuning knobs for this launcher, parsed once (magic-static init on
+ * first `get()` call) instead of re-reading and re-parsing the environment on
+ * every `launchNvrtcWarpFused()` call.
+ */
+struct WarpFusionEnvConfig {
+    bool  force_ti        = false;  ///< FZ_TI — force the thread-independent path.
+    bool  adaptive_probe  = false;  ///< FZ_ADAPTIVE — probe avg rate to choose TI vs warp-coop.
+    // Measured crossover: xx r~14 (TI wins 393 vs 236), vx r~17.6 (warp-coop wins);
+    // provisional 2-point fit — retune with more fields. FZ_ADAPTIVE_THRESH overrides.
+    float adaptive_thresh = 16.0f;
+    // Measured optimum with float4 loads (more warps + less local mem than cuSZp's 32).
+    // FZ_TI_BPT overrides.
+    int   ti_bpt          = 8;
+    bool  single_pass     = true;   ///< FZ_SINGLEPASS — default on; '0'/'o'/'f' (case-insens.) disables.
+    bool  sp_bpw_forced   = false;  ///< FZ_SP_BPW was set to one of the accepted values below.
+    int   sp_bpw          = 0;      ///< Forced blocks-per-warp for the single-pass path.
+
+    static const WarpFusionEnvConfig& get() {
+        static const WarpFusionEnvConfig cfg = [] {
+            WarpFusionEnvConfig c;
+            c.force_ti       = envOn("FZ_TI");
+            c.adaptive_probe = envOn("FZ_ADAPTIVE");
+            if (const char* e = std::getenv("FZ_ADAPTIVE_THRESH")) {
+                const float v = std::atof(e); if (v > 0) c.adaptive_thresh = v;
+            }
+            if (const char* e = std::getenv("FZ_TI_BPT")) {
+                const int v = std::atoi(e); if (v >= 1 && v <= 256) c.ti_bpt = v;
+            }
+            if (const char* e = std::getenv("FZ_SINGLEPASS"))
+                c.single_pass = !(e[0] == '0' || e[0] == 'o' || e[0] == 'O' ||
+                                   e[0] == 'f' || e[0] == 'F');
+            if (const char* e = std::getenv("FZ_SP_BPW")) {
+                const int v = std::atoi(e);
+                for (int a : {16, 32, 64, 128, 256, 512, 1024})
+                    if (v == a) { c.sp_bpw_forced = true; c.sp_bpw = v; break; }
+            }
+            return c;
+        }();
+        return cfg;
+    }
+};
 
 // Probe: over a strided sample of blocks, compute each block's fixed-rate (serial Lorenzo1D +
 // bitWidth) and accumulate. Cheap prediction-quality signal for the adaptive dispatch.
@@ -168,17 +200,6 @@ static float probeAvgRate(const float* d_in, size_t n, float inv2eb, size_t num_
     pool->free(d_cnt, stream); pool->free(d_sum, stream);
     return h_cnt ? static_cast<float>(h_sum) / static_cast<float>(h_cnt) : 0.0f;
 }
-static int tiBlocksPerThread() {   // blocks each thread owns; warp = 32*this blocks
-    if (const char* e = std::getenv("FZ_TI_BPT")) { const int v = std::atoi(e); if (v >= 1 && v <= 256) return v; }
-    return 8;   // measured optimum with float4 loads (more warps + less local mem than cuSZp's 32)
-}
-
-static bool singlePassEnabled() {
-    const char* e = std::getenv("FZ_SINGLEPASS");
-    if (!e) return true;                                   // default on
-    return !(e[0] == '0' || e[0] == 'o' || e[0] == 'O' || e[0] == 'f' || e[0] == 'F');
-}
-
 // Blocks per warp (granularity knob): each warp owns this many consecutive blocks, so the
 // look-back scans num_blocks/BPW elements. Coarser (bigger BPW) = fewer scan elements + more
 // work to hide the look-back, but holds BPW*EPL deltas/lane in local memory and needs enough
@@ -186,10 +207,8 @@ static bool singlePassEnabled() {
 // the measured compute optimum) that still leaves ~32k warps; smaller fields drop to a finer
 // BPW so they don't starve the GPU. FZ_SP_BPW overrides for experiments.
 static int singlePassBlocksPerWarp(size_t num_blocks) {
-    if (const char* e = std::getenv("FZ_SP_BPW")) {
-        const int v = std::atoi(e);
-        for (int a : {16, 32, 64, 128, 256, 512, 1024}) if (v == a) return v;
-    }
+    const WarpFusionEnvConfig& cfg = WarpFusionEnvConfig::get();
+    if (cfg.sp_bpw_forced) return cfg.sp_bpw;
     constexpr size_t target_warps = 32768;   // several waves across the H100's SMs
     for (int bpw : {128, 64, 32, 16})
         if (num_blocks / static_cast<size_t>(bpw) >= target_warps) return bpw;
@@ -233,18 +252,19 @@ size_t launchNvrtcWarpFused(
     // owns 32*BPT blocks; scan over num_warps = ceil(num_blocks/(32*BPT)). Byte-identical to AB.
     // Use TI when the chain supports it AND (FZ_TI forces it, OR FZ_ADAPTIVE probes low avg rate
     // = compressible data, TI's winning regime). Both paths are byte-identical → pure throughput.
+    const WarpFusionEnvConfig& env_cfg = WarpFusionEnvConfig::get();
     bool use_ti = false;
     if (tiSupportedChain(spec)) {
-        if (envOn("FZ_TI")) {
+        if (env_cfg.force_ti) {
             use_ti = true;
-        } else if (envOn("FZ_ADAPTIVE")) {
+        } else if (env_cfg.adaptive_probe) {
             const float inv2eb  = (params_bytes >= sizeof(float)) ? *reinterpret_cast<const float*>(pred_params) : 0.0f;
             const float avg_r   = probeAvgRate(d_in, n_ab, inv2eb, num_blocks, pool, stream);
-            use_ti = (avg_r <= adaptiveThreshold());
+            use_ti = (avg_r <= env_cfg.adaptive_thresh);
         }
     }
     if (use_ti) {
-        const int      BPT             = tiBlocksPerThread();
+        const int      BPT             = env_cfg.ti_bpt;
         const size_t   blocks_per_warp = static_cast<size_t>(BPT) * 32u;
         const unsigned num_warps       = static_cast<unsigned>((num_blocks + blocks_per_warp - 1) / blocks_per_warp);
         auto* d_state = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_warps, stream, "ti_lb_state"));
@@ -272,8 +292,8 @@ size_t launchNvrtcWarpFused(
     // Small fields can't spawn enough warps to hide the cross-warp look-back latency, so the
     // well-tuned two-pass CUB scan wins there; gate single-pass on a minimum block count
     // (bypassed when FZ_SP_BPW forces an explicit granularity for experiments).
-    bool use_single_pass = singlePassEnabled();
-    if (use_single_pass && !std::getenv("FZ_SP_BPW") && num_blocks < (1u << 20))
+    bool use_single_pass = env_cfg.single_pass;
+    if (use_single_pass && !env_cfg.sp_bpw_forced && num_blocks < (1u << 20))
         use_single_pass = false;
     // The single-pass body holds BlocksPerWarp*EPL deltas per lane in local
     // memory across the look-back; for EPL > 2 that spills badly. The two-pass

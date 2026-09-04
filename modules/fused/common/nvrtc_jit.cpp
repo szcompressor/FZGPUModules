@@ -18,6 +18,15 @@
 namespace fz {
 namespace fused {
 
+[[noreturn]] void cuThrow(int result, const char* prefix, const char* what) {
+    CUresult    r    = static_cast<CUresult>(result);
+    const char* name = nullptr; cuGetErrorName(r, &name);
+    const char* str  = nullptr; cuGetErrorString(r, &str);
+    throw std::runtime_error(std::string(prefix) + ": " + what + ": " +
+                             (name ? name : "?") + " (" + (str ? str : "") + ")");
+}
+#define CU_CHECK(call) FZ_CU_CHECK(call, "NVRTC-JIT")
+
 namespace {
 
 // ── Minimal C++ stdlib stubs handed to NVRTC in-memory. The op headers use only a
@@ -75,14 +84,6 @@ template<class T> using make_signed_t = typename make_signed<T>::type;
 )H";
 
 constexpr const char* kCassert = "#pragma once\n";  // assert() is NVRTC-builtin
-
-[[noreturn]] void cuThrow(CUresult r, const char* what) {
-    const char* name = nullptr; cuGetErrorName(r, &name);
-    const char* str  = nullptr; cuGetErrorString(r, &str);
-    throw std::runtime_error(std::string("NVRTC-JIT: ") + what + ": " +
-                             (name ? name : "?") + " (" + (str ? str : "") + ")");
-}
-#define CU_CHECK(call) do { CUresult _r = (call); if (_r != CUDA_SUCCESS) cuThrow(_r, #call); } while (0)
 
 // One thread's current context, or the device's primary context if none is set.
 CUcontext ensureContext() {

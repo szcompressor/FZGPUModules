@@ -30,6 +30,7 @@
 #include "backend/types.h"
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -304,6 +305,21 @@ private:
     /// Completes the deferred 4-entry per-port size readback used by split mode.
     void finishSplitReadback(fz::stream_t stream) const;
 
+    /// Frees the twelve persistent forward scratch buffers and nulls the
+    /// member pointers. `sync_before_cuda_free` guards a stream sync ahead of
+    /// the cudaFree fallback path -- skipped from the destructor (must not
+    /// throw), applied from execute()'s scratch-regrow path.
+    void freeForwardScratch(fz::stream_t stream, bool sync_before_cuda_free);
+
+    void executeForward(fz::stream_t stream, MemoryPool* pool,
+                         const std::vector<void*>& inputs,
+                         const std::vector<void*>& outputs,
+                         size_t in_bytes);
+    void executeInverse(fz::stream_t stream, MemoryPool* pool,
+                         const std::vector<void*>& inputs,
+                         const std::vector<void*>& outputs,
+                         size_t in_bytes);
+
     bool     is_inverse_;
     uint32_t chunk_size_;
     uint32_t saved_chunk_size_ = 0;
@@ -348,6 +364,8 @@ private:
     size_t      scratch_capacity_ = 0;
     MemoryPool* scratch_pool_owner_ = nullptr;
     bool        scratch_from_pool_ = false;
+    /// Expires if the pool is destroyed before this stage. See MemoryPool::lifetimeToken().
+    std::weak_ptr<const void> scratch_alive_;
 };
 
 } // namespace fz

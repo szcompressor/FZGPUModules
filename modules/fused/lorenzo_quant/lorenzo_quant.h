@@ -8,6 +8,8 @@
 #include "fzm_format.h"
 #include "backend/types.h"
 #include "log.h"
+#include "fused/common/data_type_of.h"
+
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -457,18 +459,8 @@ private:
     /// persistent allocator. Idempotent; no-op if already allocated.
     void initOutlierCountScratch(MemoryPool* pool);
     
-    DataType getInputDataType() const {
-        if (std::is_same<TInput, float>::value) return DataType::FLOAT32;
-        if (std::is_same<TInput, double>::value) return DataType::FLOAT64;
-        return DataType::FLOAT32;
-    }
-    
-    DataType getCodeDataType() const {
-        if (std::is_same<TCode, uint8_t>::value) return DataType::UINT8;
-        if (std::is_same<TCode, uint16_t>::value) return DataType::UINT16;
-        if (std::is_same<TCode, uint32_t>::value) return DataType::UINT32;
-        return DataType::UINT16;
-    }
+    DataType getInputDataType() const { return fused::dataTypeOf<TInput>(); }
+    DataType getCodeDataType()  const { return fused::dataTypeOf<TCode>(); }
     
     size_t getMaxOutlierCount(size_t num_elements) const {
         return static_cast<size_t>(std::ceil(num_elements * config_.outlier_capacity));

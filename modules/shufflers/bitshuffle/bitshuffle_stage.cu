@@ -106,35 +106,7 @@ __global__ void bitshuffleEncodeKernel32(
     const int      npp      = (int)(N_chunk / 32u);  // words per bit-plane
 
     for (int i = tid; i < (int)N_chunk; i += (int)blockDim.x) {
-        unsigned int a = in[in_base + i];
-
-        unsigned int q = fz::backend::shflXor(a, 16, 32);
-        a = ((sublane & 16) == 0)
-            ? __byte_perm(a, q, (3u<<12)|(2u<<8)|(7u<<4)|6u)
-            : __byte_perm(a, q, (5u<<12)|(4u<<8)|(1u<<4)|0u);
-
-        q = fz::backend::shflXor(a, 8, 32);
-        a = ((sublane & 8) == 0)
-            ? __byte_perm(a, q, (3u<<12)|(7u<<8)|(1u<<4)|5u)
-            : __byte_perm(a, q, (6u<<12)|(2u<<8)|(4u<<4)|0u);
-
-        q = fz::backend::shflXor(a, 4, 32);
-        unsigned int mask = 0x0F0F0F0Fu;
-        a = ((sublane & 4) == 0)
-            ? ((a & ~mask) | ((q >> 4) & mask))
-            : (((q << 4) & ~mask) | (a & mask));
-
-        q = fz::backend::shflXor(a, 2, 32);
-        mask = 0x33333333u;
-        a = ((sublane & 2) == 0)
-            ? ((a & ~mask) | ((q >> 2) & mask))
-            : (((q << 2) & ~mask) | (a & mask));
-
-        q = fz::backend::shflXor(a, 1, 32);
-        mask = 0x55555555u;
-        a = ((sublane & 1) == 0)
-            ? ((a & ~mask) | ((q >> 1) & mask))
-            : (((q << 1) & ~mask) | (a & mask));
+        unsigned int a = butterfly32(in[in_base + i], sublane);
 
         // LSB-first: plane sublane at word offset i/32 + sublane*npp
         out[out_base + i / 32 + sublane * npp] = a;
@@ -154,36 +126,7 @@ __global__ void bitshuffleDecodeKernel32(
 
     for (int i = tid; i < (int)N_chunk; i += (int)blockDim.x) {
         // Read from plane-organised layout (butterfly is self-inverse)
-        unsigned int a = in[in_base + i / 32 + sublane * npp];
-
-        unsigned int q = fz::backend::shflXor(a, 16, 32);
-        a = ((sublane & 16) == 0)
-            ? __byte_perm(a, q, (3u<<12)|(2u<<8)|(7u<<4)|6u)
-            : __byte_perm(a, q, (5u<<12)|(4u<<8)|(1u<<4)|0u);
-
-        q = fz::backend::shflXor(a, 8, 32);
-        a = ((sublane & 8) == 0)
-            ? __byte_perm(a, q, (3u<<12)|(7u<<8)|(1u<<4)|5u)
-            : __byte_perm(a, q, (6u<<12)|(2u<<8)|(4u<<4)|0u);
-
-        q = fz::backend::shflXor(a, 4, 32);
-        unsigned int mask = 0x0F0F0F0Fu;
-        a = ((sublane & 4) == 0)
-            ? ((a & ~mask) | ((q >> 4) & mask))
-            : (((q << 4) & ~mask) | (a & mask));
-
-        q = fz::backend::shflXor(a, 2, 32);
-        mask = 0x33333333u;
-        a = ((sublane & 2) == 0)
-            ? ((a & ~mask) | ((q >> 2) & mask))
-            : (((q << 2) & ~mask) | (a & mask));
-
-        q = fz::backend::shflXor(a, 1, 32);
-        mask = 0x55555555u;
-        a = ((sublane & 1) == 0)
-            ? ((a & ~mask) | ((q >> 1) & mask))
-            : (((q << 1) & ~mask) | (a & mask));
-
+        unsigned int a = butterfly32(in[in_base + i / 32 + sublane * npp], sublane);
         out[out_base + i] = a;
     }
 }

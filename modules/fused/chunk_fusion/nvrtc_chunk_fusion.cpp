@@ -16,13 +16,7 @@ namespace fz {
 namespace fused {
 
 namespace {
-[[noreturn]] void cuThrow(CUresult r, const char* what) {
-    const char* name = nullptr; cuGetErrorName(r, &name);
-    const char* str  = nullptr; cuGetErrorString(r, &str);
-    throw std::runtime_error(std::string("NVRTC-fusion: ") + what + ": " +
-                             (name ? name : "?") + " (" + (str ? str : "") + ")");
-}
-#define CU_CHECK(call) do { CUresult _r = (call); if (_r != CUDA_SUCCESS) cuThrow(_r, #call); } while (0)
+#define CU_CHECK(call) FZ_CU_CHECK(call, "NVRTC-fusion")
 } // namespace
 
 std::string generateChunkFusionSource(const ChunkFusionSpec& spec) {

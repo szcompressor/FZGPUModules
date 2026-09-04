@@ -487,17 +487,8 @@ private:
     /// the full struct definition via cusz_type_subset.h).
     INTERPOLATION_PARAMS buildIntpParam() const;
 
-    static DataType inputDataType() {
-        if (std::is_same<TInput, float>::value)  return DataType::FLOAT32;
-        if (std::is_same<TInput, double>::value) return DataType::FLOAT64;
-        return DataType::FLOAT32;
-    }
-    static DataType codeDataType() {
-        if (std::is_same<TCode, uint8_t>::value)  return DataType::UINT8;
-        if (std::is_same<TCode, uint16_t>::value) return DataType::UINT16;
-        if (std::is_same<TCode, uint32_t>::value) return DataType::UINT32;
-        return DataType::UINT16;
-    }
+    static DataType inputDataType() { return fused::dataTypeOf<TInput>(); }
+    static DataType codeDataType()  { return fused::dataTypeOf<TCode>(); }
     size_t getMaxOutlierCount(size_t n) const {
         return static_cast<size_t>(std::ceil(n * config_.outlier_capacity));
     }

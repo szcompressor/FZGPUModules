@@ -1,18 +1,7 @@
-// The per-chunk stream format (flag bitmap + literal/match tokens) and the
-// sequential literal/match parse follow compressKernelI from GPULZ (Zhang,
-// Tian, Di, Yu, Swany, Tao, Cappello, ICS '23).
-// Upstream: https://github.com/hpdps-group/ICS23-GPULZ — see THIRD_PARTY.md.
-// The per-chunk container format, raw-fallback flag, CUB exclusive scan for
-// packing offsets, and deferred tail-size readback are FZGM's own, mirroring
-// RREStage/RZEStage. So are the exact longest-match search, the BlockScan
-// prefix sum and staged data writes in the encode kernel, and the whole
-// block-parallel decode kernel (upstream decodes a chunk on one thread).
-//
-// The all-zero-chunk fast path in gpulzEncodeKernel (the `notEmptyFlag`
-// warp-vote skip) is adapted from the "sparse" GPULZ variant in
-// boyuanzhang62/AIZ_VLDB26 (test/gpulz.cuh), which applies the same GPULZ
-// kernels to the sparse quantized latents produced by a neural compressor.
-// Upstream: https://github.com/boyuanzhang62/AIZ_VLDB26 — see THIRD_PARTY.md.
+// Derived from GPULZ (Zhang, Tian, Di, Yu, Swany, Tao, Cappello, ICS '23) and,
+// for the all-zero-chunk fast path, the "sparse" GPULZ variant in
+// boyuanzhang62/AIZ_VLDB26. See THIRD_PARTY.md for the full attribution
+// (what's ported vs. FZGM's own) and upstream repository links.
 
 #include "coders/gpulz/gpulz_stage.h"
 #include "stage/stage_registry.h"
@@ -975,38 +964,55 @@ static __global__ void gpulzDeinterleaveHeaderKernel(
     d_data_size[i] = d_hdr_entries[2 * i + 1];
 }
 
-// ━━━━ word-size × chunk-size dispatch helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━━ word-size × chunk-size dispatch helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // chunk_size selects the compile-time CS template argument; word_size
 // selects T. Supported chunk sizes: 1024, 2048, 4096 (see GPULZStage::execute()).
+// All five launchers below share this instead of each repeating the same
+// nested switch: `f` is called once, instantiated with the resolved
+// std::integral_constant<int, CS> and GpulzTypeTag<T> for the actual
+// (word_size, chunk_size) pair.
+template <typename T> struct GpulzTypeTag { using type = T; };
+
+template <typename F>
+static void gpulzDispatch(uint8_t word_size, uint32_t chunk_size, F&& f)
+{
+    auto with_word_size = [&](auto cs_tag) {
+        switch (word_size) {
+            case 1: f(cs_tag, GpulzTypeTag<uint8_t>{});  break;
+            case 2: f(cs_tag, GpulzTypeTag<uint16_t>{}); break;
+            case 4: f(cs_tag, GpulzTypeTag<uint32_t>{}); break;
+            case 8: f(cs_tag, GpulzTypeTag<uint64_t>{}); break;
+            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8");
+        }
+    };
+    switch (chunk_size) {
+        case 1024: with_word_size(std::integral_constant<int, 1024>{}); break;
+        case 2048: with_word_size(std::integral_constant<int, 2048>{}); break;
+        case 4096: with_word_size(std::integral_constant<int, 4096>{}); break;
+        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
+    }
+}
+
 static void launchEncode(uint8_t word_size, uint32_t chunk_size, int n_chunks, cudaStream_t stream,
                           const uint8_t* d_in, uint8_t* d_flag_scratch, uint8_t* d_data_scratch,
                           uint32_t* d_flag_size, uint32_t* d_data_size, uint8_t match_level)
 {
     const int minEncodeLength = (word_size == 1) ? 2 : 1;
-#define FZ_GPULZ_ENCODE_LAUNCH(T_VAL, CS_VAL, ML_VAL)                                                                     \
-    gpulzEncodeKernel<T_VAL, CS_VAL, ML_VAL><<<n_chunks, GPULZ_THREAD_SIZE, 0, stream>>>(                                  \
-        (const T_VAL*)d_in, d_flag_scratch, d_data_scratch, d_flag_size, d_data_size, minEncodeLength)
-#define FZ_GPULZ_ENCODE_WS(CS_VAL, ML_VAL)                                                                                \
-    switch (word_size) {                                                                                                  \
-        case 1: FZ_GPULZ_ENCODE_LAUNCH(uint8_t,  CS_VAL, ML_VAL); break;                                                  \
-        case 2: FZ_GPULZ_ENCODE_LAUNCH(uint16_t, CS_VAL, ML_VAL); break;                                                  \
-        case 4: FZ_GPULZ_ENCODE_LAUNCH(uint32_t, CS_VAL, ML_VAL); break;                                                  \
-        case 8: FZ_GPULZ_ENCODE_LAUNCH(uint64_t, CS_VAL, ML_VAL); break;                                                  \
-        default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8");                                  \
-    }
-#define FZ_GPULZ_ENCODE_CASE(CS_VAL)                                                                                      \
-    case CS_VAL:                                                                                                          \
-        if (match_level == 0) { FZ_GPULZ_ENCODE_WS(CS_VAL, 0) } else { FZ_GPULZ_ENCODE_WS(CS_VAL, 1) }                     \
-        break;
-    switch (chunk_size) {
-        FZ_GPULZ_ENCODE_CASE(1024)
-        FZ_GPULZ_ENCODE_CASE(2048)
-        FZ_GPULZ_ENCODE_CASE(4096)
-        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
-    }
-#undef FZ_GPULZ_ENCODE_CASE
-#undef FZ_GPULZ_ENCODE_WS
-#undef FZ_GPULZ_ENCODE_LAUNCH
+    auto launch = [&](auto cs_tag, auto t_tag, auto ml_tag) {
+        using T = typename decltype(t_tag)::type;
+        constexpr int CS = decltype(cs_tag)::value;
+        constexpr int ML = decltype(ml_tag)::value;
+        gpulzEncodeKernel<T, CS, ML><<<n_chunks, GPULZ_THREAD_SIZE, 0, stream>>>(
+            (const T*)d_in, d_flag_scratch, d_data_scratch, d_flag_size, d_data_size, minEncodeLength);
+    };
+    if (match_level == 0)
+        gpulzDispatch(word_size, chunk_size, [&](auto cs_tag, auto t_tag) {
+            launch(cs_tag, t_tag, std::integral_constant<int, 0>{});
+        });
+    else
+        gpulzDispatch(word_size, chunk_size, [&](auto cs_tag, auto t_tag) {
+            launch(cs_tag, t_tag, std::integral_constant<int, 1>{});
+        });
 }
 
 static void launchDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks, cudaStream_t stream,
@@ -1014,25 +1020,12 @@ static void launchDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks, c
                           const uint32_t* d_flag_size, const uint32_t* d_data_size)
 {
     // One block per chunk: gpulzDecodeKernel decodes a chunk cooperatively.
-    constexpr int kDecodeTPB = GPULZ_DECODE_TPB;
-    const int grid = n_chunks;
-#define FZ_GPULZ_DECODE_CASE(CS_VAL)                                                                                      \
-    case CS_VAL:                                                                                                          \
-        switch (word_size) {                                                                                              \
-            case 1: gpulzDecodeKernel<uint8_t,  CS_VAL><<<grid, kDecodeTPB, 0, stream>>>((uint8_t*)d_out,  d_in, d_in_off, d_flag_size, d_data_size, (uint32_t)n_chunks); break; \
-            case 2: gpulzDecodeKernel<uint16_t, CS_VAL><<<grid, kDecodeTPB, 0, stream>>>((uint16_t*)d_out, d_in, d_in_off, d_flag_size, d_data_size, (uint32_t)n_chunks); break; \
-            case 4: gpulzDecodeKernel<uint32_t, CS_VAL><<<grid, kDecodeTPB, 0, stream>>>((uint32_t*)d_out, d_in, d_in_off, d_flag_size, d_data_size, (uint32_t)n_chunks); break; \
-            case 8: gpulzDecodeKernel<uint64_t, CS_VAL><<<grid, kDecodeTPB, 0, stream>>>((uint64_t*)d_out, d_in, d_in_off, d_flag_size, d_data_size, (uint32_t)n_chunks); break; \
-            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8");                             \
-        }                                                                                                                  \
-        break;
-    switch (chunk_size) {
-        FZ_GPULZ_DECODE_CASE(1024)
-        FZ_GPULZ_DECODE_CASE(2048)
-        FZ_GPULZ_DECODE_CASE(4096)
-        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
-    }
-#undef FZ_GPULZ_DECODE_CASE
+    gpulzDispatch(word_size, chunk_size, [&](auto cs_tag, auto t_tag) {
+        using T = typename decltype(t_tag)::type;
+        constexpr int CS = decltype(cs_tag)::value;
+        gpulzDecodeKernel<T, CS><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(
+            (T*)d_out, d_in, d_in_off, d_flag_size, d_data_size, (uint32_t)n_chunks);
+    });
 }
 
 struct GpulzSplitPtrs {
@@ -1046,29 +1039,14 @@ struct GpulzSplitPtrs {
 static void launchDestripe(uint8_t word_size, uint32_t chunk_size, int n_chunks,
                            cudaStream_t stream, const GpulzSplitPtrs& p)
 {
-#define FZ_GPULZ_DESTRIPE_LAUNCH(T_VAL, CS_VAL)                                             \
-    gpulzDestripeKernel<T_VAL, CS_VAL><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(          \
-        p.flag_scratch, p.data_scratch, p.in_raw, p.flag_size, p.data_size,                 \
-        p.lit_off, p.tok_off, p.meta_off, p.lit, p.len, p.off, p.meta,                      \
-        p.flag_stride, (uint32_t)n_chunks)
-#define FZ_GPULZ_DESTRIPE_CASE(CS_VAL)                                                      \
-    case CS_VAL:                                                                            \
-        switch (word_size) {                                                                \
-            case 1: FZ_GPULZ_DESTRIPE_LAUNCH(uint8_t,  CS_VAL); break;                      \
-            case 2: FZ_GPULZ_DESTRIPE_LAUNCH(uint16_t, CS_VAL); break;                      \
-            case 4: FZ_GPULZ_DESTRIPE_LAUNCH(uint32_t, CS_VAL); break;                      \
-            case 8: FZ_GPULZ_DESTRIPE_LAUNCH(uint64_t, CS_VAL); break;                      \
-            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8"); \
-        }                                                                                    \
-        break;
-    switch (chunk_size) {
-        FZ_GPULZ_DESTRIPE_CASE(1024)
-        FZ_GPULZ_DESTRIPE_CASE(2048)
-        FZ_GPULZ_DESTRIPE_CASE(4096)
-        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
-    }
-#undef FZ_GPULZ_DESTRIPE_CASE
-#undef FZ_GPULZ_DESTRIPE_LAUNCH
+    gpulzDispatch(word_size, chunk_size, [&](auto cs_tag, auto t_tag) {
+        using T = typename decltype(t_tag)::type;
+        constexpr int CS = decltype(cs_tag)::value;
+        gpulzDestripeKernel<T, CS><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(
+            p.flag_scratch, p.data_scratch, p.in_raw, p.flag_size, p.data_size,
+            p.lit_off, p.tok_off, p.meta_off, p.lit, p.len, p.off, p.meta,
+            p.flag_stride, (uint32_t)n_chunks);
+    });
 }
 
 struct GpulzSplitDecodePtrs {
@@ -1081,28 +1059,13 @@ struct GpulzSplitDecodePtrs {
 static void launchSplitDecode(uint8_t word_size, uint32_t chunk_size, int n_chunks,
                               cudaStream_t stream, const GpulzSplitDecodePtrs& p)
 {
-#define FZ_GPULZ_SPLITDEC_LAUNCH(T_VAL, CS_VAL)                                             \
-    gpulzSplitDecodeKernel<T_VAL, CS_VAL><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(       \
-        p.lit, p.len, p.off, p.meta, p.flag_size, p.data_size,                              \
-        p.lit_off, p.tok_off, p.meta_off, (T_VAL*)p.out, (uint32_t)n_chunks)
-#define FZ_GPULZ_SPLITDEC_CASE(CS_VAL)                                                      \
-    case CS_VAL:                                                                            \
-        switch (word_size) {                                                                \
-            case 1: FZ_GPULZ_SPLITDEC_LAUNCH(uint8_t,  CS_VAL); break;                      \
-            case 2: FZ_GPULZ_SPLITDEC_LAUNCH(uint16_t, CS_VAL); break;                      \
-            case 4: FZ_GPULZ_SPLITDEC_LAUNCH(uint32_t, CS_VAL); break;                      \
-            case 8: FZ_GPULZ_SPLITDEC_LAUNCH(uint64_t, CS_VAL); break;                      \
-            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8"); \
-        }                                                                                    \
-        break;
-    switch (chunk_size) {
-        FZ_GPULZ_SPLITDEC_CASE(1024)
-        FZ_GPULZ_SPLITDEC_CASE(2048)
-        FZ_GPULZ_SPLITDEC_CASE(4096)
-        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
-    }
-#undef FZ_GPULZ_SPLITDEC_CASE
-#undef FZ_GPULZ_SPLITDEC_LAUNCH
+    gpulzDispatch(word_size, chunk_size, [&](auto cs_tag, auto t_tag) {
+        using T = typename decltype(t_tag)::type;
+        constexpr int CS = decltype(cs_tag)::value;
+        gpulzSplitDecodeKernel<T, CS><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(
+            p.lit, p.len, p.off, p.meta, p.flag_size, p.data_size,
+            p.lit_off, p.tok_off, p.meta_off, (T*)p.out, (uint32_t)n_chunks);
+    });
 }
 
 struct GpulzRestripePtrs {
@@ -1116,36 +1079,33 @@ struct GpulzRestripePtrs {
 static void launchRestripe(uint8_t word_size, uint32_t chunk_size, int n_chunks,
                            cudaStream_t stream, const GpulzRestripePtrs& p)
 {
-#define FZ_GPULZ_RESTRIPE_LAUNCH(T_VAL, CS_VAL)                                             \
-    gpulzRestripeKernel<T_VAL, CS_VAL><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(          \
-        p.lit, p.len, p.off, p.meta, p.flag_size, p.data_size,                              \
-        p.lit_off, p.tok_off, p.meta_off, p.dst_off, p.out, (uint32_t)n_chunks)
-#define FZ_GPULZ_RESTRIPE_CASE(CS_VAL)                                                      \
-    case CS_VAL:                                                                            \
-        switch (word_size) {                                                                \
-            case 1: FZ_GPULZ_RESTRIPE_LAUNCH(uint8_t,  CS_VAL); break;                      \
-            case 2: FZ_GPULZ_RESTRIPE_LAUNCH(uint16_t, CS_VAL); break;                      \
-            case 4: FZ_GPULZ_RESTRIPE_LAUNCH(uint32_t, CS_VAL); break;                      \
-            case 8: FZ_GPULZ_RESTRIPE_LAUNCH(uint64_t, CS_VAL); break;                      \
-            default: throw std::runtime_error("GPULZStage: word_size must be 1, 2, 4, or 8"); \
-        }                                                                                    \
-        break;
-    switch (chunk_size) {
-        FZ_GPULZ_RESTRIPE_CASE(1024)
-        FZ_GPULZ_RESTRIPE_CASE(2048)
-        FZ_GPULZ_RESTRIPE_CASE(4096)
-        default: throw std::runtime_error("GPULZStage: chunk_size must be 1024, 2048, or 4096");
-    }
-#undef FZ_GPULZ_RESTRIPE_CASE
-#undef FZ_GPULZ_RESTRIPE_LAUNCH
+    gpulzDispatch(word_size, chunk_size, [&](auto cs_tag, auto t_tag) {
+        using T = typename decltype(t_tag)::type;
+        constexpr int CS = decltype(cs_tag)::value;
+        gpulzRestripeKernel<T, CS><<<n_chunks, GPULZ_DECODE_TPB, 0, stream>>>(
+            p.lit, p.len, p.off, p.meta, p.flag_size, p.data_size,
+            p.lit_off, p.tok_off, p.meta_off, p.dst_off, p.out, (uint32_t)n_chunks);
+    });
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-GPULZStage::~GPULZStage() {
-    auto fwd_free = [&](void* p) {
+// Frees the twelve persistent forward scratch buffers (pool-vs-cudaMalloc
+// routing per the same rule the allocation side uses) and nulls the member
+// pointers. Shared by the destructor (stream 0, no pre-free sync -- a
+// destructor must not throw, so FZ_CUDA_CHECK_WARN's sync is skipped
+// entirely rather than risk it) and execute()'s scratch-regrow path (the
+// caller's stream, synced first so an in-flight kernel can't still be
+// touching a buffer that's about to be cudaFree'd).
+void GPULZStage::freeForwardScratch(fz::stream_t stream, bool sync_before_cuda_free) {
+    auto fwd_free = [&](auto*& p) {
         if (!p) return;
-        if (scratch_from_pool_ && scratch_pool_owner_) scratch_pool_owner_->free(p, 0);
-        else cudaFree(p);
+        if (scratch_from_pool_ && scratch_pool_owner_ && !scratch_alive_.expired()) {
+            scratch_pool_owner_->free(p, stream);
+        } else if (!scratch_from_pool_) {
+            if (sync_before_cuda_free) FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
+            cudaFree(p);
+        }
+        p = nullptr;
     };
     fwd_free(d_data_scratch_);
     fwd_free(d_flag_scratch_);
@@ -1159,6 +1119,10 @@ GPULZStage::~GPULZStage() {
     fwd_free(d_lit_cnt_dev_);
     fwd_free(d_tok_cnt_dev_);
     fwd_free(d_totals_dev_);
+}
+
+GPULZStage::~GPULZStage() {
+    freeForwardScratch(nullptr, false);
 }
 
 // Completes the deferred 4-entry totals readback for split mode.
@@ -1286,9 +1250,20 @@ void GPULZStage::execute(
         throw std::runtime_error(
             "GPULZStage: word_size must be 1, 2, 4, or 8; got "
             + std::to_string((int)word_size_));
-    // ── Forward (compress) ─────────────────────────────────────────────
-    if (!is_inverse_) {
-        // getRequiredInputAlignment() makes Pipeline pad the *pipeline* input to
+
+    if (!is_inverse_) executeForward(stream, pool, inputs, outputs, in_bytes);
+    else              executeInverse(stream, pool, inputs, outputs, in_bytes);
+}
+
+// ── Forward (compress) ───────────────────────────────────────────────────
+void GPULZStage::executeForward(
+    cudaStream_t stream,
+    MemoryPool* pool,
+    const std::vector<void*>& inputs,
+    const std::vector<void*>& outputs,
+    size_t in_bytes)
+{
+    // getRequiredInputAlignment() makes Pipeline pad the *pipeline* input to
         // a chunk multiple, but that guarantee does not survive an upstream
         // stage that changes bytes per element: LorenzoQuant turns float32 into
         // uint16 codes, so a padded 4 KB-aligned input reaches this stage as
@@ -1327,24 +1302,7 @@ void GPULZStage::execute(
         orig_unpadded_bytes_ = (uint32_t)in_bytes; // what the inverse reports
 
         if (n_chunks > scratch_capacity_) {
-            auto fwd_free = [&](void* p) {
-                if (!p) return;
-                if (scratch_from_pool_ && scratch_pool_owner_)
-                    scratch_pool_owner_->free(p, stream);
-                else { FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream)); cudaFree(p); }
-            };
-            fwd_free(d_data_scratch_); d_data_scratch_ = nullptr;
-            fwd_free(d_flag_scratch_); d_flag_scratch_ = nullptr;
-            fwd_free(d_flag_size_);    d_flag_size_    = nullptr;
-            fwd_free(d_data_size_);    d_data_size_    = nullptr;
-            fwd_free(d_clean_dev_);    d_clean_dev_    = nullptr;
-            fwd_free(d_dst_off_dev_);  d_dst_off_dev_  = nullptr;
-            fwd_free(d_lit_off_dev_);  d_lit_off_dev_  = nullptr;
-            fwd_free(d_tok_off_dev_);  d_tok_off_dev_  = nullptr;
-            fwd_free(d_meta_off_dev_); d_meta_off_dev_ = nullptr;
-            fwd_free(d_lit_cnt_dev_);  d_lit_cnt_dev_  = nullptr;
-            fwd_free(d_tok_cnt_dev_);  d_tok_cnt_dev_  = nullptr;
-            fwd_free(d_totals_dev_);   d_totals_dev_   = nullptr;
+            freeForwardScratch(stream, /*sync_before_cuda_free=*/true);
 
             if (pool) {
                 d_data_scratch_ = (uint8_t*) pool->allocate(n_chunks * (size_t)chunk_size_, stream, "gpulz_data_scratch", true);
@@ -1368,6 +1326,7 @@ void GPULZStage::execute(
                     throw std::runtime_error("GPULZStage: failed to allocate persistent forward scratch from MemoryPool");
                 scratch_pool_owner_ = pool;
                 scratch_from_pool_  = true;
+                scratch_alive_      = pool->lifetimeToken();
             } else {
                 FZ_CUDA_CHECK(cudaMalloc(&d_data_scratch_, n_chunks * (size_t)chunk_size_));
                 FZ_CUDA_CHECK(cudaMalloc(&d_flag_scratch_, n_chunks * (size_t)flag_stride));
@@ -1518,9 +1477,16 @@ void GPULZStage::execute(
             d_flag_scratch_, d_data_scratch_, d_src, d_out,
             d_dst_off_dev_, d_flag_size_, d_data_size_, flag_stride, chunk_size_);
         FZ_CUDA_CHECK(cudaGetLastError());
+}
 
-    // ── Inverse (decompress) ───────────────────────────────────────────
-    } else {
+// ── Inverse (decompress) ───────────────────────────────────────────────────
+void GPULZStage::executeInverse(
+    cudaStream_t stream,
+    MemoryPool* pool,
+    const std::vector<void*>& inputs,
+    const std::vector<void*>& outputs,
+    size_t in_bytes)
+{
         const uint8_t* d_in  = (const uint8_t*)inputs[0];
         uint8_t*       d_out = (uint8_t*)outputs[0];
 
@@ -1703,7 +1669,6 @@ void GPULZStage::execute(
                             ? (size_t)orig_unpadded_bytes_ : (size_t)orig_total;
         FZ_LOG(DEBUG, "GPULZ decode done: %.1f KB -> %.1f KB",
                in_bytes / 1024.0, actual_output_size_ / 1024.0);
-    }
 }
 
 } // namespace fz
