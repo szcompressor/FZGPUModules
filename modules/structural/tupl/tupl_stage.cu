@@ -1,5 +1,5 @@
 /**
- * modules/shufflers/tupl/tupl_stage.cu
+ * modules/structural/tupl/tupl_stage.cu
  *
  * GPU implementation of TUPLStage — a tuple deinterleave (AoS -> SoA)
  * transpose, ported from `d_TUPL` / `d_iTUPL` in the LC framework
@@ -25,7 +25,7 @@
  * raw via a plain D2D memcpy, mirroring BitshuffleStage's tail handling.
  */
 
-#include "shufflers/tupl/tupl_stage.h"
+#include "structural/tupl/tupl_stage.h"
 #include "stage/stage_registry.h"
 #include "mem/mempool.h"
 #include "cuda_check.h"

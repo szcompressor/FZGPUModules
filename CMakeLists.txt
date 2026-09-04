@@ -418,7 +418,7 @@ add_library(fzgmod_modules
   modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu
   modules/coders/adaptive_bitpack/adaptive_bitpack_stage.cu
   modules/shufflers/bitshuffle/bitshuffle_stage.cu
-  modules/shufflers/tupl/tupl_stage.cu
+  modules/structural/tupl/tupl_stage.cu
   modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.cu
     modules/fused/lorenzo_quant/lorenzo_quant.cu
   modules/fused/lorenzo_quant/lorenzo_quant_nd.cu

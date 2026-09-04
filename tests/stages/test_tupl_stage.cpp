@@ -30,7 +30,7 @@
 
 #include <gtest/gtest.h>
 #include "helpers/fz_test_utils.h"
-#include "shufflers/tupl/tupl_stage.h"
+#include "structural/tupl/tupl_stage.h"
 #include "fzgpumodules.h"
 
 #include <cmath>

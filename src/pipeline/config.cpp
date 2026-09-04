@@ -46,7 +46,7 @@
 #include "coders/raze/raze_stage.h"
 #include "coders/clog/clog_stage.h"
 #include "coders/hclog/hclog_stage.h"
-#include "shufflers/tupl/tupl_stage.h"
+#include "structural/tupl/tupl_stage.h"
 #include "transforms/log_transform/log_transform_stage.h"
 #include "transforms/cdf97/cdf97_stage.h"
 #include "coders/speck2d/speck2d_stage.h"
@@ -1243,7 +1243,7 @@ static const StageEntry kStageRegistry[] = {
     { "RAZE",         StageType::RAZE,         addRAZEStage,         saveRAZEStage,         "modules/coders/raze" },
     { "CLOG",         StageType::CLOG,         addCLOGStage,         saveCLOGStage,         "modules/coders/clog" },
     { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage,        "modules/coders/hclog" },
-    { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/shufflers/tupl" },
+    { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/structural/tupl" },
     { "LogTransform", StageType::LOG_TRANSFORM, addLogTransformStage, saveLogTransformStage, "modules/transforms/log_transform" },
     { "CDF97",        StageType::CDF97,         addCdf97Stage,        saveCdf97Stage,        "modules/transforms/cdf97" },
     { "SPECK2D",      StageType::SPECK2D,       addSpeck2DStage,      saveSpeck2DStage,      "modules/coders/speck2d" },

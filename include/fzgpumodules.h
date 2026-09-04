@@ -37,7 +37,7 @@
 #include "coders/gpulz/gpulz_stage.h"
 #include "coders/speck2d/speck2d_stage.h"
 #include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
-#include "shufflers/tupl/tupl_stage.h"
+#include "structural/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
