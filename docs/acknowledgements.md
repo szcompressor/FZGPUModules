@@ -215,8 +215,11 @@ SC '25. https://doi.org/10.1145/3712285.3759817
 
 **Repository:** https://github.com/hpdps-group/MANS  
 **License:** BSD-3-Clause  
-**Authors:** Wenjing Huang, Jinwu Yang, JingKai Huang, Haoquan Long;
-Advisors: Dingwen Tao, Guangming Tan
+**Developers:** Wenjing Huang, Jinwu Yang, and Dingwen Tao (Institute of
+Computing Technology, Chinese Academy of Sciences), and colleagues  
+**Paper:** Wenjing Huang, Jinwu Yang, Dingwen Tao, et al. "MANS: Efficient and
+Portable ANS Encoding for Multi-Byte Integer Data on CPUs and GPUs." SC '25.
+(Full author list / BibTeX: see `THIRD_PARTY.md`.)
 
 **Stages:**
 

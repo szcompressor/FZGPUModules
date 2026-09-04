@@ -18,6 +18,15 @@ Remaps a `uint16_t[]` or `uint32_t[]` integer stream into a compact 8-bit symbol
 domain, dramatically improving the compression ratio of a downstream entropy coder
 (typically `ANSStage`).
 
+ADM comes from the **MANS** compressor (Huang et al., SC '25), where it is the
+multi-byte-integer front-end that runs *before* the ANS coder. `ADMStage` fills
+the same role here: it is a **lossless** symbol-domain adapter meant to sit
+directly in front of the dietGPU-derived `ANSStage`, most commonly as the coding
+back-end after a lossy transform such as \ref stage_lorenzo_quant
+(`LorenzoQuant → ADM → ANS`). Running ADM before ANS is what makes the pairing
+work at all (see *Why ADM before ANS* below) and is where it gives the best
+ratio; feeding raw wide integers straight into ANS is not supported.
+
 - **Forward:** `uint16_t[]` or `uint32_t[]` → opaque ADM payload (`uint8_t[]`)
 - **Inverse:** ADM payload → original integer array (exact reconstruction)
 
@@ -203,14 +212,16 @@ type checking.
 
 ## Acknowledgements
 
-`ADMStage` is a direct port of the ADM encode/decode kernels from **MANS**
-(Wenjing Huang, Jinwu Yang, JingKai Huang, Haoquan Long, Dingwen Tao,
-Guangming Tan) from `nv/adm/` in the MANS repository.  Kernel logic is
-unchanged; changes from the original are documented at the top of
+`ADMStage` is a direct port of the ADM (Adaptive Data Mapping) encode/decode
+kernels from **MANS** (Wenjing Huang, Jinwu Yang, and Dingwen Tao, Institute of
+Computing Technology, Chinese Academy of Sciences; and colleagues) from
+`nv/adm/` in the MANS repository.  Kernel logic is unchanged; changes from the
+original are documented at the top of
 `modules/transforms/adm/mapping_uint16.cu` and `mapping_uint32.cu`.
 
-> Wenjing Huang, Jinwu Yang, JingKai Huang, Haoquan Long, Dingwen Tao,
-> Guangming Tan. *MANS: Multidimensional Adaptive Numerical Compressor for
-> Scientific Data.* https://github.com/hpdps-group/MANS
+> Wenjing Huang, Jinwu Yang, Dingwen Tao, et al. *MANS: Efficient and Portable
+> ANS Encoding for Multi-Byte Integer Data on CPUs and GPUs.* SC '25.
+> https://github.com/hpdps-group/MANS
 
-See `THIRD_PARTY.md` for the full BSD-3-Clause license text.
+See `THIRD_PARTY.md` for the full citation (BibTeX to follow) and the
+BSD-3-Clause license text.

@@ -150,12 +150,11 @@ Contract notes for consumers:
   CUDA events bracketing the pipeline (`timing_method: cuda_events_dag`); it excludes
   PCIe transfers and host setup. `host_wall_ms` is the full end-to-end call including
   file I/O and pipeline construction. For cross-tool throughput comparison use
-  `device_ms`. Never compare this tool's `host_wall_ms` against another tool's
-  kernel-only timing — single-shot decompress `host_wall_ms` includes a fresh
+  `device_ms`. Single-shot decompress `host_wall_ms` includes a fresh
   pipeline build and can be 10–100× the device time.
 - **Recompute from raw counts.** `original_bytes`, `compressed_bytes`, and
   `num_elements` are always present; `ratio`, `bitrate_bits_per_elem`, and
-  `throughput.*` are conveniences derived from them. Throughput is decimal GB/s
+  `throughput` are conveniences derived from them. Throughput is decimal GB/s
   (bytes / 1e9 / seconds). Recompute with your own unit convention if you mix tools.
 - **Per-operation shape.** `-z` populates `timing.compress` only; `-x` populates
   `timing.decompress` only; both are single-rep (`n_runs: 1`, `all` has one element).

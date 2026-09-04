@@ -635,7 +635,7 @@ URL: https://github.com/facebookresearch/dietgpu
 
 ## MANS
 
-**Used by:** `ADMStage` (`modules/transforms/adm/`), `MANSStage` (`modules/fused/mans/`)
+**Used by:** `ADMStage` (`modules/transforms/adm/`)
 
 **Relationship:**
 - `ADMStage` (`modules/transforms/adm/mapping_uint16.cu`,
@@ -647,9 +647,28 @@ URL: https://github.com/facebookresearch/dietgpu
   namespace changed from `mans::nv::adm` to `fz::adm`; kernels renamed with
   `_u16`/`_u32` suffix to avoid TU-level naming conflicts; inline Chinese
   comments translated to English.
-- `MANSStage` (`modules/fused/mans/`) — to be added in a future release;
-  will follow the fused ADM+rANS design from the MANS repository.  The GPU
-  rANS component is covered by the dietGPU entry above.
+
+Only the ADM (Adaptive Data Mapping) mapping kernels are taken from MANS.
+FZGPUModules has no fused ADM+rANS stage and none is planned; the rANS coder
+(`ANSStage`) is vendored directly from dietGPU (see entry above) and has no MANS
+lineage. In MANS, ADM is the symbol-domain front-end applied *before* an ANS
+coder — in this library `ADMStage` plays the same role in front of `ANSStage`
+(see `docs/stages/adm.md`).
+
+**Citation:**
+
+MANS was developed by Wenjing Huang, Jinwu Yang, and Dingwen Tao (Institute of
+Computing Technology, Chinese Academy of Sciences), and colleagues. If you use
+`ADMStage`, please cite:
+
+> Wenjing Huang, Jinwu Yang, Dingwen Tao, et al. "MANS: Efficient and Portable
+> ANS Encoding for Multi-Byte Integer Data on CPUs and GPUs." In *Proceedings of
+> the International Conference for High Performance Computing, Networking, Storage
+> and Analysis* (SC '25), 2025.
+
+<!-- TODO(attribution): the MANS authors are sending the full author list and the
+     canonical BibTeX entry (Z-Hub description). Replace the reference above and
+     add a ```bibtex block when received. -->
 
 **License:**
 
