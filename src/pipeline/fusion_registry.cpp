@@ -12,7 +12,9 @@
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace fz {
@@ -179,11 +181,34 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
         static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream),
         d_side_idxs, d_side_vals, side_max, &outlier_count);
 
-    // 5. Size the outlier side buffers from the readback count (clamped to capacity —
-    //    overflow past `side_max` is dropped, same as the staged max_outliers path) and
-    //    report the byte counts back to the producer, so its serializeHeader records the
-    //    outlier count the reused inverse will scatter (execute() was bypassed).
+    // 5. Size the outlier side buffers from the readback count and report the byte
+    //    counts back to the producer, so its serializeHeader records the count the
+    //    reused inverse will scatter (execute() was bypassed).  The staged quantizer
+    //    rejects a capacity overflow: entries beyond the allocated side buffers are
+    //    not recoverable, so silently clamping here would create an archive that
+    //    decodes cleanly but violates its error bound.
     if (so_idxs && so_vals) {
+        auto* quant = dynamic_cast<QuantizerStage<float, uint32_t>*>(g.front());
+        if (outlier_count > side_max && quant && quant->getOutlierCapacity() != 0.0f) {
+            const float actual_pct = n > 0
+                ? 100.0f * static_cast<float>(outlier_count) / static_cast<float>(n)
+                : 0.0f;
+            const float capacity_pct = n > 0
+                ? 100.0f * static_cast<float>(side_max) / static_cast<float>(n)
+                : 0.0f;
+            char msg[512];
+            std::snprintf(
+                msg, sizeof(msg),
+                "QuantizerStage: outlier overflow — %u of %zu elements (%.1f%%) "
+                "fell outside the quantizer radius, but outlier_capacity reserves "
+                "only %.1f%%. Dropping the excess would violate the error bound. "
+                "Raise outlier_capacity to at least %.2f, widen quant_radius, or "
+                "loosen the error bound. Set outlier_capacity = 0 to opt into "
+                "dropping outliers deliberately.",
+                outlier_count, n, actual_pct, capacity_pct,
+                std::min(1.0f, actual_pct * 1.1f / 100.0f));
+            throw std::runtime_error(msg);
+        }
         const uint32_t written = outlier_count < side_max ? outlier_count : side_max;
         so_idxs->size = static_cast<size_t>(written) * sizeof(uint32_t);
         so_vals->size = static_cast<size_t>(written) * sizeof(float);
