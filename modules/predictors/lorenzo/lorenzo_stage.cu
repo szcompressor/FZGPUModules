@@ -683,6 +683,86 @@ void launchLorenzoPrefixSumKernel3D(
 // ─────────────────────────────────────────────────────────────────────────────
 
 template<typename T>
+void LorenzoStage<T>::executeBlockMode(
+    cudaStream_t stream,
+    const T* in, T* out, size_t n, size_t byte_size,
+    const std::vector<void*>& inputs,
+    const std::vector<void*>& outputs)
+{
+    const unsigned bt = block_size_;
+    const size_t nblocks = (n + bt - 1) / bt;
+
+    // The means port is optional plumbing shared by both orders; resolve it
+    // once here so the order dispatch below only picks a kernel.
+    T*       means_out = nullptr;
+    const T* means_in  = nullptr;
+    if (centering_) {
+        if (!is_inverse_) {
+            if (outputs.size() < 2 || outputs[1] == nullptr)
+                throw std::runtime_error(
+                    "LorenzoStage: centering enabled but the 'means' output port "
+                    "is not connected");
+            means_out = static_cast<T*>(outputs[1]);
+            actual_means_size_ = nblocks * sizeof(T);
+        } else {
+            if (inputs.size() < 2 || inputs[1] == nullptr)
+                throw std::runtime_error(
+                    "LorenzoStage: centering enabled but the 'means' input port "
+                    "is not connected");
+            means_in = static_cast<const T*>(inputs[1]);
+        }
+    }
+
+    if (!is_inverse_) {
+        if      (order_ == 2) launchLorenzo2Delta1D<T>(in, out, means_out, n, stream, bt);
+        else if (centering_)  launchLorenzoDeltaCentered1D<T>(in, out, means_out, n, stream, bt);
+        else                  launchLorenzoDeltaKernel1D<T>(in, out, n, stream, bt);
+    } else if (order_ == 1 && !centering_ && bt == 32u) {
+        // 32-element segments are exactly one warp: the barrier-free warp
+        // scan with wide CTAs still beats the segmented kernel here.
+        launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream, bt);
+    } else {
+        launchLorenzoSegmentedScan<T>(in, means_in, out, n, stream, bt,
+                                      (order_ == 2) ? 2 : 1);
+    }
+    actual_output_size_ = byte_size;
+}
+
+template<typename T>
+void LorenzoStage<T>::executeNDMode(
+    cudaStream_t stream,
+    const T* in, T* out, size_t n, size_t byte_size)
+{
+    if (centering_)
+        throw std::runtime_error(
+            "LorenzoStage: setCentering(true) requires block mode — call "
+            "setBlockSize(n) with n > 0 (there is no per-block mean without blocks)");
+    if (order_ == 2)
+        throw std::runtime_error(
+            "LorenzoStage: setOrder(2) requires block mode — call setBlockSize(n) "
+            "with n > 0 (the N-D path has no second-order form)");
+
+    // Resolve effective dims: if dim_x is 0, treat as flat 1-D of n elements.
+    const size_t nx = (dims_[0] > 0) ? dims_[0] : n;
+    const size_t ny = dims_[1];
+    const size_t nz = dims_[2];
+
+    int eff_ndim = ndim();
+
+    if (!is_inverse_) {
+        if      (eff_ndim == 3) launchLorenzoDeltaKernel3D<T>(in, out, nx, ny, nz, stream);
+        else if (eff_ndim == 2) launchLorenzoDeltaKernel2D<T>(in, out, nx, ny, stream);
+        else                    launchLorenzoDeltaKernel1D<T>(in, out, n, stream);
+    } else {
+        if      (eff_ndim == 3) launchLorenzoPrefixSumKernel3D<T>(in, out, nx, ny, nz, stream);
+        else if (eff_ndim == 2) launchLorenzoPrefixSumKernel2D<T>(in, out, nx, ny, stream);
+        else                    launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream);
+    }
+
+    actual_output_size_ = byte_size;
+}
+
+template<typename T>
 void LorenzoStage<T>::execute(
     cudaStream_t stream,
     MemoryPool* /*pool*/,
@@ -703,76 +783,10 @@ void LorenzoStage<T>::execute(
     const T* in    = static_cast<const T*>(inputs[0]);
     T*       out   = static_cast<T*>(outputs[0]);
 
-    // Resolve effective dims: if dim_x is 0, treat as flat 1-D of n elements.
-    size_t nx = (dims_[0] > 0) ? dims_[0] : n;
-    size_t ny = dims_[1];
-    size_t nz = dims_[2];
-
-    // Explicit block mode (cuSZp-style): force the 1-D path over the flattened
-    // array, resetting the prediction chain every block_size_ elements.
-    if (block_size_ > 0) {
-        const unsigned bt = block_size_;
-        const size_t nblocks = (n + bt - 1) / bt;
-
-        // The means port is optional plumbing shared by both orders; resolve it
-        // once here so the order dispatch below only picks a kernel.
-        T*       means_out = nullptr;
-        const T* means_in  = nullptr;
-        if (centering_) {
-            if (!is_inverse_) {
-                if (outputs.size() < 2 || outputs[1] == nullptr)
-                    throw std::runtime_error(
-                        "LorenzoStage: centering enabled but the 'means' output port "
-                        "is not connected");
-                means_out = static_cast<T*>(outputs[1]);
-                actual_means_size_ = nblocks * sizeof(T);
-            } else {
-                if (inputs.size() < 2 || inputs[1] == nullptr)
-                    throw std::runtime_error(
-                        "LorenzoStage: centering enabled but the 'means' input port "
-                        "is not connected");
-                means_in = static_cast<const T*>(inputs[1]);
-            }
-        }
-
-        if (!is_inverse_) {
-            if      (order_ == 2) launchLorenzo2Delta1D<T>(in, out, means_out, n, stream, bt);
-            else if (centering_)  launchLorenzoDeltaCentered1D<T>(in, out, means_out, n, stream, bt);
-            else                  launchLorenzoDeltaKernel1D<T>(in, out, n, stream, bt);
-        } else if (order_ == 1 && !centering_ && bt == 32u) {
-            // 32-element segments are exactly one warp: the barrier-free warp
-            // scan with wide CTAs still beats the segmented kernel here.
-            launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream, bt);
-        } else {
-            launchLorenzoSegmentedScan<T>(in, means_in, out, n, stream, bt,
-                                          (order_ == 2) ? 2 : 1);
-        }
-        actual_output_size_ = byte_size;
-        return;
-    }
-
-    if (centering_)
-        throw std::runtime_error(
-            "LorenzoStage: setCentering(true) requires block mode — call "
-            "setBlockSize(n) with n > 0 (there is no per-block mean without blocks)");
-    if (order_ == 2)
-        throw std::runtime_error(
-            "LorenzoStage: setOrder(2) requires block mode — call setBlockSize(n) "
-            "with n > 0 (the N-D path has no second-order form)");
-
-    int eff_ndim = ndim();
-
-    if (!is_inverse_) {
-        if      (eff_ndim == 3) launchLorenzoDeltaKernel3D<T>(in, out, nx, ny, nz, stream);
-        else if (eff_ndim == 2) launchLorenzoDeltaKernel2D<T>(in, out, nx, ny, stream);
-        else                    launchLorenzoDeltaKernel1D<T>(in, out, n, stream);
-    } else {
-        if      (eff_ndim == 3) launchLorenzoPrefixSumKernel3D<T>(in, out, nx, ny, nz, stream);
-        else if (eff_ndim == 2) launchLorenzoPrefixSumKernel2D<T>(in, out, nx, ny, stream);
-        else                    launchLorenzoPrefixSumKernel1D<T>(in, out, n, stream);
-    }
-
-    actual_output_size_ = byte_size;
+    // block_size_ > 0 selects the explicit cuSZp-style block-local mode over
+    // the default N-D stencil mode; see executeBlockMode()/executeNDMode().
+    if (block_size_ > 0) executeBlockMode(stream, in, out, n, byte_size, inputs, outputs);
+    else                 executeNDMode(stream, in, out, n, byte_size);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

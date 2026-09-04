@@ -331,6 +331,21 @@ public:
     }
 
 private:
+    /// cuSZp-style block mode (`block_size_ > 0`): forces the 1-D path over the
+    /// flattened array with the prediction chain reset every `block_size_`
+    /// elements, independent of `dims_`. Handles order 1/2 and centering.
+    void executeBlockMode(
+        fz::stream_t stream,
+        const T* in, T* out, size_t n, size_t byte_size,
+        const std::vector<void*>& inputs,
+        const std::vector<void*>& outputs);
+
+    /// Default N-D mode (`block_size_ == 0`): dispatches on `ndim()` to the
+    /// 1-D/2-D/3-D inclusion-exclusion stencil kernels. No centering/order-2.
+    void executeNDMode(
+        fz::stream_t stream,
+        const T* in, T* out, size_t n, size_t byte_size);
+
     bool is_inverse_         = false;
     size_t actual_output_size_ = 0;
     size_t actual_means_size_  = 0;

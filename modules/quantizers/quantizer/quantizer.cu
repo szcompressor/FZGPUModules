@@ -654,6 +654,198 @@ std::vector<size_t> QuantizerStage<TInput, TCode>::estimateOutputSizes(
     };
 }
 
+// =============================================================================
+// execute() kernel-launch helpers
+// =============================================================================
+// Pure call-site extraction from execute(): each wraps exactly one
+// kernel-instantiation path (the same template args / launch config the
+// inlined code used). No kernel logic, math, or launch parameters changed.
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchRelForward(
+    fz::stream_t stream, int grid, int block,
+    const TInput* in, size_t num_elements,
+    float log2eb, float log2eb_r, float opp_eb, float oopp_eb,
+    size_t max_outliers,
+    TCode* codes, TInput* outlier_vals, uint32_t* outlier_idxs)
+{
+    if (config_.dither) {
+        quantizer_rel_fwd_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            in, num_elements,
+            log2eb, log2eb_r, opp_eb, oopp_eb,
+            config_.dither_seed,
+            config_.dither_strength,
+            config_.outlier_threshold,
+            static_cast<TCode>(config_.quant_radius),
+            codes, outlier_vals, outlier_idxs,
+            d_outlier_count_scratch_,
+            max_outliers
+        );
+    } else {
+        quantizer_rel_fwd_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            in, num_elements,
+            log2eb, log2eb_r, opp_eb, oopp_eb,
+            uint64_t(0),
+            0.0f,
+            config_.outlier_threshold,
+            static_cast<TCode>(config_.quant_radius),
+            codes, outlier_vals, outlier_idxs,
+            d_outlier_count_scratch_,
+            max_outliers
+        );
+    }
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchLinearForward(
+    fz::stream_t stream, int grid, int block,
+    const TInput* in, size_t num_elements,
+    TInput ebx2_r, double ebx2_r_f64, TCode* codes)
+{
+    if (config_.linear_high_precision) {
+        quantizer_linear_fwd_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            in, num_elements, ebx2_r, ebx2_r_f64, codes, d_linear_overflow_scratch_);
+    } else {
+        quantizer_linear_fwd_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            in, num_elements, ebx2_r, ebx2_r_f64, codes, d_linear_overflow_scratch_);
+    }
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchInplaceForward(
+    fz::stream_t stream, int grid, int block,
+    const TInput* in, size_t num_elements,
+    TInput ebx2_r, TCode* codes)
+{
+    quantizer_abs_fwd_inplace_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
+        in, num_elements, ebx2_r,
+        config_.outlier_threshold,
+        static_cast<TCode>(config_.quant_radius),
+        codes
+    );
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchAbsNoaForward(
+    fz::stream_t stream, int grid, int block,
+    const TInput* in, size_t num_elements,
+    TInput ebx2_r, TInput ebx2, TInput abs_eb,
+    TInput dither_amp, uint64_t dither_seed,
+    size_t max_outliers,
+    TCode* codes, TInput* outlier_vals, uint32_t* outlier_idxs)
+{
+    if (config_.zigzag_codes && config_.dither) {
+        quantizer_abs_fwd_kernel<TInput, TCode, true, true><<<grid, block, 0, stream>>>(
+            in, num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
+            static_cast<TCode>(config_.quant_radius),
+            codes, outlier_vals, outlier_idxs,
+            d_outlier_count_scratch_,
+            max_outliers
+        );
+    } else if (config_.zigzag_codes) {
+        quantizer_abs_fwd_kernel<TInput, TCode, true, false><<<grid, block, 0, stream>>>(
+            in, num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
+            static_cast<TCode>(config_.quant_radius),
+            codes, outlier_vals, outlier_idxs,
+            d_outlier_count_scratch_,
+            max_outliers
+        );
+    } else if (config_.dither) {
+        quantizer_abs_fwd_kernel<TInput, TCode, false, true><<<grid, block, 0, stream>>>(
+            in, num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
+            static_cast<TCode>(config_.quant_radius),
+            codes, outlier_vals, outlier_idxs,
+            d_outlier_count_scratch_,
+            max_outliers
+        );
+    } else {
+        quantizer_abs_fwd_kernel<TInput, TCode, false, false><<<grid, block, 0, stream>>>(
+            in, num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
+            static_cast<TCode>(config_.quant_radius),
+            codes, outlier_vals, outlier_idxs,
+            d_outlier_count_scratch_,
+            max_outliers
+        );
+    }
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchRelInverse(
+    fz::stream_t stream, int grid, int block,
+    const TCode* codes, size_t num_elements,
+    float log2eb, TInput* out)
+{
+    if (config_.dither) {
+        quantizer_rel_inv_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            codes, num_elements, log2eb,
+            config_.dither_seed, config_.dither_strength, out
+        );
+    } else {
+        quantizer_rel_inv_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            codes, num_elements, log2eb,
+            uint64_t(0), 0.0f, out
+        );
+    }
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchLinearInverse(
+    fz::stream_t stream, int grid, int block,
+    const TCode* codes, size_t num_elements,
+    TInput ebx2, double ebx2_f64, TInput* out)
+{
+    if (config_.linear_high_precision) {
+        quantizer_linear_inv_kernel<TInput, TCode, true><<<grid, block, 0, stream>>>(
+            codes, num_elements, ebx2, ebx2_f64, out);
+    } else {
+        quantizer_linear_inv_kernel<TInput, TCode, false><<<grid, block, 0, stream>>>(
+            codes, num_elements, ebx2, ebx2_f64, out);
+    }
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchInplaceInverse(
+    fz::stream_t stream, int grid, int block,
+    const TCode* codes, size_t num_elements,
+    TInput ebx2, TInput* out)
+{
+    quantizer_abs_inv_inplace_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
+        codes, num_elements, ebx2,
+        static_cast<TCode>(config_.quant_radius),
+        out
+    );
+}
+
+template<typename TInput, typename TCode>
+void QuantizerStage<TInput, TCode>::launchAbsNoaInverse(
+    fz::stream_t stream, int grid, int block,
+    const TCode* codes, size_t num_elements,
+    TInput ebx2, TInput dither_amp, uint64_t dither_seed,
+    TInput* out)
+{
+    if (config_.zigzag_codes && config_.dither) {
+        quantizer_abs_inv_kernel<TInput, TCode, true, true><<<grid, block, 0, stream>>>(
+            codes, num_elements, ebx2, dither_amp, dither_seed,
+            static_cast<TCode>(config_.quant_radius), out
+        );
+    } else if (config_.zigzag_codes) {
+        quantizer_abs_inv_kernel<TInput, TCode, true, false><<<grid, block, 0, stream>>>(
+            codes, num_elements, ebx2, dither_amp, dither_seed,
+            static_cast<TCode>(config_.quant_radius), out
+        );
+    } else if (config_.dither) {
+        quantizer_abs_inv_kernel<TInput, TCode, false, true><<<grid, block, 0, stream>>>(
+            codes, num_elements, ebx2, dither_amp, dither_seed,
+            static_cast<TCode>(config_.quant_radius), out
+        );
+    } else {
+        quantizer_abs_inv_kernel<TInput, TCode, false, false><<<grid, block, 0, stream>>>(
+            codes, num_elements, ebx2, dither_amp, dither_seed,
+            static_cast<TCode>(config_.quant_radius), out
+        );
+    }
+}
+
 template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::execute(
     cudaStream_t stream,
@@ -706,15 +898,9 @@ void QuantizerStage<TInput, TCode>::execute(
             double ebx2_f64 = 2.0 * static_cast<double>(computed_abs_eb_);
             constexpr int kBlk = 256;
             int g = static_cast<int>((num_elements + kBlk - 1) / kBlk);
-            if (config_.linear_high_precision) {
-                quantizer_linear_inv_kernel<TInput, TCode, true><<<g, kBlk, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]), num_elements,
-                    ebx2, ebx2_f64, static_cast<TInput*>(outputs[0]));
-            } else {
-                quantizer_linear_inv_kernel<TInput, TCode, false><<<g, kBlk, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]), num_elements,
-                    ebx2, ebx2_f64, static_cast<TInput*>(outputs[0]));
-            }
+            launchLinearInverse(stream, g, kBlk,
+                static_cast<const TCode*>(inputs[0]), num_elements,
+                ebx2, ebx2_f64, static_cast<TInput*>(outputs[0]));
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TInput)};
             return;
@@ -739,38 +925,18 @@ void QuantizerStage<TInput, TCode>::execute(
         if (config_.eb_mode == ErrorBoundMode::REL) {
             // REL inverse: decode packed log-bin codes
             float log2eb = 2.0f * std::log2(1.0f + config_.error_bound);
-
-            if (config_.dither) {
-                quantizer_rel_inv_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements,
-                    log2eb,
-                    config_.dither_seed,
-                    config_.dither_strength,
-                    static_cast<TInput*>(outputs[0])
-                );
-            } else {
-                quantizer_rel_inv_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements,
-                    log2eb,
-                    uint64_t(0),
-                    0.0f,
-                    static_cast<TInput*>(outputs[0])
-                );
-            }
+            launchRelInverse(stream, grid, kBlock,
+                static_cast<const TCode*>(inputs[0]), num_elements,
+                log2eb, static_cast<TInput*>(outputs[0]));
         } else {
             // ABS / NOA inverse: dequantize with stored abs_eb
             TInput ebx2 = static_cast<TInput>(2) * computed_abs_eb_;
 
             if (isInplaceMode()) {
                 // In-place: every element is written directly (no scatter needed)
-                quantizer_abs_inv_inplace_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2,
-                    static_cast<TCode>(config_.quant_radius),
-                    static_cast<TInput*>(outputs[0])
-                );
+                launchInplaceInverse(stream, grid, kBlock,
+                    static_cast<const TCode*>(inputs[0]), num_elements,
+                    ebx2, static_cast<TInput*>(outputs[0]));
                 FZ_CUDA_CHECK(cudaGetLastError());
                 actual_output_sizes_ = {num_elements * sizeof(TInput)};
                 return;
@@ -779,35 +945,10 @@ void QuantizerStage<TInput, TCode>::execute(
             const TInput   dither_amp  = computed_abs_eb_ * static_cast<TInput>(config_.dither_strength);
             const uint64_t dither_seed = config_.dither_seed;
 
-            if (config_.zigzag_codes && config_.dither) {
-                quantizer_abs_inv_kernel<TInput, TCode, true, true><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2, dither_amp, dither_seed,
-                    static_cast<TCode>(config_.quant_radius),
-                    static_cast<TInput*>(outputs[0])
-                );
-            } else if (config_.zigzag_codes) {
-                quantizer_abs_inv_kernel<TInput, TCode, true, false><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2, dither_amp, dither_seed,
-                    static_cast<TCode>(config_.quant_radius),
-                    static_cast<TInput*>(outputs[0])
-                );
-            } else if (config_.dither) {
-                quantizer_abs_inv_kernel<TInput, TCode, false, true><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2, dither_amp, dither_seed,
-                    static_cast<TCode>(config_.quant_radius),
-                    static_cast<TInput*>(outputs[0])
-                );
-            } else {
-                quantizer_abs_inv_kernel<TInput, TCode, false, false><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TCode*>(inputs[0]),
-                    num_elements, ebx2, dither_amp, dither_seed,
-                    static_cast<TCode>(config_.quant_radius),
-                    static_cast<TInput*>(outputs[0])
-                );
-            }
+            launchAbsNoaInverse(stream, grid, kBlock,
+                static_cast<const TCode*>(inputs[0]), num_elements,
+                ebx2, dither_amp, dither_seed,
+                static_cast<TInput*>(outputs[0]));
         }
 
         FZ_CUDA_CHECK(cudaGetLastError());
@@ -1003,37 +1144,13 @@ void QuantizerStage<TInput, TCode>::execute(
         FZ_LOG(INFO, "QuantizerStage REL: param epsilon=%.6g log2eb=%.6g max_outliers=%zu num_elements=%zu",
                static_cast<double>(epsilon), static_cast<double>(log2eb), max_outliers, num_elements);
 
-        if (config_.dither) {
-            quantizer_rel_fwd_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements,
-                log2eb, log2eb_r, opp_eb, oopp_eb,
-                config_.dither_seed,
-                config_.dither_strength,
-                config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0]),
-                static_cast<TInput*>(outputs[1]),
-                static_cast<uint32_t*>(outputs[2]),
-                d_outlier_count_scratch_,
-                max_outliers
-            );
-        } else {
-            quantizer_rel_fwd_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements,
-                log2eb, log2eb_r, opp_eb, oopp_eb,
-                uint64_t(0),
-                0.0f,
-                config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0]),
-                static_cast<TInput*>(outputs[1]),
-                static_cast<uint32_t*>(outputs[2]),
-                d_outlier_count_scratch_,
-                max_outliers
-            );
-        }
+        launchRelForward(stream, grid, kBlock,
+            static_cast<const TInput*>(inputs[0]), num_elements,
+            log2eb, log2eb_r, opp_eb, oopp_eb,
+            max_outliers,
+            static_cast<TCode*>(outputs[0]),
+            static_cast<TInput*>(outputs[1]),
+            static_cast<uint32_t*>(outputs[2]));
     } else {
         // ABS / NOA
         TInput ebx2_r = static_cast<TInput>(1)
@@ -1043,19 +1160,9 @@ void QuantizerStage<TInput, TCode>::execute(
 
         if (isLinearMode()) {
             // Linear / no-outlier: pure map, single codes output.
-            if (config_.linear_high_precision) {
-                quantizer_linear_fwd_kernel<TInput, TCode, true><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TInput*>(inputs[0]),
-                    num_elements, ebx2_r, ebx2_r_f64,
-                    static_cast<TCode*>(outputs[0]),
-                    d_linear_overflow_scratch_);
-            } else {
-                quantizer_linear_fwd_kernel<TInput, TCode, false><<<grid, kBlock, 0, stream>>>(
-                    static_cast<const TInput*>(inputs[0]),
-                    num_elements, ebx2_r, ebx2_r_f64,
-                    static_cast<TCode*>(outputs[0]),
-                    d_linear_overflow_scratch_);
-            }
+            launchLinearForward(stream, grid, kBlock,
+                static_cast<const TInput*>(inputs[0]), num_elements,
+                ebx2_r, ebx2_r_f64, static_cast<TCode*>(outputs[0]));
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TCode)};
             return;
@@ -1072,13 +1179,9 @@ void QuantizerStage<TInput, TCode>::execute(
                     "QuantizerStage: setInplaceOutliers(true) requires sizeof(TCode)==sizeof(TInput) "
                     "(use QuantizerStage<float, uint32_t>)");
 
-            quantizer_abs_fwd_inplace_kernel<TInput, TCode><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r,
-                config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0])
-            );
+            launchInplaceForward(stream, grid, kBlock,
+                static_cast<const TInput*>(inputs[0]), num_elements,
+                ebx2_r, static_cast<TCode*>(outputs[0]));
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TCode)};
             return;
@@ -1088,51 +1191,13 @@ void QuantizerStage<TInput, TCode>::execute(
         const TInput   dither_amp  = abs_eb * static_cast<TInput>(config_.dither_strength);
         const uint64_t dither_seed = config_.dither_seed;
 
-        if (config_.zigzag_codes && config_.dither) {
-            quantizer_abs_fwd_kernel<TInput, TCode, true, true><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0]),
-                static_cast<TInput*>(outputs[1]),
-                static_cast<uint32_t*>(outputs[2]),
-                d_outlier_count_scratch_,
-                max_outliers
-            );
-        } else if (config_.zigzag_codes) {
-            quantizer_abs_fwd_kernel<TInput, TCode, true, false><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0]),
-                static_cast<TInput*>(outputs[1]),
-                static_cast<uint32_t*>(outputs[2]),
-                d_outlier_count_scratch_,
-                max_outliers
-            );
-        } else if (config_.dither) {
-            quantizer_abs_fwd_kernel<TInput, TCode, false, true><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0]),
-                static_cast<TInput*>(outputs[1]),
-                static_cast<uint32_t*>(outputs[2]),
-                d_outlier_count_scratch_,
-                max_outliers
-            );
-        } else {
-            quantizer_abs_fwd_kernel<TInput, TCode, false, false><<<grid, kBlock, 0, stream>>>(
-                static_cast<const TInput*>(inputs[0]),
-                num_elements, ebx2_r, ebx2, abs_eb, dither_amp, dither_seed, config_.outlier_threshold,
-                static_cast<TCode>(config_.quant_radius),
-                static_cast<TCode*>(outputs[0]),
-                static_cast<TInput*>(outputs[1]),
-                static_cast<uint32_t*>(outputs[2]),
-                d_outlier_count_scratch_,
-                max_outliers
-            );
-        }
+        launchAbsNoaForward(stream, grid, kBlock,
+            static_cast<const TInput*>(inputs[0]), num_elements,
+            ebx2_r, ebx2, abs_eb, dither_amp, dither_seed,
+            max_outliers,
+            static_cast<TCode*>(outputs[0]),
+            static_cast<TInput*>(outputs[1]),
+            static_cast<uint32_t*>(outputs[2]));
     }
 
     FZ_CUDA_CHECK(cudaGetLastError());

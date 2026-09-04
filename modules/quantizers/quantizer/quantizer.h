@@ -557,6 +557,52 @@ private:
     void initOutlierCountScratch(MemoryPool* pool);
     void initLinearOverflowScratch(MemoryPool* pool);
 
+    // ── execute() kernel-launch helpers ────────────────────────────────────
+    // Each wraps exactly one forward/inverse kernel-instantiation path so
+    // execute() reduces to mode resolution + dispatch. Pure call-site
+    // extraction: no kernel logic, math, or launch parameters changed.
+
+    /// Forward: REL log-space quant, dispatched on dither.
+    void launchRelForward(fz::stream_t stream, int grid, int block,
+                           const TInput* in, size_t num_elements,
+                           float log2eb, float log2eb_r, float opp_eb, float oopp_eb,
+                           size_t max_outliers,
+                           TCode* codes, TInput* outlier_vals, uint32_t* outlier_idxs);
+    /// Forward: linear/no-outlier quant, dispatched on linear_high_precision.
+    void launchLinearForward(fz::stream_t stream, int grid, int block,
+                              const TInput* in, size_t num_elements,
+                              TInput ebx2_r, double ebx2_r_f64, TCode* codes);
+    /// Forward: ABS/NOA in-place outlier quant (no dither/zigzag axis — inplace
+    /// always TCMS-encodes valid codes; see quantizer_abs_fwd_inplace_kernel).
+    void launchInplaceForward(fz::stream_t stream, int grid, int block,
+                               const TInput* in, size_t num_elements,
+                               TInput ebx2_r, TCode* codes);
+    /// Forward: ABS/NOA split-outlier quant, dispatched on zigzag x dither.
+    void launchAbsNoaForward(fz::stream_t stream, int grid, int block,
+                              const TInput* in, size_t num_elements,
+                              TInput ebx2_r, TInput ebx2, TInput abs_eb,
+                              TInput dither_amp, uint64_t dither_seed,
+                              size_t max_outliers,
+                              TCode* codes, TInput* outlier_vals, uint32_t* outlier_idxs);
+
+    /// Inverse: REL log-space dequant, dispatched on dither.
+    void launchRelInverse(fz::stream_t stream, int grid, int block,
+                           const TCode* codes, size_t num_elements,
+                           float log2eb, TInput* out);
+    /// Inverse: linear/no-outlier dequant, dispatched on linear_high_precision.
+    void launchLinearInverse(fz::stream_t stream, int grid, int block,
+                              const TCode* codes, size_t num_elements,
+                              TInput ebx2, double ebx2_f64, TInput* out);
+    /// Inverse: ABS/NOA in-place outlier dequant.
+    void launchInplaceInverse(fz::stream_t stream, int grid, int block,
+                               const TCode* codes, size_t num_elements,
+                               TInput ebx2, TInput* out);
+    /// Inverse: ABS/NOA split-outlier dequant, dispatched on zigzag x dither.
+    void launchAbsNoaInverse(fz::stream_t stream, int grid, int block,
+                              const TCode* codes, size_t num_elements,
+                              TInput ebx2, TInput dither_amp, uint64_t dither_seed,
+                              TInput* out);
+
     bool isInplaceMode() const {
         return config_.inplace_outliers
             && config_.eb_mode != ErrorBoundMode::REL;
