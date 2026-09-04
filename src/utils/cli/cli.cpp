@@ -477,8 +477,262 @@ static std::vector<std::string> parse_stages(const std::string& stages_str) {
     return result;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Dynamic --stages dispatch table.
+//
+// Mirrors the kStageRegistry pattern in src/pipeline/config.cpp: one table
+// entry per stage "family" instead of an if/else-if chain. Each entry pairs a
+// `matches` predicate (does this --stages token name this family, including
+// any word-size suffix?) with a `build` function (construct + configure the
+// stage, returning it unconnected). The loop below owns connecting stages
+// together and threads `last_is_codes_port`; `emits_codes` in the entry says
+// whether this family's build hands codes to the next stage the same way
+// `lorenzo`/`quantizer` always have.
+//
+// Families rze/rre/rare/raze/clog/hclog/gpulz/rle all follow the same
+// "<name>" or "<name><1|2|4|8>" convention (LC's word-granularity suffix), so
+// they share the matchWordFamily()/wordSuffixOrDefault() helpers below. tupl
+// uses its own "tupl<dim>_<word>" syntax and keeps its bespoke parser.
+//
+// To add a stage to the dynamic linear builder: add a build_xxx (+ matches_xxx
+// if it needs a new naming convention) below, then append one entry to
+// kDynamicStageTable, and mention the name in the "Unknown stage" message.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// True if `name` is exactly `base`, or `base` followed by one of the LC word
+// granularity digits {1,2,4,8} (e.g. base="rze" matches rze, rze1, rze2, rze4, rze8).
+static bool matchWordFamily(const std::string& name, const char* base) {
+    const std::string b(base);
+    if (name == b) return true;
+    return name == b + "1" || name == b + "2" || name == b + "4" || name == b + "8";
+}
+
+// Word-size digit trailing a `prefix_len`-character prefix, or `default_ws` if
+// the name has no trailing digit (i.e. is exactly the bare family name).
+static size_t wordSuffixOrDefault(const std::string& name, size_t prefix_len, size_t default_ws) {
+    return name.size() > prefix_len ? static_cast<size_t>(name[prefix_len] - '0') : default_ws;
+}
+
+static bool matches_lorenzo(const std::string& n)    { return n == "lorenzo"; }
+static bool matches_quantizer(const std::string& n)  { return n == "quantizer"; }
+static bool matches_bitshuffle(const std::string& n) { return n == "bitshuffle" || n == "bshuf"; }
+static bool matches_rze(const std::string& n)        { return matchWordFamily(n, "rze"); }
+static bool matches_rre(const std::string& n)        { return matchWordFamily(n, "rre"); }
+static bool matches_gpulz(const std::string& n)      { return matchWordFamily(n, "gpulz"); }
+static bool matches_rare(const std::string& n)       { return matchWordFamily(n, "rare"); }
+static bool matches_raze(const std::string& n)       { return matchWordFamily(n, "raze"); }
+static bool matches_clog(const std::string& n)       { return matchWordFamily(n, "clog"); }
+static bool matches_hclog(const std::string& n)      { return matchWordFamily(n, "hclog"); }
+static bool matches_tupl(const std::string& n)       { return n == "tupl" || n.rfind("tupl", 0) == 0; }
+static bool matches_diff(const std::string& n)       { return n == "diff" || n == "difference"; }
+static bool matches_rle(const std::string& n)        { return matchWordFamily(n, "rle"); }
+static bool matches_huffman(const std::string& n)    { return n == "huffman" || n == "huf"; }
+static bool matches_ans(const std::string& n)        { return n == "ans"; }
+static bool matches_adm(const std::string& n)        { return n == "adm"; }
+static bool matches_none(const std::string& n)       { return n == "none"; }
+
+template <typename T>
+static Stage* build_lorenzo(Pipeline* pipeline, const CliSettings& s, const std::string&, bool) {
+    auto* lrz = pipeline->addStage<LorenzoQuantStage<T, uint16_t>>();
+    lrz->setErrorBound(s.error_bound);
+    // The CLI default (REL) predates the REL/PREL split and has always meant
+    // the approximate mode on this stage — map it silently. Only an explicit
+    // `--mode rel` earns the deprecation warning.
+    lrz->setErrorBoundMode(
+        (!s.error_mode_explicit && s.error_mode == ErrorBoundMode::REL)
+            ? ErrorBoundMode::PREL : s.error_mode);
+    lrz->setQuantRadius(s.quant_radius);
+    lrz->setOutlierCapacity(0.10f);
+    lrz->setZigzagCodes(true);
+    return lrz;
+}
+
+template <typename T>
+static Stage* build_quantizer(Pipeline* pipeline, const CliSettings& s, const std::string&, bool) {
+    auto* quant = pipeline->addStage<QuantizerStage<T, uint16_t>>();
+    quant->setErrorBound(s.error_bound);
+    quant->setErrorBoundMode(s.error_mode);
+    quant->setQuantRadius(s.quant_radius);
+    quant->setOutlierCapacity(0.05f);
+    quant->setZigzagCodes(true);
+    return quant;
+}
+
+template <typename T>
+static Stage* build_bitshuffle(Pipeline* pipeline, const CliSettings& s, const std::string&, bool last_is_codes_port) {
+    auto* bshuf = pipeline->addStage<BitshuffleStage>();
+    bshuf->setBlockSize(s.chunk_size);
+    // If the upstream stage was a predictor, codes are uint16_t (2 bytes);
+    // otherwise fall back to the element width of the input type.
+    bshuf->setElementWidth(last_is_codes_port ? 2 : static_cast<int>(sizeof(T)));
+    return bshuf;
+}
+
+static Stage* build_rze(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    auto* rze = pipeline->addStage<RZEStage>();
+    rze->setChunkSize(s.chunk_size);
+    rze->setWordSize(wordSuffixOrDefault(name, 3, 1));
+    return rze;
+}
+
+static Stage* build_rre(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    auto* rre = pipeline->addStage<RREStage>();
+    rre->setChunkSize(s.chunk_size);
+    rre->setWordSize(wordSuffixOrDefault(name, 3, 1));
+    return rre;
+}
+
+static Stage* build_gpulz(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    // GPULZ only supports chunk sizes 1024/2048/4096; fall back to its own
+    // default (2048) unless the user explicitly overrode --chunk-size.
+    auto* gpulz = pipeline->addStage<GPULZStage>();
+    gpulz->setChunkSize(s.chunk_size == kDefaultChunkSize ? 2048 : s.chunk_size);
+    gpulz->setWordSize(wordSuffixOrDefault(name, 5, 4));
+    return gpulz;
+}
+
+static Stage* build_rare(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    auto* rare = pipeline->addStage<RAREStage>();
+    rare->setChunkSize(s.chunk_size);
+    rare->setWordSize(wordSuffixOrDefault(name, 4, 1));
+    return rare;
+}
+
+static Stage* build_raze(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    auto* raze = pipeline->addStage<RAZEStage>();
+    raze->setChunkSize(s.chunk_size);
+    raze->setWordSize(wordSuffixOrDefault(name, 4, 1));
+    return raze;
+}
+
+static Stage* build_clog(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    auto* clog = pipeline->addStage<CLOGStage>();
+    clog->setChunkSize(s.chunk_size);
+    clog->setWordSize(wordSuffixOrDefault(name, 4, 1));
+    return clog;
+}
+
+static Stage* build_hclog(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    auto* hclog = pipeline->addStage<HCLOGStage>();
+    hclog->setChunkSize(s.chunk_size);
+    hclog->setWordSize(wordSuffixOrDefault(name, 5, 1));
+    return hclog;
+}
+
+static Stage* build_tupl(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    // "tupl" (dim=2, word_size=1 default) or "tupl<dim>_<word>", e.g.
+    // "tupl6_4" -- mirrors LC's TUPLk_w naming; dim can be multi-digit
+    // (LC uses up to TUPL12), so this isn't a single trailing-digit suffix
+    // like rze[1|2|4|8].
+    size_t dim = 2, word = 1;
+    if (name.size() > 4) {
+        const std::string rest = name.substr(4);
+        const auto us = rest.find('_');
+        const auto bad = [&]() {
+            return std::runtime_error(
+                "Unknown stage '" + name + "' in --stages. "
+                "Expected 'tupl' or 'tupl<dim>_<word_size>', e.g. tupl6_4");
+        };
+        if (us == std::string::npos) throw bad();
+        // stoi throws std::invalid_argument on a non-numeric suffix, whose
+        // message is just "stoi" -- translate it to the same guidance the
+        // missing-underscore case gets.
+        try {
+            dim  = static_cast<size_t>(std::stoi(rest.substr(0, us)));
+            word = static_cast<size_t>(std::stoi(rest.substr(us + 1)));
+        } catch (const std::logic_error&) {
+            throw bad();
+        }
+    }
+    auto* tupl = pipeline->addStage<TUPLStage>();
+    tupl->setBlockSize(s.chunk_size);
+    tupl->setDim(dim);
+    tupl->setWordSize(word);
+    return tupl;
+}
+
+static Stage* build_diff(Pipeline* pipeline, const CliSettings& s, const std::string&, bool) {
+    auto* diff = pipeline->addStage<DifferenceStage<uint16_t>>();
+    diff->setChunkSize(s.chunk_size);
+    return diff;
+}
+
+static Stage* build_rle(Pipeline* pipeline, const CliSettings& s, const std::string& name, bool) {
+    // Optional trailing digit selects the word size (default 2, matching the
+    // historical uint16_t default); mirrors rze[1|2|4|8]/rre[1|2|4|8].
+    // RLE defaults to its whole-array path; an explicit --chunk-size switches
+    // it to the (much faster, marginally worse CR) chunked path. Unlike the
+    // other chunked coders it is not opted in by the default chunk size, so
+    // existing invocations are unaffected.
+    Stage* rle = nullptr;
+    const size_t width = wordSuffixOrDefault(name, 3, 2);
+    const size_t rle_cs = (s.chunk_size == kDefaultChunkSize) ? 0 : s.chunk_size;
+    auto set_cs = [&](auto* st) { st->setChunkSize(rle_cs); return st; };
+    switch (width) {
+        case 1: rle = set_cs(pipeline->addStage<RLEStage<uint8_t>>());  break;
+        case 2: rle = set_cs(pipeline->addStage<RLEStage<uint16_t>>()); break;
+        case 4: rle = set_cs(pipeline->addStage<RLEStage<uint32_t>>()); break;
+        case 8: rle = set_cs(pipeline->addStage<RLEStage<uint64_t>>()); break;
+    }
+    return rle;
+}
+
+static Stage* build_huffman(Pipeline* pipeline, const CliSettings& s, const std::string&, bool last_is_codes_port) {
+    // When following a predictor with zigzag_codes=true, codes are in [0, 2*radius-2];
+    // set bklen=2*quant_radius to cover the full symbol range exactly.
+    // When not following a predictor, fall back to 1024; use TOML for custom bklen.
+    const uint32_t bklen = last_is_codes_port
+        ? static_cast<uint32_t>(2 * s.quant_radius)
+        : 1024u;
+    auto* huf = pipeline->addStage<HuffmanStage<uint16_t>>();
+    huf->setBklen(bklen);
+    return huf;
+}
+
+static Stage* build_ans(Pipeline* pipeline, const CliSettings&, const std::string&, bool) {
+    // addStage<ANSStage>() itself throws a clear runtime_error on a backend
+    // that doesn't support it (see Stage::isSupportedOnBackend()'s doc
+    // comment) -- no guard needed.
+    return pipeline->addStage<ANSStage>();
+}
+
+static Stage* build_adm(Pipeline* pipeline, const CliSettings&, const std::string&, bool) {
+    auto* adm = pipeline->addStage<ADMStage>();
+    // The linear CLI path only ever produces uint16_t codes upstream (both
+    // `lorenzo` and `quantizer` are hardcoded to uint16_t), so U16 is always
+    // right here. Use a TOML config for a U32 ADM.
+    adm->setDtype(ADMDtype::U16);
+    return adm;
+}
+
 template <typename T>
 static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings& s) {
+    using MatchFn = bool (*)(const std::string&);
+    using BuildFn = Stage* (*)(Pipeline*, const CliSettings&, const std::string&, bool);
+    struct DynamicStageEntry {
+        MatchFn matches;
+        bool    emits_codes;
+        BuildFn build;
+    };
+    const DynamicStageEntry kDynamicStageTable[] = {
+        { matches_lorenzo,    true,  build_lorenzo<T>    },
+        { matches_quantizer,  true,  build_quantizer<T>  },
+        { matches_bitshuffle, false, build_bitshuffle<T> },
+        { matches_rze,        false, build_rze           },
+        { matches_rre,        false, build_rre           },
+        { matches_gpulz,      false, build_gpulz         },
+        { matches_rare,       false, build_rare          },
+        { matches_raze,       false, build_raze          },
+        { matches_clog,       false, build_clog          },
+        { matches_hclog,      false, build_hclog         },
+        { matches_tupl,       false, build_tupl          },
+        { matches_diff,       false, build_diff          },
+        { matches_rle,        false, build_rle           },
+        { matches_huffman,    false, build_huffman       },
+        { matches_ans,        false, build_ans           },
+        { matches_adm,        false, build_adm           },
+    };
+
     pipeline->setDims(s.nx, s.ny, s.nz);
     pipeline->setWarmupOnFinalize(s.warmup);
     pipeline->enableProfiling(s.profile);
@@ -502,164 +756,13 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
     }
 
     for (const std::string& name : stage_list) {
-        if (name == "lorenzo") {
-            auto* lrz = pipeline->addStage<LorenzoQuantStage<T, uint16_t>>();
-            lrz->setErrorBound(s.error_bound);
-            // The CLI default (REL) predates the REL/PREL split and has always
-            // meant the approximate mode on this stage — map it silently. Only
-            // an explicit `--mode rel` earns the deprecation warning.
-            lrz->setErrorBoundMode(
-                (!s.error_mode_explicit && s.error_mode == ErrorBoundMode::REL)
-                    ? ErrorBoundMode::PREL : s.error_mode);
-            lrz->setQuantRadius(s.quant_radius);
-            lrz->setOutlierCapacity(0.10f);
-            lrz->setZigzagCodes(true);
-            connect_next(lrz, /*emits_codes=*/true);
-        } else if (name == "quantizer") {
-            auto* quant = pipeline->addStage<QuantizerStage<T, uint16_t>>();
-            quant->setErrorBound(s.error_bound);
-            quant->setErrorBoundMode(s.error_mode);
-            quant->setQuantRadius(s.quant_radius);
-            quant->setOutlierCapacity(0.05f);
-            quant->setZigzagCodes(true);
-            connect_next(quant, /*emits_codes=*/true);
-        } else if (name == "bitshuffle" || name == "bshuf") {
-            auto* bshuf = pipeline->addStage<BitshuffleStage>();
-            bshuf->setBlockSize(s.chunk_size);
-            // If the upstream stage was a predictor, codes are uint16_t (2 bytes);
-            // otherwise fall back to the element width of the input type.
-            bshuf->setElementWidth(last_is_codes_port ? 2 : static_cast<int>(sizeof(T)));
-            connect_next(bshuf);
-        } else if (name == "rze" || name == "rze1" || name == "rze2" ||
-                   name == "rze4" || name == "rze8") {
-            // Optional trailing digit selects the LC word granularity (default 1).
-            auto* rze = pipeline->addStage<RZEStage>();
-            rze->setChunkSize(s.chunk_size);
-            rze->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
-            connect_next(rze);
-        } else if (name == "rre" || name == "rre1" || name == "rre2" ||
-                   name == "rre4" || name == "rre8") {
-            // Optional trailing digit selects the LC word granularity (default 1).
-            auto* rre = pipeline->addStage<RREStage>();
-            rre->setChunkSize(s.chunk_size);
-            rre->setWordSize(name.size() > 3 ? static_cast<size_t>(name[3] - '0') : 1);
-            connect_next(rre);
-        } else if (name == "gpulz" || name == "gpulz1" || name == "gpulz2" ||
-                   name == "gpulz4" || name == "gpulz8") {
-            // GPULZ only supports chunk sizes 1024/2048/4096; fall back to its
-            // own default (2048) unless the user explicitly overrode --chunk-size.
-            auto* gpulz = pipeline->addStage<GPULZStage>();
-            gpulz->setChunkSize(s.chunk_size == kDefaultChunkSize ? 2048 : s.chunk_size);
-            gpulz->setWordSize(name.size() > 5 ? static_cast<size_t>(name[5] - '0') : 4);
-            connect_next(gpulz);
-        } else if (name == "rare" || name == "rare1" || name == "rare2" ||
-                   name == "rare4" || name == "rare8") {
-            // Optional trailing digit selects the LC word granularity (default 1).
-            auto* rare = pipeline->addStage<RAREStage>();
-            rare->setChunkSize(s.chunk_size);
-            rare->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
-            connect_next(rare);
-        } else if (name == "raze" || name == "raze1" || name == "raze2" ||
-                   name == "raze4" || name == "raze8") {
-            // Optional trailing digit selects the LC word granularity (default 1).
-            auto* raze = pipeline->addStage<RAZEStage>();
-            raze->setChunkSize(s.chunk_size);
-            raze->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
-            connect_next(raze);
-        } else if (name == "clog" || name == "clog1" || name == "clog2" ||
-                   name == "clog4" || name == "clog8") {
-            // Optional trailing digit selects the LC word granularity (default 1).
-            auto* clog = pipeline->addStage<CLOGStage>();
-            clog->setChunkSize(s.chunk_size);
-            clog->setWordSize(name.size() > 4 ? static_cast<size_t>(name[4] - '0') : 1);
-            connect_next(clog);
-        } else if (name == "hclog" || name == "hclog1" || name == "hclog2" ||
-                   name == "hclog4" || name == "hclog8") {
-            // Optional trailing digit selects the LC word granularity (default 1).
-            auto* hclog = pipeline->addStage<HCLOGStage>();
-            hclog->setChunkSize(s.chunk_size);
-            hclog->setWordSize(name.size() > 5 ? static_cast<size_t>(name[5] - '0') : 1);
-            connect_next(hclog);
-        } else if (name == "tupl" || name.rfind("tupl", 0) == 0) {
-            // "tupl" (dim=2, word_size=1 default) or "tupl<dim>_<word>", e.g.
-            // "tupl6_4" -- mirrors LC's TUPLk_w naming; dim can be multi-digit
-            // (LC uses up to TUPL12), so this isn't a single trailing-digit
-            // suffix like rze[1|2|4|8].
-            size_t dim = 2, word = 1;
-            if (name.size() > 4) {
-                const std::string rest = name.substr(4);
-                const auto us = rest.find('_');
-                const auto bad = [&]() {
-                    return std::runtime_error(
-                        "Unknown stage '" + name + "' in --stages. "
-                        "Expected 'tupl' or 'tupl<dim>_<word_size>', e.g. tupl6_4");
-                };
-                if (us == std::string::npos) throw bad();
-                // stoi throws std::invalid_argument on a non-numeric suffix, whose
-                // message is just "stoi" -- translate it to the same guidance the
-                // missing-underscore case gets.
-                try {
-                    dim  = static_cast<size_t>(std::stoi(rest.substr(0, us)));
-                    word = static_cast<size_t>(std::stoi(rest.substr(us + 1)));
-                } catch (const std::logic_error&) {
-                    throw bad();
-                }
-            }
-            auto* tupl = pipeline->addStage<TUPLStage>();
-            tupl->setBlockSize(s.chunk_size);
-            tupl->setDim(dim);
-            tupl->setWordSize(word);
-            connect_next(tupl);
-        } else if (name == "diff" || name == "difference") {
-            auto* diff = pipeline->addStage<DifferenceStage<uint16_t>>();
-            diff->setChunkSize(s.chunk_size);
-            connect_next(diff);
-        } else if (name == "rle" || name == "rle1" || name == "rle2" ||
-                   name == "rle4" || name == "rle8") {
-            // Optional trailing digit selects the word size (default 2, matching
-            // the historical uint16_t default); mirrors rze[1|2|4|8]/rre[1|2|4|8].
-            // RLE defaults to its whole-array path; an explicit --chunk-size
-            // switches it to the (much faster, marginally worse CR) chunked
-            // path.  Unlike the other chunked coders it is not opted in by the
-            // default chunk size, so existing invocations are unaffected.
-            Stage* rle = nullptr;
-            const int width = name.size() > 3 ? (name[3] - '0') : 2;
-            const size_t rle_cs =
-                (s.chunk_size == kDefaultChunkSize) ? 0 : s.chunk_size;
-            auto set_cs = [&](auto* st) { st->setChunkSize(rle_cs); return st; };
-            switch (width) {
-                case 1: rle = set_cs(pipeline->addStage<RLEStage<uint8_t>>());  break;
-                case 2: rle = set_cs(pipeline->addStage<RLEStage<uint16_t>>()); break;
-                case 4: rle = set_cs(pipeline->addStage<RLEStage<uint32_t>>()); break;
-                case 8: rle = set_cs(pipeline->addStage<RLEStage<uint64_t>>()); break;
-            }
-            connect_next(rle);
-        } else if (name == "huffman" || name == "huf") {
-            // When following a predictor with zigzag_codes=true, codes are in [0, 2*radius-2];
-            // set bklen=2*quant_radius to cover the full symbol range exactly.
-            // When not following a predictor, fall back to 1024; use TOML for custom bklen.
-            const uint32_t bklen = last_is_codes_port
-                ? static_cast<uint32_t>(2 * s.quant_radius)
-                : 1024u;
-            auto* huf = pipeline->addStage<HuffmanStage<uint16_t>>();
-            huf->setBklen(bklen);
-            connect_next(huf);
-        } else if (name == "ans") {
-            // addStage<ANSStage>() itself throws a clear runtime_error on a
-            // backend that doesn't support it (see
-            // Stage::isSupportedOnBackend()'s doc comment) -- no guard needed.
-            auto* ans = pipeline->addStage<ANSStage>();
-            connect_next(ans);
-        } else if (name == "adm") {
-            auto* adm = pipeline->addStage<ADMStage>();
-            // The linear CLI path only ever produces uint16_t codes upstream
-            // (both `lorenzo` and `quantizer` are hardcoded to uint16_t), so U16
-            // is always right here. Use a TOML config for a U32 ADM.
-            adm->setDtype(ADMDtype::U16);
-            connect_next(adm);
-        } else if (name == "none") {
-            // explicit no-op
-        } else {
+        if (matches_none(name)) continue;  // explicit no-op
+
+        const DynamicStageEntry* entry = nullptr;
+        for (const auto& candidate : kDynamicStageTable) {
+            if (candidate.matches(name)) { entry = &candidate; break; }
+        }
+        if (!entry) {
             throw std::runtime_error(
                 "Unknown stage '" + name + "' in --stages. "
                 "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], "
@@ -667,6 +770,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
                 "tupl[<dim>_<word_size>], gpulz[1|2|4|8], diff, "
                 "rle[1|2|4|8], huffman, ans, adm, none");
         }
+        connect_next(entry->build(pipeline, s, name, last_is_codes_port), entry->emits_codes);
     }
 
     if (s.bounds_check) pipeline->enableBoundsCheck(true);
