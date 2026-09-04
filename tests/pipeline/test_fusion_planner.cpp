@@ -587,6 +587,24 @@ static void buildPfpl(Pipeline& p, size_t n, bool useRre) {
     else        { auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(16384); p.connect(c, b); }
 }
 
+// The production PFPL preset uses split outliers with a finite capacity.  A field
+// with a large absolute offset and a narrow range can put nearly every value outside
+// the zero-centred quantizer radius; Auto must reject it just as staged execution
+// does, rather than serialize only the first capacity entries and decode the rest
+// incorrectly.
+static void buildPfplCapacityLimitedSplit(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-4f); q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setOutlierCapacity(0.1f);
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(16384);
+    p.connect(b, d);
+    auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(16384);
+    p.connect(c, b);
+}
+
 // The PFPL chain fuses into one 4-stage chunk-cooperative group ending in the coder.
 TEST(FusionPlanner, PfplChainIsOneGroup) {
     Pipeline p(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
@@ -716,6 +734,36 @@ TEST(FusionPlanner, PfplChunk4096EngagesInverseFusion) {
     cudaDeviceSynchronize();
     EXPECT_EQ(p.getSpecializationInfo().installed_inverse_groups.size(), 1u)
         << "inverse fusion did not engage at chunk_bytes=4096 (fell back to staged decode)";
+    cudaFree(d_in);
+}
+
+TEST(FusionPlanner, PfplFusedOutlierOverflowFailsLikeStaged) {
+    constexpr size_t n = 16384;
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i)
+        h[i] = 97674.0f + static_cast<float>(i % 6425);  // PSL-shaped: large offset, narrow range
+
+    float* d_in = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_in, n * sizeof(float)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), n * sizeof(float), cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto expectOverflow = [&](FusionPolicy policy) {
+        Pipeline p(n * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(policy);
+        buildPfplCapacityLimitedSplit(p, n);
+        p.finalize();
+        void* d_compressed = nullptr;
+        size_t compressed_bytes = 0;
+        try {
+            p.compress(d_in, n * sizeof(float), &d_compressed, &compressed_bytes, 0);
+            FAIL() << "capacity-limited outlier overflow unexpectedly compressed";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("outlier overflow"), std::string::npos);
+        }
+    };
+
+    expectOverflow(FusionPolicy::Off);
+    expectOverflow(FusionPolicy::Auto);
     cudaFree(d_in);
 }
 
