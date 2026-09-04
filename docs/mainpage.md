@@ -93,7 +93,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_diff "DifferenceStage<T, TOut>"         | `modules/predictors/diff/diff.h`                   | First-order difference / cumulative-sum coding |
 | \ref stage_adm "ADMStage"                         | `modules/transforms/adm/adm_stage.h`               | Adaptive data mapping — uint16/32 → 8-bit symbol domain (MANS port) |
 | \ref stage_bitshuffle "BitshuffleStage"                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
-| \ref stage_tupl "TUPLStage"                       | `modules/shufflers/tupl/tupl_stage.h`              | Tuple deinterleave / AoS-to-SoA transpose (LC component) |
+| \ref stage_tupl "TUPLStage"                       | `modules/structural/tupl/tupl_stage.h`              | Tuple deinterleave / AoS-to-SoA transpose (LC component) |
 | \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Zero-word bitmap reducer with recursive bitmap compression (LC component) |
 | \ref stage_rre "RREStage"                         | `modules/coders/rre/rre_stage.h`                   | Repeated-word bitmap reducer with recursive bitmap compression (LC component) |
 | \ref stage_rare "RAREStage"                       | `modules/coders/rare/rare_stage.h`                 | Adaptive top-bit matching generalization of RRE (LC component) |

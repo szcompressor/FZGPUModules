@@ -147,6 +147,11 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
         }
         blob.insert(blob.end(), op.params.begin(), op.params.end());
     }
+    // matchesChunkCooperative() guarantees exactly one Cooperative-access member
+    // (the coder), and the planner guarantees every Cooperative/BlockLocal member
+    // of the group agrees on block_size (see fusion_planner.cpp) — so the coder's
+    // own declared block_size IS the chunk size the whole group was matched at.
+    spec.chunk_bytes = static_cast<int>(coder->getFusionSpec().block_size);
 
     // 3. Split-outlier producer? The quant Map declares "QuantSplitOutlier" and its
     //    outlier ports arrive as named escaping side outputs. Hand the pre-allocated buffers to the
@@ -208,11 +213,17 @@ bool matchesChunkCooperativeInverse(const std::vector<Stage*>& g) {
     auto* bs  = dynamic_cast<BitshuffleStage*>(g[1]);
     auto* df  = dynamic_cast<DifferenceStage<int32_t, uint32_t>*>(g[2]);
     auto* q   = dynamic_cast<QuantizerStage<float, uint32_t>*>(g[3]);
-    return rze && bs && df && q &&
-           rze->isInverse() && bs->isInverse() && df->isInverse() && q->isInverse() &&
-           rze->getWordSize() == 1 && rze->getChunkSize() == 16384u &&
-           bs->getElementWidth() == 4u && bs->getBlockSize() == 16384u &&
-           df->getChunkSize() == 16384u && q->supportsChunkInverseFusion();
+    if (!(rze && bs && df && q)) return false;
+    if (!(rze->isInverse() && bs->isInverse() && df->isInverse() && q->isInverse())) return false;
+    if (rze->getWordSize() != 1 || bs->getElementWidth() != 4u) return false;
+    // Chunk size can be any of the fusion harness's supported sizes, but every
+    // stage in the chain must agree on the same one (the planner enforces this
+    // for the forward direction via block_size; the inverse chain is matched
+    // directly by stage state here instead, so the equality check is explicit).
+    const uint32_t cs = static_cast<uint32_t>(rze->getChunkSize());
+    if (cs != 4096u && cs != 8192u && cs != 16384u) return false;
+    return bs->getBlockSize() == cs && df->getChunkSize() == cs &&
+           q->supportsChunkInverseFusion();
 }
 
 size_t runChunkCooperativeInverse(const FusedRunContext& ctx) {
@@ -238,7 +249,8 @@ size_t runChunkCooperativeInverse(const FusedRunContext& ctx) {
         q->getInplaceOutliers(), static_cast<uint32_t>(q->getQuantRadius()),
         outlier_vals, outlier_idxs, q->getActualOutlierCount(),
         static_cast<float*>(ctx.d_output), ctx.pool,
-        static_cast<fz::stream_t>(ctx.stream));
+        static_cast<fz::stream_t>(ctx.stream),
+        static_cast<int>(rze->getChunkSize()));
     q->setFusedInverseResult(written);
     return written;
 }

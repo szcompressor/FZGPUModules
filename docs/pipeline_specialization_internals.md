@@ -1,16 +1,9 @@
 # Making a stage specialization-compatible {#pipeline_specialization_internals}
 
-Audience: stage authors and library developers. This is the contract a stage
-implements so that pipelines using it are picked up by
-\ref pipeline_specialization "Pipeline Specialization" automatically — with
-**no edits to the planner, matcher, or runner**. If you only *use* the feature,
-read the user guide instead.
-
-The guiding principle: specialization is **declaration-driven**. A stage declares
+Specialization is **declaration-driven**. A stage declares
 its fused identity; the planner walks the DAG matching those declarations by role;
 the runner builds the fused kernel from the declared op names. A correctly
-declaring stage joins the fast path the same way an existing one does. Adding a new
-predictor/coder to a family is a stage-level change, not a control-flow change.
+declared stage joins the fast path the same way an existing one does.
 
 ---
 
@@ -36,7 +29,7 @@ the POD `Params` struct is **shared verbatim** between host and device (see
 
 `include/stage/fusion.h` defines the vocabulary.
 
-**`FusionAccess`** — a stage's data-access pattern, which decides *how* it can fuse:
+`FusionAccess` — a stage's data-access pattern, which decides *how* it can fuse:
 
 | Role | Meaning | Example |
 |---|---|---|
@@ -46,25 +39,19 @@ the POD `Params` struct is **shared verbatim** between host and device (see
 | `TileAdaptive` | one selector tile containing N coder units | FSZ selector |
 | `Unfusable` (default) | opaque / global dependency — a fusion barrier | Huffman (global codebook) |
 
-**`FusionStrategy`** — which execution model the op belongs to. A fused group is
+`FusionStrategy` — which execution model the op belongs to. A fused group is
 composed of ops that all share one strategy:
 
 | Strategy | Execution model |
 |---|---|
 | `WarpRegister` | one warp owns a `≤ 32·kMaxWarpElemsPerLane`-element block, intermediates in registers + shuffles, no barriers (cuSZp / SZp) |
-| `ChunkCooperative` | one CTA owns a 16 KB byte-chunk, intermediates in shared memory, `__syncthreads` between ops (LC / PFPL) |
+| `ChunkCooperative` | one CTA owns a compatible size byte-chunk, intermediates in shared memory, `__syncthreads` between ops (LC / PFPL) |
 
-The rest of this guide works the **warp-register** path end to end (it's the
-simplest and covers cuSZp/SZp). The chunk-cooperative path uses the same declaration
-surface with a different harness — see the note at the end.
+The rest of this guide works the **warp-register** path end to end. The chunk-cooperative path uses the same declaration surface with a different harness.
 
 ---
 
 ## Forward declaration
-
-Two virtuals, both gated on `!isInverse()`. A stage returning a fusable
-`getFusionSpec()` but no `getFusedOp()` cannot actually be composed — keep them in
-lockstep.
 
 <!-- doc-check: skip — class-member fragments, not standalone TUs -->
 ```cpp
@@ -92,9 +79,9 @@ FusedOpDecl getFusedOp() const override {
 
 Conventions:
 
-- **`op_name` is the device policy type name.** The NVRTC codegen instantiates the
+- **op_name is the device policy type name.** The NVRTC codegen instantiates the
   harness with exactly this identifier, so it must name a type in `include_header`.
-- **`params` is the POD's raw bytes.** The generated kernel casts the packed blob to
+- **params is the POD's raw bytes.** The generated kernel casts the packed blob to
   the POD type; host and device layouts must match. Stateless ops leave it empty.
 - **The `inv2eb` slot convention.** Every warp predictor's `Params` begins with
   `float inv2eb` at offset 0. The predictor stage cannot know the error bound (the
@@ -102,8 +89,8 @@ Conventions:
   with `1/(2·abs_eb)` resolved from the primed quantizer bound before uploading. The
   quantizer is absorbed into the predictor (it quantizes inline in `delta()`), which
   is why the Map/quant stage declares op `"LinearQuant"` with empty params.
-- **`elems_per_lane`** (= `block_size / 32`) is the harness's compile-time template
-  arg; **`n_ab`** is the padded block-covering element count (0 = 1-D, no padding).
+- **elems_per_lane** (= `block_size / 32`) is the harness's compile-time template
+  arg; **n_ab** is the padded block-covering element count (0 = 1-D, no padding).
 
 The coder (Cooperative, the group tail) declares similarly with `op_name` naming its
 coder policy (`"PlainRateCoder"` / `"AdaptiveBitpackCoder"`).
@@ -155,7 +142,7 @@ inverse harness can't undo — e.g. Lorenzo excludes `centeringActive()` because
 
 ---
 
-## Priming: the fused runner bypasses `execute()`
+## Priming: the fused runner bypasses execute()
 
 A fused runner replaces the group's per-stage `execute()` calls with one kernel, so
 any state a stage would normally compute in `execute()` — and that its **own
@@ -169,9 +156,9 @@ inverse** later reads — must be established explicitly. These `Stage` hooks
 | `setFusedInverseResult(bytes)` | inverse tail (quant) | Publish the reconstructed byte count for output-size refinement. |
 | `setFusedSideOutput(port, bytes)` | outlier-producing quant | Report bytes written to an escaping side port (e.g. an outlier list) so `serializeHeader` matches the fused result. |
 
-**Gotcha (learned the hard way):** without `primeFusedForwardState`, a fused
+Without `primeFusedForwardState`, a fused
 quantizer's inverse read the *default* bound (1e-4) instead of the resolved one —
-producing a byte-identical archive that reconstructed 10× too small, silently. If
+producing a byte-identical archive that reconstructed 10× too small. If
 your stage computes anything in `execute()` that its inverse depends on, it must be
 primed. See `docs/codebase_notes.md` CN-FUSE-DRIVER / CN-CHUNK-WIRE.
 
@@ -224,7 +211,7 @@ transforms, so a chain with an interior transform (e.g. Zigzag) fuses on compres
 but stays staged on decompress until `invert()` + `applyInverseTransforms` land.
 
 The forward and inverse methods of one policy **must** be exact inverses that also
-match the staged stage's kernels bit-for-bit — the staged path is the oracle.
+match the staged stage's kernels bit-for-bit.
 
 ---
 
@@ -295,14 +282,21 @@ A specialization is only correct if it is indistinguishable from staged:
 
 Same declaration surface (`getFusionSpec`/`getFusedOp` with
 `FusionStrategy::ChunkCooperative`), different harness
-(`modules/fused/chunk_fusion/`). Device ops are `__device__` functions over a 16 KB
-chunk with shared-memory ping-pong; the POD params live in `chunk_op_params.h`. The
-harness is NVRTC-composed from an op list, so a novel `Map → Transform* → Coder`
-chunk chain fuses with zero new glue — proven for `Quant → Diff → Bitshuffle →
-{RZE, RRE, RARE, RAZE}`. The NVRTC surface needs the op headers to compile without
-the CUDA runtime; see CN-NVRTC-FUSE for the stub requirements. Decompress
-generalization for this path is future work (its inverse is currently the single
-PFPL/RZE shape).
+(`modules/fused/chunk_fusion/`). Device ops are templated on chunk size
+(`Op<ChunkBytes>`, one of `{4096, 8192, 16384}` — see `chunk_geometry.h`'s
+`Geom<Bytes>`) with shared-memory ping-pong; the POD params live in
+`chunk_op_params.h`. The harness is NVRTC-composed from an op list, with the
+chunk size baked into the generated template args (`ChunkFusionSpec::chunk_bytes`),
+so a novel `Map → Transform* → Coder` chunk chain fuses with zero new glue —
+proven for `Quant → Diff → Bitshuffle → {RZE, RRE, RARE, RAZE}` at all three
+sizes. All participating ops in a group must declare the same `block_size`
+(chunk size) or the planner rejects the group. The NVRTC surface needs the op
+headers to compile without the CUDA runtime; see CN-NVRTC-FUSE for the stub
+requirements — note this also means any host-only helper in a header pulled
+into the NVRTC translation unit must be `#ifndef __CUDACC_RTC__`-guarded, since
+NVRTC rejects an unannotated function merely being *present*, not just called
+(see `chunk_geometry.h`'s `isSupportedChunkBytes`). Decompress generalization
+for this path beyond PFPL/RZE is future work.
 
 ---
 
@@ -310,7 +304,5 @@ PFPL/RZE shape).
 
 - User guide: \ref pipeline_specialization "Pipeline Specialization" (in Performance Tuning)
 - Adding a stage at all: [how_to_add_a_stage.md](how_to_add_a_stage.md)
-- Measured evidence, roofline model, postmortems: `docs/codebase_notes.md`
-  (`CN-FUSE-*`, `CN-CHUNK-*`, `CN-NVRTC-*`, `CN-BSHUF-SMEM`)
 - Future deep-dive on stage design + optimization decisions (WIP outline):
   [developing_stages_deep_dive.md](developing_stages_deep_dive.md)

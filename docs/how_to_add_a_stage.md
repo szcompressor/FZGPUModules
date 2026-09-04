@@ -392,7 +392,7 @@ Ordinary device intrinsics need no change and behave identically: `__ffs`, `__po
 `__clz`, `__brev`, `__syncthreads`, `__ldg`, unscoped `atomicAdd`/`atomicMax`,
 `__launch_bounds__`, `<<<>>>` launches.
 
-### The part no wrapper can fix: 32-lane algorithms
+### 32-lane algorithms core issue
 
 A facade can correct the mask and the default width, but it cannot know whether your
 *algorithm* is intrinsically 32-lane. If a kernel does a 32-lane butterfly, packs a ballot
@@ -474,12 +474,12 @@ FZ_REGISTER_STAGE_FACTORY(fz::StageType::MY_STAGE, MyStage_fromHeader);
 The registrar runs at static-init when `libfzgmod_modules` loads. `scripts/new_stage.sh`
 emits the `FZ_REGISTER_SIMPLE_STAGE` line for you.
 
-> **Static-archive builds:** registration relies on the stage's object file being
-> linked in. In the default shared-library build (`BUILD_SHARED_LIBS=ON`) every
-> module object is present in `libfzgmod_modules.so`, so registrars always run. If
-> you link the modules as a static archive, link it with `--whole-archive` (or an
-> equivalent `KEEP`) so the registrars are not stripped. `test_stage_registry`
-> asserts every shipped `StageType` has a registered factory.
+**Static-archive builds:** registration relies on the stage's object file being
+linked in. In the default shared-library build (`BUILD_SHARED_LIBS=ON`) every
+module object is present in `libfzgmod_modules.so`, so registrars always run. If
+you link the modules as a static archive, link it with `--whole-archive` (or an
+equivalent `KEEP`) so the registrars are not stripped. `test_stage_registry`
+asserts every shipped `StageType` has a registered factory.
 
 ---
 
@@ -555,7 +555,7 @@ the helpers — see `addLorenzoQuantStage` / `saveLorenzoQuantStage` for the pat
 
 ---
 
-## Step 8 — Register in the CLI dynamic builder *(optional)*
+## Step 8 — Register in the CLI dynamic builder (optional)
 
 If the stage makes sense as a general-purpose pipeline step, add it to the
 `--stages` builder in `src/utils/cli/cli.cpp` and update the help text.
@@ -565,7 +565,7 @@ instantiations or unusual wiring can be TOML-only.
 
 ---
 
-## Step 8b — Attribution *(required when based on prior work)*
+## Step 8b — Attribution (required when based on prior work)
 
 If your stage ports, adapts, or closely follows an algorithm from another
 project, you must acknowledge it in three places:

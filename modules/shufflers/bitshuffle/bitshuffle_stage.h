@@ -53,9 +53,12 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
 
     // Fixed-length cooperative transform, block-local at the chunk granularity.
-    // The fused Bitshuffle32 op covers only the primary 4-byte / 16384-byte shape.
+    // The fused Bitshuffle32<ChunkBytes> op covers the 4-byte-element shape at
+    // any chunk_size the fusion harness supports — see chunk_geometry.h's
+    // kSupportedChunkBytes.
     FusionSpec getFusionSpec() const override {
-        if (is_inverse_ || element_width_ != 4 || block_size_ != 16384u) return {};
+        if (is_inverse_ || element_width_ != 4 ||
+            (block_size_ != 4096u && block_size_ != 8192u && block_size_ != 16384u)) return {};
         return FusionSpec{FusionAccess::BlockLocal, block_size_};
     }
 

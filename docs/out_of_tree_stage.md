@@ -124,7 +124,7 @@ registers, so decode fails with "no factory registered for stage type 40000".
 
 ---
 
-## 5. What you do *not* get out of tree
+## 5. What you lose
 
 - **TOML config** (`type = "MyStage"` in a `.toml`). The toml++ loader is
   confined to the library's `config.cpp` and has no extension point. Configure

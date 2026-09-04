@@ -35,9 +35,14 @@ namespace fused {
 /// field is a device-op *type name* defined in chunk_fusion.cuh. Defaults spell
 /// the PFPL body; a planner would fill these from the fused group's stages.
 struct ChunkFusionSpec {
-    std::string              quant_op   = "QuantInplaceZigzag";
-    std::vector<std::string> transforms = {"DiffNegabinary", "Bitshuffle32"};
-    std::string              coder      = "RZECoder";
+    std::string              quant_op    = "QuantInplaceZigzag";
+    std::vector<std::string> transforms  = {"DiffNegabinary", "Bitshuffle32"};
+    std::string              coder       = "RZECoder";
+    /// Chunk size in bytes — must be one of chunk::kSupportedChunkBytes
+    /// (chunk_geometry.h). Baked into the generated source as the harness's
+    /// `ChunkBytes` template parameter, and into the coder/Bitshuffle32 op names
+    /// that are themselves templated on it (see generateChunkFusionSource()).
+    int                       chunk_bytes = 16384;
 };
 
 /// Map a coder enum to its device-op name (the swappable sink).
@@ -54,7 +59,7 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec);
 
 /**
  * Compile (once, then cached) and launch the fused encode kernel for `spec`,
- * filling `d_scratch` (nc * CHUNK_BYTES) and `d_sizes` (nc). `d_params` is the
+ * filling `d_scratch` (nc * spec.chunk_bytes) and `d_sizes` (nc). `d_params` is the
  * device-resident packed per-op Params blob (ops in execution order); the kernel
  * hands each op its slice. Mirrors the launch of chunk_fused_kernel<...>; the
  * cross-chunk scan/pack tail is shared with the template path in chunk_fusion.cu.

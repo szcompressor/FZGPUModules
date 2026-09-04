@@ -1,15 +1,15 @@
 # Developing new stages: design & optimization decisions {#developing_stages_deep_dive}
 
-> **STATUS: WORK IN PROGRESS — outline only.** This page is a scaffold for a future
-> deep-dive. The mechanical "how to add a stage" steps already live in
-> [how_to_add_a_stage.md](how_to_add_a_stage.md); the specialization declaration
-> contract lives in
-> [pipeline_specialization_internals.md](pipeline_specialization_internals.md).
-> This page is meant to capture the *judgment* those two don't: how to decide a
-> stage's shape, ports, access pattern, and how it connects to and is optimized by
-> the rest of the pipeline. Sections below are stubs — fill them in with worked
-> examples and measured evidence as the design stabilizes. Do not treat unfilled
-> sections as authoritative.
+**STATUS: WORK IN PROGRESS — outline only.** This page is a scaffold for a future
+deep-dive. The mechanical "how to add a stage" steps already live in
+[how_to_add_a_stage.md](how_to_add_a_stage.md); the specialization declaration
+contract lives in
+[pipeline_specialization_internals.md](pipeline_specialization_internals.md).
+This page is meant to capture the *judgment* those two don't: how to decide a
+stage's shape, ports, access pattern, and how it connects to and is optimized by
+the rest of the pipeline. Sections below are stubs — fill them in with worked
+examples and measured evidence as the design stabilizes. Do not treat unfilled
+sections as authoritative.
 
 ---
 
@@ -90,10 +90,3 @@
 - [ ] A BlockLocal predictor, including its forward+inverse device policy.
 - [ ] A Cooperative coder, including the exact encoded-size oracle contract.
 - [ ] A structural stage (no compression op) and why it exists.
-
----
-
-*When filling this in, prefer measured numbers and cross-links to the canonical
-docs/notes over re-explaining mechanics already documented elsewhere. Each stub
-should become either a short prose section with a concrete example or a pointer to
-where that knowledge already lives.*

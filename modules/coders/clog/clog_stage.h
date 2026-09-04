@@ -92,10 +92,13 @@ public:
     uint32_t getCachedOrigBytes() const { return cached_orig_bytes_; }
 
     // ── Fusion (chunk-cooperative coder sink) ────────────────────────────────
-    // Byte-word 16 KB shape only — matches the fused CLOGCoder device op
-    // (d_CLOG<uint8_t, 16384>, identical to word_size==1 execute()).
+    // Any byte-word chunk_size the fusion harness supports fuses — matches the
+    // fused CLOGCoder<ChunkBytes> device op (d_CLOG<uint8_t, ChunkBytes>,
+    // identical to word_size==1 execute()); see chunk_geometry.h's
+    // kSupportedChunkBytes.
     FusionSpec getFusionSpec() const override {
-        if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
+        if (is_inverse_ || word_size_ != 1 ||
+            (chunk_size_ != 4096u && chunk_size_ != 8192u && chunk_size_ != 16384u)) return {};
         return FusionSpec{FusionAccess::Cooperative, chunk_size_};
     }
     FusedOpDecl getFusedOp() const override {

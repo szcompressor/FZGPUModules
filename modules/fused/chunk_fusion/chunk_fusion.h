@@ -36,21 +36,25 @@ enum class ChunkCoderKind { RZE, RRE };
  * @param d_out   device archive buffer (LC format: [orig][n_chunks][sizes][payloads])
  * @param pool    scratch pool
  * @param stream  CUDA stream (synchronised internally to read the archive length)
+ * @param chunk_bytes  chunk size; must be one of chunk::kSupportedChunkBytes
  * @return total archive length in bytes (4-byte rounded, matching the staged coder)
  */
 size_t launchFusedChunkPfpl(
     ChunkCoderKind coder, const float* d_in, size_t n, float ebx2_r,
-    uint32_t radius, float threshold, uint8_t* d_out, MemoryPool* pool, fz::stream_t stream);
+    uint32_t radius, float threshold, uint8_t* d_out, MemoryPool* pool, fz::stream_t stream,
+    int chunk_bytes = 16384);
 
 /** Decode a PFPL-shaped RZE archive through the inverse chunk harness. The main
  * codes path stays in shared memory; split outliers are restored by one final
- * scatter kernel. Returns `output_bytes`.
+ * scatter kernel. `chunk_bytes` must be one of chunk::kSupportedChunkBytes and
+ * must match the chunk size the archive was encoded with. Returns `output_bytes`.
  */
 size_t launchFusedChunkPfplInverse(
     const uint8_t* d_archive, size_t archive_bytes, size_t output_bytes,
     float ebx2, bool inplace_outliers, uint32_t quant_radius,
     const float* d_outlier_vals, const uint32_t* d_outlier_idxs,
-    uint32_t outlier_count, float* d_out, MemoryPool* pool, fz::stream_t stream);
+    uint32_t outlier_count, float* d_out, MemoryPool* pool, fz::stream_t stream,
+    int chunk_bytes = 16384);
 
 } // namespace fused
 } // namespace fz

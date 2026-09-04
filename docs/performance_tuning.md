@@ -216,7 +216,7 @@ chain shape pays the one-time JIT).
 | Strategy | Execution model | Pipelines it covers |
 |---|---|---|
 | **warp-register** | One warp owns a small block (`block_size = 32·EPL`, EPL ≤ 4), intermediates in registers + warp shuffles, no barriers. | The cuSZp / SZp family: `Quantizer(linear) → Lorenzo (or TiledLorenzo) → AdaptiveBitpack`, any block 32–128, plain or outlier. Compress **and** decompress. |
-| **chunk-cooperative** | One CTA owns a fixed **16 KB** byte-chunk, intermediates ping-ponged in shared memory, barriers between ops. | The PFPL / LC family: `Quantizer(inplace) → Difference → Bitshuffle → {RZE, RRE, RARE, RAZE}`. Compress (and PFPL/RZE decompress). |
+| **chunk-cooperative** | One CTA owns a byte-chunk (4096, 8192, or 16384 bytes — a per-pipeline choice, default 16 KB), intermediates ping-ponged in shared memory, barriers between ops. | The PFPL / LC family: `Quantizer(inplace) → Difference → Bitshuffle → {RZE, RRE, RARE, RAZE}`. Compress (and PFPL/RZE decompress). |
 
 Both are **general within their family**: a pipeline you assemble from stages that
 declare the right fusion ops fuses with no per-pipeline code.
@@ -241,16 +241,21 @@ All three are tuned via `FZ_*` environment variables (`FZ_TI`, `FZ_ADAPTIVE`,
 full list, defaults, and parsing rules. These are tuning/diagnostic knobs for
 experiments, not something a normal caller needs to set.
 
-**chunk-cooperative's 16 KB chunk size is a fixed compile-time constant, not a
-configurable parameter.** It's defined once, as the single source of truth, in
-`modules/fused/chunk_fusion/chunk_geometry.h` (`CHUNK_BYTES = 16384`), and shared by
-the device fusion harness, the host launcher, and the runtime-generated NVRTC
-source — all the derived geometry (element count, bitshuffle plane stride, coder
-scratch size) is computed from that one constant. Every RRE-family coder's
-`getFusionSpec()` explicitly gates on `chunk_size_ == 16384`
-(e.g. `modules/coders/rze/rze_stage.h`); a pipeline built with any other chunk size
-for those coders is still fully correct, it just runs staged (no fusion) instead of
-chunk-cooperative — there's no "any chunk size" option for this strategy today.
+**chunk-cooperative's chunk size is a per-pipeline choice among {4096, 8192,
+16384} bytes** (default 16384) — not a single hardcoded constant. The supported
+set lives once, as the single source of truth, in
+`modules/fused/chunk_fusion/chunk_geometry.h` (`kSupportedChunkBytes`); a
+`Geom<Bytes>` template derives the rest (element count, bitshuffle plane stride)
+per size, and the device fusion harness, host launcher, and runtime-generated
+NVRTC source are all instantiated once per supported size — the same pattern
+the RRE-family coders already used internally for their own `word_size`/
+`chunk_size` kernel dispatch. Every RRE-family coder's `getFusionSpec()` gates
+on chunk size being one of that set (e.g. `modules/coders/rze/rze_stage.h`); a
+pipeline built with any other chunk size for those coders is still fully
+correct, it just runs staged (no fusion) instead of chunk-cooperative. All
+participating stages (the coder plus `BitshuffleStage`/`DifferenceStage`
+upstream) must agree on the same chunk size — the planner's fusion matcher
+enforces this and falls back to staged on a mismatch.
 
 #### Making your own stages specialization-compatible
 

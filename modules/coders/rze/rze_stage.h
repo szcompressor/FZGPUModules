@@ -41,7 +41,7 @@ namespace fz {
 /**
  * LC RZE zero-word bitmap reducer.
  *
- * `setChunkSize(bytes)` — chunk size (default 16384; only 16384 is supported).
+ * `setChunkSize(bytes)` — chunk size (default 16384; 4096, 8192, or 16384).
  * `setWordSize(bytes)`  — word granularity 1/2/4/8 (default 1 = LC RZE_1).
  *
  * @note **Prior work:** GPU kernels are a faithful port of `d_RZE.h`,
@@ -87,9 +87,11 @@ public:
     uint32_t getCachedOrigBytes() const { return cached_orig_bytes_; }
 
     // Variable-length coder = the sink that terminates a chunk-cooperative fused
-    // chain. block_size is the chunk in bytes; only the byte-word 16 KB shape fuses.
+    // chain. block_size is the chunk in bytes; any byte-word chunk_size the
+    // fusion harness supports fuses — see chunk_geometry.h's kSupportedChunkBytes.
     FusionSpec getFusionSpec() const override {
-        if (is_inverse_ || word_size_ != 1 || chunk_size_ != 16384u) return {};
+        if (is_inverse_ || word_size_ != 1 ||
+            (chunk_size_ != 4096u && chunk_size_ != 8192u && chunk_size_ != 16384u)) return {};
         return FusionSpec{FusionAccess::Cooperative, chunk_size_};
     }
 

@@ -32,8 +32,9 @@
     {
       "name": "chunkSize",
       "type": "int",
+      "values": [4096, 8192, 16384],
       "default": 16384,
-      "description": "Chunk size in bytes. Only 16384 is currently supported."
+      "description": "Chunk size in bytes."
     }
   ],
 

@@ -599,6 +599,22 @@ TEST(FusionPlanner, PfplChainIsOneGroup) {
     EXPECT_TRUE(groups[0].has_coder);
 }
 
+// Same PFPL shape, but at a caller-chosen chunk size — proves the fusion harness
+// (chunk_fusion.cuh's Geom<ChunkBytes>) is genuinely parameterized, not just
+// defaulting to 16384 everywhere. Forward-only (RRE has no inverse fusion).
+static void buildPfplAtChunkSize(Pipeline& p, size_t n, bool useRre, uint32_t chunk_bytes) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(chunk_bytes);
+    p.connect(d, q, "codes");
+    auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(chunk_bytes);
+    p.connect(b, d);
+    if (useRre) { auto* c = p.addStage<RREStage>(); c->setWordSize(1); c->setChunkSize(chunk_bytes); p.connect(c, b); }
+    else        { auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(chunk_bytes); p.connect(c, b); }
+}
+
 // End-to-end: Auto must be byte-identical to staged and round-trip within bound —
 // run for BOTH coders through the same registry entry (the generalization gate).
 // Generic chunk-fusion end-to-end check: fused (Auto) must be byte-identical to
@@ -668,6 +684,39 @@ TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) {
 }
 TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) {
     chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/true); });
+}
+
+TEST(FusionPlanner, PfplChunk4096EndToEndFusedMatchesStaged) {
+    chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfplAtChunkSize(p, n, /*useRre=*/false, 4096); });
+}
+TEST(FusionPlanner, PfplChunk8192EndToEndFusedMatchesStaged) {
+    chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfplAtChunkSize(p, n, /*useRre=*/false, 8192); });
+}
+
+// A non-16384 chunk size must still engage BOTH forward and inverse chunk-
+// cooperative fusion (not silently fall back to staged decode) — the inverse
+// matcher's chunk-size checks were widened alongside the forward path.
+TEST(FusionPlanner, PfplChunk4096EngagesInverseFusion) {
+    const size_t n = 1u << 20;
+    const size_t bytes = n * sizeof(float);
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i) h[i] = 0.6f*std::sin(i*0.001f) + 0.3f*std::cos(i*0.017f);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+    p.setFusionPolicy(FusionPolicy::Auto);
+    buildPfplAtChunkSize(p, n, /*useRre=*/false, 4096);
+    p.finalize();
+    void* d_comp = nullptr; size_t sz = 0;
+    p.compress(d_in, bytes, &d_comp, &sz, 0);
+    EXPECT_EQ(p.getFusedGroupCount(), 1u) << "forward fusion did not engage at chunk_bytes=4096";
+    void* d_decomp = nullptr; size_t dsz = 0;
+    p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+    cudaDeviceSynchronize();
+    EXPECT_EQ(p.getSpecializationInfo().installed_inverse_groups.size(), 1u)
+        << "inverse fusion did not engage at chunk_bytes=4096 (fell back to staged decode)";
+    cudaFree(d_in);
 }
 
 // A chain the registry has NO hand-written entry for: Quantizer(inplace,zigzag) ->
@@ -1173,11 +1222,14 @@ TEST(FusionPlanner, WarpSwappableCoderPlainBitpack) {
 // two PFPL tests above under FZ_FUSION_NVRTC=1; here we just lock the mapping
 // from a ChunkFusionSpec to its template-argument list.
 TEST(FusionPlanner, NvrtcCodegenComposesSpecOps) {
-    fused::ChunkFusionSpec spec;   // PFPL defaults
+    fused::ChunkFusionSpec spec;   // PFPL defaults (chunk_bytes = 16384)
     const std::string src = fused::generateChunkFusionSource(spec);
-    // The generated glue names every op from the spec, in order, as template args.
-    EXPECT_NE(src.find("chunk_fused_body< QuantInplaceZigzag, RZECoder, "
-                       "DiffNegabinary, Bitshuffle32 >"), std::string::npos);
+    // The generated glue names every op from the spec, in order, as template
+    // args, led by the chunk-size template parameter; ops whose geometry
+    // depends on chunk size (the coder, Bitshuffle32) are themselves templated
+    // on it.
+    EXPECT_NE(src.find("chunk_fused_body< 16384, QuantInplaceZigzag, RZECoder<16384>, "
+                       "DiffNegabinary, Bitshuffle32<16384> >"), std::string::npos);
     EXPECT_NE(src.find("extern \"C\" __global__ void"), std::string::npos);
     EXPECT_NE(src.find("#include \"fused/chunk_fusion/chunk_fusion.cuh\""),
               std::string::npos);
@@ -1187,10 +1239,19 @@ TEST(FusionPlanner, NvrtcCodegenComposesSpecOps) {
     EXPECT_NE(fused::generateChunkFusionSource(spec).find("RRECoder"),
               std::string::npos);
 
+    // A different chunk size re-composes the same chain with a different
+    // ChunkBytes template argument everywhere it matters.
+    spec.chunk_bytes = 4096;
+    const std::string at4k = fused::generateChunkFusionSource(spec);
+    EXPECT_NE(at4k.find("chunk_fused_body< 4096, "), std::string::npos);
+    EXPECT_NE(at4k.find("RRECoder<4096>"), std::string::npos);
+    EXPECT_NE(at4k.find("Bitshuffle32<4096>"), std::string::npos);
+    spec.chunk_bytes = 16384;
+
     // Dropping a transform re-composes a shorter chain from the same generator.
     spec.transforms = {"DiffNegabinary"};
     const std::string shorter = fused::generateChunkFusionSource(spec);
-    EXPECT_NE(shorter.find("RRECoder, DiffNegabinary >"), std::string::npos);
+    EXPECT_NE(shorter.find("RRECoder<16384>, DiffNegabinary >"), std::string::npos);
     EXPECT_EQ(shorter.find("Bitshuffle32"), std::string::npos);
 }
 

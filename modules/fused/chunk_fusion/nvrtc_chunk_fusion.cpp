@@ -20,10 +20,18 @@ namespace {
 } // namespace
 
 std::string generateChunkFusionSource(const ChunkFusionSpec& spec) {
-    // Template args: <QuantOp, Coder, Transforms...>. This is the "connecting code" —
-    // the only thing that changes per pipeline; the ops are #included.
-    std::string targs = spec.quant_op + ", " + spec.coder;
-    for (const auto& t : spec.transforms) targs += ", " + t;
+    // Template args: <ChunkBytes, QuantOp, Coder<ChunkBytes>, Transforms...>.
+    // This is the "connecting code" — the only thing that changes per pipeline;
+    // the ops are #included. Ops whose geometry depends on chunk size (the coder,
+    // and Bitshuffle32's plane-stride math) are themselves templated on it; ops
+    // that only ever touch a runtime element count (quantizers, difference) are
+    // not, so only those two get the `<chunk_bytes>` suffix.
+    const std::string cb = std::to_string(spec.chunk_bytes);
+    std::string targs = cb + ", " + spec.quant_op + ", " + spec.coder + "<" + cb + ">";
+    for (const auto& t : spec.transforms) {
+        targs += ", " + t;
+        if (t == "Bitshuffle32") targs += "<" + cb + ">";
+    }
 
     std::string src;
     src += "#include \"fused/chunk_fusion/chunk_fusion.cuh\"\n";

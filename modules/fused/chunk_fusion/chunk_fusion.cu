@@ -15,6 +15,7 @@
 
 #include <cstdlib>   // getenv — FZ_FUSION_NVRTC toggle
 #include <stdexcept>
+#include <string>
 
 namespace fz {
 namespace fused {
@@ -23,12 +24,15 @@ namespace {
 
 using namespace fz::fused::chunk;
 
+// chunk_bytes is a runtime arg here (not a template param): the pack kernel only
+// uses it for addressing stride, not shared-memory sizing, so it doesn't need a
+// per-size instantiation the way the encode/decode harness kernels do.
 __global__ void chunk_pack(const byte* __restrict__ scratch, byte* __restrict__ outp,
                            const uint32_t* __restrict__ off, const uint32_t* __restrict__ sz,
-                           uint32_t header) {
+                           uint32_t header, uint32_t chunk_bytes) {
     const uint32_t cid = blockIdx.x;
     const uint32_t n   = sz[cid] & 0x7FFFFFFFu;
-    const byte* s = scratch + (size_t)cid * CHUNK_BYTES;
+    const byte* s = scratch + (size_t)cid * chunk_bytes;
     byte* d = outp + header + off[cid];
     for (uint32_t i = threadIdx.x; i < n; i += blockDim.x) d[i] = s[i];
 }
@@ -53,7 +57,8 @@ bool useNvrtcFusion() {
 // d_sizes it produces the byte-identical LC archive in d_out. Frees scratch/sizes.
 size_t packChunks(const float* /*d_in*/, size_t n, size_t nc,
                   byte* d_scratch, uint32_t* d_sizes,
-                  uint8_t* d_out, MemoryPool* pool, cudaStream_t stream) {
+                  uint8_t* d_out, MemoryPool* pool, cudaStream_t stream,
+                  int chunk_bytes) {
     const uint32_t header = 8u + 4u * (uint32_t)nc;
     auto* d_off = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_off"));
 
@@ -65,7 +70,8 @@ size_t packChunks(const float* /*d_in*/, size_t n, size_t nc,
     auto tmp = fz::backend::withTempStorage(pool, stream, "chunk_cub",
         [&](void* t, size_t& b) { cub::DeviceScan::ExclusiveSum(t, b, strip, d_off, (int)nc, stream); });
 
-    chunk_pack<<<(unsigned)nc, 256, 0, stream>>>(d_scratch, d_out, d_off, d_sizes, header);
+    chunk_pack<<<(unsigned)nc, 256, 0, stream>>>(d_scratch, d_out, d_off, d_sizes, header,
+                                                  (uint32_t)chunk_bytes);
     FZ_CUDA_CHECK(cudaGetLastError());
 
     uint32_t last_off = 0, last_sz = 0;
@@ -87,35 +93,58 @@ size_t packChunks(const float* /*d_in*/, size_t n, size_t nc,
 }
 
 // Compile-time template encode (the default, non-NVRTC path). Picks the kernel
-// instantiation for the coder; the transform chain (Diff -> Bitshuffle) is the
-// PFPL body. A different pipeline shape maps to a different Chain<...> / QuantOp.
-void encodeTemplate(ChunkCoderKind coder, const float* d_in, size_t n,
-                    const byte* d_params, byte* d_scratch, uint32_t* d_sizes,
-                    size_t nc, cudaStream_t stream) {
+// instantiation for (coder, chunk_bytes); the transform chain (Diff -> Bitshuffle)
+// is the PFPL body. A different pipeline shape maps to a different Chain<...> /
+// QuantOp. One instantiation per (coder, chunk size) pair — mirrors the same
+// switch-over-pre-instantiated-templates pattern RZEStage::launchEncode uses.
+template <int ChunkBytes>
+void encodeTemplateAt(ChunkCoderKind coder, const float* d_in, size_t n,
+                      const byte* d_params, byte* d_scratch, uint32_t* d_sizes,
+                      size_t nc, cudaStream_t stream) {
     switch (coder) {
         case ChunkCoderKind::RRE:
-            chunk_fused_kernel<QuantInplaceZigzag, RRECoder, DiffNegabinary, Bitshuffle32>
+            chunk_fused_kernel<ChunkBytes, QuantInplaceZigzag, RRECoder<ChunkBytes>,
+                               DiffNegabinary, Bitshuffle32<ChunkBytes>>
                 <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, d_params, d_scratch, d_sizes);
             break;
         case ChunkCoderKind::RZE:
         default:
-            chunk_fused_kernel<QuantInplaceZigzag, RZECoder, DiffNegabinary, Bitshuffle32>
+            chunk_fused_kernel<ChunkBytes, QuantInplaceZigzag, RZECoder<ChunkBytes>,
+                               DiffNegabinary, Bitshuffle32<ChunkBytes>>
                 <<<(unsigned)nc, TPB, 0, stream>>>(d_in, n, d_params, d_scratch, d_sizes);
             break;
     }
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
+void encodeTemplate(ChunkCoderKind coder, const float* d_in, size_t n,
+                    const byte* d_params, byte* d_scratch, uint32_t* d_sizes,
+                    size_t nc, cudaStream_t stream, int chunk_bytes) {
+    switch (chunk_bytes) {
+        case 4096:  encodeTemplateAt<4096>(coder, d_in, n, d_params, d_scratch, d_sizes, nc, stream); break;
+        case 8192:  encodeTemplateAt<8192>(coder, d_in, n, d_params, d_scratch, d_sizes, nc, stream); break;
+        case 16384: encodeTemplateAt<16384>(coder, d_in, n, d_params, d_scratch, d_sizes, nc, stream); break;
+        default:
+            throw std::runtime_error(
+                "chunk_fusion: chunk_bytes must be 4096, 8192, or 16384; got "
+                + std::to_string(chunk_bytes));
+    }
+}
+
 } // namespace
 
 size_t launchFusedChunkPfpl(
     ChunkCoderKind coder, const float* d_in, size_t n, float ebx2_r,
-    uint32_t radius, float threshold, uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
+    uint32_t radius, float threshold, uint8_t* d_out, MemoryPool* pool, cudaStream_t stream,
+    int chunk_bytes)
 {
     if (n == 0) return 0;
-    const size_t nc = (n + NELEM - 1) / NELEM;
+    if (!isSupportedChunkBytes(chunk_bytes))
+        throw std::runtime_error("launchFusedChunkPfpl: chunk_bytes must be 4096, 8192, or 16384");
+    const size_t nelem = (size_t)chunk_bytes / 4;
+    const size_t nc    = (n + nelem - 1) / nelem;
 
-    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
+    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * (size_t)chunk_bytes, stream, "chunk_scratch"));
     auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
 
     // Build the packed params blob on device. For PFPL only the quant Map op is
@@ -131,14 +160,15 @@ size_t launchFusedChunkPfpl(
     // fill d_scratch/d_sizes identically from the same blob; the tail is shared.
     if (useNvrtcFusion()) {
         ChunkFusionSpec spec;                     // PFPL op names (defaults) + coder
-        spec.coder = chunkCoderOpName(coder);
+        spec.coder       = chunkCoderOpName(coder);
+        spec.chunk_bytes = chunk_bytes;
         launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
                                     (unsigned)nc, stream);
     } else {
-        encodeTemplate(coder, d_in, n, d_params, d_scratch, d_sizes, nc, stream);
+        encodeTemplate(coder, d_in, n, d_params, d_scratch, d_sizes, nc, stream, chunk_bytes);
     }
 
-    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
+    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream, chunk_bytes);
     pool->free(d_params, stream);
     return out_bytes;
 }
@@ -153,9 +183,12 @@ size_t launchGenericChunkFusion(
         if (out_side_count) *out_side_count = 0;
         return 0;
     }
-    const size_t nc = (n + NELEM - 1) / NELEM;
+    if (!isSupportedChunkBytes(spec.chunk_bytes))
+        throw std::runtime_error("launchGenericChunkFusion: spec.chunk_bytes must be 4096, 8192, or 16384");
+    const size_t nelem = (size_t)spec.chunk_bytes / 4;
+    const size_t nc    = (n + nelem - 1) / nelem;
 
-    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * CHUNK_BYTES, stream, "chunk_scratch"));
+    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * (size_t)spec.chunk_bytes, stream, "chunk_scratch"));
     auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
 
     // Upload the caller-assembled params blob (already ordered [Map][Trs...][Coder]).
@@ -180,7 +213,8 @@ size_t launchGenericChunkFusion(
     launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
                                 (unsigned)nc, stream,
                                 d_side_idxs, d_side_vals, d_side_count, side_max);
-    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream);
+    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream,
+                                        spec.chunk_bytes);
 
     // Read back the outlier count (data-dependent, known only after the kernel). Sync
     // so the caller can size the side buffers from it immediately on return.
@@ -198,11 +232,24 @@ size_t launchGenericChunkFusion(
     return out_bytes;
 }
 
+// One instantiation per supported chunk size, mirroring encodeTemplateAt<>.
+template <int ChunkBytes>
+void launchInversePfplKernelAt(
+    const uint8_t* d_archive, const uint32_t* d_entries, const uint32_t* d_offsets,
+    size_t nc, size_t output_bytes, float ebx2, bool inplace_outliers,
+    uint32_t quant_radius, float* d_out, cudaStream_t stream) {
+    chunk_inverse_pfpl_kernel<ChunkBytes, RZECoder<ChunkBytes>>
+        <<<static_cast<unsigned>(nc), TPB, 0, stream>>>(
+            d_archive, d_entries, d_offsets, output_bytes, ebx2,
+            inplace_outliers, quant_radius, d_out);
+}
+
 size_t launchFusedChunkPfplInverse(
     const uint8_t* d_archive, size_t archive_bytes, size_t output_bytes,
     float ebx2, bool inplace_outliers, uint32_t quant_radius,
     const float* d_outlier_vals, const uint32_t* d_outlier_idxs,
-    uint32_t outlier_count, float* d_out, MemoryPool* pool, cudaStream_t stream)
+    uint32_t outlier_count, float* d_out, MemoryPool* pool, cudaStream_t stream,
+    int chunk_bytes)
 {
     if (output_bytes == 0) return 0;
     if (!d_archive || !d_out || !pool || output_bytes % sizeof(uint32_t) != 0)
@@ -211,8 +258,10 @@ size_t launchFusedChunkPfplInverse(
         (!d_outlier_vals || !d_outlier_idxs))
         throw std::runtime_error(
             "launchFusedChunkPfplInverse: missing split-outlier side inputs");
+    if (!isSupportedChunkBytes(chunk_bytes))
+        throw std::runtime_error("launchFusedChunkPfplInverse: chunk_bytes must be 4096, 8192, or 16384");
 
-    const size_t nc = (output_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES;
+    const size_t nc = (output_bytes + (size_t)chunk_bytes - 1) / (size_t)chunk_bytes;
     const size_t header_bytes = 8u + nc * sizeof(uint32_t);
     if (archive_bytes < header_bytes)
         throw std::runtime_error("launchFusedChunkPfplInverse: truncated RZE header");
@@ -226,9 +275,21 @@ size_t launchFusedChunkPfplInverse(
             cub::DeviceScan::ExclusiveSum(t, b, strip, d_offsets, static_cast<int>(nc), stream);
         });
 
-    chunk_inverse_pfpl_kernel<RZECoder><<<static_cast<unsigned>(nc), TPB, 0, stream>>>(
-        d_archive, d_entries, d_offsets, output_bytes, ebx2,
-        inplace_outliers, quant_radius, d_out);
+    switch (chunk_bytes) {
+        case 4096:
+            launchInversePfplKernelAt<4096>(d_archive, d_entries, d_offsets, nc, output_bytes,
+                                            ebx2, inplace_outliers, quant_radius, d_out, stream);
+            break;
+        case 8192:
+            launchInversePfplKernelAt<8192>(d_archive, d_entries, d_offsets, nc, output_bytes,
+                                            ebx2, inplace_outliers, quant_radius, d_out, stream);
+            break;
+        case 16384:
+        default:
+            launchInversePfplKernelAt<16384>(d_archive, d_entries, d_offsets, nc, output_bytes,
+                                             ebx2, inplace_outliers, quant_radius, d_out, stream);
+            break;
+    }
     FZ_CUDA_CHECK(cudaGetLastError());
 
     if (!inplace_outliers && outlier_count > 0) {

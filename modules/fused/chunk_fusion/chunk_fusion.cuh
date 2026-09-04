@@ -6,8 +6,12 @@
  *        that composes per-stage __device__ ops into one CTA-per-chunk kernel.
  *
  * This is the shared skeleton for the chunk-cooperative fusion strategy (one CTA
- * owns a 16 KB chunk, intermediates in shared memory, `__syncthreads` between
+ * owns a chunk, intermediates in shared memory, `__syncthreads` between
  * stages) — the LC-style counterpart to the warp-register driver in fused_block/.
+ * Chunk size is a template parameter (`ChunkBytes`, see `Geom<>` in
+ * chunk_geometry.h): every op whose geometry actually depends on it
+ * (`Bitshuffle32`, the coder ops) is itself templated on `ChunkBytes`; ops that
+ * only ever touch a runtime element count are not.
  *
  * The DESIGN (see docs/codebase_notes.md CN-CHUNK-FUSE):
  *   - Each fusable stage contributes a small __device__ OP (below): a Map op that
@@ -19,11 +23,16 @@
  *     syncs, runs the coder, and emits the per-chunk compressed bytes + size. It
  *     does not know or care which ops it is composing.
  *   - Swapping the coder (RZE -> RRE) or the transform set re-composes the kernel
- *     with no new glue: `chunk_fused_kernel<Quant, RRECoder, Diff, Bitshuffle>`.
+ *     with no new glue: `chunk_fused_kernel<16384, Quant, RRECoder<16384>, Diff,
+ *     Bitshuffle32<16384>>`.
  *
- * A future NVRTC path emits THIS harness as source for an arbitrary op list,
- * #including the op headers — the ops stay hand-written, only the glue is
- * generated. Template composition here is the compile-time precursor.
+ * The compile-time template kernel above is a fallback (`FZ_FUSION_NVRTC=0`) kept
+ * for the profiling harness; the production path (the generic registry runner,
+ * `runChunkCooperative` in fusion_registry.cpp) always composes THIS harness as
+ * source for an arbitrary op list at runtime via NVRTC — see
+ * nvrtc_chunk_fusion.h/.cpp and docs/codebase_notes.md CN-NVRTC-FUSE. The ops stay
+ * hand-written; only the composing glue (including which `ChunkBytes` to bake in)
+ * is generated.
  */
 
 #include "fused/chunk_fusion/chunk_geometry.h"   // chunk geometry constants (no host deps)
@@ -141,9 +150,14 @@ struct DiffNegabinary {
 };
 
 // ── Fixed-length cooperative op: 32-bit bitshuffle. The partial tail chunk is
-// copied through (the staged bitshuffle memcpys its sub-chunk tail). ─────────
+// copied through (the staged bitshuffle memcpys its sub-chunk tail). Templated
+// on chunk size — its plane-stride math (NELEM/NPP) depends on it, unlike the
+// Map/stencil ops above which only ever touch a runtime element count. ───────
+template <int ChunkBytes>
 struct Bitshuffle32 {
     using Params = EmptyParams;
+    static constexpr int NELEM = Geom<ChunkBytes>::NELEM;
+    static constexpr int NPP   = Geom<ChunkBytes>::NPP;
     __device__ static void apply(const uint32_t* __restrict__ s_in, uint32_t* __restrict__ s_out,
                                  int cnt, bool full, const void* /*pp*/) {
         if (full) {
@@ -156,51 +170,61 @@ struct Bitshuffle32 {
     }
 };
 
-// ── Coder ops: the swappable variable-length sink. Uniform LC signature. ─────
+// ── Coder ops: the swappable variable-length sink. Uniform LC signature.
+// Templated on chunk size — each is a thin wrapper handing it through to the
+// already chunk-size-generic `d_RZE<T,ChunkBytes>`-style LC primitives
+// (lc_chunk_components.cuh), which is where the underlying capability already
+// lives; only this glue needed to stop hardcoding CHUNK_BYTES. ──────────────
+template <int ChunkBytes>
 struct RZECoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
-        return lc_detail::d_RZE<byte, CHUNK_BYTES>(csize, in, out, temp);
+        return lc_detail::d_RZE<byte, ChunkBytes>(csize, in, out, temp);
     }
     __device__ static void decode(int& csize, byte* in, byte* out, byte* temp) {
-        lc_detail::d_iRZE<byte, CHUNK_BYTES>(csize, in, out, temp);
+        lc_detail::d_iRZE<byte, ChunkBytes>(csize, in, out, temp);
     }
 };
+template <int ChunkBytes>
 struct RRECoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
-        return lc_detail::d_RRE<byte, CHUNK_BYTES>(csize, in, out, temp);
+        return lc_detail::d_RRE<byte, ChunkBytes>(csize, in, out, temp);
     }
 };
 // RARE/RAZE (auto-k generalizations of RRE/RZE) — same uniform LC signature, so they
 // drop into the harness as coder ops with no new glue. Their stages just declare
 // getFusedOp() and any Map->Transform*->{RARE|RAZE} chain fuses via the generic runner.
+template <int ChunkBytes>
 struct RARECoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
-        return lc_detail::d_RARE<byte, CHUNK_BYTES>(csize, in, out, temp);
+        return lc_detail::d_RARE<byte, ChunkBytes>(csize, in, out, temp);
     }
 };
+template <int ChunkBytes>
 struct RAZECoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
-        return lc_detail::d_RAZE<byte, CHUNK_BYTES>(csize, in, out, temp);
+        return lc_detail::d_RAZE<byte, ChunkBytes>(csize, in, out, temp);
     }
 };
 
 // CLOG / HCLOG — LC leading-zero + bit-packing coders (byte-word, matching each stage's
 // word_size==1 dispatch → d_CLOG<uint8_t>). Same uniform LC signature, so they drop in with
 // no new glue: their stages declare getFusedOp() and any Map->Transform*->{CLOG|HCLOG} fuses.
+template <int ChunkBytes>
 struct CLOGCoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
-        return lc_detail::d_CLOG<uint8_t, CHUNK_BYTES>(csize, in, out, temp);
+        return lc_detail::d_CLOG<uint8_t, ChunkBytes>(csize, in, out, temp);
     }
 };
+template <int ChunkBytes>
 struct HCLOGCoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
-        return lc_detail::d_HCLOG<uint8_t, CHUNK_BYTES>(csize, in, out, temp);
+        return lc_detail::d_HCLOG<uint8_t, ChunkBytes>(csize, in, out, temp);
     }
 };
 
@@ -243,12 +267,13 @@ template<class T, class... R> struct Chain<T, R...> {
 // compile-time offset. Stateless ops ignore it.
 // `side` carries escaping outputs (e.g. an outlier list); the Map op uses it or
 // ignores it. Defaulted so callers that never fuse a side-output op need not pass it.
-template<class QuantOp, class Coder, class... Transforms>
+template<int ChunkBytes, class QuantOp, class Coder, class... Transforms>
 __device__ __forceinline__ void
 chunk_fused_body(const float* __restrict__ in, size_t n,
                  const byte* __restrict__ params,
                  byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
                  ChunkSideCtx side = ChunkSideCtx{}) {
+    constexpr int NELEM = Geom<ChunkBytes>::NELEM;
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
     __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
@@ -265,9 +290,9 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
     uint32_t* cur = Chain<Transforms...>::apply(sA, sB, cnt, full, params, kTransOff);
     uint32_t* alt = (cur == sA) ? sB : sA;
 
-    const int in_size = full ? CHUNK_BYTES : cnt * 4;
+    const int in_size = full ? ChunkBytes : cnt * 4;
     if (!full) {   // zero-pad the sub-chunk so the coder's word reads see zeros
-        for (int i = threadIdx.x + in_size; i < CHUNK_BYTES; i += TPB)
+        for (int i = threadIdx.x + in_size; i < ChunkBytes; i += TPB)
             reinterpret_cast<byte*>(cur)[i] = 0;
         __syncthreads();
     }
@@ -278,7 +303,7 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
                                reinterpret_cast<byte*>(alt), sTemp, params + kCoderOff);
     __syncthreads();
 
-    byte* out = scratch + (size_t)cid * CHUNK_BYTES;
+    byte* out = scratch + (size_t)cid * ChunkBytes;
     if (good && csize < in_size) {
         for (int i = threadIdx.x; i < csize; i += TPB) out[i] = reinterpret_cast<byte*>(alt)[i];
         if (threadIdx.x == 0) sizes[cid] = (uint32_t)csize;
@@ -290,13 +315,13 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
 
 // Compile-time template entry (the FZ_FUSION path without NVRTC). The NVRTC path
 // generates an equivalent `extern "C"` kernel over the same body.
-template<class QuantOp, class Coder, class... Transforms>
+template<int ChunkBytes, class QuantOp, class Coder, class... Transforms>
 __global__ void __launch_bounds__(TPB)
 chunk_fused_kernel(const float* __restrict__ in, size_t n,
                    const byte* __restrict__ params,
                    byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
                    ChunkSideCtx side = ChunkSideCtx{}) {
-    chunk_fused_body<QuantOp, Coder, Transforms...>(in, n, params, scratch, sizes, side);
+    chunk_fused_body<ChunkBytes, QuantOp, Coder, Transforms...>(in, n, params, scratch, sizes, side);
 }
 
 // ── Inverse chunk harness (initial RZE evidence-gated path). ─────────────────
@@ -304,7 +329,7 @@ chunk_fused_kernel(const float* __restrict__ in, size_t n,
 // shared-memory ping-pong buffers as compression, and writes reconstructed
 // floats once. `offsets` are payload-relative exclusive offsets computed from
 // the archive's flagged size table by the launcher.
-template<class Coder>
+template<int ChunkBytes, class Coder>
 __device__ __forceinline__ void
 chunk_inverse_pfpl_body(const byte* __restrict__ archive,
                         const uint32_t* __restrict__ entries,
@@ -312,22 +337,24 @@ chunk_inverse_pfpl_body(const byte* __restrict__ archive,
                         size_t output_bytes, float ebx2,
                         bool inplace_outliers, uint32_t quant_radius,
                         float* __restrict__ out) {
+    constexpr int NELEM = Geom<ChunkBytes>::NELEM;
+    constexpr int NPP   = Geom<ChunkBytes>::NPP;
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
     __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
 
     const uint32_t cid = blockIdx.x;
-    const size_t base_bytes = static_cast<size_t>(cid) * CHUNK_BYTES;
+    const size_t base_bytes = static_cast<size_t>(cid) * ChunkBytes;
     if (base_bytes >= output_bytes) return;
-    const int out_bytes = static_cast<int>(min(static_cast<size_t>(CHUNK_BYTES),
+    const int out_bytes = static_cast<int>(min(static_cast<size_t>(ChunkBytes),
                                                output_bytes - base_bytes));
     const int cnt = out_bytes / static_cast<int>(sizeof(uint32_t));
-    const bool full = out_bytes == CHUNK_BYTES;
+    const bool full = out_bytes == ChunkBytes;
     const uint32_t entry = entries[cid];
     const uint32_t stored = entry & 0x7fffffffu;
     const bool raw = (entry & 0x80000000u) != 0;
     const uint32_t nchunks = static_cast<uint32_t>(
-        (output_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES);
+        (output_bytes + ChunkBytes - 1) / ChunkBytes);
     const size_t header = 8u + static_cast<size_t>(nchunks) * sizeof(uint32_t);
     const byte* payload = archive + header + offsets[cid];
 
@@ -407,7 +434,7 @@ chunk_inverse_pfpl_body(const byte* __restrict__ archive,
     }
 }
 
-template<class Coder>
+template<int ChunkBytes, class Coder>
 __global__ void __launch_bounds__(TPB)
 chunk_inverse_pfpl_kernel(const byte* __restrict__ archive,
                           const uint32_t* __restrict__ entries,
@@ -415,8 +442,8 @@ chunk_inverse_pfpl_kernel(const byte* __restrict__ archive,
                           size_t output_bytes, float ebx2,
                           bool inplace_outliers, uint32_t quant_radius,
                           float* __restrict__ out) {
-    chunk_inverse_pfpl_body<Coder>(archive, entries, offsets, output_bytes, ebx2,
-                                   inplace_outliers, quant_radius, out);
+    chunk_inverse_pfpl_body<ChunkBytes, Coder>(archive, entries, offsets, output_bytes, ebx2,
+                                               inplace_outliers, quant_radius, out);
 }
 
 } // namespace chunk
