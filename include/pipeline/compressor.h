@@ -936,6 +936,45 @@ private:
         fz::stream_t stream);
 
     /**
+     * decompressCore() helper: resolve the n_seg per-segment compressed
+     * sizes for this call. For an external blob these come from the blob's
+     * own self-describing concat header (or, for a single segment, the
+     * whole blob); for the live-DAG path (d_input == nullptr) they come
+     * from the freshly-produced buffer_metadata_. See decompressCore()'s
+     * body comment for why each case is authoritative.
+     */
+    std::vector<size_t> resolveDecompressSegmentSizes(
+        const void* d_input, size_t input_size, fz::stream_t stream) const;
+
+    /**
+     * decompressCore() helper: map each pipeline-output buffer ID to its
+     * compressed-data device pointer and size (from d_input or the live
+     * DAG), producing the PipelineOutputMap buildInverseDAG()/
+     * buildOrReuseInvCache() need.
+     */
+    PipelineOutputMap mapCompressedBufferPointers(
+        const void* d_input, const std::vector<size_t>& seg_sizes) const;
+
+    /**
+     * decompressCore() helper: resolve which source stage's inverse output
+     * is "the" decompressed answer, and the uncompressed size to build its
+     * inverse DAG against. See decompressCore()'s body comment for the
+     * default/ambiguity rules with multiple source stages.
+     */
+    std::pair<Stage*, size_t> resolvePrimarySource() const;
+
+    /**
+     * decompressCore() helper: resolve the device pointer the inverse DAG
+     * writes its final result into — the caller-supplied buffer, a fresh
+     * pool allocation, or a fresh cudaMalloc, per the same rules the inline
+     * code previously implemented. Throws if a caller-supplied buffer is
+     * too small or an allocation fails.
+     */
+    void* allocateDecompressOutput(
+        size_t actual_size, void* caller_output, size_t caller_capacity,
+        fz::stream_t stream);
+
+    /**
      * Shared inverse-execution core behind all decompress() overloads.
      * @param caller_output  if non-null, the inverse result is written here (no
      *                       internal allocation/copy); ownership stays with the

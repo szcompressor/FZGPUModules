@@ -302,6 +302,16 @@ private:
     void freeBuffer(int buffer_id, fz::stream_t stream);
     void planPreallocation();
     void colorBuffers();
+
+    /**
+     * execute() helper: dispatch `node` if it belongs to a fused group.
+     * Returns false (no-op) for a node outside every fused group, in which
+     * case execute()'s normal per-stage dispatch handles it instead.
+     * A non-head member only records its completion event (its work was
+     * already done by the group's head); the head runs the fused kernel for
+     * the whole group.
+     */
+    bool executeFusedNode(DAGNode* node, fz::stream_t stream);
 };
 
 } // namespace fz

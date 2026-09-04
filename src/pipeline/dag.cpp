@@ -411,6 +411,106 @@ void CompressionDAG::setFusedGroups(std::vector<FusedGroupExec> groups) {
     }
 }
 
+// ── Fusion: a matched group runs one fused kernel at its head node and its
+// member stages' individual execute()s are bypassed. Only reached with
+// fusion enabled (which also disables graph capture). Returns false if
+// `node` is not part of any fused group, so the caller falls through to
+// normal per-stage dispatch.
+bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
+    if (fused_member_.empty() || !fused_member_.count(node)) return false;
+
+    auto head_it = fused_head_.find(node);
+    if (head_it == fused_head_.end()) {
+        // Non-head member: nothing to run; satisfy any waiter.
+        FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, stream));
+        return true;
+    }
+    const FusedGroupExec& fg = fused_groups_[head_it->second];
+    for (auto* dep : node->dependencies)
+        FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
+
+    if (profiling_enabled_ && node->start_event && !capture_mode_)
+        FZ_CUDA_CHECK(cudaEventRecord(node->start_event, stream));
+
+    const BufferInfo& in_buf  = buffers_.at(node->input_buffer_ids[0]);
+    const int   main_out_id = fg.tail->output_buffer_ids[0];
+    BufferInfo& out_buf     = buffers_.at(main_out_id);
+
+    // Collect the group's escaping side outputs: any member output-port
+    // buffer with no consumers (a pipeline leaf) that is not the main
+    // archive. The runner writes these (e.g. an outlier list) and reports
+    // their sizes; the pipeline auto-concatenates them. Empty for the
+    // common single-output case, so those runners are unaffected.
+    std::vector<FusedSideOutput> side;
+    std::vector<int>             side_ids;
+    for (DAGNode* m : fg.members) {
+        const auto declarations = m->stage->getFusedAuxOutputs();
+        for (const auto& kv : m->output_index_to_buffer_id) {
+            const int buf_id = kv.second;
+            if (buf_id == main_out_id) continue;
+            BufferInfo& b = buffers_.at(buf_id);
+            if (!b.consumer_stage_ids.empty()) continue;   // internal to the group
+            FusedAuxOutputDecl declaration;
+            const auto declared = std::find_if(
+                declarations.begin(), declarations.end(),
+                [&](const FusedAuxOutputDecl& d) {
+                    return d.output_index == kv.first;
+                });
+            if (declared != declarations.end()) declaration = *declared;
+            side.push_back(FusedSideOutput{
+                m->stage, kv.first, b.d_ptr, b.allocated_size, 0,
+                std::move(declaration)});
+            side_ids.push_back(buf_id);
+        }
+    }
+
+    // Collect every input entering the group from outside it except
+    // the head's first/main input (already exposed as d_input). This
+    // is primarily for inverse groups whose tail quantizer consumes
+    // separately archived outlier values and indices.
+    std::unordered_set<int> member_ids;
+    for (DAGNode* m : fg.members) member_ids.insert(m->id);
+    std::vector<FusedSideInput> side_inputs;
+    for (DAGNode* m : fg.members) {
+        for (size_t input_index = 0; input_index < m->input_buffer_ids.size(); ++input_index) {
+            if (m == fg.head && input_index == 0) continue;
+            const BufferInfo& b = buffers_.at(m->input_buffer_ids[input_index]);
+            if (b.producer_stage_id >= 0 && member_ids.count(b.producer_stage_id))
+                continue;
+            side_inputs.push_back(FusedSideInput{
+                m->stage, static_cast<int>(input_index), b.d_ptr, b.size});
+        }
+    }
+
+    FusedRunContext ctx;
+    ctx.stages       = &fg.stages;
+    ctx.d_input      = in_buf.d_ptr;
+    ctx.input_bytes  = in_buf.size;
+    ctx.d_output     = out_buf.d_ptr;
+    ctx.output_capacity = out_buf.allocated_size;
+    ctx.pool         = mem_pool_;
+    ctx.stream       = stream;
+    ctx.side_outputs = side.empty() ? nullptr : &side;
+    ctx.side_inputs  = side_inputs.empty() ? nullptr : &side_inputs;
+    const size_t archive_bytes = fg.impl->run(ctx);
+    out_buf.size = archive_bytes;
+    if (out_buf.allocated_size != 0 && archive_bytes > out_buf.allocated_size)
+        throw std::runtime_error(
+            "Fused group '" + std::string(fg.impl->name) + "' wrote " +
+            std::to_string(archive_bytes) + " bytes into a " +
+            std::to_string(out_buf.allocated_size) + "-byte buffer");
+    for (size_t k = 0; k < side.size(); ++k) {
+        if (side[k].capacity != 0 && side[k].size > side[k].capacity)
+            throw std::runtime_error(
+                "Fused group '" + std::string(fg.impl->name) +
+                "' side output overflowed its buffer");
+        buffers_.at(side_ids[k]).size = side[k].size;
+    }
+    for (DAGNode* m : fg.members)
+        FZ_CUDA_CHECK(cudaEventRecord(m->completion_event, stream));
+    return true;
+}
+
 void CompressionDAG::execute(cudaStream_t stream) {
     if (!is_finalized_) {
         throw std::runtime_error("DAG must be finalized before execution");
@@ -418,101 +518,7 @@ void CompressionDAG::execute(cudaStream_t stream) {
 
     for (int level = 0; level <= max_level_; level++) {
         for (auto* node : levels_[level]) {
-            // ── Fusion: a matched group runs one fused kernel at its head node
-            // and its member stages' individual execute()s are bypassed. Only
-            // reached with fusion enabled (which also disables graph capture).
-            if (!fused_member_.empty() && fused_member_.count(node)) {
-                auto head_it = fused_head_.find(node);
-                if (head_it == fused_head_.end()) {
-                    // Non-head member: nothing to run; satisfy any waiter.
-                    FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, stream));
-                    continue;
-                }
-                const FusedGroupExec& fg = fused_groups_[head_it->second];
-                for (auto* dep : node->dependencies)
-                    FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
-
-                if (profiling_enabled_ && node->start_event && !capture_mode_)
-                    FZ_CUDA_CHECK(cudaEventRecord(node->start_event, stream));
-
-                const BufferInfo& in_buf  = buffers_.at(node->input_buffer_ids[0]);
-                const int   main_out_id = fg.tail->output_buffer_ids[0];
-                BufferInfo& out_buf     = buffers_.at(main_out_id);
-
-                // Collect the group's escaping side outputs: any member output-port
-                // buffer with no consumers (a pipeline leaf) that is not the main
-                // archive. The runner writes these (e.g. an outlier list) and reports
-                // their sizes; the pipeline auto-concatenates them. Empty for the
-                // common single-output case, so those runners are unaffected.
-                std::vector<FusedSideOutput> side;
-                std::vector<int>             side_ids;
-                for (DAGNode* m : fg.members) {
-                    const auto declarations = m->stage->getFusedAuxOutputs();
-                    for (const auto& kv : m->output_index_to_buffer_id) {
-                        const int buf_id = kv.second;
-                        if (buf_id == main_out_id) continue;
-                        BufferInfo& b = buffers_.at(buf_id);
-                        if (!b.consumer_stage_ids.empty()) continue;   // internal to the group
-                        FusedAuxOutputDecl declaration;
-                        const auto declared = std::find_if(
-                            declarations.begin(), declarations.end(),
-                            [&](const FusedAuxOutputDecl& d) {
-                                return d.output_index == kv.first;
-                            });
-                        if (declared != declarations.end()) declaration = *declared;
-                        side.push_back(FusedSideOutput{
-                            m->stage, kv.first, b.d_ptr, b.allocated_size, 0,
-                            std::move(declaration)});
-                        side_ids.push_back(buf_id);
-                    }
-                }
-
-                // Collect every input entering the group from outside it except
-                // the head's first/main input (already exposed as d_input). This
-                // is primarily for inverse groups whose tail quantizer consumes
-                // separately archived outlier values and indices.
-                std::unordered_set<int> member_ids;
-                for (DAGNode* m : fg.members) member_ids.insert(m->id);
-                std::vector<FusedSideInput> side_inputs;
-                for (DAGNode* m : fg.members) {
-                    for (size_t input_index = 0; input_index < m->input_buffer_ids.size(); ++input_index) {
-                        if (m == fg.head && input_index == 0) continue;
-                        const BufferInfo& b = buffers_.at(m->input_buffer_ids[input_index]);
-                        if (b.producer_stage_id >= 0 && member_ids.count(b.producer_stage_id))
-                            continue;
-                        side_inputs.push_back(FusedSideInput{
-                            m->stage, static_cast<int>(input_index), b.d_ptr, b.size});
-                    }
-                }
-
-                FusedRunContext ctx;
-                ctx.stages       = &fg.stages;
-                ctx.d_input      = in_buf.d_ptr;
-                ctx.input_bytes  = in_buf.size;
-                ctx.d_output     = out_buf.d_ptr;
-                ctx.output_capacity = out_buf.allocated_size;
-                ctx.pool         = mem_pool_;
-                ctx.stream       = stream;
-                ctx.side_outputs = side.empty() ? nullptr : &side;
-                ctx.side_inputs  = side_inputs.empty() ? nullptr : &side_inputs;
-                const size_t archive_bytes = fg.impl->run(ctx);
-                out_buf.size = archive_bytes;
-                if (out_buf.allocated_size != 0 && archive_bytes > out_buf.allocated_size)
-                    throw std::runtime_error(
-                        "Fused group '" + std::string(fg.impl->name) + "' wrote " +
-                        std::to_string(archive_bytes) + " bytes into a " +
-                        std::to_string(out_buf.allocated_size) + "-byte buffer");
-                for (size_t k = 0; k < side.size(); ++k) {
-                    if (side[k].capacity != 0 && side[k].size > side[k].capacity)
-                        throw std::runtime_error(
-                            "Fused group '" + std::string(fg.impl->name) +
-                            "' side output overflowed its buffer");
-                    buffers_.at(side_ids[k]).size = side[k].size;
-                }
-                for (DAGNode* m : fg.members)
-                    FZ_CUDA_CHECK(cudaEventRecord(m->completion_event, stream));
-                continue;
-            }
+            if (executeFusedNode(node, stream)) continue;
 
             // Use node's assigned stream, or fallback to provided stream.
             // During graph capture, force all work onto the single capture stream

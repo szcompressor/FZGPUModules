@@ -626,6 +626,92 @@ TEST(PipelineErrors, PipelineUsableAfterDecompressThrow) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ER2b: Pipeline is usable — including a normal forward compress() — after a
+// decompressCore() throw that happens AFTER stages have been flipped into
+// inverse mode.
+//
+// Unlike ER2 (which throws at the very top of decompressCore(), before any
+// stage state is touched), this forces the "caller buffer too small" throw
+// site in decompressCore() — reached only after every stage has had
+// saveState()/setInverse(true) called on it. That throw site (and its
+// neighbors around the output-buffer-allocation step) used to hand-repeat a
+// setInverse(false)/restoreState() cleanup loop before throwing; a scope-exit
+// guard now performs that cleanup unconditionally instead.
+//
+// The regression this guards against is specifically observable on the NEXT
+// compress() call, not the next decompress(): LorenzoQuantStage's
+// getNumInputs()/getNumOutputs() and its execute() path branch on
+// isInverse(), so a stage stuck with is_inverse_==true would silently run
+// its inverse computation on the next forward pass instead of throwing —
+// this test therefore drives compress() (not another decompress()) right
+// after the throw and checks the full round trip is still byte-for-byte
+// correct.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PipelineErrors, PipelineUsableAfterUserBufferTooSmallDecompressThrow) {
+    constexpr size_t N        = 1024;
+    constexpr float  EB       = 1e-2f;
+    const size_t     in_bytes = N * sizeof(float);
+
+    auto h_in = make_random_floats(N, 77);
+
+    Pipeline p(in_bytes, MemoryStrategy::MINIMAL);
+    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
+    lrz->setErrorBound(EB);
+    p.finalize();
+
+    CudaStream stream;
+
+    CudaBuffer<float> d_in(N);
+    d_in.upload(h_in, stream);
+    stream.sync();
+
+    void*  d_comp  = nullptr;
+    size_t comp_sz = 0;
+    p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+    stream.sync();
+    ASSERT_GT(comp_sz, 0u);
+
+    // Deliberately-undersized caller-owned output buffer: the decompressed
+    // size (in_bytes) will not fit, so decompressCore() must throw from
+    // inside the "caller buffer too small" check — after stages_ have
+    // already been flipped into inverse mode.
+    CudaBuffer<float> d_small(N / 2);
+    size_t actual_sz = 0;
+    EXPECT_THROW(
+        p.decompress(nullptr, comp_sz, d_small.void_ptr(),
+                     (N / 2) * sizeof(float), &actual_sz, stream),
+        std::runtime_error
+    ) << "decompress() into an undersized caller buffer must throw";
+
+    // Recovery: a normal forward compress() must now succeed and be
+    // data-correct on round trip — proving the scope-exit cleanup ran (every
+    // stage's is_inverse_ reset to false) even though the throw happened
+    // deep inside decompressCore(), after setInverse(true).
+    void*  d_comp2  = nullptr;
+    size_t comp_sz2 = 0;
+    ASSERT_NO_THROW(
+        p.compress(d_in.void_ptr(), in_bytes, &d_comp2, &comp_sz2, stream)
+    ) << "compress() after an undersized-buffer decompress() throw must not throw";
+    stream.sync();
+    ASSERT_GT(comp_sz2, 0u);
+
+    void*  d_dec  = nullptr;
+    size_t dec_sz = 0;
+    ASSERT_NO_THROW(
+        p.decompress(nullptr, comp_sz2, &d_dec, &dec_sz, stream)
+    ) << "decompress() after the recovery compress() must not throw";
+    stream.sync();
+    ASSERT_NE(d_dec, nullptr);
+    ASSERT_EQ(dec_sz, in_bytes);
+
+    std::vector<float> h_recon(N);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+
+    EXPECT_LE(max_abs_error(h_in, h_recon), EB * 1.01f)
+        << "Round-trip after undersized-buffer decompress() throw must be data-correct";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ER3: PREALLOCATE strategy — pipeline still usable after compress() throws.
 //
 // PREALLOCATE allocates all stage buffers at finalize() time.  A compress()
