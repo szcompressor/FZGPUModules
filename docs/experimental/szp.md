@@ -3,7 +3,7 @@
 > **NOT a supported composable module.** `SZpStage` is a quarantined GPU
 > reference implementation kept only as a point of comparison. It is **absent**
 > from `<fzgpumodules.h>`, from the stage catalog, and from the automatic-fusion
-> planner, and lives under `experimental/reference_compressors/szp/`. Its
+> planner, and lives under `modules/experimental/reference_compressors/szp/`. Its
 > `StageType::SZP = 37` FZM factory stays linked so pre-existing archives still
 > decode, and `type = "SZp"` still loads from legacy TOML configs, but neither is
 > a supported surface.
@@ -14,14 +14,14 @@
 > It matches the upstream algorithm's high-level stages but does not reproduce
 > its exact quantization, partition seeding, predictor boundaries, or container.
 
-**Header:** `experimental/reference_compressors/szp/szp_stage.h` (direct-include only)
+**Header:** `modules/experimental/reference_compressors/szp/szp_stage.h` (direct-include only)
 **Class:** `fz::SZpStage<TData>` — `TData` is `float` or `double`
 **Category:** Experimental / reference compressor (lossy, whole compressor)
 
 **Common instantiation:**
 <!-- doc-check: skip — quarantined stage, intentionally absent from <fzgpumodules.h>; direct-include only -->
 ```cpp
-#include "reference_compressors/szp/szp_stage.h"   // not in <fzgpumodules.h>
+#include "experimental/reference_compressors/szp/szp_stage.h"   // not in <fzgpumodules.h>
 
 auto* szp = p.addStage<fz::SZpStage<float>>();
 szp->setBlockSize(128);                 // elements per block (FZGM default)
@@ -122,7 +122,7 @@ error_bound_mode = "ABS"
 
 `examples/presets/szp_composed.toml` (the supported modular analogue) is
 shipped under `examples/presets/`. The legacy native preset is retained only at
-`experimental/reference_compressors/szp/szp.toml`.
+`modules/experimental/reference_compressors/szp/szp.toml`.
 
 ## hZCCL (not implemented)
 

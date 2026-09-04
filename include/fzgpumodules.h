@@ -60,4 +60,4 @@
 // decode (its StageType::SZP factory stays linked); the supported expression of
 // the SZp algorithm is examples/presets/szp_composed.toml. To use the reference
 // implementation directly, include
-// "reference_compressors/szp/szp_stage.h" explicitly.
+// "experimental/reference_compressors/szp/szp_stage.h" explicitly.

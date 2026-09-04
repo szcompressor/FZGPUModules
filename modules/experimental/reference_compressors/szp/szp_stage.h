@@ -6,7 +6,7 @@
  *        fused stage.
  *
  * EXPERIMENTAL / REFERENCE COMPRESSOR — NOT a supported composable library
- * module. This monolithic implementation lives under `experimental/
+ * module. This monolithic implementation lives under `modules/experimental/
  * reference_compressors/szp/` as a GPU point of comparison only. It is deliberately
  * absent from the umbrella header `<fzgpumodules.h>` and from the ordinary stage
  * catalog (`kStageRegistry`). Its FZM factory (`StageType::SZP = 37`) stays

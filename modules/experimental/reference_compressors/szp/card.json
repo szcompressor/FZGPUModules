@@ -13,5 +13,5 @@
     "sourceProject": "SZp", "sourceUrl": "https://github.com/szcompressor/SZp", "relationship": "reimplementation", "license": "MIT",
     "paper": { "title": "fZ-light: A Fast and Light Scientific Lossy Compression Framework toward Optimizing High-Performance Computing Applications", "authors": "Jiajun Huang, Sheng Di, et al.", "year": 2024 }
   },
-  "docs": "experimental_szp.html", "sourcePath": "experimental/reference_compressors/szp", "versionAdded": "2.0"
+  "docs": "experimental_szp.html", "sourcePath": "modules/experimental/reference_compressors/szp", "versionAdded": "2.0"
 }

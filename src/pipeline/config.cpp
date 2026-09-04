@@ -56,7 +56,7 @@
 #include "fused/szx/szx_stage.h"
 // Quarantined experimental reference compressor — kept here only for the legacy
 // `type = "SZp"` TOML constructor (kLegacyStageRegistry, not the public catalog).
-#include "reference_compressors/szp/szp_stage.h"
+#include "experimental/reference_compressors/szp/szp_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
@@ -630,7 +630,7 @@ static Stage* addSZxStage(Pipeline& p, const toml::table& t) {
 }
 
 // LEGACY / EXPERIMENTAL — the monolithic SZp reference compressor is quarantined
-// (experimental/reference_compressors/szp). This constructor is reachable only
+// (modules/experimental/reference_compressors/szp). This constructor is reachable only
 // through kLegacyStageRegistry, NOT the public kStageRegistry catalog, and exists
 // purely so pre-existing `type = "SZp"` configs and saved archives still load.
 // New pipelines should use examples/presets/szp_composed.toml instead.
@@ -1277,7 +1277,7 @@ static const StageEntry kStageRegistry[] = {
 //   SZp  ->  examples/presets/szp_composed.toml
 // ─────────────────────────────────────────────────────────────────────────────
 static const StageEntry kLegacyStageRegistry[] = {
-    { "SZp",          StageType::SZP,          addSZpStage,          saveSZpStage,          "experimental/reference_compressors/szp" },
+    { "SZp",          StageType::SZP,          addSZpStage,          saveSZpStage,          "modules/experimental/reference_compressors/szp" },
 };
 
 static const StageEntry* findStageEntry(const std::string& type_name) {

@@ -20,11 +20,11 @@
 Some whole-compressor implementations are kept only as GPU points of comparison and
 are **not** part of the composable module set: they are absent from
 `<fzgpumodules.h>`, from the stage catalog, and from the automatic-fusion planner.
-They live under `experimental/reference_compressors/`.
+They live under `modules/experimental/reference_compressors/`.
 
 | Reference compressor | Supported modular equivalent |
 |---|---|
-| `SZpStage<T>` (`experimental/reference_compressors/szp/`) — SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack. See \ref experimental_szp. | `examples/presets/szp_composed.toml` — `Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)` |
+| `SZpStage<T>` (`modules/experimental/reference_compressors/szp/`) — SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack. See \ref experimental_szp. | `examples/presets/szp_composed.toml` — `Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)` |
 
 Its `StageType::SZP` FZM factory stays linked so archives written before the
 quarantine still decode, and `type = "SZp"` still loads from legacy TOML configs.

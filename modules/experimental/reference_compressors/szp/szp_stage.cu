@@ -13,7 +13,7 @@
 // container (see the stage header). hZCCL's compressed-domain arithmetic is out
 // of scope — that is a separate HomomorphicOp interface, not a Stage.
 
-#include "reference_compressors/szp/szp_stage.h"
+#include "experimental/reference_compressors/szp/szp_stage.h"
 #include "stage/stage_registry.h"
 #include <cstring>
 #include <algorithm>

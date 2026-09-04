@@ -30,7 +30,7 @@ TEST(StageRegistry, EveryShippedStageTypeHasAFactory) {
         StageType::ROIBIN_SPLIT, StageType::SZX,
         StageType::CDF97, StageType::SPECK2D, StageType::CDF97_OUTLIER_CORRECT,
         // SZP is a quarantined experimental reference compressor
-        // (experimental/reference_compressors/szp) — no longer a public module,
+        // (modules/experimental/reference_compressors/szp) — no longer a public module,
         // but its header factory MUST stay linked so pre-existing FZM archives
         // remain decodable. This is the regression guard for that guarantee.
         StageType::SZP,

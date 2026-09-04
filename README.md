@@ -200,7 +200,7 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 | [FSZ](https://github.com/JiajunHuang1999/FSZ) — Jiajun Huang, SC '26 (arXiv:2607.15413) — *algorithmic attribution only; written from the paper, before FSZ 1.0.0 was released* | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | Liang, Di, Tao, Chen, Cappello — IEEE CLUSTER 2018 — *algorithmic attribution only* | `LogTransformStage` |
 | [ROIBIN-SZ](https://arxiv.org/abs/2206.11297) — Underwood, Yoon, Gok, Di, Cappello — *independent GPU/DAG implementation of the published design* | `ROIBinSplitStage` |
-| [SZp / fZ-light](https://github.com/szcompressor/SZp) — Huang, Di et al. (MIT) | `szp_composed.toml` (`Quantizer → Lorenzo → AdaptiveBitpack`); `experimental/reference_compressors/szp` (quarantined reference impl) |
+| [SZp / fZ-light](https://github.com/szcompressor/SZp) — Huang, Di et al. (MIT) | `szp_composed.toml` (`Quantizer → Lorenzo → AdaptiveBitpack`); `modules/experimental/reference_compressors/szp` (quarantined reference impl) |
 | [SZx](https://github.com/szcompressor/SZx) — Yu, Di et al. — *algorithmic attribution only; no source copied* | `SZxStage` |
 
 For per-stage attribution details, copyright notices, relationship types (direct port, algorithmic reimplementation, or vendored), and paper citations, see [`docs/acknowledgements.md`](docs/acknowledgements.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).

@@ -12,8 +12,8 @@
 #
 # It is NOT byte-compatible with the reference SZp container. The monolithic
 # `SZpStage` FZGM implementation is quarantined under
-# experimental/reference_compressors/szp/ (and its legacy preset at
-# experimental/reference_compressors/szp/szp.toml); it is a GPU point of
+# modules/experimental/reference_compressors/szp/ (and its legacy preset at
+# modules/experimental/reference_compressors/szp/szp.toml); it is a GPU point of
 # comparison only, not a supported module.
 #
 # SZp / fZ-light: Huang, Di, et al., SC'24. The homomorphic collective

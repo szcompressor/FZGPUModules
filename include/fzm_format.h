@@ -119,7 +119,7 @@ enum class StageType : uint16_t {
     ADAPTIVE_LORENZO = 34, ///< Per-tile adaptive multi-order Lorenzo + centering (FSZ prediction stage)
     ROIBIN_SPLIT = 35, ///< Region-of-interest / binned-background split (ROIBIN-style dual-error-bound branching)
     SZX        = 36,   ///< SZx ultrafast EB compressor: per-block constant/non-constant classification + fixed-length residuals (fused, no entropy coder)
-    SZP        = 37,   ///< SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack. QUARANTINED experimental reference compressor (experimental/reference_compressors/szp) — ID reserved forever, factory stays linked for archive back-compat; use szp_composed.toml for new pipelines.
+    SZP        = 37,   ///< SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack. QUARANTINED experimental reference compressor (modules/experimental/reference_compressors/szp) — ID reserved forever, factory stays linked for archive back-compat; use szp_composed.toml for new pipelines.
     // 38 (TEE, SPERR-branch-only) never shipped on main -- bindExternalInput()
     // replaced the fan-out/duplicate-copy stage it would have been for before
     // this branch merged. Not reused -- a future stage type reading an old

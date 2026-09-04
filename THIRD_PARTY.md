@@ -350,7 +350,7 @@ Contact: SZ Team (szlossycompressor@gmail.com)
 
 **Repository:** https://github.com/szcompressor/SZp
 
-**Used by:** `SZpStage` (`experimental/reference_compressors/szp/`)
+**Used by:** `SZpStage` (`modules/experimental/reference_compressors/szp/`)
 
 **Relationship:** **GPU reimplementation** of the SZp forward/inverse. The
 upstream SZp is a CPU/OpenMP compressor (published as *fZ-light*, SC '24);
