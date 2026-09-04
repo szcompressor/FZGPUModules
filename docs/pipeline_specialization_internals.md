@@ -1,10 +1,10 @@
 # Making a stage specialization-compatible {#pipeline_specialization_internals}
 
 Audience: stage authors and library developers. This is the contract a stage
-implements so that pipelines using it are picked up by [Pipeline
-Specialization](pipeline_specialization.md) automatically — with **no edits to the
-planner, matcher, or runner**. If you only *use* the feature, read the user guide
-instead.
+implements so that pipelines using it are picked up by
+\ref pipeline_specialization "Pipeline Specialization" automatically — with
+**no edits to the planner, matcher, or runner**. If you only *use* the feature,
+read the user guide instead.
 
 The guiding principle: specialization is **declaration-driven**. A stage declares
 its fused identity; the planner walks the DAG matching those declarations by role;
@@ -308,7 +308,7 @@ PFPL/RZE shape).
 
 ## Deeper reading
 
-- User guide: [pipeline_specialization.md](pipeline_specialization.md)
+- User guide: \ref pipeline_specialization "Pipeline Specialization" (in Performance Tuning)
 - Adding a stage at all: [how_to_add_a_stage.md](how_to_add_a_stage.md)
 - Measured evidence, roofline model, postmortems: `docs/codebase_notes.md`
   (`CN-FUSE-*`, `CN-CHUNK-*`, `CN-NVRTC-*`, `CN-BSHUF-SMEM`)

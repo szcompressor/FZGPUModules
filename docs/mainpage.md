@@ -181,7 +181,7 @@ p.compress(d_input, input_bytes, &d_comp, &comp_sz, stream);  // fused where pro
 
 or at runtime with `FZ_SPECIALIZE=auto`, or `--report-json` from the CLI to see
 what was installed. Full guide, guarantees, and how to make your own stages
-specialization-compatible: **[pipeline_specialization.md](pipeline_specialization.md)**.
+specialization-compatible: see \ref pipeline_specialization "Pipeline Specialization" in the Performance Tuning page.
 
 ### CUDA Graph Support
 

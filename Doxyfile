@@ -25,7 +25,6 @@ INPUT                  = include/ \
                          docs/api_reference.md \
                          docs/architecture.md \
                          docs/performance_tuning.md \
-                         docs/pipeline_specialization.md \
                          docs/pipeline_specialization_internals.md \
                          docs/extending.md \
                          docs/developing_stages_deep_dive.md \
