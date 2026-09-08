@@ -407,6 +407,7 @@ add_library(fzgmod_modules
   modules/quantizers/quantizer/quantizer.cu
   modules/coders/rle/rle.cu
   modules/coders/rze/rze_stage.cu
+  modules/coders/golomb_rice/golomb_rice_stage.cu
   modules/coders/rre/rre_stage.cu
   modules/coders/rare/rare_stage.cu
   modules/coders/raze/raze_stage.cu

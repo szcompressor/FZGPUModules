@@ -95,22 +95,39 @@ public:
         return chunk_size_ > 0 ? chunk_size_ : 1;
     }
 
-    // Block-local (chunk-cooperative) when chunking a signed->unsigned negabinary
-    // difference — the fused DiffNegabinary op reproduces exactly this. block_size
-    // is the chunk in BYTES (the granularity the whole chunk chain shares).
+    // Block-local (chunk-cooperative) in two shapes:
+    //  - T != TOut, Mode == NEGABINARY: the fused DiffNegabinary op (unchanged).
+    //  - T == TOut (plain difference, no fused encode step): the fused DiffPlain
+    //    op, gated to int32_t -- the chunk_fusion.cuh harness's shared buffers
+    //    are a fixed uint32_t[4096] (16 KB / 4 B) shape, and DiffPlain's device
+    //    op is written against that width (the NEGABINARY op has the same real
+    //    constraint but happens to only be instantiated/used at int32 today, so
+    //    it was never gated explicitly). Plain difference is the shape a coder
+    //    that does its OWN final encode (e.g. GolombRiceCoder, which zigzags
+    //    internally) needs -- a transform that also encoded would double-encode.
+    //  ZIGZAG-fused (T != TOut, Mode == ZIGZAG) is deliberately NOT declared
+    //  fusable: no chunk-cooperative coder currently consumes a pre-zigzagged
+    //  transform output (GolombRiceCoder uses DiffPlain instead, precisely to
+    //  avoid double-zigzagging itself), so there is nothing to test it against.
+    // block_size is the chunk in BYTES (the granularity the whole chunk chain
+    // shares).
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || chunk_size_ == 0) return {};
         if constexpr (!std::is_same_v<T, TOut> && Mode == FusionMode::NEGABINARY)
+            return FusionSpec{FusionAccess::BlockLocal, static_cast<uint32_t>(chunk_size_)};
+        else if constexpr (std::is_same_v<T, TOut> && std::is_same_v<T, int32_t>)
             return FusionSpec{FusionAccess::BlockLocal, static_cast<uint32_t>(chunk_size_)};
         else
             return {};
     }
 
-    /// Chunk-cooperative stencil op: chunk-local difference + negabinary. Stateless
-    /// (no params). Fusable only in the same shape getFusionSpec() accepts.
+    /// Chunk-cooperative stencil op: chunk-local difference, negabinary-encoded
+    /// or plain. Stateless (no params). Fusable only in the same shape
+    /// getFusionSpec() accepts.
     FusedOpDecl getFusedOp() const override {
         if (!getFusionSpec().fusable()) return {};
-        return FusedOpDecl{FusionStrategy::ChunkCooperative, "DiffNegabinary",
+        const char* op_name = std::is_same_v<T, TOut> ? "DiffPlain" : "DiffNegabinary";
+        return FusedOpDecl{FusionStrategy::ChunkCooperative, op_name,
                            "fused/chunk_fusion/chunk_fusion.cuh", {}};
     }
 

@@ -62,9 +62,11 @@
 - [ ] Per-kernel optimization before fusion (coalescing, barrier removal, warp
       cooperation) — with the profiling method (ncu sectors/request, pipe
       analysis). Cross-link: `docs/decompress_kernel_optimizations.md`.
-- [ ] The roofline "should I fuse?" cost model: predicting the fused ceiling from
-      per-stage traffic; "knows when not to fuse". Why optimizing a bottleneck can
-      *raise* the fusion ceiling (bitshuffle case study).
+- [ ] A future "should I specialize?" cost model: predict the specialized ceiling
+      from per-stage traffic, launch removal, scans, and occupancy. The current Auto
+      policy uses an evidence-gated registry rather than a per-input predictor. Explain
+      why optimizing a bottleneck can *raise* the specialization ceiling (bitshuffle
+      case study).
 - [ ] Specialization declaration: forward + inverse ops, priming, the shared POD
       params contract. Cross-link:
       [pipeline_specialization_internals.md](pipeline_specialization_internals.md).

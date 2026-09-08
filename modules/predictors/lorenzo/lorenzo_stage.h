@@ -120,8 +120,20 @@ public:
     /// block_size_-element segment is a self-contained delta chain. The N-D
     /// default (block_size_ == 0) is a multi-dimensional stencil handled by a
     /// different driver and is not fused yet.
+    ///
+    /// Per-block mean centering is excluded (`centeringActive()`), matching
+    /// getInverseFusionSpec() below: the warp-register `Lorenzo1DPredictor`
+    /// policy has no means-port support at all (no field for it in
+    /// `Lorenzo1DParams`, no per-block-mean subtraction in its predict step),
+    /// so a centered Lorenzo's `getNumOutputs()==2` ("output"+"means") edge
+    /// silently doesn't trip `linearFusableEdge`'s single-dependent check
+    /// (the planner has no output-port-count guard) — before this exclusion,
+    /// `FusionPolicy::Auto` would fuse a centered Lorenzo into the plain
+    /// (uncentered) warp kernel, discarding the means entirely and producing
+    /// a badly corrupted archive with NO error (found empirically: PSNR
+    /// dropped to -113 dB). See `memory/szp_faithfulness_native_comparison.md`.
     FusionSpec getFusionSpec() const override {
-        if (isInverse() || block_size_ == 0) return {};
+        if (isInverse() || centeringActive() || block_size_ == 0) return {};
         return FusionSpec{FusionAccess::BlockLocal, block_size_};
     }
 
@@ -134,8 +146,11 @@ public:
         // 1-D block-reset Lorenzo fuses for any block_size that is a multiple of
         // 32 up to the warp-register cap (block_size = 32*EPL). EPL == 1 is
         // cuSZp2; EPL == 4 (block 128) is SZp's composed chain. The device policy
-        // runs the delta chain across the whole block for EPL > 1.
-        if (isInverse() || block_size_ == 0 || block_size_ % 32u != 0 ||
+        // runs the delta chain across the whole block for EPL > 1. Centering is
+        // excluded via getFusionSpec() above (checked again here so a caller who
+        // calls getFusedOp() directly, bypassing getFusionSpec(), can't get a
+        // false-positive fused op either).
+        if (!getFusionSpec().fusable() || block_size_ % 32u != 0 ||
             block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
         const uint32_t epl = block_size_ / 32u;
         FusedOpDecl d;

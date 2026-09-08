@@ -52,7 +52,8 @@ std::string generateWarpFusionSource(const WarpFusionSpec& spec);
 size_t launchNvrtcWarpFused(
     const WarpFusionSpec& spec, const float* d_in, size_t n_ab,
     const uint8_t* pred_params, size_t params_bytes,
-    uint8_t* d_out, MemoryPool* pool, fz::stream_t stream);
+    uint8_t* d_out, MemoryPool* pool, fz::stream_t stream,
+    std::string* execution_path = nullptr);
 
 /// The inverse: NVRTC-composes a single warp-per-block decode kernel over `spec`
 /// (coder decode + reverse transforms + predictor prefix-sum + linear dequant),

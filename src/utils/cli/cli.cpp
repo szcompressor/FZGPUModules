@@ -948,11 +948,13 @@ static void fill_from_pipeline(fz::cli::ReportData& d, const Pipeline& p) {
     d.fusion_fallback_reason = fusion.fallback_reason;
     d.fusion_installed_groups.clear();
     for (const auto& group : fusion.installed_groups) {
-        d.fusion_installed_groups.push_back({group.implementation, group.stages});
+        d.fusion_installed_groups.push_back(
+            {group.implementation, group.stages, group.execution_path});
     }
     d.fusion_installed_inverse_groups.clear();
     for (const auto& group : fusion.installed_inverse_groups) {
-        d.fusion_installed_inverse_groups.push_back({group.implementation, group.stages});
+        d.fusion_installed_inverse_groups.push_back(
+            {group.implementation, group.stages, group.execution_path});
     }
 }
 

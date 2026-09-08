@@ -104,7 +104,97 @@ void buildFsz(Pipeline& p, size_t n, bool outlier) {
     p.connect(ab, al);
 }
 
+// Per-block mean centering has no warp-register fused support (no means-port
+// field in Lorenzo1DParams, no mean-subtraction step in the predict policy).
+// Before a fix, getFusionSpec() didn't check centeringActive() at all, and
+// the planner's linearFusableEdge() only checks DAG edge fan-in/out (not a
+// stage's output PORT count), so a centered Lorenzo's second "means" output
+// silently didn't block fusion -- FusionPolicy::Auto fused it into the plain
+// (uncentered) warp kernel, discarding the means and producing a garbage
+// archive with NO error (found empirically on real data: PSNR -113 dB).
+void buildCenteredWarp1D(Pipeline& p, size_t n, uint32_t block) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+    // centering is a constructor argument (addStage() captures port count at
+    // add-time), not a post-add setter -- see config.cpp's addLorenzoStage.
+    auto* l = p.addStage<LorenzoStage<int32_t>>(block, /*centering=*/true);
+    p.connect(l, q, "codes");
+    auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    a->setBlockSize(block);
+    p.connect(a, l, "output");
+}
+
 } // namespace
+
+// getFusionSpec() must exclude centering outright: a centered Lorenzo is not
+// a fusable BlockLocal predictor today (no fused policy supports its means
+// port), regardless of block size.
+TEST(FusionPlanner, LorenzoCenteringIsUnfusable) {
+    LorenzoStage<int32_t> centered(128, /*centering=*/true);
+    EXPECT_FALSE(centered.getFusionSpec().fusable());
+    EXPECT_TRUE(centered.getFusedOp().op_name.empty());
+}
+
+// End-to-end: with the fix, FusionPolicy::Auto on a centered chain must fall
+// back to fully staged execution (zero fused groups) and produce a result
+// IDENTICAL to FusionPolicy::Off -- not just "close enough". Before the fix
+// this silently produced a corrupted archive instead (see the comment on
+// buildCenteredWarp1D above).
+TEST(FusionPlanner, LorenzoCenteringAutoMatchesStagedNotCorrupted) {
+    const size_t n = 1u << 18;
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i)
+        h[i] = 0.5f * std::sin(i * 0.001f) + 0.2f * std::cos(i * 0.017f);
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildCenteredWarp1D(p, n, 128);
+        p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), 0u) << "centering must never fuse, even under Auto";
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        cudaDeviceSynchronize();
+        out.resize(sz);
+        EXPECT_EQ(cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost), cudaSuccess);
+        return sz;
+    };
+    std::vector<uint8_t> staged, autoed;
+    const size_t sz_staged = compressCopy(FusionPolicy::Off, staged);
+    const size_t sz_auto   = compressCopy(FusionPolicy::Auto, autoed);
+    ASSERT_EQ(sz_staged, sz_auto);
+    EXPECT_EQ(staged, autoed) << "Auto must be byte-identical to Off for an unfusable chain";
+
+    auto roundtrip = [&](FusionPolicy pol, std::vector<float>& recon) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        buildCenteredWarp1D(p, n, 128);
+        p.finalize();
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        void* d_decomp = nullptr; size_t dsz = 0;
+        p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+        cudaDeviceSynchronize();
+        recon.assign(n, 0.0f);
+        cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+    };
+    auto maxErr = [&](const std::vector<float>& r) {
+        double m = 0; for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(r[i]-h[i]));
+        return m;
+    };
+    std::vector<float> rs, ra;
+    roundtrip(FusionPolicy::Off, rs);
+    roundtrip(FusionPolicy::Auto, ra);
+    EXPECT_LE(maxErr(rs), eb * 1.001) << "staged reconstruction exceeds bound";
+    EXPECT_LE(maxErr(ra), eb * 1.001) << "auto reconstruction exceeds bound (would catch corruption)";
+    EXPECT_EQ(rs, ra) << "Auto reconstruction differs from Off";
+    cudaFree(d_in);
+}
 
 // The whole cuszp2 front is one block-local fusable group ending in the coder.
 TEST(FusionPlanner, Cuszp2ChainIsOneGroup) {
@@ -686,6 +776,44 @@ TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) {
 }
 TEST(FusionPlanner, PfplRreEndToEndFusedMatchesStaged) {
     chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/true); });
+}
+
+// Novel chunk chain the registry has no hand-written entry for: Quantizer
+// (NOA,inplace,zigzag) -> Difference(plain, same-type) -> GolombRice. Plain
+// (not zigzag-fused) Difference: GolombRiceCoder zigzags its residuals
+// internally, matching how the standalone GolombRiceStage kernel is fed a
+// plain Lorenzo delta in lorenzo_golomb_rice.toml -- a transform that ALSO
+// zigzagged would double-encode. No Bitshuffle -- unlike RZE/RRE (byte-level
+// LC coders that want bit-transposed zero-dense planes), GolombRice needs the
+// per-element magnitude structure intact for its Rice cost model. Exercises
+// the "any Map->Transform*->Coder chain fuses with zero new glue" claim for a
+// coder shaped nothing like the LC family (variable per-chunk parameter k,
+// restart-interval byte offsets, escape-bounded codes).
+static void buildDiffPlainGolombRice(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
+    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    auto* d = p.addStage<DifferenceStage<int32_t>>();
+    d->setChunkSize(16384);
+    p.connect(d, q, "codes");
+    auto* g = p.addStage<GolombRiceStage<int32_t>>(); g->setChunkSize(16384);
+    p.connect(g, d);
+}
+
+TEST(FusionPlanner, DiffPlainGolombRiceChainIsOneGroup) {
+    Pipeline p(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+    buildDiffPlainGolombRice(p, 4096);
+    p.finalize();
+    auto groups = planFusionGroups(*p.getDAG());
+    ASSERT_EQ(groups.size(), 1u);
+    EXPECT_EQ(groups[0].stages.size(), 3u);
+    EXPECT_EQ(groups[0].block_size, 16384u);
+    EXPECT_TRUE(groups[0].has_coder);
+}
+
+TEST(FusionPlanner, DiffPlainGolombRiceEndToEndFusedMatchesStaged) {
+    chunkFusionEndToEnd(buildDiffPlainGolombRice);
 }
 
 TEST(FusionPlanner, PfplFusedOutlierOverflowFailsLikeStaged) {
@@ -1394,6 +1522,17 @@ TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
                 void* d_comp = nullptr; size_t sz = 0;
                 p.compress(d_in, bytes, &d_comp, &sz, 0);
                 cudaDeviceSynchronize();
+                if (pol == FusionPolicy::Auto) {
+                    EXPECT_EQ(p.getFusionInfo().installed_groups.size(), 1u) << tag;
+                    if (!p.getFusionInfo().installed_groups.empty()) {
+                        const std::string& path =
+                            p.getFusionInfo().installed_groups[0].execution_path;
+                        EXPECT_TRUE(path == "thread_independent" ||
+                                    path == "single_pass" || path == "two_pass")
+                            << "missing/unknown runtime execution path '" << path
+                            << "': " << tag;
+                    }
+                }
                 out.resize(sz);
                 EXPECT_EQ(cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost), cudaSuccess);
                 return sz;

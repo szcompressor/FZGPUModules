@@ -34,6 +34,7 @@
 #include "coders/raze/raze_stage.h"
 #include "coders/clog/clog_stage.h"
 #include "coders/hclog/hclog_stage.h"
+#include "coders/golomb_rice/golomb_rice_stage.h"
 #include "coders/gpulz/gpulz_stage.h"
 #include "coders/speck2d/speck2d_stage.h"
 #include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"

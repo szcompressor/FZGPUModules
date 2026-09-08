@@ -89,7 +89,8 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     const size_t archive_bytes = fused::launchNvrtcWarpFused(
         spec, static_cast<const float*>(ctx.d_input), n_ab,
         blob.data(), blob.size(),
-        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream));
+        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream),
+        ctx.execution_path);
 
     // The archive masquerades as the staged AdaptiveBitpack output: set the tail
     // stage's execute-time state (num_elements = the padded tile-major count) so

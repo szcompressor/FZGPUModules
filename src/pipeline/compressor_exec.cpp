@@ -131,6 +131,16 @@ void Pipeline::compress(
 
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
+        // Runners may choose a data/size-dependent subpath after finalize(). Keep
+        // that runtime decision beside the installed-group provenance consumed by
+        // the CLI report. Group ordering is fixed by planAndInstallFusion().
+        const auto& runtime_groups = dag_->getFusedGroups();
+        const size_t reported_groups = std::min(
+            runtime_groups.size(), fusion_info_.installed_groups.size());
+        for (size_t i = 0; i < reported_groups; ++i)
+            fusion_info_.installed_groups[i].execution_path =
+                runtime_groups[i].execution_path;
+
         for (auto& stage_ptr : stages_) {
             stage_ptr->postStreamSync(stream);
         }

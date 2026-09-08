@@ -1,0 +1,34 @@
+[pipeline]
+# EXPERIMENTAL: Quantizer(linear) -> Lorenzo(block) -> GolombRice
+#
+# Same front end as cuszp.toml, with the chunk-local Golomb-Rice entropy coder
+# (modules/coders/golomb_rice) in place of AdaptiveBitpack, to compare a real
+# entropy coder against the fixed-rate bitpack on actual Lorenzo residuals.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/lorenzo_golomb_rice.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "NOA"
+linear_mode = true
+
+[[stage]]
+name = "lrz"
+type = "Lorenzo"
+data_type = "int32"
+block_size = 32
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "gr"
+type = "GolombRice"
+data_type = "int32"
+chunk_size = 16384
+inputs = [{from = "lrz"}]

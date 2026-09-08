@@ -47,6 +47,7 @@ struct PhaseTimingJson {
 struct FusionGroupJson {
     std::string implementation;
     std::vector<std::string> stages;
+    std::string execution_path;
 };
 
 /// Everything the JSON needs, in plain types decoupled from CLI internals.

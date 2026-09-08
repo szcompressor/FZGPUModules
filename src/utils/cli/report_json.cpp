@@ -268,7 +268,10 @@ void write_report_json(const std::string& path, const ReportData& d) {
                   << esc(group.implementation) << "\", \"stages\": [";
                 for (size_t j = 0; j < group.stages.size(); ++j)
                     o << (j ? ", " : "") << "\"" << esc(group.stages[j]) << "\"";
-                o << "] }";
+                o << "]";
+                if (!group.execution_path.empty())
+                    o << ", \"execution_path\": \"" << esc(group.execution_path) << "\"";
+                o << " }";
             }
             o << (d.fusion_installed_groups.empty() ? "],\n" : "\n    ],\n");
             o << "    \"inverse_groups\": [";
@@ -278,7 +281,10 @@ void write_report_json(const std::string& path, const ReportData& d) {
                   << esc(group.implementation) << "\", \"stages\": [";
                 for (size_t j = 0; j < group.stages.size(); ++j)
                     o << (j ? ", " : "") << "\"" << esc(group.stages[j]) << "\"";
-                o << "] }";
+                o << "]";
+                if (!group.execution_path.empty())
+                    o << ", \"execution_path\": \"" << esc(group.execution_path) << "\"";
+                o << " }";
             }
             o << (d.fusion_installed_inverse_groups.empty() ? "]\n" : "\n    ]\n");
             o << "  }";

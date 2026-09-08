@@ -87,9 +87,22 @@ static std::string generateWarpSinglePassSource(const WarpFusionSpec& spec, int 
 // Single-pass (coarse warp-granular decoupled look-back) is the DEFAULT warp-register path:
 // one kernel, no CUB scan, no delta recompute, byte-identical to the two-pass path. Set
 // FZ_SINGLEPASS=0 to force the legacy two-pass (rate → CUB scan → pack) for A/B.
-// ── Thread-independent (cuSZp-layout) path — Phase 4 wiring, gated FZ_TI=1 ────────────────
-// Milestone 1 supports ONLY Lorenzo1D + AdaptiveBitpack (block=32, no transforms): those map to
-// warp_ti::ThreadLorenzo1DPredictor / ThreadFixedRateCoder, which emit the byte-identical AB stream.
+// ── Thread-independent (cuSZp-layout) path — DEFAULT dispatch (2026-09-05) ───────────────
+// Currently supports ONLY Lorenzo1D + AdaptiveBitpack (block=32, no transforms): those map to
+// warp_ti::ThreadLorenzo1DPredictor / ThreadFixedRateCoder, which emit the byte-identical AB
+// stream (this is a real, current scope boundary — see tiSupportedChain() — not a TODO; a new
+// predictor/coder pair needs its own ThreadXPredictor/ThreadXCoder policy in warp_ti_fusion.cuh
+// before it's eligible here, same as any other warp-register op). Within that chain, TI is
+// memory-bound (no cross-lane ballot/shfl) and reaches native cuSZp2 parity on compressible
+// data (measured 393 GB/s on HACC-xx, r~14) but loses to the warp-cooperative path on
+// incompressible data (its serial per-thread pack falls behind the parallel bit-transpose pack
+// once there are many bitplanes to write, e.g. HACC-vx r~17.6). Both backends are byte-identical
+// — the choice is pure throughput, decided per compress() call by a cheap runtime probe
+// (probeAvgRate(), ~1% overhead) against a measured 2-point threshold (adaptive_thresh below;
+// retune with more fields before trusting it far from the cuSZp2 HACC-xx/vx regime it was fit
+// on). This probe-driven choice is the DEFAULT for any TI-supported chain — no env var needed.
+// FZ_TI=1 forces TI unconditionally (skips the probe); FZ_ADAPTIVE=0 disables the probe and
+// falls through to the single-pass/two-pass choice below (debugging/A-B only).
 static std::string generateWarpTISource(int blocks_per_thread) {
     std::string src;
     src += "#include \"fused/fused_block/warp_ti_fusion.cuh\"\n";
@@ -123,8 +136,8 @@ static bool envOn(const char* name) {
  * every `launchNvrtcWarpFused()` call.
  */
 struct WarpFusionEnvConfig {
-    bool  force_ti        = false;  ///< FZ_TI — force the thread-independent path.
-    bool  adaptive_probe  = false;  ///< FZ_ADAPTIVE — probe avg rate to choose TI vs warp-coop.
+    bool  force_ti        = false;  ///< FZ_TI — force the thread-independent path (skips the probe).
+    bool  adaptive_probe  = true;   ///< FZ_ADAPTIVE — default on; '0'/'o'/'f' (case-insens.) disables.
     // Measured crossover: xx r~14 (TI wins 393 vs 236), vx r~17.6 (warp-coop wins);
     // provisional 2-point fit — retune with more fields. FZ_ADAPTIVE_THRESH overrides.
     float adaptive_thresh = 16.0f;
@@ -139,7 +152,9 @@ struct WarpFusionEnvConfig {
         static const WarpFusionEnvConfig cfg = [] {
             WarpFusionEnvConfig c;
             c.force_ti       = envOn("FZ_TI");
-            c.adaptive_probe = envOn("FZ_ADAPTIVE");
+            if (const char* e = std::getenv("FZ_ADAPTIVE"))
+                c.adaptive_probe = !(e[0] == '0' || e[0] == 'o' || e[0] == 'O' ||
+                                     e[0] == 'f' || e[0] == 'F');
             if (const char* e = std::getenv("FZ_ADAPTIVE_THRESH")) {
                 const float v = std::atof(e); if (v > 0) c.adaptive_thresh = v;
             }
@@ -218,9 +233,13 @@ static int singlePassBlocksPerWarp(size_t num_blocks) {
 size_t launchNvrtcWarpFused(
     const WarpFusionSpec& spec, const float* d_in, size_t n_ab,
     const uint8_t* pred_params, size_t params_bytes,
-    uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
+    uint8_t* d_out, MemoryPool* pool, cudaStream_t stream,
+    std::string* execution_path)
 {
-    if (n_ab == 0) return 0;
+    if (n_ab == 0) {
+        if (execution_path) *execution_path = "empty";
+        return 0;
+    }
     const uint32_t block_size = 32u * static_cast<uint32_t>(spec.elems_per_lane);
     // "PlainRateCoder" emits the true 1-byte-meta plain AdaptiveBitpack format;
     // every other warp coder ("AdaptiveBitpackCoder"/"PlainBitpackCoder") emits
@@ -229,7 +248,10 @@ size_t launchNvrtcWarpFused(
     const bool plain_meta = (spec.coder == "PlainRateCoder");
     const ab::Config cfg = ab::configure(n_ab, block_size, /*outlier=*/!plain_meta);
     const size_t num_blocks = cfg.num_blocks;
-    if (num_blocks == 0) return 0;
+    if (num_blocks == 0) {
+        if (execution_path) *execution_path = "empty";
+        return 0;
+    }
     const size_t meta_region = static_cast<size_t>(cfg.meta_bytes) * num_blocks;
 
     auto* d_cost   = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_blocks, stream, "warp_cost"));
@@ -250,8 +272,9 @@ size_t launchNvrtcWarpFused(
 
     // ── Thread-independent (cuSZp-layout) path: CTA=1 warp, each thread owns BPT blocks; warp
     // owns 32*BPT blocks; scan over num_warps = ceil(num_blocks/(32*BPT)). Byte-identical to AB.
-    // Use TI when the chain supports it AND (FZ_TI forces it, OR FZ_ADAPTIVE probes low avg rate
-    // = compressible data, TI's winning regime). Both paths are byte-identical → pure throughput.
+    // Use TI when the chain supports it AND (FZ_TI forces it unconditionally, OR the default-on
+    // probe measures low avg rate = compressible data, TI's winning regime). Both paths are
+    // byte-identical → pure throughput; no user action needed for the profitable choice to apply.
     const WarpFusionEnvConfig& env_cfg = WarpFusionEnvConfig::get();
     bool use_ti = false;
     if (tiSupportedChain(spec)) {
@@ -264,6 +287,7 @@ size_t launchNvrtcWarpFused(
         }
     }
     if (use_ti) {
+        if (execution_path) *execution_path = "thread_independent";
         const int      BPT             = env_cfg.ti_bpt;
         const size_t   blocks_per_warp = static_cast<size_t>(BPT) * 32u;
         const unsigned num_warps       = static_cast<unsigned>((num_blocks + blocks_per_warp - 1) / blocks_per_warp);
@@ -300,6 +324,7 @@ size_t launchNvrtcWarpFused(
     // path (recompute in pack, only EPL registers live) is the right choice there.
     if (spec.elems_per_lane > 2) use_single_pass = false;
     if (use_single_pass) {
+        if (execution_path) *execution_path = "single_pass";
         // cuSZp-style coarse warp granularity: CTA = 1 warp, each warp owns BPW blocks, so
         // the scan runs over num_warps = ceil(num_blocks/BPW) elements.
         const int BPW = singlePassBlocksPerWarp(num_blocks);
@@ -333,6 +358,7 @@ size_t launchNvrtcWarpFused(
         return meta_region + static_cast<size_t>(h_total);
     }
 
+    if (execution_path) *execution_path = "two_pass";
     const std::string src  = generateWarpFusionSource(spec);
     CUfunction rate = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_warp_rate"));
     CUfunction pack = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_warp_pack"));

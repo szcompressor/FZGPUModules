@@ -207,6 +207,7 @@ public:
         std::vector<DAGNode*> members;          ///< all group nodes (skipped individually)
         std::vector<Stage*>   stages;           ///< group stages for the runner context
         const FusedImpl*      impl = nullptr;   ///< matched fused implementation
+        std::string           execution_path;   ///< last runtime path, when reported by runner
     };
 
     /** Install fused groups (from Pipeline::finalize) that execute() will honor. */

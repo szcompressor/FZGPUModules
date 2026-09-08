@@ -425,7 +425,7 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
         FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, stream));
         return true;
     }
-    const FusedGroupExec& fg = fused_groups_[head_it->second];
+    FusedGroupExec& fg = fused_groups_[head_it->second];
     for (auto* dep : node->dependencies)
         FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
 
@@ -492,6 +492,7 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
     ctx.stream       = stream;
     ctx.side_outputs = side.empty() ? nullptr : &side;
     ctx.side_inputs  = side_inputs.empty() ? nullptr : &side_inputs;
+    ctx.execution_path = &fg.execution_path;
     const size_t archive_bytes = fg.impl->run(ctx);
     out_buf.size = archive_bytes;
     if (out_buf.allocated_size != 0 && archive_bytes > out_buf.allocated_size)

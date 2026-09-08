@@ -17,7 +17,8 @@
  * fused kernel for this exact chain?". An eligible hit lets
  * the DAG executor run one fused kernel in place of the group's staged
  * execute()s; misses and unselected overlaps remain staged. Normal Auto selection
- * also requires the implementation's profitability gate. Adding a new fused
+ * considers only auto-enabled implementations: registration is the current
+ * evidence gate, not a predictive per-input profitability test. Adding a new fused
  * configuration means registering one `FusedImpl` (later: NVRTC-generated ones
  * keyed by fingerprint).
  *
@@ -27,6 +28,7 @@
 #include "backend/types.h"
 #include "stage/fusion.h"
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace fz {
@@ -75,6 +77,9 @@ struct FusedRunContext {
     /// Non-main inputs entering any member from outside the fused chain. Used by
     /// inverse fusion for side archives; empty for ordinary linear compression.
     const std::vector<FusedSideInput>* side_inputs = nullptr;
+    /// Optional per-group diagnostic populated by runners whose implementation
+    /// selects among materially different internal execution paths at runtime.
+    std::string* execution_path = nullptr;
 };
 
 /// A registered fused implementation and its matcher.

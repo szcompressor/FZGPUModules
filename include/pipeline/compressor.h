@@ -46,10 +46,11 @@ namespace fz {
  * specialization strategy it currently applies; the umbrella name leaves room for
  * further runtime optimizations.
  *
- * `Off` (default) runs every stage staged. `Auto` installs only registered
- * specializations that have passed their profitability gate ("knows when not to
- * fuse"). `Force` also permits experimental specializations and is intended for
- * correctness/performance diagnostics, not production selection. The planner may
+ * `Off` (default) runs every stage staged. `Auto` installs matching auto-enabled
+ * specializations; registration is the current evidence gate, not a predictive
+ * per-input profitability test. `Force` also permits experimental specializations
+ * and is intended for correctness/performance diagnostics, not production
+ * selection. The planner may
  * select non-overlapping partial groups from one larger compatible chain; a
  * specialization need not consume the maximal chain. Decompression is specialized
  * on the same policy and stays byte-exact vs the staged inverse. Overridable at
@@ -68,6 +69,7 @@ using FusionPolicy = SpecializationPolicy;
 struct SpecializationGroupInfo {
     std::string implementation;              ///< strategy impl name, e.g. "warp-register"
     std::vector<std::string> stages;         ///< the stages it replaced
+    std::string execution_path;              ///< last runtime subpath; empty if not applicable
 };
 using FusionGroupInfo = SpecializationGroupInfo;   ///< @deprecated
 
@@ -78,7 +80,7 @@ struct SpecializationInfo {
     std::vector<SpecializationGroupInfo> installed_groups;
     /// Lazily populated after the first decompress builds its inverse DAG.
     std::vector<SpecializationGroupInfo> installed_inverse_groups;
-    /// policy_off, no_legal_group, or no_profitable_implementation; empty on a hit.
+    /// policy_off, no_legal_group, or legacy no_profitable_implementation; empty on a hit.
     std::string fallback_reason;
 };
 using FusionInfo = SpecializationInfo;   ///< @deprecated

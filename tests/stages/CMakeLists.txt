@@ -84,6 +84,14 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── GolombRiceStage GPU round-trip ──────────────────────────────────────────
+fz_add_test(
+    NAME    test_golomb_rice
+    SOURCES test_golomb_rice.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+
 # ─── RREStage GPU round-trip ─────────────────────────────────────────────────
 fz_add_test(
     NAME    test_rre_stage

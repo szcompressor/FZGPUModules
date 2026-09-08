@@ -31,6 +31,7 @@
 #include "coders/lc_common/lc_chunk_components.cuh"
 #include "coders/lc_common/lc_clog_components.cuh"   // d_CLOG / d_HCLOG
 #include "transforms/negabinary/negabinary.h"
+#include "transforms/zigzag/zigzag.h"
 #include <cstdint>
 
 namespace fz {
@@ -140,6 +141,25 @@ struct DiffNegabinary {
     }
 };
 
+// ── Stencil op: chunk-local difference (boundary = elem 0), PLAIN -- no final
+// encode. Same shape as DiffNegabinary but leaves the signed delta as-is
+// (reinterpreted through uint32_t bits, not encoded): GolombRiceCoder does its
+// OWN zigzag internally (matching the standalone GolombRiceStage kernel, which
+// has no upstream transform to rely on and zigzags inline), so a transform that
+// zigzagged here too would double-encode. This is the fused equivalent of a
+// plain same-type DifferenceStage<T> (T==TOut, no Mode fusion). ─────────────
+struct DiffPlain {
+    using Params = EmptyParams;
+    __device__ static void apply(const uint32_t* __restrict__ s_in, uint32_t* __restrict__ s_out,
+                                 int cnt, bool /*full*/, const void* /*pp*/) {
+        for (int i = threadIdx.x; i < cnt; i += TPB) {
+            const int ci = (int)s_in[i];
+            const int d  = (i == 0) ? ci : (ci - (int)s_in[i-1]);
+            s_out[i] = static_cast<uint32_t>(d);
+        }
+    }
+};
+
 // ── Fixed-length cooperative op: 32-bit bitshuffle. The partial tail chunk is
 // copied through (the staged bitshuffle memcpys its sub-chunk tail). ─────────
 struct Bitshuffle32 {
@@ -201,6 +221,223 @@ struct HCLOGCoder {
     using Params = EmptyParams;
     __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
         return lc_detail::d_HCLOG<uint8_t, CHUNK_BYTES>(csize, in, out, temp);
+    }
+};
+
+// ── GolombRiceCoder: chunk-cooperative fused encode of modules/coders/golomb_rice.
+// ENCODE ONLY (matches RRE/RARE/RAZE/CLOG/HCLOG above -- decode fusion for this
+// path is future work, same as the staged GolombRiceStage's own decode). Must
+// reproduce modules/coders/golomb_rice/golomb_rice_stage.cu's
+// golombRiceEncodeKernel BYTE-FOR-BYTE (same k selection, same kIntervalsPerChunk
+// restart-interval offsets, same header layout) so the ordinary, unfused
+// GolombRiceStage::execute() inverse can decode an archive this fused encoder
+// produced -- it never gets its own inverse.
+//
+// `in` here is `cur`, the chunk-local PLAIN signed difference a DiffPlain
+// transform produced (bit-reinterpreted through uint32_t). This coder zigzag-
+// encodes it internally (see grZigzag() below) -- exactly matching the
+// standalone GolombRiceStage kernel's own inline zigzagEncode<T>() step. An
+// upstream transform that ALSO zigzagged would double-encode; that was tried
+// first and caught by the byte-identity test (fused archive came out smaller
+// than staged -- double-zigzag of an always-nonnegative value just doubles
+// it, inflating every Rice cost by ~1 bit).
+//
+// Uses `temp` (TEMP_BYTES=4096) for all scratch instead of declaring new
+// __shared__ arrays -- the harness already budgets sA/sB (16 KB each) for
+// `in`/`out`; needed scratch (~1.8 KB, see the layout comment below) fits
+// comfortably in the coder's `temp` slice with room to spare.
+namespace golomb_rice_detail {
+
+constexpr uint32_t kGrEscapeQ           = 24u;
+constexpr uint32_t kGrRawBits           = 32u;   // bitWidth<int32_t>()
+constexpr uint32_t kGrMaxK              = 24u;   // kMaxCandidate<int32_t>()
+constexpr uint32_t kGrIntervalsPerChunk = TPB / 32u;   // 16 at TPB=512
+constexpr uint32_t kGrHeaderBytes       = 4u + 4u * kGrIntervalsPerChunk;   // 68
+
+// Scatter the low `nbits` of `value` into a flat little-endian bit array
+// starting at `bit_off`. Identical to golomb_rice_stage.cu's orBits() --
+// atomicOr because two elements' disjoint bit ranges can still share one
+// 32-bit WORD.
+__device__ __forceinline__ void grOrBits(uint32_t* words, uint64_t bit_off,
+                                         uint64_t value, uint32_t nbits) {
+    while (nbits > 0) {
+        const uint32_t widx = static_cast<uint32_t>(bit_off >> 5);
+        const uint32_t boff = static_cast<uint32_t>(bit_off & 31u);
+        const uint32_t take = min(nbits, 32u - boff);
+        const uint32_t mask = (take == 32u) ? 0xFFFFFFFFu : ((1u << take) - 1u);
+        const uint32_t chunk = static_cast<uint32_t>(value & mask);
+        atomicOr(&words[widx], chunk << boff);
+        value  >>= take;
+        bit_off += take;
+        nbits   -= take;
+    }
+}
+
+// Exact bit cost of one value under Rice parameter k, with the escape cap --
+// identical to golomb_rice_stage.cu's riceCost<kGrEscapeQ, kGrRawBits>().
+__device__ __forceinline__ uint32_t grRiceCost(uint32_t u, uint32_t k) {
+    const uint32_t q = u >> k;
+    return (q < kGrEscapeQ) ? (q + 1u + k) : (kGrEscapeQ + kGrRawBits);
+}
+
+// zigzag(signed int32 delta -> unsigned). GolombRiceCoder does this itself
+// (its input is DiffPlain's plain signed delta, bit-reinterpreted through
+// uint32_t) -- exactly mirroring the standalone GolombRiceStage kernel's own
+// inline zigzagEncode<T>() step, which exists precisely because that kernel
+// has no upstream transform to rely on. An upstream transform that ALSO
+// zigzagged (e.g. a hypothetical DiffZigzag) would double-encode -- caught
+// by the byte-identity test (it was; see the fix history in this file's
+// commit / chunk_local_entropy_coder_design.md).
+__device__ __forceinline__ uint32_t grZigzag(uint32_t bits) {
+    return Zigzag<int32_t>::encode(static_cast<int32_t>(bits));
+}
+
+} // namespace golomb_rice_detail
+
+struct GolombRiceCoder {
+    using Params = EmptyParams;
+    __device__ static bool encode(int& csize, byte* in, byte* out, byte* temp, const void* /*pp*/) {
+        using namespace golomb_rice_detail;
+        constexpr uint32_t kMaxK   = kGrMaxK;
+        constexpr int       nwarps = TPB >> 5;
+        constexpr int       LOCAL  = NELEM / TPB;
+
+        const int       live  = csize / 4;      // csize enters as in_size (bytes)
+        const int       tid   = threadIdx.x;
+        const int       warp  = tid >> 5, lane = tid & 31;
+        // `in` holds DiffPlain's plain signed per-chunk deltas (bit-reinterpreted
+        // through uint32_t, NOT zigzag-encoded yet) -- grZigzag() below does that.
+        const uint32_t* deltas = reinterpret_cast<const uint32_t*>(in);
+
+        // `temp` (TEMP_BYTES=4096 B) layout, all uint32 slots:
+        //   [0 .. nwarps*(kMaxK+1))            s_warp_cost[warp][k]   (400 slots)
+        //   [.. + (kMaxK+1))                   s_total_cost[k]        ( 25 slots)
+        //   [.. + 1)                           s_k                    (  1 slot )
+        //   [.. + nwarps)                      s_warp_bytelen[warp]   ( 16 slots)
+        //   [.. + nwarps)                      s_warp_bytebase[warp]  ( 16 slots)
+        //   [.. + 1)                           s_total_payload_bytes  (  1 slot )
+        // Total 459 slots = 1836 B, comfortably under 4096 B.
+        uint32_t* t              = reinterpret_cast<uint32_t*>(temp);
+        uint32_t* s_warp_cost    = t;
+        uint32_t* s_total_cost   = s_warp_cost + nwarps * (kMaxK + 1);
+        uint32_t* s_k            = s_total_cost + (kMaxK + 1);
+        uint32_t* s_warp_bytelen = s_k + 1;
+        uint32_t* s_warp_bytebase= s_warp_bytelen + nwarps;
+        uint32_t* s_total_bytes  = s_warp_bytebase + nwarps;
+
+        // ---- Phase 1: exact cost search over k in [0, kMaxK] ----
+        uint32_t local_cost[kMaxK + 1];
+        #pragma unroll
+        for (uint32_t k = 0; k <= kMaxK; ++k) local_cost[k] = 0u;
+        for (int j = 0; j < LOCAL; ++j) {
+            const int i = tid * LOCAL + j;
+            if (i >= live) continue;
+            const uint32_t u = grZigzag(deltas[i]);
+            #pragma unroll
+            for (uint32_t k = 0; k <= kMaxK; ++k) local_cost[k] += grRiceCost(u, k);
+        }
+        #pragma unroll
+        for (uint32_t k = 0; k <= kMaxK; ++k) {
+            uint32_t c = local_cost[k];
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1) c += __shfl_down_sync(0xffffffffu, c, off, 32);
+            if (lane == 0) s_warp_cost[warp * (kMaxK + 1) + k] = c;
+        }
+        __syncthreads();
+        if (warp == 0) {
+            #pragma unroll
+            for (uint32_t k = 0; k <= kMaxK; ++k) {
+                uint32_t c = (lane < nwarps) ? s_warp_cost[lane * (kMaxK + 1) + k] : 0u;
+                #pragma unroll
+                for (int off = 16; off > 0; off >>= 1) c += __shfl_down_sync(0xffffffffu, c, off, 32);
+                if (lane == 0) s_total_cost[k] = c;
+            }
+            if (lane == 0) {
+                uint32_t best = 0;
+                for (uint32_t k = 1; k <= kMaxK; ++k)
+                    if (s_total_cost[k] < s_total_cost[best]) best = k;
+                *s_k = best;
+            }
+        }
+        __syncthreads();
+        const uint32_t k_opt = *s_k;
+
+        // ---- Phase 2: per-thread length -> WARP-LOCAL exclusive scan (each
+        // warp is one restart interval, byte-aligned independently). ----
+        uint32_t local_len[LOCAL];
+        uint32_t thread_total = 0;
+        for (int j = 0; j < LOCAL; ++j) {
+            const int i = tid * LOCAL + j;
+            const uint32_t len = (i < live) ? grRiceCost(grZigzag(deltas[i]), k_opt) : 0u;
+            local_len[j] = thread_total;
+            thread_total += len;
+        }
+        uint32_t warp_excl = thread_total;
+        #pragma unroll
+        for (int d = 1; d < 32; d <<= 1) {
+            const uint32_t up = __shfl_up_sync(0xffffffffu, warp_excl, d, 32);
+            if (lane >= d) warp_excl += up;
+        }
+        const uint32_t warp_bit_total = __shfl_sync(0xffffffffu, warp_excl, 31, 32);
+        warp_excl -= thread_total;
+        const uint32_t warp_byte_len = (warp_bit_total + 7u) >> 3;
+        if (lane == 0) s_warp_bytelen[warp] = warp_byte_len;
+        __syncthreads();
+        if (warp == 0) {
+            uint32_t v = (lane < nwarps) ? s_warp_bytelen[lane] : 0u;
+            uint32_t excl = v;
+            #pragma unroll
+            for (int d = 1; d < 32; d <<= 1) {
+                const uint32_t up = __shfl_up_sync(0xffffffffu, excl, d, 32);
+                if (lane >= d) excl += up;
+            }
+            const uint32_t grand_total = __shfl_sync(0xffffffffu, excl, nwarps - 1, 32);
+            excl -= v;
+            if (lane < nwarps) s_warp_bytebase[lane] = excl;
+            if (lane == 0) *s_total_bytes = grand_total;
+        }
+        __syncthreads();
+        const uint64_t thread_base = static_cast<uint64_t>(s_warp_bytebase[warp]) * 8ull + warp_excl;
+        const uint32_t total_payload_bytes = *s_total_bytes;
+
+        const uint32_t packed_bytes = kGrHeaderBytes + total_payload_bytes;
+        const uint32_t orig_bytes   = static_cast<uint32_t>(live) * 4u;
+
+        // Never write more than `out`'s CHUNK_BYTES capacity, and let the
+        // harness's own csize<in_size check decide the raw-copy fallback --
+        // bail out with no writes whenever packing wouldn't help or wouldn't
+        // fit (GolombRice's escape-bounded worst case CAN exceed CHUNK_BYTES,
+        // unlike the byte-level LC coders above).
+        if (packed_bytes >= orig_bytes || packed_bytes > static_cast<uint32_t>(CHUNK_BYTES))
+            return false;
+
+        // ---- Phase 3: zero the payload region, then atomicOr-pack. ----
+        byte*     outb  = out;
+        uint32_t* words = reinterpret_cast<uint32_t*>(outb + kGrHeaderBytes);
+        const uint32_t payload_words = (total_payload_bytes + 3) / 4 + 1;   // +1 word tail safety
+        for (uint32_t w = tid; w < payload_words; w += TPB) words[w] = 0u;
+        if (tid == 0) *reinterpret_cast<uint32_t*>(outb) = k_opt;
+        if (lane == 0) reinterpret_cast<uint32_t*>(outb + 4)[warp] = s_warp_bytebase[warp];
+        __syncthreads();
+
+        for (int j = 0; j < LOCAL; ++j) {
+            const int i = tid * LOCAL + j;
+            if (i >= live) continue;
+            const uint32_t u   = grZigzag(deltas[i]);
+            const uint32_t q   = u >> k_opt;
+            const uint64_t off = thread_base + local_len[j];
+            if (q < kGrEscapeQ) {
+                const uint32_t r = u & ((k_opt == 32u) ? 0xFFFFFFFFu : ((1u << k_opt) - 1u));
+                const uint64_t codeword = ((1ull << q) - 1ull) | (static_cast<uint64_t>(r) << (q + 1u));
+                grOrBits(words, off, codeword, q + 1u + k_opt);
+            } else {
+                const uint64_t codeword = ((1ull << kGrEscapeQ) - 1ull) | (static_cast<uint64_t>(u) << kGrEscapeQ);
+                grOrBits(words, off, codeword, kGrEscapeQ + kGrRawBits);
+            }
+        }
+        __syncthreads();
+        csize = static_cast<int>(packed_bytes);
+        return true;
     }
 };
 

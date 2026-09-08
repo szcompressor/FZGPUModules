@@ -55,9 +55,11 @@ Kernel fusion is the main strategy it applies today (compatible stages collapsed
 into a single kernel, keeping intermediates in registers/shared memory instead of
 round-tripping each one through DRAM). The name is deliberately broader than
 "fusion" because a specialization is more than a fused kernel — it also carries
-in-kernel optimizations such as single-pass decoupled-lookback, an NVRTC code
-generator, and a roofline-aware decision that declines to specialize when not
-profitable. Further runtime optimizations fit under the same umbrella.
+in-kernel optimizations such as single-pass decoupled-lookback and an NVRTC code
+generator. Auto currently admits implementations through an evidence-gated
+registry and resolves overlaps by launches removed; it does not yet evaluate a
+predictive per-input performance cost model. Further runtime optimizations fit
+under the same umbrella.
 
 Specialization and CUDA Graph mode are mutually exclusive (see above) — pick one.
 
@@ -94,7 +96,7 @@ void build(Pipeline& p) {
 | Value | Meaning |
 |---|---|
 | `Off` (default) | Every stage runs staged. No specialization. |
-| `Auto` | Install every registered specialization that matches a chain **and** clears its profitability gate. This is the production setting. |
+| `Auto` | Install every auto-enabled registered specialization that matches a chain. Registration is the current evidence gate; there is not yet a per-input predictive profitability test. This is the production setting. |
 | `Force` | Also admit *experimental* specializations that have not yet cleared the gate. For correctness/perf diagnostics only — not a production default. |
 
 `PREALLOCATE` is recommended (and required for the fused path's persistent scratch).
@@ -121,10 +123,10 @@ FZ_SPECIALIZE=auto fzgmod-cli -c examples/presets/szp_composed.toml \
   as the staged version.
 - **Both directions, independently.** Compress and decompress are specialized
   separately under the same policy; a pipeline may get one, both, or neither.
-- **Silent, safe fallback.** Any chain that isn't eligible, or doesn't clear the
-  profitability gate, simply runs staged. Turning `Auto` on never makes a pipeline
-  slower-than-staged in a way that changes results, and never fails a pipeline that
-  worked staged.
+- **Silent, safe fallback.** Any chain without a matching auto-enabled implementation
+  simply runs staged. Registration is evidence-based, but `Auto` does not yet predict
+  per-input runtime and can occasionally be slower than staged. It never changes the
+  result or makes an otherwise working pipeline fail.
 - **The DAG and archive are unchanged.** Specialization swaps *execution*; the DAG
   nodes, port wiring, and FZM header are built exactly as in the staged path. That
   is why decode of a specialized archive is unaffected and old archives are
@@ -187,7 +189,7 @@ cell rather than silently falling back.
 |---|---|
 | `policy_off` | Policy resolved to `Off` — specialization disabled. |
 | `no_legal_group` | No fusable chain in the DAG (nothing to specialize). |
-| `no_profitable_implementation` | Legal chains exist, but no registered specialization matched their exact shape, or none cleared the profitability gate. |
+| `no_profitable_implementation` | Legacy token: legal chains exist, but no auto-enabled registered specialization matched their exact shape. It does not currently mean a runtime cost model measured or predicted a slowdown. |
 | (empty) | At least one specialization was installed. |
 
 #### When it does not engage
@@ -196,10 +198,10 @@ cell rather than silently falling back.
 - **No matching specialization.** A chain must match a registered strategy's shape.
   Today that means the warp-register family (below) or the chunk-cooperative family.
   A chain outside those falls back to staged.
-- **Profitability gate.** Under `Auto`, a matched specialization still has to clear
-  its gate. The gate exists so specialization "knows when *not* to fuse" — e.g. a
-  chain whose fused ceiling is below the staged throughput. `Force` bypasses the
-  gate for diagnostics.
+- **Registry admission.** Under `Auto`, a chain must match an auto-enabled
+  implementation. Admission is based on prior evidence, but the current planner
+  does not predict a crossover for each input. `Force` additionally exposes
+  experimental implementations for diagnostics.
 - **CUDA Graph mode.** Specialization and graph capture are mutually exclusive: the
   fused runner synchronizes to read data-dependent archive lengths, so enabling
   `Auto`/`Force` disables graph mode (with a log warning). Pick one.

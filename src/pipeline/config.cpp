@@ -40,6 +40,7 @@
 #include "quantizers/quantizer/quantizer.h"
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/rze/rze_stage.h"
+#include "coders/golomb_rice/golomb_rice_stage.h"
 #include "coders/rre/rre_stage.h"
 #include "coders/gpulz/gpulz_stage.h"
 #include "coders/rare/rare_stage.h"
@@ -487,6 +488,34 @@ static Stage* addRZEStage(Pipeline& p, const toml::table& t) {
     rze->setChunkSize(static_cast<size_t>(optInt(t, "chunk_size", 16384)));
     rze->setWordSize(static_cast<size_t>(optInt(t, "word_size", 1)));
     return rze;
+}
+
+// Add a GolombRice stage (dispatches on data_type string, like AdaptiveLorenzo).
+static Stage* addGolombRiceStage(Pipeline& p, const toml::table& t) {
+    DataType dt = dataTypeFromString(optStr(t, "data_type", "int32"));
+    const size_t chunk_size = static_cast<size_t>(optInt(t, "chunk_size", 16384));
+
+    auto make = [&](auto* tag) {
+        using StageT = std::remove_pointer_t<decltype(tag)>;
+        auto* s = p.addStage<StageT>();
+        s->setChunkSize(chunk_size);
+        return s;
+    };
+    if (dt == DataType::INT16) return make(static_cast<GolombRiceStage<int16_t>*>(nullptr));
+    if (dt == DataType::INT32) return make(static_cast<GolombRiceStage<int32_t>*>(nullptr));
+    throw std::runtime_error(
+        "loadConfig: GolombRice supports data_type \"int16\" or \"int32\", got \""
+        + optStr(t, "data_type", "int32") + "\"");
+}
+
+static void saveGolombRiceStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[5] = {};
+    if (s->serializeHeader(0, buf, sizeof(buf)) >= 5) {
+        uint32_t chunk_size = 0;
+        std::memcpy(&chunk_size, buf, sizeof(uint32_t));
+        out << "data_type = \"" << dataTypeToString(static_cast<DataType>(buf[4])) << "\"\n";
+        out << "chunk_size = " << chunk_size << "\n";
+    }
 }
 
 static Stage* addRREStage(Pipeline& p, const toml::table& t) {
@@ -1237,6 +1266,7 @@ static const StageEntry kStageRegistry[] = {
     { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage,    "modules/quantizers/quantizer" },
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage,   "modules/shufflers/bitshuffle" },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage,          "modules/coders/rze" },
+    { "GolombRice",   StageType::GOLOMB_RICE,  addGolombRiceStage,   saveGolombRiceStage,   "modules/coders/golomb_rice" },
     { "RRE",          StageType::RRE,          addRREStage,          saveRREStage,          "modules/coders/rre" },
     { "GPULZ",        StageType::GPULZ,        addGPULZStage,        saveGPULZStage,        "modules/coders/gpulz" },
     { "RARE",         StageType::RARE,         addRAREStage,         saveRAREStage,         "modules/coders/rare" },

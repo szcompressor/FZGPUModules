@@ -147,3 +147,13 @@ add_executable(sperr_gpu_dag_bounded sperr_gpu_dag_bounded.cu)
 target_link_libraries(sperr_gpu_dag_bounded PRIVATE fzgmod fzgmod_modules fzgmod_mem)
 set_target_properties(sperr_gpu_dag_bounded PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# ── EXPERIMENTAL: FSZ "M1" partial-fusion probe — folds the upstream linear
+#    Quantizer inline into AdaptiveLorenzo's forward kernel (deletes one
+#    full-array DRAM round-trip) and measures whether that matters at the
+#    field sizes FSZ actually targets. Not wired into the fusion registry;
+#    see the file's doc comment.
+add_executable(fsz_fusion_probe fsz_fusion_probe.cu)
+target_link_libraries(fsz_fusion_probe PRIVATE fzgmod fzgmod_modules fzgmod_mem)
+set_target_properties(fsz_fusion_probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

@@ -1,0 +1,51 @@
+[pipeline]
+# Chunk-cooperative fused GolombRice — Quantizer(inplace,zigzag,NOA) -> Difference
+# (plain, same-type) -> GolombRice, all three fusable into ONE kernel (compress
+# only; see modules/coders/golomb_rice/golomb_rice_stage.h's "Fusion readiness"
+# note for why decode fusion is not attempted here).
+#
+# Difference is PLAIN (input_type == output_type = int32, no fused encode step):
+# GolombRice zigzag-encodes its residuals internally (same as it does in
+# lorenzo_golomb_rice.toml, fed by Lorenzo's plain delta), so an upstream
+# transform that also zigzagged would double-encode.
+#
+# This is a DIFFERENT predictor shape than lorenzo_golomb_rice.toml: Difference
+# resets once per 16 KB chunk (4096 elements), not every 32 elements like
+# Lorenzo — coarser, so compression ratio on non-stationary real fields will
+# differ from the Lorenzo-fronted preset. The point of this preset is
+# exercising/benchmarking the fused path, not matching lorenzo_golomb_rice.toml's
+# ratio.
+#
+# No Bitshuffle stage: unlike RZE/RRE (byte-level LC coders that benefit from
+# bit-transposing residuals into zero-dense planes), GolombRice needs the
+# per-element magnitude structure intact to compute its Rice cost model.
+#
+# Usage:
+#   fzgmod-cli -c examples/presets/diffplain_golomb_rice.toml \
+#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-3
+error_bound_mode = "NOA"
+quant_radius = 32768
+zigzag_codes = true
+inplace_outliers = true
+
+[[stage]]
+name = "diff"
+type = "Difference"
+input_type = "int32"
+chunk_size = 16384
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "gr"
+type = "GolombRice"
+data_type = "int32"
+chunk_size = 16384
+inputs = [{from = "diff", port = "output"}]

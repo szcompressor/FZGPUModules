@@ -98,6 +98,40 @@ capturable. SZp is lossy: a resolved `abs_eb ≤ 0` throws.
 > high-offset data. This is an FZGM composition detail, not a claim about the
 > upstream CPU/OpenMP partitioning; \ref stage_szx "SZx" instead uses a
 > reference-value scheme for flat regions.
+>
+> **Quantified (2026-09-06):** built and ran the real upstream SZp on CLDHGH at
+> a matched absolute error bound. It gets 7.03-7.43x CR (random-access vs.
+> continuous-prediction mode) against this composition's 3.98x, at near-identical
+> PSNR — so this is a real ~1.8x ratio gap, not a rounding artifact, and this
+> "first residual = absolute level" effect is the best-evidenced explanation
+> (continuous vs. block-reset prediction only accounts for ~6% of real SZp's own
+> internal variance, so it is NOT the main story). Full writeup, reproduction
+> steps, and what a targeted fix would look like:
+> `memory/szp_faithfulness_native_comparison.md`.
+>
+> **Update (2026-09-07):** the fix already exists as a dormant Lorenzo
+> option. `Lorenzo(block, centering=true)` (built for FSZ) shrinks the
+> block-head residual from the raw quantized level to `q_0 - mu`, closing
+> ~77% of the gap (3.98x -> 5.87x vs. real SZp's 7.03x), with no new stage.
+> Enabling it costs the warp-register fusion speedup until a fused policy
+> learns about per-block means (not done). This also surfaced and fixed a
+> real silent-corruption bug: centering combined with `FusionPolicy::Auto`
+> previously fused into the plain kernel and silently dropped the means
+> (PSNR -113 dB, no error) — `getFusionSpec()`/`getFusedOp()` now correctly
+> exclude centering on the forward side too, matching the inverse side.
+>
+> **Update (2026-09-07):** block-size sweep shows the remaining ~20% gap
+> shrinks to ~4% just by using `block_size=32` instead of 128 (no code
+> change) — real SZp's random-access mode pays a fixed 4-byte seed even on
+> constant blocks, while centering lets `AdaptiveBitpack`'s existing rate=0
+> escape fire for the whole block, a real structural edge on flat data that
+> grows at smaller block sizes. Traced why fused Lorenzo+centering doesn't
+> work: beyond the predictor needing a block-mean reduction (tractable),
+> the warp-register runner (`runWarpRegister` in `fusion_registry.cpp`) has
+> NO side-output plumbing at all — `AdaptiveLorenzoStage` already declares
+> a `"means"` aux output that no runner anywhere consumes, confirming this
+> is a real, separate infrastructure gap, not a quick add. Full detail:
+> `memory/szp_faithfulness_native_comparison.md`.
 
 ## Stage settings
 
