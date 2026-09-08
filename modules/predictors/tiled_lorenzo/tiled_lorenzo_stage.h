@@ -245,15 +245,24 @@ public:
         // thread-independent DELTA decode (ThreadTiledLorenzo{2,3}DPredictor's
         // unpredict_and_write chase) is a real regression vs the existing
         // warp-cooperative decode (NYX/temperature: 194-374 GB/s vs ~356-651 GB/s
-        // before) -- the fully serial prevX/prevY/prevZ dependency chain does not
-        // hide its own latency the way native's equivalent chase apparently does;
-        // root cause not yet isolated (register pressure vs ILP vs something else --
-        // ncu is blocked here by ERR_NVGPUCTRPERM). The IDENTITY (no-delta, fixed
-        // mode) decode has no such chain and measured a clear win (591 GB/s vs
+        // before). Root-caused via `sudo ncu` (unprivileged ncu is blocked here by
+        // ERR_NVGPUCTRPERM, but sudo with the full binary path works): registers
+        // (32/thread), occupancy (~46%), and shared memory are near-identical to the
+        // fast identity kernel -- none of those are the bottleneck. The one metric
+        // that diverges is average latency per issued instruction: 52 cycles (delta)
+        // vs 18 (identity). The chase is a genuine SERIAL PREFIX SUM (each `cur =
+        // pred + d[i]` needs the exact previous result, so the compiler cannot
+        // reorder or pipeline it) -- unlike cost()/pack()'s reductions/independent
+        // per-element ops, which parallelize even written as a "serial" loop. That is
+        // the real distinction between why compress always won (reduction-shaped) and
+        // decode only won for identity (no chase at all). The IDENTITY (no-delta,
+        // fixed mode) decode has no such chain and measured a clear win (591 GB/s vs
         // ~410-495 before on the SAME field) -- see
-        // reports/w2_ti_decode_design.md UPDATE and fused_throughput_rewrite_plan.md.
-        // Forward (compress) ti_op_name is unaffected: it is set for BOTH modes
-        // above and both measured real wins there.
+        // reports/w2_ti_decode_design.md UPDATE 2 for the full ncu numbers and the
+        // scoped fix direction (software-pipelining multiple tiles' chases within one
+        // thread to hide the dependency latency via intra-thread ILP). Forward
+        // (compress) ti_op_name is unaffected: it is set for BOTH modes above and
+        // both measured real wins there.
         if (tz == 1u) {   // 2-D
             d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
             if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity2DPredictor";

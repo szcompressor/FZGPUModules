@@ -192,9 +192,14 @@ public:
         // ti_op_name intentionally left empty: measured 2026-09-08, TI decode's
         // serial de-delta chain (ThreadLorenzo1DPredictor::unpredict_and_write) is a
         // real regression vs the existing warp-cooperative decode (NYX/temperature
-        // cuszp2 outlier: 374 GB/s vs ~651-897 before) — same root cause as
-        // TiledLorenzoStage's delta modes, not yet isolated. See
-        // reports/w2_ti_decode_design.md UPDATE. Forward (compress) is unaffected.
+        // cuszp2 outlier: 374 GB/s vs ~651-897 before). Root-caused via `sudo ncu`
+        // (same investigation as TiledLorenzoStage's delta modes): registers/
+        // occupancy/shared-mem are near-identical to the fast identity decode, but
+        // average latency per issued instruction is ~3x higher (52 vs 18 cycles) --
+        // the chase is a genuine serial prefix sum (exact-order dependent), unlike
+        // cost()/pack()'s reduction-shaped ops, which is why compress wins everywhere
+        // but decode only wins where there is no chase. See
+        // reports/w2_ti_decode_design.md UPDATE 2. Forward (compress) is unaffected.
         return d;
     }
 
