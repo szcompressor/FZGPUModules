@@ -76,6 +76,147 @@ struct ThreadLorenzo1DPredictor {
     }
 };
 
+// ── Tiled predictors (cuSZp3-shaped): one thread owns a whole 64-element TILE ─
+// (8x8 in 2-D, 4x4x4 in 3-D — the same tile geometry as TiledLorenzo{2D,3D}Predictor
+// in warp_fusion.cuh), traversed serially inside the thread. Block index `base/64`
+// IS the tile index (block_size == tile_elems by construction, see tiled_lorenzo_stage.h).
+//
+// LOAD-ONCE: the warp-cooperative TiledLorenzo{2D,3D}Predictor re-reads and re-quantizes
+// each element's neighbour from global (`in[gidx-1]` etc.), because different LANES own
+// different elements and cannot share registers. Here ONE thread owns the WHOLE tile, so
+// the neighbour is simply the previous LOOP ITERATION's already-computed `cur` — a
+// register read, not a second global load + requantize. This is exactly what native
+// cuSZp3 does per-thread (see cuSZp_kernels_3D_f32.cu's prevQuant_{x,y,z} chain) and it
+// is mathematically IDENTICAL to the warp-cooperative delta() (same deterministic
+// __float2int_rn on the same float value), so it is byte-identical by construction —
+// no new inverse needed; this predictor pairs with the SAME ThreadFixedRateCoderN<64>
+// coder below to emit the identical AdaptiveBitpack archive the warp-cooperative /
+// staged tiled paths produce, which the existing tiled inverse already decodes.
+//
+// Traversal order is z outer, y middle, x inner (matching the tile's fast-x layout),
+// with three chained registers:
+//   prevX — value at (lx-1,ly,lz): updated every element, consumed when lx>0
+//   prevY — value at (0,ly-1,lz): updated only when lx==0, consumed when lx==0,ly>0
+//   prevZ — value at (0,0,lz-1):  updated only when lx==0&&ly==0, consumed at the tile's
+//           leading (0,0,lz>0) edge
+// Once one axis goes out of range (padding), every later element on that axis is also
+// out of range (dims are monotonic in tile-local coordinates), so an update skipped for
+// a padding element is never consulted by a later valid one.
+struct ThreadTiledLorenzo2DPredictor {
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, tx, ty, ntx;
+    __device__ static ThreadTiledLorenzo2DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const warp::TiledLorenzo2DParams p = *static_cast<const warp::TiledLorenzo2DParams*>(pp);
+        return ThreadTiledLorenzo2DPredictor{in, p.inv2eb, p.dx, p.dy, p.tx, p.ty, p.ntx};
+    }
+    __device__ __forceinline__ void predict(size_t base, int (&d)[64]) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);   // block index == tile index
+        const uint32_t tix = t % ntx, tiy = t / ntx;
+        int prevY = 0;
+        for (uint32_t ly = 0; ly < ty; ++ly) {
+            const uint32_t gy = tiy * ty + ly;
+            int prevX = 0;
+            for (uint32_t lx = 0; lx < tx; ++lx) {
+                const uint32_t local = ly * tx + lx;
+                const uint32_t gx = tix * tx + lx;
+                if (gx >= dx || gy >= dy) { d[local] = 0; continue; }
+                const int cur = __float2int_rn(in[static_cast<size_t>(gy) * dx + gx] * inv2eb);
+                const int pred = (lx > 0) ? prevX : (ly > 0) ? prevY : 0;
+                d[local] = cur - pred;
+                prevX = cur;
+                if (lx == 0) prevY = cur;
+            }
+        }
+    }
+};
+
+struct ThreadTiledLorenzo3DPredictor {
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    __device__ static ThreadTiledLorenzo3DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const warp::TiledLorenzo3DParams p = *static_cast<const warp::TiledLorenzo3DParams*>(pp);
+        return ThreadTiledLorenzo3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+    }
+    __device__ __forceinline__ void predict(size_t base, int (&d)[64]) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = (t / ntx) % nty, tiz = t / (ntx * nty);
+        int prevZ = 0;
+        for (uint32_t lz = 0; lz < tz; ++lz) {
+            const uint32_t gz = tiz * tz + lz;
+            int prevY = 0;
+            for (uint32_t ly = 0; ly < ty; ++ly) {
+                const uint32_t gy = tiy * ty + ly;
+                int prevX = 0;
+                for (uint32_t lx = 0; lx < tx; ++lx) {
+                    const uint32_t local = (lz * ty + ly) * tx + lx;
+                    const uint32_t gx = tix * tx + lx;
+                    if (gx >= dx || gy >= dy || gz >= dz) { d[local] = 0; continue; }
+                    const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
+                    const int cur = __float2int_rn(in[gidx] * inv2eb);
+                    const int pred = (lx > 0) ? prevX : (ly > 0) ? prevY : (lz > 0) ? prevZ : 0;
+                    d[local] = cur - pred;
+                    prevX = cur;
+                    if (lx == 0) { prevY = cur; if (ly == 0) prevZ = cur; }
+                }
+            }
+        }
+    }
+};
+
+// ── Identity tiled predictors (cuSZp3 FIXED mode): same tile geometry, no delta —
+// d[local] = cur. Genuinely load-once by construction (no chain state at all). ─────
+struct ThreadTiledLorenzoIdentity2DPredictor {
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, tx, ty, ntx;
+    __device__ static ThreadTiledLorenzoIdentity2DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const warp::TiledLorenzo2DParams p = *static_cast<const warp::TiledLorenzo2DParams*>(pp);
+        return ThreadTiledLorenzoIdentity2DPredictor{in, p.inv2eb, p.dx, p.dy, p.tx, p.ty, p.ntx};
+    }
+    __device__ __forceinline__ void predict(size_t base, int (&d)[64]) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = t / ntx;
+        for (uint32_t ly = 0; ly < ty; ++ly) {
+            const uint32_t gy = tiy * ty + ly;
+            for (uint32_t lx = 0; lx < tx; ++lx) {
+                const uint32_t local = ly * tx + lx;
+                const uint32_t gx = tix * tx + lx;
+                d[local] = (gx >= dx || gy >= dy) ? 0
+                    : __float2int_rn(in[static_cast<size_t>(gy) * dx + gx] * inv2eb);
+            }
+        }
+    }
+};
+
+struct ThreadTiledLorenzoIdentity3DPredictor {
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    __device__ static ThreadTiledLorenzoIdentity3DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const warp::TiledLorenzo3DParams p = *static_cast<const warp::TiledLorenzo3DParams*>(pp);
+        return ThreadTiledLorenzoIdentity3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+    }
+    __device__ __forceinline__ void predict(size_t base, int (&d)[64]) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = (t / ntx) % nty, tiz = t / (ntx * nty);
+        for (uint32_t lz = 0; lz < tz; ++lz) {
+            const uint32_t gz = tiz * tz + lz;
+            for (uint32_t ly = 0; ly < ty; ++ly) {
+                const uint32_t gy = tiy * ty + ly;
+                for (uint32_t lx = 0; lx < tx; ++lx) {
+                    const uint32_t local = (lz * ty + ly) * tx + lx;
+                    const uint32_t gx = tix * tx + lx;
+                    if (gx >= dx || gy >= dy || gz >= dz) { d[local] = 0; continue; }
+                    const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
+                    d[local] = __float2int_rn(in[gidx] * inv2eb);
+                }
+            }
+        }
+    }
+};
+
 // ── Coder policy interface (Phase 2) ─────────────────────────────────────────
 // A thread-independent coder consumes one thread's 32 block codes and works in-register
 // (no cross-lane ops). Byte-identical to AdaptiveBitpack so the staged inverse decodes it.
@@ -89,21 +230,29 @@ struct ThreadLorenzo1DPredictor {
 //                                 const uint8_t* meta, uint8_t* out);
 //   };
 
-// Thread-independent AdaptiveBitpack: one thread owns all 32 block codes, so the warp-
-// cooperative ballot/shfl of AdaptiveBitpackCoder becomes serial in-register loops. Emits
-// the IDENTICAL byte stream (same meta/selector/sign/plane layout, 32-bit = 4-byte words),
-// so the staged AdaptiveBitpack inverse decodes it. 32-element blocks only ⇒ word_bytes==4.
-struct ThreadFixedRateCoder {
+// Thread-independent AdaptiveBitpack, generalized to N elements (N a multiple of 32; the
+// warp-cooperative side supports EPL up to kMaxWarpElemsPerLane==4, i.e. N up to 128 — this
+// coder generalizes the same way). One thread owns all N block codes, so the warp-cooperative
+// ballot/shfl of AdaptiveBitpackCoder becomes NW=N/32 serial in-register 32-bit sub-words per
+// sign/plane region — byte-for-byte the SAME layout AdaptiveBitpackCoder::pack<EPL> emits
+// (each region is NW consecutive 4-byte LE words, one per group of 32 elements), so the
+// staged/warp-cooperative inverse decodes either producer's archive identically.
+// N=32 (NW=1) is byte-for-byte what the original hand-written ThreadFixedRateCoder emitted.
+template<int N>
+struct ThreadFixedRateCoderN {
+    static_assert(N % 32 == 0 && N <= 128, "ThreadFixedRateCoderN: N must be a multiple of 32, up to 128");
     static constexpr uint32_t meta_bytes = 2;
+    static constexpr int NW = N / 32;
 
     // Writes meta[0..1] and returns this block's payload byte length. Mirrors
-    // AdaptiveBitpackCoder::cost<1>: plain (fixed-rate over all) vs outlier (elem0 raw + rate
+    // AdaptiveBitpackCoder::cost<EPL>: plain (fixed-rate over all) vs outlier (elem0 raw + rate
     // over the rest), whichever is cheaper.
-    __device__ static __forceinline__ uint32_t cost(const int (&d)[32], uint32_t word_bytes,
+    __device__ static __forceinline__ uint32_t cost(const int (&d)[N], uint32_t word_bytes,
                                                     uint32_t count, uint8_t* __restrict__ meta) {
         uint32_t acc_all = 0u, acc_rest = 0u;
-        for (uint32_t i = 0; i < count; ++i) {
-            const uint32_t av = warp::absU_i32(d[i]);
+        #pragma unroll
+        for (uint32_t i = 0; i < static_cast<uint32_t>(N); ++i) {
+            const uint32_t av = (i < count) ? warp::absU_i32(d[i]) : 0u;
             acc_all |= av;
             if (i > 0) acc_rest |= av;
         }
@@ -119,10 +268,11 @@ struct ThreadFixedRateCoder {
         return cost_out;
     }
 
-    // Writes the payload. Mirrors AdaptiveBitpackCoder::pack<1> byte-for-byte: sign mask (4 B
-    // LE, bit i = element i) then r bit-planes (4 B each); outlier prepends elem0's magnitude
-    // and drops elem0 from the planes.
-    __device__ static __forceinline__ void pack(const int (&d)[32], uint32_t word_bytes,
+    // Writes the payload. Mirrors AdaptiveBitpackCoder::pack<EPL> byte-for-byte: sign region
+    // (NW 4-byte LE sub-words, bit j of sub-word m = element 32*m+j) then r bit-plane regions
+    // (same NW-sub-word shape each); outlier prepends elem0's magnitude and drops elem0 from
+    // the planes.
+    __device__ static __forceinline__ void pack(const int (&d)[N], uint32_t word_bytes,
                                                 uint32_t count, const uint8_t* __restrict__ meta,
                                                 uint8_t* __restrict__ out) {
         const int     r      = meta[0];
@@ -131,33 +281,128 @@ struct ThreadFixedRateCoder {
 
         if (!is_out) {
             if (r == 0) return;
-            uint32_t sm = 0u;
-            for (uint32_t i = 0; i < count; ++i) if (d[i] < 0) sm |= (1u << i);
-            for (uint32_t k = 0; k < 4u; ++k) out[k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
-            for (int p = 0; p < r; ++p) {
-                uint32_t pm = 0u;
-                for (uint32_t i = 0; i < count; ++i)
-                    if ((warp::absU_i32(d[i]) >> p) & 1u) pm |= (1u << i);
+            #pragma unroll
+            for (int m = 0; m < NW; ++m) {
+                uint32_t sm = 0u;
+                #pragma unroll
+                for (int j = 0; j < 32; ++j) {
+                    const uint32_t i = static_cast<uint32_t>(m * 32 + j);
+                    if (i < count && d[i] < 0) sm |= (1u << j);
+                }
+                #pragma unroll
                 for (uint32_t k = 0; k < 4u; ++k)
-                    out[word_bytes * (1u + p) + k] = static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+                    out[4u * m + k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
+            }
+            for (int p = 0; p < r; ++p) {
+                #pragma unroll
+                for (int m = 0; m < NW; ++m) {
+                    uint32_t pm = 0u;
+                    #pragma unroll
+                    for (int j = 0; j < 32; ++j) {
+                        const uint32_t i = static_cast<uint32_t>(m * 32 + j);
+                        if (i < count && ((warp::absU_i32(d[i]) >> p) & 1u)) pm |= (1u << j);
+                    }
+                    #pragma unroll
+                    for (uint32_t k = 0; k < 4u; ++k)
+                        out[word_bytes * (1u + p) + 4u * m + k] =
+                            static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+                }
             }
             return;
         }
-        // Outlier: [ob_bytes elem0 magnitude LE][sign of all elems][r planes for elems 1..].
+        // Outlier: [ob_bytes elem0 magnitude LE][sign region][r plane regions for elems 1..].
         const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
         const uint32_t mag0     = (count > 0) ? warp::absU_i32(d[0]) : 0u;
         for (uint32_t k = 0; k < ob_bytes; ++k) out[k] = static_cast<uint8_t>((mag0 >> (8u * k)) & 0xFFu);
         uint8_t* sign   = out + ob_bytes;
         uint8_t* planes = out + ob_bytes + word_bytes;
-        uint32_t sm = 0u;
-        for (uint32_t i = 0; i < count; ++i) if (d[i] < 0) sm |= (1u << i);
-        for (uint32_t k = 0; k < 4u; ++k) sign[k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
-        for (int p = 0; p < r; ++p) {
-            uint32_t pm = 0u;
-            for (uint32_t i = 1; i < count; ++i)
-                if ((warp::absU_i32(d[i]) >> p) & 1u) pm |= (1u << i);
+        #pragma unroll
+        for (int m = 0; m < NW; ++m) {
+            uint32_t sm = 0u;
+            #pragma unroll
+            for (int j = 0; j < 32; ++j) {
+                const uint32_t i = static_cast<uint32_t>(m * 32 + j);
+                if (i < count && d[i] < 0) sm |= (1u << j);
+            }
+            #pragma unroll
             for (uint32_t k = 0; k < 4u; ++k)
-                planes[word_bytes * p + k] = static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+                sign[4u * m + k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
+        }
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < NW; ++m) {
+                uint32_t pm = 0u;
+                #pragma unroll
+                for (int j = 0; j < 32; ++j) {
+                    const uint32_t i = static_cast<uint32_t>(m * 32 + j);
+                    if (i > 0 && i < count && ((warp::absU_i32(d[i]) >> p) & 1u)) pm |= (1u << j);
+                }
+                #pragma unroll
+                for (uint32_t k = 0; k < 4u; ++k)
+                    planes[word_bytes * p + 4u * m + k] = static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+            }
+        }
+    }
+};
+
+/// Back-compat alias: the original hand-written 32-element coder, now the N=32
+/// instantiation of the generalized template (byte-identical output).
+using ThreadFixedRateCoder = ThreadFixedRateCoderN<32>;
+
+// Thread-independent PlainRateCoder: fixed-rate over ALL elements, no outlier escape.
+// Mirrors warp::PlainRateCoder exactly (1-byte meta = [rate], sign region + r plane
+// regions, no outlier branch) — this is what AdaptiveBitpackStage emits when
+// outlier_selection is false (cuszp2/cuszp3 "plain" mode), so TI could not fuse those
+// chains before this coder existed (tiSupportedChain required AdaptiveBitpackCoder
+// specifically). Same NW=N/32 sub-word byte layout as ThreadFixedRateCoderN.
+template<int N>
+struct ThreadPlainRateCoderN {
+    static_assert(N % 32 == 0 && N <= 128, "ThreadPlainRateCoderN: N must be a multiple of 32, up to 128");
+    static constexpr uint32_t meta_bytes = 1;
+    static constexpr int NW = N / 32;
+
+    __device__ static __forceinline__ uint32_t cost(const int (&d)[N], uint32_t word_bytes,
+                                                    uint32_t count, uint8_t* __restrict__ meta) {
+        uint32_t acc_all = 0u;
+        #pragma unroll
+        for (uint32_t i = 0; i < static_cast<uint32_t>(N); ++i)
+            acc_all |= (i < count) ? warp::absU_i32(d[i]) : 0u;
+        const int fr = warp::bitWidth32(acc_all);
+        meta[0] = static_cast<uint8_t>(fr);
+        return (fr > 0) ? word_bytes * (fr + 1u) : 0u;
+    }
+
+    __device__ static __forceinline__ void pack(const int (&d)[N], uint32_t word_bytes,
+                                                uint32_t count, const uint8_t* __restrict__ meta,
+                                                uint8_t* __restrict__ out) {
+        const int r = meta[0];
+        if (r == 0) return;
+        #pragma unroll
+        for (int m = 0; m < NW; ++m) {
+            uint32_t sm = 0u;
+            #pragma unroll
+            for (int j = 0; j < 32; ++j) {
+                const uint32_t i = static_cast<uint32_t>(m * 32 + j);
+                if (i < count && d[i] < 0) sm |= (1u << j);
+            }
+            #pragma unroll
+            for (uint32_t k = 0; k < 4u; ++k)
+                out[4u * m + k] = static_cast<uint8_t>((sm >> (8u * k)) & 0xFFu);
+        }
+        for (int p = 0; p < r; ++p) {
+            #pragma unroll
+            for (int m = 0; m < NW; ++m) {
+                uint32_t pm = 0u;
+                #pragma unroll
+                for (int j = 0; j < 32; ++j) {
+                    const uint32_t i = static_cast<uint32_t>(m * 32 + j);
+                    if (i < count && ((warp::absU_i32(d[i]) >> p) & 1u)) pm |= (1u << j);
+                }
+                #pragma unroll
+                for (uint32_t k = 0; k < 4u; ++k)
+                    out[word_bytes * (1u + p) + 4u * m + k] =
+                        static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
+            }
         }
     }
 };
@@ -167,7 +412,12 @@ struct ThreadFixedRateCoder {
 // for jb in [0,BlocksPerThread). Holds all codes, computes LINEAR-order byte offsets with a 2-D
 // warp prefix, gets the warp's base via the decoupled look-back, then packs. `meta`/`payload`
 // point at the AdaptiveBitpack meta region and payload region of the archive.
-template<int BlocksPerThread, class Coder, class Pred>
+//
+// `BlockSize` (elements per block: 32 for Lorenzo1D, 64 for the tiled cuSZp3 predictors) is
+// purely the size of each thread's held-codes array and the count/offset arithmetic below —
+// the WARP still always has exactly 32 lanes, each owning a full BlockSize-element block, so
+// the lane-dispatch and cross-lane prefix-sum (Phase B/C) are unchanged by it.
+template<int BlockSize, int BlocksPerThread, class Coder, class Pred>
 __device__ __forceinline__ void fused_ti_body(
     Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks,
     uint8_t* __restrict__ meta, uint8_t* __restrict__ payload,
@@ -181,14 +431,14 @@ __device__ __forceinline__ void fused_ti_body(
     const size_t warp_block_base = static_cast<size_t>(w) * BlocksPerThread * 32u;
 
     // ── Phase A: predict + cost every block this thread owns (one per row jb).
-    int      d[BlocksPerThread][32];   // held codes (local memory) — no recompute in pack
-    uint32_t bcost[BlocksPerThread];   // this lane's block cost per row
+    int      d[BlocksPerThread][BlockSize];   // held codes (local memory) — no recompute in pack
+    uint32_t bcost[BlocksPerThread];          // this lane's block cost per row
     #pragma unroll 1
     for (int jb = 0; jb < BlocksPerThread; ++jb) {
         const size_t b = warp_block_base + static_cast<size_t>(jb) * 32u + lane;
         if (b < num_blocks) {
-            const size_t base = b * 32u;
-            const uint32_t count = static_cast<uint32_t>(min(size_t{32}, n - base));
+            const size_t base = b * static_cast<size_t>(BlockSize);
+            const uint32_t count = static_cast<uint32_t>(min(size_t{BlockSize}, n - base));
             pred.predict(base, d[jb]);
             bcost[jb] = Coder::cost(d[jb], word_bytes, count, meta + Coder::meta_bytes * b);
         } else {
@@ -227,8 +477,8 @@ __device__ __forceinline__ void fused_ti_body(
     for (int jb = 0; jb < BlocksPerThread; ++jb) {
         const size_t b = warp_block_base + static_cast<size_t>(jb) * 32u + lane;
         if (b < num_blocks) {
-            const size_t base = b * 32u;
-            const uint32_t count = static_cast<uint32_t>(min(size_t{32}, n - base));
+            const size_t base = b * static_cast<size_t>(BlockSize);
+            const uint32_t count = static_cast<uint32_t>(min(size_t{BlockSize}, n - base));
             Coder::pack(d[jb], word_bytes, count, meta + Coder::meta_bytes * b,
                         payload + warp_base + blk_excl[jb]);
         }
