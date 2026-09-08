@@ -1204,6 +1204,56 @@ TEST(FusionPlanner, ThreadIndependentCoverageMap) {
     }
 }
 
+// Decode-side (inverse) TI coverage is DELIBERATELY ASYMMETRIC with the forward map
+// above: measured 2026-09-08, the thread-independent DELTA decode (the serial
+// prevX/prevY/prevZ chase in ThreadLorenzo1DPredictor/ThreadTiledLorenzo{2,3}D
+// Predictor's unpredict_and_write) is a real throughput REGRESSION vs the existing
+// warp-cooperative decode (NYX/temperature: cuszp2 outlier 374 vs ~651-897 GB/s
+// before; cuszp3 outlier 194-240 vs ~356-360 before) — root cause not yet isolated
+// (see reports/w2_ti_decode_design.md UPDATE). The IDENTITY (no-delta, fixed mode)
+// decode has no such chain and is a clear, shipped win (591 vs ~410-495 before), so
+// ONLY identity predictors declare an inverse ti_op_name; delta predictors declare
+// one on FORWARD (a real, separate win) but NOT on inverse. This test pins that
+// asymmetry so a future change cannot silently re-enable delta TI decode (or
+// silently lose identity TI decode) without this test flagging it for re-validation.
+TEST(FusionPlanner, ThreadIndependentDecodeCoverageIsAsymmetric) {
+    // Tiled: delta predictor's INVERSE must NOT declare TI (2-D and 3-D).
+    TiledLorenzoStage<int32_t> tl2i; tl2i.setDims(16, 16, 1); tl2i.setTileShape(8, 8);
+    tl2i.setPredict(true); tl2i.setInverse(true);
+    EXPECT_TRUE(tl2i.getInverseFusedOp().valid());
+    EXPECT_TRUE(tl2i.getInverseFusedOp().ti_op_name.empty())
+        << "delta 2-D predictor's inverse should NOT declare TI (known regression)";
+
+    TiledLorenzoStage<int32_t> tl3i; tl3i.setDims(8, 8, 8); tl3i.setTileShape(4, 4, 4);
+    tl3i.setPredict(true); tl3i.setInverse(true);
+    EXPECT_TRUE(tl3i.getInverseFusedOp().valid());
+    EXPECT_TRUE(tl3i.getInverseFusedOp().ti_op_name.empty())
+        << "delta 3-D predictor's inverse should NOT declare TI (known regression)";
+
+    // Tiled: identity (fixed-mode) predictor's INVERSE MUST declare TI (the shipped win).
+    TiledLorenzoStage<int32_t> id2i; id2i.setDims(16, 16, 1); id2i.setTileShape(8, 8);
+    id2i.setPredict(false); id2i.setInverse(true);
+    EXPECT_EQ(id2i.getInverseFusedOp().ti_op_name, "ThreadTiledLorenzoIdentity2DPredictor");
+
+    TiledLorenzoStage<int32_t> id3i; id3i.setDims(8, 8, 8); id3i.setTileShape(4, 4, 4);
+    id3i.setPredict(false); id3i.setInverse(true);
+    EXPECT_EQ(id3i.getInverseFusedOp().ti_op_name, "ThreadTiledLorenzoIdentity3DPredictor");
+
+    // 1-D Lorenzo's INVERSE must NOT declare TI at EPL==1 either (same regression).
+    LorenzoStage<int32_t> l1i; l1i.setBlockSize(32); l1i.setInverse(true);
+    EXPECT_TRUE(l1i.getInverseFusedOp().valid());
+    EXPECT_TRUE(l1i.getInverseFusedOp().ti_op_name.empty())
+        << "1-D Lorenzo's inverse should NOT declare TI (known regression)";
+
+    // The coder side is UNCHANGED by any of this (decode() itself was never the
+    // bottleneck — isolated by the identity-vs-delta comparison above) — both
+    // outlier and plain inverse coder declarations still carry TI unconditionally.
+    AdaptiveBitpackStage<int32_t> abo; abo.setBlockSize(64); abo.setOutlierSelection(true); abo.setInverse(true);
+    EXPECT_EQ(abo.getInverseFusedOp().ti_op_name, "ThreadFixedRateCoderN");
+    AdaptiveBitpackStage<int32_t> abp; abp.setBlockSize(64); abp.setOutlierSelection(false); abp.setInverse(true);
+    EXPECT_EQ(abp.getInverseFusedOp().ti_op_name, "ThreadPlainRateCoderN");
+}
+
 // Warp NVRTC codegen contract (host-only): the WarpFusionSpec composes into the two
 // extern-C kernels wrapping fused_rate_body/fused_pack_body, parameterised on the
 // predictor policy type and ElemsPerLane. End-to-end byte-identity is covered by the

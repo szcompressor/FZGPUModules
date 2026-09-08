@@ -15,6 +15,7 @@
 #include <cub/device/device_scan.cuh>
 
 #include <cuda.h>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -450,6 +451,33 @@ std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
     return src;
 }
 
+// TI decode (Milestone 2): thread-independent, no cross-lane sync at all (offsets
+// are already resolved by Pass A below, same as every other decode path here) —
+// mirrors native's own decompress structure. One kernel signature for both 1-D and
+// tiled: `pp` is always accepted, but the 1-D predictor's decode-only `fromN(n)`
+// factory never touches it (see warp_ti_fusion.cuh) — only the tiled predictors'
+// `fromParams` actually reads geometry out of it.
+static std::string generateWarpTIInverseSource(const std::string& predictor_ti,
+                                                const std::string& coder_ti, int block_size,
+                                                int blocks_per_thread, bool tiled) {
+    const std::string coder = coder_ti + "<" + std::to_string(block_size) + ">";
+    std::string src;
+    src += "#include \"fused/fused_block/warp_ti_fusion.cuh\"\n";
+    src += "using namespace fz::fused::warp_ti;\n";
+    src += "extern \"C\" __global__ void fz_fused_warp_ti_unpack(\n";
+    src += "    unsigned long long n, unsigned word_bytes, unsigned long long num_blocks,\n";
+    src += "    float ebx2, const unsigned char* meta, const unsigned* offset,\n";
+    src += "    const unsigned char* payload, float* out, const unsigned char* pp) {\n";
+    src += tiled
+        ? "  " + predictor_ti + " pred = " + predictor_ti + "::fromParams((const float*)0, (size_t)n, pp);\n"
+        : "  " + predictor_ti + " pred = " + predictor_ti + "::fromN((size_t)n);\n";
+    src += "  fused_ti_unpack_body<" + std::to_string(block_size) + ", " + std::to_string(blocks_per_thread) +
+           ", " + coder + ", " + predictor_ti + ">(\n";
+    src += "      pred, (size_t)n, word_bytes, (size_t)num_blocks, ebx2, meta, offset, payload, out);\n";
+    src += "}\n";
+    return src;
+}
+
 size_t launchNvrtcWarpInverseFused(
     const WarpFusionSpec& spec, const uint8_t* d_archive, size_t /*archive_bytes*/,
     size_t n_elems, size_t n_out, float ebx2,
@@ -480,6 +508,41 @@ size_t launchNvrtcWarpInverseFused(
         [&](void* tmp, size_t& b) {
             cub::DeviceScan::ExclusiveSum(tmp, b, d_cost, d_offset, num_blocks, stream);
         });
+
+    // Pass B, thread-independent variant (Milestone 2): if both sides declared a TI
+    // policy (same stage-owned capability check as the forward path — see
+    // tiSupportedChain()), decode is unconditionally thread-independent, no probe.
+    // Unlike compress, there is no known regime here where the warp-cooperative
+    // decode wins — native's own decompress kernel is unconditionally thread-
+    // independent too (see reports/w2_ti_decode_design.md) — so this skips the
+    // adaptive-probe machinery entirely rather than re-deriving a threshold with no
+    // known counter-example yet.
+    if (tiSupportedChain(spec)) {
+        const WarpFusionEnvConfig& env_cfg = WarpFusionEnvConfig::get();
+        const int BPT = env_cfg.ti_bpt;
+        const size_t blocks_per_warp = static_cast<size_t>(BPT) * 32u;
+        const unsigned num_warps = static_cast<unsigned>((num_blocks + blocks_per_warp - 1) / blocks_per_warp);
+        const std::string tsrc = generateWarpTIInverseSource(spec.predictor_ti, spec.coder_ti,
+                                                             static_cast<int>(block_size), BPT, tiled);
+        CUfunction tik = reinterpret_cast<CUfunction>(nvrtcGetKernel(tsrc, "fz_fused_warp_ti_unpack"));
+        unsigned long long n_arg = n_elems, nb_arg = num_blocks;
+        unsigned wb_arg = cfg.word_bytes;
+        // Always pass a valid pp pointer for one uniform kernel signature; the 1-D
+        // predictor's fromN() never dereferences it (see warp_ti_fusion.cuh).
+        uint8_t* d_pp = static_cast<uint8_t*>(pool->allocate(params_bytes ? params_bytes : 1, stream, "warp_ti_inv_pp"));
+        if (params_bytes)
+            FZ_CUDA_CHECK(cudaMemcpyAsync(d_pp, pred_params, params_bytes, cudaMemcpyHostToDevice, stream));
+        void* args[] = { (void*)&n_arg, (void*)&wb_arg, (void*)&nb_arg, (void*)&ebx2,
+                         (void*)&d_meta, (void*)&d_offset, (void*)&d_payload, (void*)&d_out,
+                         (void*)&d_pp };
+        CU_CHECK(cuLaunchKernel(tik, num_warps,1,1, 32u,1,1, 0, (CUstream)stream, args, nullptr));
+        pool->free(d_pp, stream);
+
+        fz::backend::freeTempStorage(pool, d_tmp, stream);
+        pool->free(d_offset, stream);
+        pool->free(d_cost, stream);
+        return n_out * sizeof(float);
+    }
 
     // Pass B: one warp per block. 1-D: decode + undelta + block-major dequant, all in
     // registers. Tiled (cuSZp3): decode + shared-staged separable reconstruction +

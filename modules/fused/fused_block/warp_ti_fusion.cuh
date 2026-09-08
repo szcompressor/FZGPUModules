@@ -48,6 +48,14 @@ struct ThreadLorenzo1DPredictor {
     __device__ static ThreadLorenzo1DPredictor fromParams(const float* in, size_t n, const void* pp) {
         return ThreadLorenzo1DPredictor{in, n, static_cast<const warp::Lorenzo1DParams*>(pp)->inv2eb};
     }
+    // Decode-only factory: unpredict_and_write() needs only `n` (to bound the tail
+    // block's writes) and never reads `inv2eb` (the caller passes the resolved
+    // dequant step as `ebx2` directly) or `in`, so this avoids dereferencing a `pp`
+    // blob — LorenzoStage::getInverseFusedOp() declares no params today, so a real
+    // Lorenzo1DParams blob does not exist on the inverse side to read from safely.
+    __device__ static ThreadLorenzo1DPredictor fromN(size_t n) {
+        return ThreadLorenzo1DPredictor{nullptr, n, 0.0f};
+    }
     __device__ __forceinline__ void predict(size_t base, int (&d)[32]) const {
         int prev = 0;
         if (base + 32u <= n) {
@@ -71,6 +79,37 @@ struct ThreadLorenzo1DPredictor {
                 const int q = (g < n) ? __float2int_rn(in[g] * inv2eb) : 0;
                 d[i] = q - prev;
                 prev = q;
+            }
+        }
+    }
+
+    // Decode-side mirror of predict(): reconstruct this block's 32 natural values
+    // from its decoded deltas (a plain running sum — simpler than the warp-
+    // cooperative inverse, which needs a shuffle-based scan; here one thread owns
+    // the whole block so there is no cross-lane communication to do at all) and
+    // write them out, vectorized 4-at-a-time (matches native's float4 decompress
+    // stores). Falls back to scalar for a genuinely partial tail block so a
+    // vectorized store can never write past `n`.
+    __device__ __forceinline__ void unpredict_and_write(size_t base, const int (&d)[32],
+                                                         float ebx2, float* out) const {
+        int prev = 0;
+        if (base + 32u <= n) {
+            float4* out4 = reinterpret_cast<float4*>(out + base);
+            #pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                float4 v;
+                prev += d[j*4+0]; v.x = static_cast<float>(prev) * ebx2;
+                prev += d[j*4+1]; v.y = static_cast<float>(prev) * ebx2;
+                prev += d[j*4+2]; v.z = static_cast<float>(prev) * ebx2;
+                prev += d[j*4+3]; v.w = static_cast<float>(prev) * ebx2;
+                out4[j] = v;
+            }
+        } else {
+            #pragma unroll
+            for (int i = 0; i < 32; ++i) {
+                prev += d[i];
+                const size_t g = base + static_cast<size_t>(i);
+                if (g < n) out[g] = static_cast<float>(prev) * ebx2;
             }
         }
     }
@@ -129,6 +168,52 @@ struct ThreadTiledLorenzo2DPredictor {
             }
         }
     }
+
+    // Decode-side mirror: reconstruct in the SAME (ly outer, lx inner) order predict()
+    // used to difference in, so the accumulate ("+=") sees predecessors before
+    // dependents — de-delta is the identical chain reversed. Output in groups of 4
+    // consecutive x (tx=8 is two groups), vectorized when the whole group is within
+    // dx (matches native's float4 decompress store); scalar fallback at a partial
+    // group so a store can never land past the natural array's real width. Rows past
+    // dy are all padding (monotonic in ly, see TiledLorenzo3DPredictor's identical
+    // argument) — nothing downstream ever reads their chain state, so breaking early
+    // is safe.
+    __device__ __forceinline__ void unpredict_and_write(size_t base, const int (&d)[64],
+                                                         float ebx2, float* out) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = t / ntx;
+        int prevY = 0;
+        for (uint32_t ly = 0; ly < ty; ++ly) {
+            const uint32_t gy = tiy * ty + ly;
+            if (gy >= dy) break;
+            int prevX = 0;
+            const size_t rowbase = static_cast<size_t>(gy) * dx + tix * tx;
+            #pragma unroll
+            for (uint32_t gx4 = 0; gx4 < tx; gx4 += 4) {
+                int vals[4];
+                #pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    const uint32_t lx    = gx4 + static_cast<uint32_t>(k);
+                    const uint32_t local = ly * tx + lx;
+                    const int pred = (lx > 0) ? prevX : (ly > 0) ? prevY : 0;
+                    const int cur  = pred + d[local];
+                    vals[k] = cur; prevX = cur;
+                    if (lx == 0) prevY = cur;
+                }
+                const uint32_t gx0 = tix * tx + gx4;
+                if (gx0 + 4u <= dx) {
+                    float4 v{static_cast<float>(vals[0]) * ebx2, static_cast<float>(vals[1]) * ebx2,
+                              static_cast<float>(vals[2]) * ebx2, static_cast<float>(vals[3]) * ebx2};
+                    reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                } else {
+                    #pragma unroll
+                    for (int k = 0; k < 4; ++k)
+                        if (gx0 + static_cast<uint32_t>(k) < dx)
+                            out[rowbase + gx4 + static_cast<uint32_t>(k)] = static_cast<float>(vals[k]) * ebx2;
+                }
+            }
+        }
+    }
 };
 
 struct ThreadTiledLorenzo3DPredictor {
@@ -163,6 +248,52 @@ struct ThreadTiledLorenzo3DPredictor {
             }
         }
     }
+
+    // Decode-side mirror — same traversal order (lz outer, ly middle, lx inner) so
+    // predecessors are accumulated before dependents; see the 2-D predictor's comment
+    // for the vectorized-group / early-break reasoning (identical here, just one more
+    // nested level). tx=4, so each row is exactly one float4 group.
+    __device__ __forceinline__ void unpredict_and_write(size_t base, const int (&d)[64],
+                                                         float ebx2, float* out) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = (t / ntx) % nty, tiz = t / (ntx * nty);
+        int prevZ = 0;
+        for (uint32_t lz = 0; lz < tz; ++lz) {
+            const uint32_t gz = tiz * tz + lz;
+            if (gz >= dz) break;
+            int prevY = 0;
+            for (uint32_t ly = 0; ly < ty; ++ly) {
+                const uint32_t gy = tiy * ty + ly;
+                if (gy >= dy) break;
+                int prevX = 0;
+                const size_t rowbase = (static_cast<size_t>(gz) * dy + gy) * dx + tix * tx;
+                #pragma unroll
+                for (uint32_t gx4 = 0; gx4 < tx; gx4 += 4) {
+                    int vals[4];
+                    #pragma unroll
+                    for (int k = 0; k < 4; ++k) {
+                        const uint32_t lx    = gx4 + static_cast<uint32_t>(k);
+                        const uint32_t local = (lz * ty + ly) * tx + lx;
+                        const int pred = (lx > 0) ? prevX : (ly > 0) ? prevY : (lz > 0) ? prevZ : 0;
+                        const int cur  = pred + d[local];
+                        vals[k] = cur; prevX = cur;
+                        if (lx == 0) { prevY = cur; if (ly == 0) prevZ = cur; }
+                    }
+                    const uint32_t gx0 = tix * tx + gx4;
+                    if (gx0 + 4u <= dx) {
+                        float4 v{static_cast<float>(vals[0]) * ebx2, static_cast<float>(vals[1]) * ebx2,
+                                  static_cast<float>(vals[2]) * ebx2, static_cast<float>(vals[3]) * ebx2};
+                        reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                    } else {
+                        #pragma unroll
+                        for (int k = 0; k < 4; ++k)
+                            if (gx0 + static_cast<uint32_t>(k) < dx)
+                                out[rowbase + gx4 + static_cast<uint32_t>(k)] = static_cast<float>(vals[k]) * ebx2;
+                    }
+                }
+            }
+        }
+    }
 };
 
 // ── Identity tiled predictors (cuSZp3 FIXED mode): same tile geometry, no delta —
@@ -185,6 +316,35 @@ struct ThreadTiledLorenzoIdentity2DPredictor {
                 const uint32_t gx = tix * tx + lx;
                 d[local] = (gx >= dx || gy >= dy) ? 0
                     : __float2int_rn(in[static_cast<size_t>(gy) * dx + gx] * inv2eb);
+            }
+        }
+    }
+
+    // No chase needed (identity has no delta) — just dequantize d[local] directly,
+    // with the same vectorized-group / bounds-safe write as the delta predictor.
+    __device__ __forceinline__ void unpredict_and_write(size_t base, const int (&d)[64],
+                                                         float ebx2, float* out) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = t / ntx;
+        for (uint32_t ly = 0; ly < ty; ++ly) {
+            const uint32_t gy = tiy * ty + ly;
+            if (gy >= dy) break;
+            const size_t rowbase = static_cast<size_t>(gy) * dx + tix * tx;
+            #pragma unroll
+            for (uint32_t gx4 = 0; gx4 < tx; gx4 += 4) {
+                const uint32_t gx0 = tix * tx + gx4;
+                const uint32_t local0 = ly * tx + gx4;
+                if (gx0 + 4u <= dx) {
+                    float4 v{static_cast<float>(d[local0])   * ebx2, static_cast<float>(d[local0+1]) * ebx2,
+                              static_cast<float>(d[local0+2]) * ebx2, static_cast<float>(d[local0+3]) * ebx2};
+                    reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                } else {
+                    #pragma unroll
+                    for (int k = 0; k < 4; ++k)
+                        if (gx0 + static_cast<uint32_t>(k) < dx)
+                            out[rowbase + gx4 + static_cast<uint32_t>(k)] =
+                                static_cast<float>(d[local0 + static_cast<uint32_t>(k)]) * ebx2;
+                }
             }
         }
     }
@@ -211,6 +371,37 @@ struct ThreadTiledLorenzoIdentity3DPredictor {
                     if (gx >= dx || gy >= dy || gz >= dz) { d[local] = 0; continue; }
                     const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
                     d[local] = __float2int_rn(in[gidx] * inv2eb);
+                }
+            }
+        }
+    }
+
+    __device__ __forceinline__ void unpredict_and_write(size_t base, const int (&d)[64],
+                                                         float ebx2, float* out) const {
+        const uint32_t t   = static_cast<uint32_t>(base / 64u);
+        const uint32_t tix = t % ntx, tiy = (t / ntx) % nty, tiz = t / (ntx * nty);
+        for (uint32_t lz = 0; lz < tz; ++lz) {
+            const uint32_t gz = tiz * tz + lz;
+            if (gz >= dz) break;
+            for (uint32_t ly = 0; ly < ty; ++ly) {
+                const uint32_t gy = tiy * ty + ly;
+                if (gy >= dy) break;
+                const size_t rowbase = (static_cast<size_t>(gz) * dy + gy) * dx + tix * tx;
+                #pragma unroll
+                for (uint32_t gx4 = 0; gx4 < tx; gx4 += 4) {
+                    const uint32_t gx0 = tix * tx + gx4;
+                    const uint32_t local0 = (lz * ty + ly) * tx + gx4;
+                    if (gx0 + 4u <= dx) {
+                        float4 v{static_cast<float>(d[local0])   * ebx2, static_cast<float>(d[local0+1]) * ebx2,
+                                  static_cast<float>(d[local0+2]) * ebx2, static_cast<float>(d[local0+3]) * ebx2};
+                        reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                    } else {
+                        #pragma unroll
+                        for (int k = 0; k < 4; ++k)
+                            if (gx0 + static_cast<uint32_t>(k) < dx)
+                                out[rowbase + gx4 + static_cast<uint32_t>(k)] =
+                                    static_cast<float>(d[local0 + static_cast<uint32_t>(k)]) * ebx2;
+                    }
                 }
             }
         }
@@ -343,6 +534,59 @@ struct ThreadFixedRateCoderN {
             }
         }
     }
+
+    // Decode: the exact serial mirror of pack() above, extracting all N elements'
+    // bits in one thread instead of one bit via lane index (the warp-cooperative
+    // AdaptiveBitpackCoder::decode<EPL>'s "idx = lane+32*m, k=4*m+q, bit j=lane&7"
+    // becomes, per element i: m=i/32, byte k=4*m+(i%32)/8, bit j=(i%32)&7 — same
+    // layout, walked serially). Byte-identical archive in, byte-identical d[] out,
+    // regardless of which coder/predictor produced the archive.
+    __device__ static __forceinline__ void decode(const uint8_t* __restrict__ meta,
+                                                   const uint8_t* __restrict__ payload,
+                                                   uint32_t word_bytes, uint32_t count,
+                                                   int (&d)[N]) {
+        const int     r      = meta[0];
+        const uint8_t sel    = meta[1];
+        const bool    is_out = (sel & 1u) != 0;
+
+        if (!is_out) {
+            if (r == 0) { for (int i = 0; i < N; ++i) d[i] = 0; return; }
+            const uint8_t* sign   = payload;
+            const uint8_t* planes = payload + word_bytes;
+            #pragma unroll
+            for (int i = 0; i < N; ++i) {
+                if (static_cast<uint32_t>(i) >= count) { d[i] = 0; continue; }
+                const int m = i >> 5, j = i & 31, byte = (m << 2) + (j >> 3), bit = j & 7;
+                const uint32_t sgn = (sign[byte] >> bit) & 1u;
+                uint32_t av = 0u;
+                #pragma unroll
+                for (int p = 0; p < r; ++p)
+                    av |= ((static_cast<uint32_t>(planes[word_bytes * p + byte]) >> bit) & 1u) << p;
+                d[i] = sgn ? -static_cast<int>(av) : static_cast<int>(av);
+            }
+            return;
+        }
+        // Outlier: [ob_bytes elem0 magnitude LE][sign region][r plane regions for 1..].
+        const uint32_t ob_bytes = ((sel >> 1) & 3u) + 1u;
+        uint32_t mag0 = 0u;
+        for (uint32_t k = 0; k < ob_bytes; ++k) mag0 |= static_cast<uint32_t>(payload[k]) << (8u * k);
+        const uint8_t* sign   = payload + ob_bytes;
+        const uint8_t* planes = payload + ob_bytes + word_bytes;
+        // Element 0's sign is sign[0] bit 0 — which is exactly what the general
+        // per-element formula gives at i=0 (m=0, byte=0, bit=0), so no special case.
+        #pragma unroll
+        for (int i = 0; i < N; ++i) {
+            if (static_cast<uint32_t>(i) >= count) { d[i] = 0; continue; }
+            const int m = i >> 5, j = i & 31, byte = (m << 2) + (j >> 3), bit = j & 7;
+            const uint32_t sgn = (sign[byte] >> bit) & 1u;
+            if (i == 0) { d[0] = sgn ? -static_cast<int>(mag0) : static_cast<int>(mag0); continue; }
+            uint32_t av = 0u;
+            #pragma unroll
+            for (int p = 0; p < r; ++p)
+                av |= ((static_cast<uint32_t>(planes[word_bytes * p + byte]) >> bit) & 1u) << p;
+            d[i] = sgn ? -static_cast<int>(av) : static_cast<int>(av);
+        }
+    }
 };
 
 /// Back-compat alias: the original hand-written 32-element coder, now the N=32
@@ -403,6 +647,28 @@ struct ThreadPlainRateCoderN {
                     out[word_bytes * (1u + p) + 4u * m + k] =
                         static_cast<uint8_t>((pm >> (8u * k)) & 0xFFu);
             }
+        }
+    }
+
+    // Decode: serial mirror of pack() (no outlier branch — PlainRateCoder never has one).
+    __device__ static __forceinline__ void decode(const uint8_t* __restrict__ meta,
+                                                   const uint8_t* __restrict__ payload,
+                                                   uint32_t word_bytes, uint32_t count,
+                                                   int (&d)[N]) {
+        const int r = meta[0];
+        if (r == 0) { for (int i = 0; i < N; ++i) d[i] = 0; return; }
+        const uint8_t* sign   = payload;
+        const uint8_t* planes = payload + word_bytes;
+        #pragma unroll
+        for (int i = 0; i < N; ++i) {
+            if (static_cast<uint32_t>(i) >= count) { d[i] = 0; continue; }
+            const int m = i >> 5, j = i & 31, byte = (m << 2) + (j >> 3), bit = j & 7;
+            const uint32_t sgn = (sign[byte] >> bit) & 1u;
+            uint32_t av = 0u;
+            #pragma unroll
+            for (int p = 0; p < r; ++p)
+                av |= ((static_cast<uint32_t>(planes[word_bytes * p + byte]) >> bit) & 1u) << p;
+            d[i] = sgn ? -static_cast<int>(av) : static_cast<int>(av);
         }
     }
 };
@@ -482,6 +748,37 @@ __device__ __forceinline__ void fused_ti_body(
             Coder::pack(d[jb], word_bytes, count, meta + Coder::meta_bytes * b,
                         payload + warp_base + blk_excl[jb]);
         }
+    }
+}
+
+// ── Decode harness (Milestone 2 — this is what closes the decompress gap) ────────
+// CTA = 1 warp, thread `lane` owns block (jb,lane) exactly as the forward harness
+// above. Unlike forward, there is NO cross-lane synchronization at all: byte offsets
+// are already resolved (the caller runs the existing decode-cost kernels + a CUB
+// exclusive scan into `offset[]`, the same precompute every other decode path here
+// uses), so each lane decodes and writes its own blocks completely independently —
+// this is what native's decompress kernel does, and it's why it reaches near-HBM-
+// peak bandwidth (see reports/w2_ti_decode_design.md): thread-independence plus
+// vectorized (float4) output stores, not cross-lane coalescing.
+template<int BlockSize, int BlocksPerThread, class Coder, class Pred>
+__device__ __forceinline__ void fused_ti_unpack_body(
+    Pred pred, size_t n, uint32_t word_bytes, size_t num_blocks, float ebx2,
+    const uint8_t* __restrict__ meta, const uint32_t* __restrict__ offset,
+    const uint8_t* __restrict__ payload, float* __restrict__ out)
+{
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t w    = blockIdx.x;                 // CTA = 1 warp ⇒ global warp id
+    const size_t warp_block_base = static_cast<size_t>(w) * BlocksPerThread * 32u;
+
+    #pragma unroll 1
+    for (int jb = 0; jb < BlocksPerThread; ++jb) {
+        const size_t b = warp_block_base + static_cast<size_t>(jb) * 32u + lane;
+        if (b >= num_blocks) continue;
+        const size_t base = b * static_cast<size_t>(BlockSize);
+        const uint32_t count = static_cast<uint32_t>(min(static_cast<size_t>(BlockSize), n - base));
+        int d[BlockSize];
+        Coder::decode(meta + Coder::meta_bytes * b, payload + offset[b], word_bytes, count, d);
+        pred.unpredict_and_write(base, d, ebx2, out);
     }
 }
 

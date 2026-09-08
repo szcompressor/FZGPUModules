@@ -241,15 +241,28 @@ public:
         d.strategy       = FusionStrategy::WarpRegister;
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
+        // ti_op_name (decode): identity mode only. Measured 2026-09-08: the
+        // thread-independent DELTA decode (ThreadTiledLorenzo{2,3}DPredictor's
+        // unpredict_and_write chase) is a real regression vs the existing
+        // warp-cooperative decode (NYX/temperature: 194-374 GB/s vs ~356-651 GB/s
+        // before) -- the fully serial prevX/prevY/prevZ dependency chain does not
+        // hide its own latency the way native's equivalent chase apparently does;
+        // root cause not yet isolated (register pressure vs ILP vs something else --
+        // ncu is blocked here by ERR_NVGPUCTRPERM). The IDENTITY (no-delta, fixed
+        // mode) decode has no such chain and measured a clear win (591 GB/s vs
+        // ~410-495 before on the SAME field) -- see
+        // reports/w2_ti_decode_design.md UPDATE and fused_throughput_rewrite_plan.md.
+        // Forward (compress) ti_op_name is unaffected: it is set for BOTH modes
+        // above and both measured real wins there.
         if (tz == 1u) {   // 2-D
             d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
-            d.ti_op_name = predict_ ? "ThreadTiledLorenzo2DPredictor" : "ThreadTiledLorenzoIdentity2DPredictor";
+            if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};  // inv2eb unused on decode
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D
             d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
-            d.ti_op_name = predict_ ? "ThreadTiledLorenzo3DPredictor" : "ThreadTiledLorenzoIdentity3DPredictor";
+            if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));

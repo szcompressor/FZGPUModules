@@ -189,7 +189,12 @@ public:
         d.op_name        = "Lorenzo1DPredictor";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = block_size_ / 32u;
-        if (d.elems_per_lane == 1u) d.ti_op_name = "ThreadLorenzo1DPredictor";
+        // ti_op_name intentionally left empty: measured 2026-09-08, TI decode's
+        // serial de-delta chain (ThreadLorenzo1DPredictor::unpredict_and_write) is a
+        // real regression vs the existing warp-cooperative decode (NYX/temperature
+        // cuszp2 outlier: 374 GB/s vs ~651-897 before) — same root cause as
+        // TiledLorenzoStage's delta modes, not yet isolated. See
+        // reports/w2_ti_decode_design.md UPDATE. Forward (compress) is unaffected.
         return d;
     }
 
