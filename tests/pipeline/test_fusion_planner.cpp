@@ -76,6 +76,23 @@ void buildCuszp3(Pipeline& p, size_t dx, size_t dy) {
     p.connect(a, tl);
 }
 
+// Build a tiled (cuSZp3-shaped) warp-register chain: Quantizer(linear) ->
+// TiledLorenzo(tx,ty,tz) -> AdaptiveBitpack(block=tx*ty*tz). `outlier` picks the
+// adaptive coder vs PlainRateCoder; `predict` false is cuSZp3 fixed mode (no delta,
+// tile-major reorder only). dz==1 with tz==1 gives the 2-D shape.
+void buildTiled(Pipeline& p, size_t dx, size_t dy, size_t dz,
+                uint32_t tx, uint32_t ty, uint32_t tz, bool outlier, bool predict) {
+    p.setDims(dx, dy, dz);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+    auto* tl = p.addStage<TiledLorenzoStage<int32_t>>();
+    tl->setTileShape(tx, ty, tz); tl->setPredict(predict);
+    p.connect(tl, q, "codes");
+    auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    a->setBlockSize(tx * ty * tz); a->setOutlierSelection(outlier);
+    p.connect(a, tl);
+}
+
 // Build a 1-D warp-register chain: Quantizer(linear) -> Lorenzo(block) ->
 // AdaptiveBitpack(block). `block` = 32*EPL; `outlier` picks the adaptive coder
 // vs the 1-byte-meta PlainRateCoder. Exercises the generalized warp-register
@@ -1104,6 +1121,87 @@ TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
     EXPECT_EQ(pred3.params.size(), sizeof(fused::warp::TiledLorenzo2DParams));
     // n_ab = padded tile-major count: ceil(300/8)*8 * ceil(180/8)*8 = 304 * 184.
     EXPECT_EQ(pred3.n_ab, size_t{304} * 184);
+}
+
+// Thread-independent (TI) fusion coverage map: for every warp-register chain shape we
+// know about, does the predictor AND the coder declare a TI variant
+// (FusedOpDecl::ti_op_name)? This is a REGRESSION GUARD, not just documentation — it is
+// the test that would have caught, at write time rather than by someone noticing low
+// throughput, that AdaptiveBitpackStage's plain-mode coder (PlainRateCoder) had no TI
+// policy and so TI silently never fired for any "_plain" preset (cuszp2 plain, cuszp3
+// plain, cuszp3 fixed) despite being fully eligible on the predictor side. See
+// reports/fused_throughput_rewrite_plan.md (2026-09-08) for the incident this guards.
+//
+// A row with `expect_predictor_ti=false` is a DOCUMENTED gap, not a mistake: EPL>1 warp
+// Lorenzo1D chains (SZp-shaped, block 64/96/128) have no ThreadLorenzo1DPredictor today
+// (its predict(base, d[32]) interface is hardcoded to one 32-element block) and must NOT
+// silently start reporting TI eligibility without a real ThreadLorenzo1DPredictor<EPL>
+// (or equivalent) being written and validated — if this row ever flips to `true`
+// unexpectedly, that means someone added an op_name without the matching TI class, which
+// is exactly the class of bug this test exists to catch on the other side.
+struct TiCoverageCase {
+    const char* name;
+    std::function<void(Pipeline&)> build;
+    bool expect_predictor_ti;
+    bool expect_coder_ti;
+};
+
+TEST(FusionPlanner, ThreadIndependentCoverageMap) {
+    std::vector<TiCoverageCase> cases = {
+        {"Lorenzo1D_block32_outlier",
+         [](Pipeline& p) { buildWarp1D(p, 4096, 32, /*outlier=*/true); }, true, true},
+        {"Lorenzo1D_block32_plain",
+         [](Pipeline& p) { buildWarp1D(p, 4096, 32, /*outlier=*/false); }, true, true},
+        {"Lorenzo1D_block128_outlier_NO_TI_PREDICTOR_YET",
+         [](Pipeline& p) { buildWarp1D(p, 4096, 128, /*outlier=*/true); }, false, true},
+        {"Lorenzo1D_block128_plain_NO_TI_PREDICTOR_YET",
+         [](Pipeline& p) { buildWarp1D(p, 4096, 128, /*outlier=*/false); }, false, true},
+        {"Tiled2D_outlier_delta",
+         [](Pipeline& p) { buildTiled(p, 300, 180, 1, 8, 8, 1, true, true); }, true, true},
+        {"Tiled2D_plain_delta",
+         [](Pipeline& p) { buildTiled(p, 300, 180, 1, 8, 8, 1, false, true); }, true, true},
+        {"Tiled2D_outlier_identity_fixed",
+         [](Pipeline& p) { buildTiled(p, 300, 180, 1, 8, 8, 1, true, false); }, true, true},
+        {"Tiled2D_plain_identity_fixed",
+         [](Pipeline& p) { buildTiled(p, 300, 180, 1, 8, 8, 1, false, false); }, true, true},
+        {"Tiled3D_outlier_delta",
+         [](Pipeline& p) { buildTiled(p, 40, 30, 20, 4, 4, 4, true, true); }, true, true},
+        {"Tiled3D_plain_delta",
+         [](Pipeline& p) { buildTiled(p, 40, 30, 20, 4, 4, 4, false, true); }, true, true},
+        {"Tiled3D_outlier_identity_fixed",
+         [](Pipeline& p) { buildTiled(p, 40, 30, 20, 4, 4, 4, true, false); }, true, true},
+        {"Tiled3D_plain_identity_fixed",
+         [](Pipeline& p) { buildTiled(p, 40, 30, 20, 4, 4, 4, false, false); }, true, true},
+    };
+
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        Pipeline p(4096 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
+        c.build(p);
+        p.finalize();
+        auto groups = planFusionGroups(*p.getDAG());
+        ASSERT_EQ(groups.size(), 1u) << "chain did not form one warp-register group";
+        ASSERT_EQ(groups[0].stages.size(), 3u) << "expected Quant->Predictor->Coder";
+
+        const FusedOpDecl pred_decl  = groups[0].stages[1]->getFusedOp();
+        const FusedOpDecl coder_decl = groups[0].stages[2]->getFusedOp();
+        ASSERT_TRUE(pred_decl.valid())  << "predictor declares no warp-register op at all";
+        ASSERT_TRUE(coder_decl.valid()) << "coder declares no warp-register op at all";
+
+        EXPECT_EQ(!pred_decl.ti_op_name.empty(), c.expect_predictor_ti)
+            << "predictor op_name=" << pred_decl.op_name
+            << " ti_op_name=\"" << pred_decl.ti_op_name << "\"";
+        EXPECT_EQ(!coder_decl.ti_op_name.empty(), c.expect_coder_ti)
+            << "coder op_name=" << coder_decl.op_name
+            << " ti_op_name=\"" << coder_decl.ti_op_name << "\"";
+
+        // Both sides must agree for the chain to actually be TI-eligible (mirrors
+        // tiSupportedChain() in nvrtc_warp_fusion.cu) — assert the CONJUNCTION matches
+        // what the launcher would decide, not just each side individually.
+        const bool expect_chain_ti = c.expect_predictor_ti && c.expect_coder_ti;
+        const bool actual_chain_ti = !pred_decl.ti_op_name.empty() && !coder_decl.ti_op_name.empty();
+        EXPECT_EQ(actual_chain_ti, expect_chain_ti) << "chain-level TI eligibility mismatch";
+    }
 }
 
 // Warp NVRTC codegen contract (host-only): the WarpFusionSpec composes into the two
