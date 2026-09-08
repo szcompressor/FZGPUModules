@@ -200,14 +200,24 @@ public:
         d.strategy       = FusionStrategy::WarpRegister;
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
+        // op_name carries the tile shape as template args (2026-09-08 tile-shape
+        // templating — see reports/predictor_interface_index_hoist_scoping.md "(B)"):
+        // TiledLorenzo{2,3}D[Identity]Predictor are now templated on <TX,TY[,TZ]> so
+        // NVRTC compiles `local % tx` etc. as a mask/shift instead of a runtime
+        // division. ti_op_name (TI path) stays untemplated — that predictor was
+        // reverted to its plain runtime-tx/ty form (see the reassessment in
+        // reports/cuszp3_coalesced_strip_redesign_scoping.md: TI is not the ALU-bound
+        // path this fix targets).
         if (tz == 1u) {   // 2-D
-            d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo2DPredictor<" : "TiledLorenzoIdentity2DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + ">";
             d.ti_op_name = predict_ ? "ThreadTiledLorenzo2DPredictor" : "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D (PROTOTYPE)
-            d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo3DPredictor<" : "TiledLorenzoIdentity3DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + "," + std::to_string(tz) + ">";
             d.ti_op_name = predict_ ? "ThreadTiledLorenzo3DPredictor" : "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
@@ -263,14 +273,20 @@ public:
         // thread to hide the dependency latency via intra-thread ILP). Forward
         // (compress) ti_op_name is unaffected: it is set for BOTH modes above and
         // both measured real wins there.
+        // op_name carries the tile shape as template args — see getFusedOp()'s
+        // identical comment. Both delta and identity decode use the warp-cooperative
+        // op_name (fused_unpack_tiled_body); only ti_op_name (identity-only, per the
+        // note above) stays untemplated.
         if (tz == 1u) {   // 2-D
-            d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo2DPredictor<" : "TiledLorenzoIdentity2DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + ">";
             if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};  // inv2eb unused on decode
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D
-            d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo3DPredictor<" : "TiledLorenzoIdentity3DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + "," + std::to_string(tz) + ">";
             if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};

@@ -1116,7 +1116,9 @@ TEST(FusionPlanner, WarpStagesDeclareFusedOps) {
     ASSERT_EQ(g3.size(), 1u);
     const FusedOpDecl pred3 = g3[0].stages[1]->getFusedOp();
     EXPECT_EQ(pred3.strategy, FusionStrategy::WarpRegister);
-    EXPECT_EQ(pred3.op_name, "TiledLorenzo2DPredictor");
+    // Tile shape is a template arg since the 2026-09-08 index-hoist fix (see
+    // reports/predictor_interface_index_hoist_scoping.md) — 8x8 here.
+    EXPECT_EQ(pred3.op_name, "TiledLorenzo2DPredictor<8,8>");
     EXPECT_EQ(pred3.elems_per_lane, 2u);
     EXPECT_EQ(pred3.params.size(), sizeof(fused::warp::TiledLorenzo2DParams));
     // n_ab = padded tile-major count: ceil(300/8)*8 * ceil(180/8)*8 = 304 * 184.
@@ -1409,7 +1411,9 @@ TEST(FusionPlanner, Cuszp3_3D_FusesMatchesStaged) {
     { Pipeline pg(bytes, MemoryStrategy::PREALLOCATE, 2.0f); build(pg); pg.finalize();
       auto gr = planFusionGroups(*pg.getDAG());
       ASSERT_EQ(gr.size(), 1u); EXPECT_EQ(gr[0].stages.size(), 3u);
-      EXPECT_EQ(gr[0].stages[1]->getFusedOp().op_name, "TiledLorenzo3DPredictor"); }
+      // Tile shape is a template arg since the 2026-09-08 index-hoist fix (see
+      // reports/predictor_interface_index_hoist_scoping.md) — 4x4x4 here.
+      EXPECT_EQ(gr[0].stages[1]->getFusedOp().op_name, "TiledLorenzo3DPredictor<4,4,4>"); }
 
     auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
         Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f); p.setFusionPolicy(pol);
@@ -1546,7 +1550,9 @@ TEST(FusionPlanner, TiledLorenzoFusionSpec) {
     EXPECT_EQ(tli.getFusionSpec().access, FusionAccess::Unfusable);        // inverse instance
     EXPECT_EQ(tli.getInverseFusionSpec().access, FusionAccess::BlockLocal);
     EXPECT_EQ(tli.getInverseFusionSpec().block_size, 64u);
-    EXPECT_EQ(tli.getInverseFusedOp().op_name, "TiledLorenzo2DPredictor");
+    // Tile shape is a template arg since the 2026-09-08 index-hoist fix (see
+    // reports/predictor_interface_index_hoist_scoping.md) — 8x8 here.
+    EXPECT_EQ(tli.getInverseFusedOp().op_name, "TiledLorenzo2DPredictor<8,8>");
     EXPECT_EQ(tli.getInverseFusedOp().strategy, FusionStrategy::WarpRegister);
 }
 

@@ -195,16 +195,18 @@ TEST(TiledLorenzoStage, FusionOpNameByMode) {
     s.setTileShape(8, 8, 1);          // tile_elems == 64 → fusible (EPL=2)
     s.setPredict(true);
     EXPECT_TRUE(s.getFusionSpec().fusable());
-    EXPECT_EQ(s.getFusedOp().op_name, "TiledLorenzo2DPredictor");
+    // Tile shape is a template arg since the 2026-09-08 index-hoist fix (see
+    // reports/predictor_interface_index_hoist_scoping.md).
+    EXPECT_EQ(s.getFusedOp().op_name, "TiledLorenzo2DPredictor<8,8>");
     s.setPredict(false);
     EXPECT_TRUE(s.getFusionSpec().fusable());   // no-delta (fixed) fuses too
-    EXPECT_EQ(s.getFusedOp().op_name, "TiledLorenzoIdentity2DPredictor");
+    EXPECT_EQ(s.getFusedOp().op_name, "TiledLorenzoIdentity2DPredictor<8,8>");
     // 3-D
     TiledLorenzoStage<int32_t> s3;
     s3.setDims(64, 64, 64);
     s3.setTileShape(4, 4, 4);
     s3.setPredict(false);
-    EXPECT_EQ(s3.getFusedOp().op_name, "TiledLorenzoIdentity3DPredictor");
+    EXPECT_EQ(s3.getFusedOp().op_name, "TiledLorenzoIdentity3DPredictor<4,4,4>");
 }
 
 // ── TL10 ────────────────────────────────────────────────────────────────────

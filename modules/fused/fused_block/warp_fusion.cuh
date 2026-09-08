@@ -42,6 +42,21 @@ __device__ __forceinline__ int bitWidth32(uint32_t x) { return x ? (32 - __clz(x
 // return 0 (matching the staged predictor). Small PODs passed by value — no global
 // state, no spills. `fromParams` reconstructs the policy from the launch input +
 // the packed config blob (the uniform NVRTC factory).
+//
+// PER-TILE CONTEXT (2026-09-08, root-caused via native-vs-ours instruction-count
+// profiling — see reports/predictor_interface_index_hoist_scoping.md): `b` decomposes
+// into tile coordinates (tix, tiy[, tiz]) via runtime integer div/mod — for
+// TiledLorenzo3DPredictor, THREE of those are 64-BIT divisions (b is size_t). Doing
+// that decomposition inside delta() means every one of the 64 elements in a tile
+// redoes it — measured 10.8x more instructions/element than native (14.5 vs 1.35),
+// and native's own kernel is comfortably memory-bound (68% DRAM) while ours was
+// ALU-bound (65.9% ALU pipeline) purely on this address arithmetic. Native does the
+// identical decomposition but ONCE PER TILE (64x amortization) then walks the tile
+// with compile-time-constant bounds. `tile_ctx(b)` is that hoist point: harness
+// bodies call it ONCE per block (outside the per-element m-loop) and pass the
+// result into delta()/inv_gidx(). Every predictor implements this — including
+// Lorenzo1DPredictor, which has no division to hoist — so the harness call sites
+// stay uniform across predictors (no per-predictor branching in the harness).
 
 // cuSZp2 / SZp: linear-ABS quant + 1-D Lorenzo delta, reset per BLOCK (32*epl
 // elements). All lanes call delta() so the intra-warp shuffles are collective.
@@ -53,15 +68,19 @@ struct Lorenzo1DPredictor {
     size_t n;
     float inv2eb;
     uint32_t epl;
+    using Ctx = size_t;   // the block's base element offset (m==0)
     __device__ static Lorenzo1DPredictor fromParams(const float* in, size_t n, const void* pp) {
         const Lorenzo1DParams p = *static_cast<const Lorenzo1DParams*>(pp);
         return Lorenzo1DPredictor{in, n, p.inv2eb, p.epl ? p.epl : 1u};
     }
+    // Nothing to hoist here (base = b * (32*epl) is a single multiply, not a division) —
+    // exists only so the harness's call sites stay uniform across all predictors.
+    __device__ __forceinline__ Ctx tile_ctx(size_t b) const { return b * (32ull * epl); }
     __device__ __forceinline__ int q_at(size_t gidx) const {
         return (gidx < n) ? __float2int_rn(in[gidx] * inv2eb) : 0;
     }
-    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
-        const size_t base = b * (32ull * epl) + 32ull * static_cast<uint32_t>(m);
+    __device__ __forceinline__ int delta(const Ctx& ctx, uint32_t lane, int m) const {
+        const size_t base = ctx + 32ull * static_cast<uint32_t>(m);
         const int q      = q_at(base + lane);
         const int q_up   = __shfl_up_sync(0xffffffffu, q, 1);            // predecessor in this row
         int q_row_prev   = (m > 0 && lane == 31u) ? q_at(base - 1ull) : 0;  // last elem of previous row
@@ -95,23 +114,37 @@ struct Lorenzo1DPredictor {
 // re-quantises its own left/up predecessor from the float field (a pure map, so the
 // neighbour code equals what the staged quantizer produced). Mirrors
 // tiled_lorenzo_delta_kernel exactly. tile_elems == tx*ty == block_size.
+// TX/TY as compile-time template constants (2026-09-08, "(B)" of the same scoping doc,
+// landed after (A) alone measured a <0.1% instruction-count change): `lx = local % tx`
+// and `ly = local / tx` inside delta()/inv_gidx() are PER-ELEMENT and cannot be hoisted
+// by tile_ctx() at all — `local` varies per lane/m, that's the whole point of the loop.
+// With tx/ty as runtime uint32_t fields, each is a genuine runtime division; with them
+// as template constants (the two shipped tile shapes are both powers of two: 8x8 2-D,
+// 4x4x4 3-D), the compiler turns `% tx`/`/ tx` into a mask/shift. This is the fix that
+// actually targets where the instruction gap lives — (A) targeted the tix/tiy/tiz
+// decomposition, which turned out to already be cheap (one warp-wide instruction
+// regardless of lane count, not 32x/2x redundant as assumed).
+template<uint32_t TX, uint32_t TY>
 struct TiledLorenzo2DPredictor {
     static constexpr bool is_identity = false;   // applies the separable delta
+    static constexpr uint32_t kTx = TX, kTy = TY;   // exposed for generic harness code (fused_unpack_tiled_body)
     const float* in;
     float inv2eb;
-    uint32_t dx, dy, tx, ty, ntx;
+    uint32_t dx, dy, ntx;
+    struct Ctx { uint32_t tix, tiy; };
     __device__ static TiledLorenzo2DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
-        return TiledLorenzo2DPredictor{in, p.inv2eb, p.dx, p.dy, p.tx, p.ty, p.ntx};
+        return TiledLorenzo2DPredictor{in, p.inv2eb, p.dx, p.dy, p.ntx};
     }
-    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+    __device__ __forceinline__ Ctx tile_ctx(size_t b) const {
+        return Ctx{static_cast<uint32_t>(b % ntx), static_cast<uint32_t>(b / ntx)};
+    }
+    __device__ __forceinline__ int delta(const Ctx& ctx, uint32_t lane, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);   // element within tile
-        const uint32_t lx = local % tx;
-        const uint32_t ly = local / tx;                                 // tz==1 ⇒ ly < ty
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+        const uint32_t lx = local % TX;
+        const uint32_t ly = local / TX;                                 // tz==1 ⇒ ly < ty
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
         if (gx >= dx || gy >= dy) return 0;                             // padding
         const size_t gidx = static_cast<size_t>(gy) * dx + gx;
         const int cur = __float2int_rn(in[gidx] * inv2eb);
@@ -123,13 +156,11 @@ struct TiledLorenzo2DPredictor {
     }
     // INVERSE: natural row-major index for tile-major local element `local` of tile
     // `b`; ~0 marks a padding element (no write). tz == 1 for the 2-D predictor.
-    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+    __device__ __forceinline__ size_t inv_gidx(const Ctx& ctx, uint32_t local) const {
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
         if (gx >= dx || gy >= dy) return ~static_cast<size_t>(0);
         return static_cast<size_t>(gy) * dx + gx;
     }
@@ -169,26 +200,35 @@ __device__ __forceinline__ void applyTransforms(int (&d)[EPL], uint32_t lane) {
 // field so the delta equals the staged code delta (byte-identical). tile_elems==64 ⇒
 // local ∈ [0,64). NOTE: like the 2-D predictor this re-reads neighbours from GLOBAL and
 // the fused kernel recomputes it in BOTH the rate and pack passes.
+template<uint32_t TX, uint32_t TY, uint32_t TZ>
 struct TiledLorenzo3DPredictor {
     static constexpr bool is_identity = false;   // applies the separable delta
+    static constexpr uint32_t kTx = TX, kTy = TY, kTz = TZ;   // exposed for generic harness code
     const float* in;
     float inv2eb;
-    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    uint32_t dx, dy, dz, ntx, nty;
+    struct Ctx { uint32_t tix, tiy, tiz; };
     __device__ static TiledLorenzo3DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
-        return TiledLorenzo3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+        return TiledLorenzo3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.ntx, p.nty};
     }
-    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+    // tix/tiy/tiz's divisions are hoisted once per tile (kept from (A) — harmless even
+    // though (A) alone didn't move the instruction count; the interface stays uniform).
+    __device__ __forceinline__ Ctx tile_ctx(size_t b) const {
+        return Ctx{
+            static_cast<uint32_t>(b % ntx),
+            static_cast<uint32_t>((b / ntx) % nty),
+            static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty))
+        };
+    }
+    __device__ __forceinline__ int delta(const Ctx& ctx, uint32_t lane, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);   // element within tile
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
-        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
+        const uint32_t gz = ctx.tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return 0;                 // padding
         const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
         const int cur = __float2int_rn(in[gidx] * inv2eb);
@@ -201,16 +241,13 @@ struct TiledLorenzo3DPredictor {
     }
     // INVERSE: natural row-major index for tile-major local element `local` of tile `b`;
     // ~0 marks a padding element (no write).
-    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
-        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+    __device__ __forceinline__ size_t inv_gidx(const Ctx& ctx, uint32_t local) const {
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
+        const uint32_t gz = ctx.tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return ~static_cast<size_t>(0);
         return (static_cast<size_t>(gz) * dy + gy) * dx + gx;
     }
@@ -224,73 +261,79 @@ struct TiledLorenzo3DPredictor {
 // predictor reads only in[gidx] — 1 read/elem, like native. The inverse needs no
 // prefix sum (is_identity gates it in fused_unpack_tiled_body): the stored tile-major
 // values ARE the codes, so the inverse just scatters them via inv_gidx.
+template<uint32_t TX, uint32_t TY>
 struct TiledLorenzoIdentity2DPredictor {
     static constexpr bool is_identity = true;
+    static constexpr uint32_t kTx = TX, kTy = TY;   // exposed for generic harness code (fused_unpack_tiled_body)
     const float* in;
     float inv2eb;
-    uint32_t dx, dy, tx, ty, ntx;
+    uint32_t dx, dy, ntx;
+    struct Ctx { uint32_t tix, tiy; };
     __device__ static TiledLorenzoIdentity2DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
-        return TiledLorenzoIdentity2DPredictor{in, p.inv2eb, p.dx, p.dy, p.tx, p.ty, p.ntx};
+        return TiledLorenzoIdentity2DPredictor{in, p.inv2eb, p.dx, p.dy, p.ntx};
     }
-    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+    __device__ __forceinline__ Ctx tile_ctx(size_t b) const {
+        return Ctx{static_cast<uint32_t>(b % ntx), static_cast<uint32_t>(b / ntx)};
+    }
+    __device__ __forceinline__ int delta(const Ctx& ctx, uint32_t lane, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
-        const uint32_t lx = local % tx;
-        const uint32_t ly = local / tx;                                 // tz==1 ⇒ ly < ty
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+        const uint32_t lx = local % TX;
+        const uint32_t ly = local / TX;                                 // tz==1 ⇒ ly < ty
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
         if (gx >= dx || gy >= dy) return 0;                             // padding
         const size_t gidx = static_cast<size_t>(gy) * dx + gx;
         return __float2int_rn(in[gidx] * inv2eb);                       // NO delta (load-once)
     }
-    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+    __device__ __forceinline__ size_t inv_gidx(const Ctx& ctx, uint32_t local) const {
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
         if (gx >= dx || gy >= dy) return ~static_cast<size_t>(0);
         return static_cast<size_t>(gy) * dx + gx;
     }
 };
 
+template<uint32_t TX, uint32_t TY, uint32_t TZ>
 struct TiledLorenzoIdentity3DPredictor {
     static constexpr bool is_identity = true;
+    static constexpr uint32_t kTx = TX, kTy = TY, kTz = TZ;   // exposed for generic harness code
     const float* in;
     float inv2eb;
-    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    uint32_t dx, dy, dz, ntx, nty;
+    struct Ctx { uint32_t tix, tiy, tiz; };
     __device__ static TiledLorenzoIdentity3DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
-        return TiledLorenzoIdentity3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+        return TiledLorenzoIdentity3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.ntx, p.nty};
     }
-    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+    __device__ __forceinline__ Ctx tile_ctx(size_t b) const {
+        return Ctx{
+            static_cast<uint32_t>(b % ntx),
+            static_cast<uint32_t>((b / ntx) % nty),
+            static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty))
+        };
+    }
+    __device__ __forceinline__ int delta(const Ctx& ctx, uint32_t lane, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
-        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
+        const uint32_t gz = ctx.tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return 0;                 // padding
         const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
         return __float2int_rn(in[gidx] * inv2eb);                       // NO delta (load-once)
     }
-    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
-        const uint32_t tix = static_cast<uint32_t>(b % ntx);
-        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
-        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+    __device__ __forceinline__ size_t inv_gidx(const Ctx& ctx, uint32_t local) const {
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
+        const uint32_t gx = ctx.tix * TX + lx;
+        const uint32_t gy = ctx.tiy * TY + ly;
+        const uint32_t gz = ctx.tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return ~static_cast<size_t>(0);
         return (static_cast<size_t>(gz) * dy + gy) * dx + gx;
     }
@@ -611,9 +654,10 @@ __device__ __forceinline__ void fused_rate_body(
     const size_t start = b * block_size;
     const size_t count = min(static_cast<size_t>(block_size), n - start);
 
+    const auto ctx = pred.tile_ctx(b);   // hoisted OUT of the per-element loop below
     int d[ElemsPerLane];
     #pragma unroll
-    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
+    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(ctx, lane, m);
     applyTransforms<ElemsPerLane, Transforms...>(d, lane);
     Coder::template cost<ElemsPerLane>(d, lane, word_bytes, count,
                                        meta + Coder::meta_bytes * b, &cost[b]);
@@ -635,9 +679,10 @@ __device__ __forceinline__ void fused_pack_body(
     const size_t start = b * block_size;
     const size_t count = min(static_cast<size_t>(block_size), n - start);
 
+    const auto ctx = pred.tile_ctx(b);   // hoisted OUT of the per-element loop below
     int d[ElemsPerLane];
     #pragma unroll
-    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(lane, b, m);
+    for (int m = 0; m < ElemsPerLane; ++m) d[m] = pred.delta(ctx, lane, m);
     applyTransforms<ElemsPerLane, Transforms...>(d, lane);
     Coder::template pack<ElemsPerLane>(d, lane, word_bytes, count,
                                        meta + Coder::meta_bytes * b, payload + offset[b]);
@@ -738,8 +783,9 @@ __device__ __forceinline__ void fused_single_pass_body(
         if (b < num_blocks) {
             const size_t start = b * block_size;
             const size_t count = min(static_cast<size_t>(block_size), n - start);
+            const auto ctx = pred.tile_ctx(b);   // hoisted OUT of the per-element loop below
             #pragma unroll
-            for (int m = 0; m < ElemsPerLane; ++m) dheld[jb][m] = pred.delta(lane, b, m);
+            for (int m = 0; m < ElemsPerLane; ++m) dheld[jb][m] = pred.delta(ctx, lane, m);
             applyTransforms<ElemsPerLane, Transforms...>(dheld[jb], lane);
             Coder::template cost<ElemsPerLane>(dheld[jb], lane, word_bytes, count,
                                                meta + Coder::meta_bytes * b, &c);
@@ -847,7 +893,11 @@ __device__ __forceinline__ void fused_unpack_tiled_body(
     for (int m = 0; m < ElemsPerLane; ++m) s[lane + 32u * static_cast<uint32_t>(m)] = d[m];
     __syncwarp();
 
-    const uint32_t tx = pred.tx, ty = pred.ty;
+    // tx/ty were runtime instance fields before the tile-shape templating (2026-09-08);
+    // now compile-time constants on the predictor type itself (both delta and identity
+    // variants expose kTx/kTy so this generic call site works for either).
+    constexpr uint32_t tx = Pred::kTx, ty = Pred::kTy;
+    const auto ctx = pred.tile_ctx(b);   // hoisted OUT of the per-element loop below
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
@@ -864,7 +914,7 @@ __device__ __forceinline__ void fused_unpack_tiled_body(
             for (uint32_t k = 1; k <= ly; ++k) code += s[(lz * ty + k) * tx];        // y-spine
             for (uint32_t k = 1; k <= lx; ++k) code += s[(lz * ty + ly) * tx + k];   // x-row
         }
-        const size_t g = pred.inv_gidx(b, local);
+        const size_t g = pred.inv_gidx(ctx, local);
         if (g != ~static_cast<size_t>(0)) out[g] = static_cast<float>(code) * ebx2;
     }
 }

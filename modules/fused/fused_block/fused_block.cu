@@ -96,14 +96,22 @@ size_t launchFusedCuszp3Compress(
     uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
 {
     const uint32_t tile_elems = tx * ty;
-    if (dx == 0 || dy == 0 || tile_elems != 64u) return 0;   // block-64 2-D driver only
+    // Was a runtime tx/ty parameter; TiledLorenzo2DPredictor's tile shape is now a
+    // compile-time template arg (2026-09-08 tile-shape templating — see
+    // reports/predictor_interface_index_hoist_scoping.md). This function's own doc
+    // comment ("2-D 8x8, block=64") and the `tile_elems != 64u` gate already assumed
+    // 8x8 was the only shape in practice; this reference/oracle launcher (declared,
+    // never called in production — the NVRTC registry path superseded it) only needs
+    // to keep compiling for that one shape, so the runtime tx/ty are now asserted
+    // rather than threaded through as template args.
+    if (dx == 0 || dy == 0 || tile_elems != 64u || tx != 8u || ty != 8u) return 0;
     const uint32_t ntx = static_cast<uint32_t>((dx + tx - 1) / tx);
     const uint32_t nty = static_cast<uint32_t>((dy + ty - 1) / ty);
     const size_t num_tiles = static_cast<size_t>(ntx) * nty;
     const size_t n_ab = num_tiles * tile_elems;              // tile-major padded count
     ab::Config cfg = ab::configure(n_ab, tile_elems, /*outlier=*/true);
-    TiledLorenzo2DPredictor pred{d_in, 1.0f / (2.0f * abs_eb),
-                                 static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), tx, ty, ntx};
+    TiledLorenzo2DPredictor<8, 8> pred{d_in, 1.0f / (2.0f * abs_eb),
+                                 static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), ntx};
     return launchFusedBlockCore<2>(pred, n_ab, cfg.word_bytes, cfg.num_blocks, d_out, pool, stream);
 }
 
