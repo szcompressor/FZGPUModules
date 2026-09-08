@@ -42,14 +42,17 @@ struct TiledLorenzoConfig {
     uint8_t  tile_x;      ///< Tile extent in x (fast dim).
     uint8_t  tile_y;      ///< Tile extent in y (1 for 1-D).
     uint8_t  tile_z;      ///< Tile extent in z (1 for 1-D/2-D).
-    uint8_t  reserved[3]; ///< Must be zero.
+    uint8_t  no_delta;    ///< 0 = separable Lorenzo delta (legacy default); 1 = no delta,
+                          ///< tile-major reorder only (cuSZp3 fixed mode). Legacy archives
+                          ///< wrote 0 here (was reserved), so 0 preserves their behaviour.
+    uint8_t  reserved[2]; ///< Must be zero.
     uint32_t dim_x;       ///< X (fast) dimension.
     uint32_t dim_y;       ///< Y dimension (1 for 1-D).
     uint32_t dim_z;       ///< Z dimension (1 for 1-D/2-D).
 
     TiledLorenzoConfig()
         : data_type(DataType::INT32), ndim(2),
-          tile_x(8), tile_y(8), tile_z(1), reserved{0, 0, 0},
+          tile_x(8), tile_y(8), tile_z(1), no_delta(0), reserved{0, 0},
           dim_x(0), dim_y(1), dim_z(1) {}
 };
 static_assert(sizeof(TiledLorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
@@ -131,6 +134,16 @@ public:
     }
     std::array<uint32_t, 3> getTileShape() const { return effectiveTile(); }
 
+    /**
+     * Enable/disable the separable Lorenzo delta. `predict = false` keeps the
+     * tile-major reorder and zero-padding but stores the quantizer codes directly
+     * (no prediction) — this reproduces cuSZp3 **fixed** mode's per-tile fixed-rate
+     * layout (8x8 in 2-D, 4x4x4 in 3-D) when paired with
+     * `AdaptiveBitpackStage(block_size = tile_elems)`. Default true (plain/outlier).
+     */
+    void setPredict(bool p) { predict_ = p; }
+    bool getPredict() const { return predict_; }
+
     /// Elements per tile = the AdaptiveBitpack block_size that aligns blocks to tiles.
     uint32_t getTileElems() const {
         auto t = effectiveTile();
@@ -160,6 +173,8 @@ public:
     // the separable delta per element. tz > 1 is not fused yet.
     FusionSpec getFusionSpec() const override {
         auto t = effectiveTile();
+        // Both delta (plain/outlier) and no-delta (cuSZp3 fixed) fuse: the fixed
+        // variant uses the identity warp predictor (getFusedOp selects the op name).
         if (is_inverse_) return {};
         // Block-local for fusion; the block is one tile. 2-D (tz==1) and 3-D (tz>1)
         // both fuse — the warp op gate (getFusedOp) requires tile_elems==64 (EPL=2).
@@ -186,12 +201,12 @@ public:
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
         if (tz == 1u) {   // 2-D
-            d.op_name = "TiledLorenzo2DPredictor";
+            d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D (PROTOTYPE)
-            d.op_name = "TiledLorenzo3DPredictor";
+            d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
@@ -225,12 +240,12 @@ public:
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
         if (tz == 1u) {   // 2-D
-            d.op_name = "TiledLorenzo2DPredictor";
+            d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};  // inv2eb unused on decode
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D
-            d.op_name = "TiledLorenzo3DPredictor";
+            d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
@@ -286,6 +301,7 @@ public:
         cfg.tile_x    = static_cast<uint8_t>(t[0]);
         cfg.tile_y    = static_cast<uint8_t>(t[1]);
         cfg.tile_z    = static_cast<uint8_t>(t[2]);
+        cfg.no_delta  = predict_ ? 0 : 1;
         cfg.dim_x     = static_cast<uint32_t>(dims_[0]);
         cfg.dim_y     = static_cast<uint32_t>(dims_[1]);
         cfg.dim_z     = static_cast<uint32_t>(dims_[2]);
@@ -304,6 +320,7 @@ public:
         dims_[2] = (eff_ndim >= 3) ? cfg.dim_z : 1;
         tile_ = {cfg.tile_x, cfg.tile_y, cfg.tile_z};
         tile_set_ = (cfg.tile_x != 0);
+        predict_ = (cfg.no_delta == 0);  // 0 = delta (legacy default), 1 = no-delta
     }
 
     size_t getMaxHeaderSize(size_t /*output_index*/) const override {
@@ -312,6 +329,7 @@ public:
 
 private:
     bool is_inverse_           = false;
+    bool predict_              = true;   ///< false = cuSZp3 fixed mode (tile reorder, no delta)
     bool dims_pinned_          = false;  ///< set by setDimsOverride(); blocks pipeline dim pushes
     size_t actual_output_size_ = 0;
     std::array<size_t, 3>   dims_     = {0, 1, 1};

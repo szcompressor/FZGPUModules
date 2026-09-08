@@ -713,9 +713,12 @@ static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
     const auto dx = static_cast<size_t>(optInt(t, "dim_x", 0));
     const auto dy = static_cast<size_t>(optInt(t, "dim_y", 0));
     const auto dz = static_cast<size_t>(optInt(t, "dim_z", 0));
+    // predict=false → cuSZp3 fixed mode: tile-major reorder, no separable delta.
+    const bool predict = optBool(t, "predict", true);
     auto configure = [&](auto* s) {
         if (tx || ty || tz)
             s->setTileShape(tx ? tx : 1, ty ? ty : 1, tz ? tz : 1);
+        s->setPredict(predict);
         if (dx) s->setDimsOverride(dx, dy ? dy : 1, dz ? dz : 1);
         return s;
     };
@@ -1031,6 +1034,7 @@ static void saveTiledLorenzoStage(Stage* s, std::ostringstream& out) {
     out << "tile_x = " << static_cast<int64_t>(cfg.tile_x) << "\n";
     out << "tile_y = " << static_cast<int64_t>(cfg.tile_y) << "\n";
     out << "tile_z = " << static_cast<int64_t>(cfg.tile_z) << "\n";
+    if (cfg.no_delta) out << "predict = false\n";
     // Only an explicitly pinned override is persisted; ordinary dims come from
     // Pipeline::setDims() and writing them here would freeze a saved config to
     // one input shape.

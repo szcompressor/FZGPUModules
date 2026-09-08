@@ -46,12 +46,13 @@ template<typename T>
 void expect_exact_tiled_round_trip(const std::vector<T>& h_in,
                                    size_t nx, size_t ny, size_t nz,
                                    uint32_t tx = 0, uint32_t ty = 0,
-                                   uint32_t tz = 0) {
+                                   uint32_t tz = 0, bool predict = true) {
     const size_t in_bytes = h_in.size() * sizeof(T);
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE);
     p.setDims(nx, ny, nz);
     auto* s = p.addStage<TiledLorenzoStage<T>>();
     if (tx || ty || tz) s->setTileShape(tx ? tx : 1, ty ? ty : 1, tz ? tz : 1);
+    s->setPredict(predict);
     p.finalize();
 
     CudaStream cs;
@@ -153,6 +154,57 @@ TEST(TiledLorenzoStage, SerializeDeserialize) {
     EXPECT_EQ(t[0], 16u);
     EXPECT_EQ(t[1], 16u);
     EXPECT_EQ(t[2], 1u);
+    EXPECT_TRUE(restored.getPredict());  // default (legacy) = delta on
+}
+
+// ── TL11: no-delta (cuSZp3 fixed) round trips exactly, 2-D / 3-D / edge ───────
+TEST(TiledLorenzoStage, NoDeltaRoundTrip2D) {
+    const size_t NX = 64, NY = 48;
+    auto h = make_field<int32_t>(NX, NY, 1);
+    expect_exact_tiled_round_trip<int32_t>(h, NX, NY, 1, 8, 8, 1, /*predict=*/false);
+}
+TEST(TiledLorenzoStage, NoDeltaRoundTrip3D) {
+    const size_t NX = 16, NY = 12, NZ = 8;
+    auto h = make_field<int32_t>(NX, NY, NZ);
+    expect_exact_tiled_round_trip<int32_t>(h, NX, NY, NZ, 4, 4, 4, /*predict=*/false);
+}
+TEST(TiledLorenzoStage, NoDeltaPartialEdgeTiles3D) {
+    const size_t NX = 13, NY = 7, NZ = 5;  // not multiples of 4 — exercises padding
+    auto h = make_field<int32_t>(NX, NY, NZ);
+    expect_exact_tiled_round_trip<int32_t>(h, NX, NY, NZ, 4, 4, 4, /*predict=*/false);
+}
+
+// ── TL12: predict flag survives serialize/deserialize ─────────────────────────
+TEST(TiledLorenzoStage, NoDeltaSerializeDeserialize) {
+    TiledLorenzoStage<int32_t> original;
+    original.setDims(32, 32, 1);
+    original.setTileShape(8, 8, 1);
+    original.setPredict(false);
+    uint8_t buf[128] = {};
+    size_t n = original.serializeHeader(0, buf, sizeof(buf));
+    ASSERT_GT(n, 0u);
+    TiledLorenzoStage<int32_t> restored;
+    restored.deserializeHeader(buf, n);
+    EXPECT_FALSE(restored.getPredict());
+}
+
+// ── TL13: both delta and no-delta fuse, with the right warp op name (Phase 2) ──
+TEST(TiledLorenzoStage, FusionOpNameByMode) {
+    TiledLorenzoStage<int32_t> s;
+    s.setDims(512, 512, 1);
+    s.setTileShape(8, 8, 1);          // tile_elems == 64 → fusible (EPL=2)
+    s.setPredict(true);
+    EXPECT_TRUE(s.getFusionSpec().fusable());
+    EXPECT_EQ(s.getFusedOp().op_name, "TiledLorenzo2DPredictor");
+    s.setPredict(false);
+    EXPECT_TRUE(s.getFusionSpec().fusable());   // no-delta (fixed) fuses too
+    EXPECT_EQ(s.getFusedOp().op_name, "TiledLorenzoIdentity2DPredictor");
+    // 3-D
+    TiledLorenzoStage<int32_t> s3;
+    s3.setDims(64, 64, 64);
+    s3.setTileShape(4, 4, 4);
+    s3.setPredict(false);
+    EXPECT_EQ(s3.getFusedOp().op_name, "TiledLorenzoIdentity3DPredictor");
 }
 
 // ── TL10 ────────────────────────────────────────────────────────────────────

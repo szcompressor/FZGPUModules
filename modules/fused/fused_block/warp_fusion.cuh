@@ -96,6 +96,7 @@ struct Lorenzo1DPredictor {
 // neighbour code equals what the staged quantizer produced). Mirrors
 // tiled_lorenzo_delta_kernel exactly. tile_elems == tx*ty == block_size.
 struct TiledLorenzo2DPredictor {
+    static constexpr bool is_identity = false;   // applies the separable delta
     const float* in;
     float inv2eb;
     uint32_t dx, dy, tx, ty, ntx;
@@ -169,6 +170,7 @@ __device__ __forceinline__ void applyTransforms(int (&d)[EPL], uint32_t lane) {
 // local ∈ [0,64). NOTE: like the 2-D predictor this re-reads neighbours from GLOBAL and
 // the fused kernel recomputes it in BOTH the rate and pack passes.
 struct TiledLorenzo3DPredictor {
+    static constexpr bool is_identity = false;   // applies the separable delta
     const float* in;
     float inv2eb;
     uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
@@ -199,6 +201,86 @@ struct TiledLorenzo3DPredictor {
     }
     // INVERSE: natural row-major index for tile-major local element `local` of tile `b`;
     // ~0 marks a padding element (no write).
+    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lz = local / (tx * ty);
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
+        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gz = tiz * tz + lz;
+        if (gx >= dx || gy >= dy || gz >= dz) return ~static_cast<size_t>(0);
+        return (static_cast<size_t>(gz) * dy + gy) * dx + gx;
+    }
+};
+
+// ── Identity tiled predictors (cuSZp3 FIXED mode) ────────────────────────────
+// Same tile geometry as TiledLorenzo{2D,3D}Predictor, but with NO delta: delta()
+// returns the quantized code itself (pred == 0). This reproduces cuSZp3 fixed mode's
+// per-tile fixed-rate layout in one fused kernel. Note the load-once property: unlike
+// the delta predictors (self + a re-read neighbour = 2 global reads/elem), the identity
+// predictor reads only in[gidx] — 1 read/elem, like native. The inverse needs no
+// prefix sum (is_identity gates it in fused_unpack_tiled_body): the stored tile-major
+// values ARE the codes, so the inverse just scatters them via inv_gidx.
+struct TiledLorenzoIdentity2DPredictor {
+    static constexpr bool is_identity = true;
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, tx, ty, ntx;
+    __device__ static TiledLorenzoIdentity2DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
+        return TiledLorenzoIdentity2DPredictor{in, p.inv2eb, p.dx, p.dy, p.tx, p.ty, p.ntx};
+    }
+    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+        const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
+        const uint32_t lx = local % tx;
+        const uint32_t ly = local / tx;                                 // tz==1 ⇒ ly < ty
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        if (gx >= dx || gy >= dy) return 0;                             // padding
+        const size_t gidx = static_cast<size_t>(gy) * dx + gx;
+        return __float2int_rn(in[gidx] * inv2eb);                       // NO delta (load-once)
+    }
+    __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>(b / ntx);
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        if (gx >= dx || gy >= dy) return ~static_cast<size_t>(0);
+        return static_cast<size_t>(gy) * dx + gx;
+    }
+};
+
+struct TiledLorenzoIdentity3DPredictor {
+    static constexpr bool is_identity = true;
+    const float* in;
+    float inv2eb;
+    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    __device__ static TiledLorenzoIdentity3DPredictor fromParams(const float* in, size_t /*n*/, const void* pp) {
+        const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
+        return TiledLorenzoIdentity3DPredictor{in, p.inv2eb, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+    }
+    __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
+        const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
+        const uint32_t lx = local % tx;
+        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lz = local / (tx * ty);
+        const uint32_t tix = static_cast<uint32_t>(b % ntx);
+        const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
+        const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
+        const uint32_t gx = tix * tx + lx;
+        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gz = tiz * tz + lz;
+        if (gx >= dx || gy >= dy || gz >= dz) return 0;                 // padding
+        const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
+        return __float2int_rn(in[gidx] * inv2eb);                       // NO delta (load-once)
+    }
     __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
         const uint32_t lx = local % tx;
         const uint32_t ly = (local / tx) % ty;
@@ -769,13 +851,19 @@ __device__ __forceinline__ void fused_unpack_tiled_body(
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
-        int code = 0;
-        for (uint32_t k = 0; k <= lz; ++k) code += s[(k * ty) * tx];                 // z-spine
-        for (uint32_t k = 1; k <= ly; ++k) code += s[(lz * ty + k) * tx];            // y-spine
-        for (uint32_t k = 1; k <= lx; ++k) code += s[(lz * ty + ly) * tx + k];       // x-row
+        int code;
+        if (Pred::is_identity) {
+            // cuSZp3 fixed: stored tile-major values ARE the codes — no prefix sum.
+            code = s[local];
+        } else {
+            const uint32_t lx = local % tx;
+            const uint32_t ly = (local / tx) % ty;
+            const uint32_t lz = local / (tx * ty);
+            code = 0;
+            for (uint32_t k = 0; k <= lz; ++k) code += s[(k * ty) * tx];             // z-spine
+            for (uint32_t k = 1; k <= ly; ++k) code += s[(lz * ty + k) * tx];        // y-spine
+            for (uint32_t k = 1; k <= lx; ++k) code += s[(lz * ty + ly) * tx + k];   // x-row
+        }
         const size_t g = pred.inv_gidx(b, local);
         if (g != ~static_cast<size_t>(0)) out[g] = static_cast<float>(code) * ebx2;
     }

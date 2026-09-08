@@ -17,6 +17,7 @@ struct TiledGeom {
     uint32_t tx, ty, tz;     // tile dims
     uint32_t ntx, nty, ntz;  // tile counts per axis
     uint32_t tile_elems;     // tx*ty*tz
+    bool     predict;        // true = separable Lorenzo delta; false = tile-major reorder only (cuSZp3 fixed)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +59,11 @@ __global__ void tiled_lorenzo_delta_kernel(
 
     const size_t gidx = (static_cast<size_t>(gz) * g.dy + gy) * g.dx + gx;
     const T cur = in[gidx];
+
+    if (!g.predict) {          // cuSZp3 fixed mode: tile-major reorder, no delta
+        out[oidx] = cur;
+        return;
+    }
 
     T pred;
     if (lx > 0)        pred = in[gidx - 1];                                 // X-delta
@@ -189,11 +195,14 @@ __global__ void tiled_lorenzo_scan_kernel_rows(
 
     // Seed = reconstructed value at (lx=0, ly, lz): z-column prefix up to lz, then
     // y-column prefix (1..ly) at this lz. Both walk the tile's x=0 spine deltas.
+    // No-delta (cuSZp3 fixed) mode carries no prefix — the codes ARE the values.
     T seed = 0;
-    for (uint32_t k = 0; k <= lz; ++k)
-        seed = static_cast<T>(seed + in[base + (static_cast<size_t>(k) * ty) * tx]); // d(0,0,k)
-    for (uint32_t k = 1; k <= ly; ++k)
-        seed = static_cast<T>(seed + in[base + (static_cast<size_t>(lz) * ty + k) * tx]); // d(0,k,lz)
+    if (g.predict) {
+        for (uint32_t k = 0; k <= lz; ++k)
+            seed = static_cast<T>(seed + in[base + (static_cast<size_t>(k) * ty) * tx]); // d(0,0,k)
+        for (uint32_t k = 1; k <= ly; ++k)
+            seed = static_cast<T>(seed + in[base + (static_cast<size_t>(lz) * ty + k) * tx]); // d(0,k,lz)
+    }
 
     // X-chain: reconstruct (lx,ly,lz) = seed + prefix of row deltas, write natural.
     const uint32_t tix = static_cast<uint32_t>(t % g.ntx);
@@ -205,11 +214,16 @@ __global__ void tiled_lorenzo_scan_kernel_rows(
 
     const size_t rowbase = base + (static_cast<size_t>(lz) * ty + ly) * tx;
     const size_t out_row = (static_cast<size_t>(gz) * g.dy + gy) * g.dx + tix * tx;
-    T cur = seed;
     const uint32_t gx0 = tix * tx;
-    for (uint32_t lx = 0; lx < tx; ++lx) {
-        if (lx > 0) cur = static_cast<T>(cur + in[rowbase + lx]);   // d(lx,ly,lz)
-        if (gx0 + lx < g.dx) out[out_row + lx] = cur;
+    if (g.predict) {
+        T cur = seed;
+        for (uint32_t lx = 0; lx < tx; ++lx) {
+            if (lx > 0) cur = static_cast<T>(cur + in[rowbase + lx]);   // d(lx,ly,lz)
+            if (gx0 + lx < g.dx) out[out_row + lx] = cur;
+        }
+    } else {                       // cuSZp3 fixed: un-tile scatter, codes are values
+        for (uint32_t lx = 0; lx < tx; ++lx)
+            if (gx0 + lx < g.dx) out[out_row + lx] = in[rowbase + lx];
     }
 }
 
@@ -275,6 +289,7 @@ void TiledLorenzoStage<T>::execute(
     g.nty = static_cast<uint32_t>((dy + g.ty - 1) / g.ty);
     g.ntz = static_cast<uint32_t>((dz + g.tz - 1) / g.tz);
     g.tile_elems = g.tx * g.ty * g.tz;
+    g.predict = predict_;
 
     const size_t num_tiles = static_cast<size_t>(g.ntx) * g.nty * g.ntz;
     const size_t padded    = num_tiles * g.tile_elems;
