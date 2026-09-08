@@ -395,19 +395,37 @@ struct AdaptiveBitpackCoder {
             active[m] = idx < count;
             av[m]     = active[m] ? absU_i32(d[m]) : 0u;
         }
+        // NOTE (2026-09-08, coder rewrite -- see reports/adaptive_bitpack_coder_rewrite.md):
+        // `sm`/`pm` are the result of __ballot_sync, which is IDENTICAL on every lane in
+        // the warp by definition (a vote broadcasts its result). The original code wrote
+        // it 1 byte at a time from 4 different lanes (`if (lane<4) base[...]=byte`) --
+        // under SIMT that's 4 predicated store instructions issued by the warp for a
+        // value every lane already holds identically. One lane writing the full
+        // `uint32_t` in one store is the same data, 4x fewer store instructions,
+        // matching the vectorized-write fix already applied to ThreadFixedRateCoderN
+        // (warp_ti_fusion.cuh) for the TI path. Falls back to scalar bytes only if the
+        // destination isn't 4-byte aligned (word_bytes is usually 4, making every offset
+        // here a multiple of 4, but this isn't guaranteed for smaller word_bytes).
         if (!is_out) {
             if (r == 0) return;
             #pragma unroll
             for (int m = 0; m < EPL; ++m) {
                 const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
-                if (lane < 4) base[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
+                uint8_t* p4 = base + 4u * m;
+                if (lane == 0u) {
+                    if ((reinterpret_cast<size_t>(p4) & 3u) == 0u) *reinterpret_cast<uint32_t*>(p4) = sm;
+                    else { for (uint32_t k = 0; k < 4u; ++k) p4[k] = static_cast<uint8_t>((sm >> (8u*k)) & 0xFFu); }
+                }
             }
             for (int p = 0; p < r; ++p) {
                 #pragma unroll
                 for (int m = 0; m < EPL; ++m) {
                     const uint32_t pm = __ballot_sync(0xffffffffu, active[m] && ((av[m] >> p) & 1u));
-                    if (lane < 4)
-                        base[word_bytes*(1u+p) + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
+                    uint8_t* pp4 = base + word_bytes*(1u+p) + 4u*m;
+                    if (lane == 0u) {
+                        if ((reinterpret_cast<size_t>(pp4) & 3u) == 0u) *reinterpret_cast<uint32_t*>(pp4) = pm;
+                        else { for (uint32_t k = 0; k < 4u; ++k) pp4[k] = static_cast<uint8_t>((pm >> (8u*k)) & 0xFFu); }
+                    }
                 }
             }
             return;
@@ -424,15 +442,22 @@ struct AdaptiveBitpackCoder {
         #pragma unroll
         for (int m = 0; m < EPL; ++m) {
             const uint32_t sm = __ballot_sync(0xffffffffu, active[m] && d[m] < 0);
-            if (lane < 4) sign[4u*m + lane] = static_cast<uint8_t>((sm >> (8u*lane)) & 0xFFu);
+            uint8_t* p4 = sign + 4u * m;
+            if (lane == 0u) {
+                if ((reinterpret_cast<size_t>(p4) & 3u) == 0u) *reinterpret_cast<uint32_t*>(p4) = sm;
+                else { for (uint32_t k = 0; k < 4u; ++k) p4[k] = static_cast<uint8_t>((sm >> (8u*k)) & 0xFFu); }
+            }
         }
         for (int p = 0; p < r; ++p) {
             #pragma unroll
             for (int m = 0; m < EPL; ++m) {
                 const bool plane_active = active[m] && (static_cast<size_t>(lane) + 32u*m) > 0;
                 const uint32_t pm = __ballot_sync(0xffffffffu, plane_active && ((av[m] >> p) & 1u));
-                if (lane < 4)
-                    planes[word_bytes*p + 4u*m + lane] = static_cast<uint8_t>((pm >> (8u*lane)) & 0xFFu);
+                uint8_t* pp4 = planes + word_bytes*p + 4u*m;
+                if (lane == 0u) {
+                    if ((reinterpret_cast<size_t>(pp4) & 3u) == 0u) *reinterpret_cast<uint32_t*>(pp4) = pm;
+                    else { for (uint32_t k = 0; k < 4u; ++k) pp4[k] = static_cast<uint8_t>((pm >> (8u*k)) & 0xFFu); }
+                }
             }
         }
     }
