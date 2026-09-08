@@ -103,22 +103,18 @@ static std::string generateWarpSinglePassSource(const WarpFusionSpec& spec, int 
 // on). This probe-driven choice is the DEFAULT for any TI-supported chain — no env var needed.
 // FZ_TI=1 forces TI unconditionally (skips the probe); FZ_ADAPTIVE=0 disables the probe and
 // falls through to the single-pass/two-pass choice below (debugging/A-B only).
-// `predictor_name`/`coder_name` are the SAME op_name strings the warp-cooperative path
-// already uses ("Lorenzo1DPredictor", "TiledLorenzo{2,3}DPredictor",
-// "TiledLorenzoIdentity{2,3}DPredictor"; "AdaptiveBitpackCoder" or "PlainRateCoder") — the
-// thread-independent policy for each predictor is named identically with a "Thread" prefix
-// (declared in warp_ti_fusion.cuh), so source-gen is a straight string transform, no per-
-// predictor branching. `block_size` (32 or 64) selects the ThreadXRateCoderN<> width; see
-// tiSupportedChain() for which (predictor, coder, block_size) triples are actually eligible.
-static std::string generateWarpTISource(const std::string& predictor_name,
-                                        const std::string& coder_name, int block_size,
+// `predictor_ti`/`coder_ti` come straight from the stages' own FusedOpDecl::ti_op_name
+// (see fusion.h) — the predictor's is a complete, non-templated class name
+// ("ThreadLorenzo1DPredictor", "ThreadTiledLorenzo3DPredictor", ...); the coder's is a
+// template BASE name ("ThreadFixedRateCoderN", "ThreadPlainRateCoderN") that this
+// function completes with `<block_size>`, since only the launcher knows the paired
+// predictor's block size. No name-transform convention and no per-predictor branching
+// live here — see tiSupportedChain() for the (equally stage-declared) eligibility check.
+static std::string generateWarpTISource(const std::string& predictor_ti,
+                                        const std::string& coder_ti, int block_size,
                                         int blocks_per_thread) {
-    const std::string thread_pred = "Thread" + predictor_name;
-    // "AdaptiveBitpackCoder" -> ThreadFixedRateCoderN<N> (2-byte meta, outlier escape);
-    // "PlainRateCoder" -> ThreadPlainRateCoderN<N> (1-byte meta, no outlier).
-    const std::string coder_base = (coder_name == "PlainRateCoder")
-        ? "ThreadPlainRateCoderN" : "ThreadFixedRateCoderN";
-    const std::string coder = coder_base + "<" + std::to_string(block_size) + ">";
+    const std::string& thread_pred = predictor_ti;
+    const std::string coder = coder_ti + "<" + std::to_string(block_size) + ">";
     std::string src;
     src += "#include \"fused/fused_block/warp_ti_fusion.cuh\"\n";
     src += "using namespace fz::fused::warp_ti;\n";
@@ -135,21 +131,17 @@ static std::string generateWarpTISource(const std::string& predictor_name,
     src += "}\n";
     return src;
 }
-// Chain shapes TI supports: Lorenzo1D (block=32, milestone 1) and the tiled cuSZp3
-// predictors — plain/outlier delta and the no-delta identity (fixed mode) — at block=64
-// (milestone 2), each paired with EITHER AdaptiveBitpackCoder (outlier-selection mode) or
-// PlainRateCoder (plain, fixed-rate-only mode — AdaptiveBitpackStage emits this whenever
-// outlier_selection is false, which is most of the "plain" presets; TI could not fuse those
-// chains before ThreadPlainRateCoderN existed). No transforms.
+// TI eligibility is now exactly the stages' own declaration: both the predictor and the
+// coder set FusedOpDecl::ti_op_name (propagated into spec.predictor_ti/coder_ti by
+// fusion_registry.cpp), and the chain has no register→register transforms (no TI
+// transform policies exist yet — same restriction the warp-cooperative single-pass path
+// applies). This replaced a launcher-side name whitelist (previously hardcoded here:
+// "Lorenzo1DPredictor" at EPL==1, "TiledLorenzo{2,3}D[Identity]Predictor" at EPL==2,
+// paired with "AdaptiveBitpackCoder"/"PlainRateCoder") — adding a TI variant for a new
+// predictor/coder is now purely "write the ThreadX policy + set ti_op_name on the stage",
+// with nothing to keep in sync here.
 static bool tiSupportedChain(const WarpFusionSpec& spec) {
-    if (spec.coder != "AdaptiveBitpackCoder" && spec.coder != "PlainRateCoder") return false;
-    if (!spec.transforms.empty()) return false;
-    if (spec.predictor == "Lorenzo1DPredictor") return spec.elems_per_lane == 1;
-    if (spec.predictor == "TiledLorenzo2DPredictor" || spec.predictor == "TiledLorenzo3DPredictor" ||
-        spec.predictor == "TiledLorenzoIdentity2DPredictor" ||
-        spec.predictor == "TiledLorenzoIdentity3DPredictor")
-        return spec.elems_per_lane == 2;
-    return false;
+    return !spec.predictor_ti.empty() && !spec.coder_ti.empty() && spec.transforms.empty();
 }
 static bool envOn(const char* name) {
     const char* e = std::getenv(name);
@@ -322,7 +314,7 @@ size_t launchNvrtcWarpFused(
         auto* d_incl  = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t)*num_warps, stream, "ti_lb_incl"));
         FZ_CUDA_CHECK(cudaMemsetAsync(d_state, 0, sizeof(uint32_t)*num_warps, stream));  // LB_NONE
 
-        const std::string tsrc = generateWarpTISource(spec.predictor, spec.coder,
+        const std::string tsrc = generateWarpTISource(spec.predictor_ti, spec.coder_ti,
                                                        static_cast<int>(block_size), BPT);
         CUfunction tik = reinterpret_cast<CUfunction>(nvrtcGetKernel(tsrc, "fz_fused_warp_ti"));
         unsigned long long nw_arg = num_warps;

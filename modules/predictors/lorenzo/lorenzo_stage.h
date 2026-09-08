@@ -159,6 +159,10 @@ public:
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = epl;
         d.n_ab           = 0;
+        // ThreadLorenzo1DPredictor's predict(base, d[32]) is written for exactly one
+        // 32-element block; EPL > 1 (block 64/96/128, e.g. SZp's composed chain) has
+        // no TI policy today, so only declare it at EPL == 1.
+        if (epl == 1u) d.ti_op_name = "ThreadLorenzo1DPredictor";
         fused::warp::Lorenzo1DParams p{0.0f, epl};
         d.params.resize(sizeof(p));
         std::memcpy(d.params.data(), &p, sizeof(p));
@@ -185,6 +189,7 @@ public:
         d.op_name        = "Lorenzo1DPredictor";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = block_size_ / 32u;
+        if (d.elems_per_lane == 1u) d.ti_op_name = "ThreadLorenzo1DPredictor";
         return d;
     }
 

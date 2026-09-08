@@ -126,6 +126,16 @@ public:
         // the warp chain with no other change.
         d.op_name        = outlier_selection_ ? fused_coder_ : "PlainRateCoder";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
+        // ThreadFixedRateCoderN<N>/ThreadPlainRateCoderN<N> mirror AdaptiveBitpackCoder
+        // and PlainRateCoder byte-for-byte for any N (launcher fills in <N> from the
+        // paired predictor's block size). Only known when fused_coder_ is left at its
+        // default "AdaptiveBitpackCoder" -- a caller who swapped in some other
+        // Cooperative sink via setFusedCoder() has no known TI policy to offer.
+        if (outlier_selection_) {
+            if (fused_coder_ == "AdaptiveBitpackCoder") d.ti_op_name = "ThreadFixedRateCoderN";
+        } else {
+            d.ti_op_name = "ThreadPlainRateCoderN";
+        }
         return d;
     }
 
@@ -151,6 +161,10 @@ public:
         d.op_name        = outlier_selection_ ? "AdaptiveBitpackCoder" : "PlainRateCoder";
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = block_size_ / 32u;
+        // Inverse always decodes the true AdaptiveBitpack-format archive regardless of
+        // what fused_coder_ was on the forward encode side, so the TI decode policy is
+        // always known here (no setFusedCoder ambiguity, unlike the forward decl above).
+        d.ti_op_name     = outlier_selection_ ? "ThreadFixedRateCoderN" : "ThreadPlainRateCoderN";
         return d;
     }
     size_t getFusedInverseElementCount() const override { return num_elements_; }

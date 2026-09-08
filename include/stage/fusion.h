@@ -172,6 +172,25 @@ struct FusedOpDecl {
     /// leading `float inv2eb` slot (offset 0) the runner fills from the resolved bound.
     uint32_t             elems_per_lane = 0;
     size_t               n_ab = 0;
+
+    /// Thread-independent (TI) device-policy type name for this SAME op, if the stage
+    /// has one registered; empty means "no TI variant" — the launcher's TI eligibility
+    /// check is exactly "both predictor and coder declared a non-empty ti_op_name",
+    /// nothing else. This replaces a launcher-side name whitelist
+    /// (nvrtc_warp_fusion.cu's old tiSupportedChain) with the stage declaring its own
+    /// capability directly: adding a TI variant for a new predictor/coder means writing
+    /// the ThreadX policy in warp_ti_fusion.cuh and setting this field here — no
+    /// separate list to keep in sync, and a mismatch (TI class exists but this field
+    /// wasn't set, or vice versa) is a straightforward NVRTC-compile-time or
+    /// eligibility-mismatch to find rather than a silent throughput regression.
+    ///
+    /// For a PREDICTOR: the exact, non-templated TI class name
+    /// ("ThreadLorenzo1DPredictor", "ThreadTiledLorenzo3DPredictor", ...). For a
+    /// CODER: the TI class's TEMPLATE BASE name without the `<N>` block-size argument
+    /// ("ThreadFixedRateCoderN", "ThreadPlainRateCoderN") — the launcher supplies `N`
+    /// (= 32 * elems_per_lane) since only it knows the paired predictor's block size.
+    std::string          ti_op_name;
+
     bool valid() const { return !op_name.empty(); }
 };
 

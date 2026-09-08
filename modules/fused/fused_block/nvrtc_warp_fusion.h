@@ -34,6 +34,14 @@ struct WarpFusionSpec {
     std::vector<std::string> transforms;                        // optional, in execution order
     std::string              coder          = "AdaptiveBitpackCoder";   // swappable sink
     int                      elems_per_lane = 1;
+
+    /// Thread-independent (TI) variant names, copied straight from the predictor's and
+    /// coder's own FusedOpDecl::ti_op_name (see fusion.h) — empty means that op has no
+    /// TI policy. TI is eligible for this chain iff BOTH are non-empty and `transforms`
+    /// is empty; see tiSupportedChain() in nvrtc_warp_fusion.cu. This is the stage's own
+    /// capability declaration, not a launcher-side name whitelist.
+    std::string              predictor_ti;
+    std::string              coder_ti;
 };
 
 /// The CUDA source the codegen emits for `spec` (exposed for tests/inspection).

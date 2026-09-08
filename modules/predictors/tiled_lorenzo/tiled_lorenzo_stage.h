@@ -202,11 +202,13 @@ public:
         d.elems_per_lane = 2;
         if (tz == 1u) {   // 2-D
             d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
+            d.ti_op_name = predict_ ? "ThreadTiledLorenzo2DPredictor" : "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D (PROTOTYPE)
             d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
+            d.ti_op_name = predict_ ? "ThreadTiledLorenzo3DPredictor" : "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
@@ -241,11 +243,13 @@ public:
         d.elems_per_lane = 2;
         if (tz == 1u) {   // 2-D
             d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
+            d.ti_op_name = predict_ ? "ThreadTiledLorenzo2DPredictor" : "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};  // inv2eb unused on decode
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D
             d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
+            d.ti_op_name = predict_ ? "ThreadTiledLorenzo3DPredictor" : "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));

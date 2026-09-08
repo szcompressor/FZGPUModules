@@ -73,10 +73,13 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     // policy), g[1] predictor, g[2..n-2] transforms, g[n-1] coder. The predictor packs
     // its geometry with a leading inv2eb slot (offset 0) it cannot fill (the quantizer
     // owns the bound); patch it here.
-    const FusedOpDecl decl = g[1]->getFusedOp();
+    const FusedOpDecl decl      = g[1]->getFusedOp();
+    const FusedOpDecl coder_decl = g.back()->getFusedOp();   // swappable Cooperative sink
     fused::WarpFusionSpec spec;
     spec.predictor      = decl.op_name;
-    spec.coder          = g.back()->getFusedOp().op_name;   // swappable Cooperative sink
+    spec.coder          = coder_decl.op_name;
+    spec.predictor_ti   = decl.ti_op_name;
+    spec.coder_ti       = coder_decl.ti_op_name;
     spec.elems_per_lane = static_cast<int>(decl.elems_per_lane);
     for (size_t i = 2; i + 1 < g.size(); ++i)              // register→register transforms
         spec.transforms.push_back(g[i]->getFusedOp().op_name);
@@ -319,10 +322,13 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
     if (!coder || !predictor || !quant) return 0;   // matcher guarantees this
 
     const FusedOpDecl pdecl = predictor->getInverseFusedOp();
+    const FusedOpDecl cdecl = coder->getInverseFusedOp();
     fused::WarpFusionSpec spec;
-    spec.coder          = coder->getInverseFusedOp().op_name;
+    spec.coder          = cdecl.op_name;
     spec.predictor      = pdecl.op_name;
-    spec.elems_per_lane = static_cast<int>(coder->getInverseFusedOp().elems_per_lane);
+    spec.predictor_ti   = pdecl.ti_op_name;
+    spec.coder_ti       = cdecl.ti_op_name;
+    spec.elems_per_lane = static_cast<int>(cdecl.elems_per_lane);
 
     // n_elems: the coder's block-covering count. 1-D: the natural count. Tiled
     // (cuSZp3): the padded tile-major count — so n_out (the predictor's natural
