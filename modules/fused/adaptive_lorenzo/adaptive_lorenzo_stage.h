@@ -354,7 +354,8 @@ static_assert(sizeof(FusedQuantAdaptiveLorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
 
 /**
  * AdaptiveLorenzo with the upstream linear Quantizer folded into its forward
- * kernel — the "M1" partial fusion (see FZGPUModules memory
+ * kernel — the "M1" partial fusion. This is an explicit, opt-in stage and is
+ * not selected by automatic Pipeline Specialization (see FZGPUModules memory
  * `generic_fusion_plan.md`'s ARCHITECTURAL TENSION section, approach C, and
  * `quant_al_partial_fusion_probe.md` for the validated probe this promotes to
  * a real stage). Deletes the separate `QuantizerStage` kernel and its `codes`
