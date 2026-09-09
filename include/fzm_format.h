@@ -128,6 +128,7 @@ enum class StageType : uint16_t {
     SPECK2D    = 40,   ///< GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format
     CDF97_OUTLIER_CORRECT = 41, ///< Sparse outlier correction, guarantees the GPU SPERR pipeline's pointwise bound
     GOLOMB_RICE = 42,  ///< Chunk-local Golomb-Rice entropy coder (exact per-chunk k, escape-bounded)
+    FUSED_QUANT_ADAPTIVE_LORENZO = 43, ///< AdaptiveLorenzo with the upstream linear Quantizer fused into its forward kernel (FSZ "M1" partial fusion, deletes one DRAM round-trip)
 };
 
 /**

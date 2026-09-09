@@ -261,6 +261,36 @@ static void saveAdaptiveLorenzoStage(Stage* s, std::ostringstream& out) {
     }
 }
 
+// Add a FusedQuantAdaptiveLorenzo stage — AdaptiveLorenzo with the upstream
+// linear Quantizer fused into its forward kernel ("M1" partial fusion). Takes
+// raw float32 input directly: no separate Quantizer stage in the pipeline.
+// TCode is fixed at int32_t for now (matching FSZ's real usage) — see
+// modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.h.
+static Stage* addFusedQuantAdaptiveLorenzoStage(Pipeline& p, const toml::table& t) {
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
+    c.coder_block_size = static_cast<uint32_t>(optInt(t, "coder_block_size", 32));
+    c.blocks_per_tile  = static_cast<uint32_t>(optInt(t, "blocks_per_tile", 8));
+    c.enable_order2    = optBool(t, "enable_order2", true);
+    c.enable_centering = optBool(t, "enable_centering", true);
+    c.error_bound      = optDbl(t, "error_bound", 1e-3);
+    c.eb_mode          = ebModeFromString(optStr(t, "error_bound_mode", "ABS"));
+    c.precomputed_value_base = static_cast<float>(optDbl(t, "value_base", 0.0));
+    return p.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
+}
+
+static void saveFusedQuantAdaptiveLorenzoStage(Stage* s, std::ostringstream& out) {
+    uint8_t buf[sizeof(FusedQuantAdaptiveLorenzoConfig)] = {};
+    if (s->serializeHeader(0, buf, sizeof(buf)) >= sizeof(FusedQuantAdaptiveLorenzoConfig)) {
+        FusedQuantAdaptiveLorenzoConfig c;
+        std::memcpy(&c, buf, sizeof(c));
+        out << "blocks_per_tile = " << static_cast<int>(c.blocks_per_tile) << "\n";
+        out << "enable_order2 = " << (c.enable_order2 ? "true" : "false") << "\n";
+        out << "enable_centering = " << (c.enable_centering ? "true" : "false") << "\n";
+        out << "error_bound = " << c.user_error_bound << "\n";
+        out << "error_bound_mode = \"" << ebModeToString(static_cast<ErrorBoundMode>(c.eb_mode)) << "\"\n";
+    }
+}
+
 // Add a LorenzoQuant stage (dispatches on input_type / code_type strings).
 static Stage* addLorenzoQuantStage(Pipeline& p, const toml::table& t) {
     std::string in_type   = optStr(t, "input_type", "float32");
@@ -1267,6 +1297,7 @@ static const StageEntry kStageRegistry[] = {
     { "Lorenzo",      StageType::LORENZO,      addLorenzoStage,      saveLorenzoStage,      "modules/predictors/lorenzo" },
     { "LorenzoQuant", StageType::LORENZO_QUANT, addLorenzoQuantStage, saveLorenzoQuantStage, "modules/fused/lorenzo_quant" },
     { "AdaptiveLorenzo", StageType::ADAPTIVE_LORENZO, addAdaptiveLorenzoStage, saveAdaptiveLorenzoStage, "modules/fused/adaptive_lorenzo" },
+    { "FusedQuantAdaptiveLorenzo", StageType::FUSED_QUANT_ADAPTIVE_LORENZO, addFusedQuantAdaptiveLorenzoStage, saveFusedQuantAdaptiveLorenzoStage, "modules/fused/adaptive_lorenzo" },
     { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage,    "modules/quantizers/quantizer" },
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage,   "modules/shufflers/bitshuffle" },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage,          "modules/coders/rze" },

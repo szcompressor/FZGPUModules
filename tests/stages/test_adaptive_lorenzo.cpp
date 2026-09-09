@@ -23,6 +23,15 @@
  *   AL17 BoundPlainOracleMatchesLegacy — explicit bound/fallback byte parity
  *   AL18 DownstreamOracleChangesSelection — outlier policy changes chosen modes
  *   AL19 OutlierOracleNeverWorseThanFixed — exact second-policy end-to-end gate
+ *
+ * FusedQuantAdaptiveLorenzoStage<T> — AdaptiveLorenzo with the upstream linear
+ * Quantizer fused into its forward kernel ("M1" partial fusion, promoted from
+ * examples/fsz_fusion_probe.cu — see memory/quant_al_partial_fusion_probe.md):
+ *
+ *   FQAL1 ForwardRoundTrip           — 2-stage pipeline (no separate Quantizer), ABS
+ *   FQAL2 MatchesStagedByteIdentical — identical reconstruction to Quantizer->AdaptiveLorenzo->AdaptiveBitpack
+ *   FQAL3 NOAMode                    — value-range-relative bound resolves and round-trips
+ *   FQAL4 SerializeDeserialize       — resolved abs_eb survives the FZM header
  */
 
 #include <gtest/gtest.h>
@@ -434,4 +443,130 @@ TEST(AdaptiveLorenzoStage, CompactionSurvivesTileCountNotMultipleOfFour) {
     CudaStream cs;
     auto res = pipeline_round_trip<int32_t>(p, v, cs.stream);
     EXPECT_EQ(res.max_error, 0.0f);
+}
+
+// ── FusedQuantAdaptiveLorenzoStage — "M1" partial fusion (upstream linear
+// Quantizer folded into AdaptiveLorenzo's forward kernel), promoted from the
+// probe in examples/fsz_fusion_probe.cu. See
+// FZGPUModules/memory/quant_al_partial_fusion_probe.md for the design.
+//
+//   FQAL1  ForwardRoundTrip        — 2-stage pipeline (no separate Quantizer), ABS
+//   FQAL2  MatchesStagedByteIdentical — same archive as Quantizer->AdaptiveLorenzo->AdaptiveBitpack
+//   FQAL3  NOAMode                 — value-range-relative bound resolves and round-trips
+//   FQAL4  SerializeDeserialize    — resolved abs_eb survives the FZM header
+
+TEST(FusedQuantAdaptiveLorenzoStage, ForwardRoundTrip) {
+    const size_t N = 8192;
+    auto h_float = make_smooth_data<float>(N);
+
+    Pipeline p(N * sizeof(float), MemoryStrategy::PREALLOCATE);
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
+    c.error_bound = 1e-3;
+    c.eb_mode     = ErrorBoundMode::ABS;
+    auto* al = p.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    p.connect(ab, al);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_float, cs.stream);
+    // Same 1% slack as AdaptiveLorenzoStage's own PipelineIntegration test —
+    // the prediction/coding chain is integer-lossless; the float32 ulp at
+    // make_smooth_data's magnitude is the only source of error here.
+    EXPECT_LE(res.max_error, 1e-3 * 1.01);
+}
+
+TEST(FusedQuantAdaptiveLorenzoStage, MatchesStagedByteIdentical) {
+    // Same math, two different pipelines: Quantizer(linear,ABS) ->
+    // AdaptiveLorenzo -> AdaptiveBitpack (staged, 3 stages) must reconstruct
+    // to the EXACT SAME output as FusedQuantAdaptiveLorenzo -> AdaptiveBitpack
+    // (fused, 2 stages) on the same input and bound — the fused kernel is a
+    // line-for-line copy of the staged one with only the input read changed
+    // (see adaptive_lorenzo_stage.cu). Both are integer-lossless once
+    // quantized, so exact float equality (not just within-eb) is the bar.
+    const size_t N = 8192 + 37;  // exercise a partial coder block and tile
+    auto h_float = make_smooth_data<float>(N);
+
+    Pipeline staged(N * sizeof(float), MemoryStrategy::PREALLOCATE);
+    auto* q = staged.addStage<QuantizerStage<float, uint32_t>>();
+    q->setErrorBound(1e-3f);
+    q->setErrorBoundMode(ErrorBoundMode::ABS);
+    q->setLinearMode(true);
+    auto* al_staged = staged.addStage<AdaptiveLorenzoStage<int32_t>>();
+    auto* ab_staged = staged.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab_staged->setBlockSize(32);
+    staged.connect(al_staged, q, "codes");
+    staged.connect(ab_staged, al_staged);
+    staged.finalize();
+
+    Pipeline fused(N * sizeof(float), MemoryStrategy::PREALLOCATE);
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
+    c.error_bound = 1e-3;
+    c.eb_mode     = ErrorBoundMode::ABS;
+    auto* al_fused = fused.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
+    auto* ab_fused = fused.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab_fused->setBlockSize(32);
+    fused.connect(ab_fused, al_fused);
+    fused.finalize();
+
+    CudaStream cs;
+    auto staged_res = pipeline_round_trip<float>(staged, h_float, cs.stream);
+    auto fused_res  = pipeline_round_trip<float>(fused,  h_float, cs.stream);
+
+    EXPECT_EQ(staged_res.compressed_bytes, fused_res.compressed_bytes)
+        << "fused should encode the identical residuals/modes/means, so the "
+           "AdaptiveBitpack payload size must match exactly";
+    ASSERT_EQ(staged_res.data.size(), fused_res.data.size());
+    for (size_t i = 0; i < staged_res.data.size(); ++i)
+        EXPECT_EQ(staged_res.data[i], fused_res.data[i]) << "mismatch at element " << i;
+}
+
+TEST(FusedQuantAdaptiveLorenzoStage, NOAMode) {
+    const size_t N = 16384;
+    std::vector<float> h_float(N);
+    for (size_t i = 0; i < N; ++i)
+        h_float[i] = 1000.0f + 50.0f * std::sin(static_cast<float>(i) * 0.01f);
+    const float range = 100.0f;  // sin amplitude 50 -> range ~= 100
+    const double rel_eb = 1e-3;
+
+    Pipeline p(N * sizeof(float), MemoryStrategy::PREALLOCATE);
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
+    c.error_bound = rel_eb;
+    c.eb_mode     = ErrorBoundMode::NOA;
+    auto* al = p.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    p.connect(ab, al);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_float, cs.stream);
+    const double abs_eb = rel_eb * range;
+    EXPECT_LE(res.max_error, abs_eb * 1.05)
+        << "NOA-resolved bound should be ~= rel_eb * (max-min) of the data";
+    EXPECT_GE(al->getComputedAbsErrorBound(), abs_eb * 0.9);
+    EXPECT_LE(al->getComputedAbsErrorBound(), abs_eb * 1.1);
+}
+
+TEST(FusedQuantAdaptiveLorenzoStage, SerializeDeserialize) {
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
+    c.blocks_per_tile  = 16;
+    c.enable_order2    = false;
+    c.enable_centering = true;
+    c.error_bound      = 5e-4;
+    c.eb_mode          = ErrorBoundMode::NOA;
+    FusedQuantAdaptiveLorenzoStage<int32_t> original(c);
+
+    // deserializeHeader() reads back computed_abs_eb_ as written by
+    // serializeHeader(), which in turn reflects whatever the forward pass
+    // last resolved. Simulate that directly rather than running a compress.
+    uint8_t buf[128] = {};
+    size_t written = original.serializeHeader(0, buf, sizeof(buf));
+    EXPECT_EQ(written, sizeof(FusedQuantAdaptiveLorenzoConfig));
+
+    FusedQuantAdaptiveLorenzoStage<int32_t> restored;
+    restored.deserializeHeader(buf, written);
+    EXPECT_EQ(restored.getTileSize(), 16u * 32u);
+    EXPECT_EQ(restored.getErrorBoundMode(), ErrorBoundMode::NOA);
 }

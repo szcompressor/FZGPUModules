@@ -24,6 +24,7 @@
 
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_oracle.cuh"
+#include "predictors/predictor_utils.cuh"  // computeValueBase — FusedQuantAdaptiveLorenzoStage
 #include "stage/stage_registry.h"
 #include <cstring>
 #include <algorithm>
@@ -337,6 +338,210 @@ __global__ void adaptive_lorenzo_forward_kernel(
     residuals[gid] = out;
 }
 
+// ── M1 partial fusion: upstream linear Quantizer folded into this kernel ────
+//
+// Line-for-line identical to adaptive_lorenzo_forward_kernel above, except the
+// input read `v = in[gid]` (pre-quantized T) becomes an inline quantize from
+// the raw float (`round(raw[gid] * ebx2_r)`, matching QuantizerStage's
+// linear_mode, non-high-precision path exactly — no overflow guard, so this
+// is scoped to fields whose quantized codes fit T, same envelope as the FSZ
+// paper's own assumption; the staged path's overflow safety net is unaffected
+// since this is an opt-in Config flag, not a change to AdaptiveLorenzoStage
+// itself). Deletes the Quantizer kernel and its `codes` DRAM round-trip.
+//
+// `__launch_bounds__(256, 8)` is not decoration: without it the extra inline
+// float-load + multiply + round pushes this kernel from 31 to 38
+// registers/thread, crossing the 8->6 resident-blocks/SM boundary on H100 —
+// AdaptiveLorenzo's forward is compute-bound (77.8% SM, see
+// FZGPUModules/memory/generic_fusion_plan.md's ncu gate), so that occupancy
+// loss cancels almost exactly what deleting the Quantizer pass saves (probe
+// measured 1.03-1.05x without this line vs 1.19-1.21x with it — see
+// FZGPUModules/memory/quant_al_partial_fusion_probe.md). Correctness is
+// unaffected either way — this only changes register allocation/spill
+// decisions.
+template<typename T>
+__global__ __launch_bounds__(256, 8) void fused_quant_adaptive_lorenzo_forward_kernel(
+    const float* __restrict__ raw,
+    float ebx2_r,
+    T*       __restrict__ residuals,
+    uint8_t* __restrict__ modes,
+    T*       __restrict__ means,
+    uint32_t* __restrict__ flags,
+    size_t n,
+    uint32_t tile_size,
+    bool enable_order2,
+    bool enable_centering,
+    EncodingOracleKind oracle_kind)
+{
+    __shared__ uint32_t  acc1[kMaxBlocksPerTile];
+    __shared__ uint32_t  acc2[kMaxBlocksPerTile];
+    __shared__ uint32_t  rest1[kMaxBlocksPerTile];
+    __shared__ uint32_t  rest2[kMaxBlocksPerTile];
+    __shared__ uint32_t  first1[kMaxBlocksPerTile];
+    __shared__ uint32_t  first2[kMaxBlocksPerTile];
+    __shared__ long long red[kMaxBlocksPerTile];
+    __shared__ T         sb_last[kMaxBlocksPerTile];
+    __shared__ T         sb_prev[kMaxBlocksPerTile];
+    __shared__ T         s_mu;
+    __shared__ T         s_q0;
+    __shared__ uint8_t   s_mode;
+
+    const size_t   base   = static_cast<size_t>(blockIdx.x) * tile_size;
+    const unsigned tid    = threadIdx.x;
+    const size_t   gid    = base + tid;
+    const bool     live   = (gid < n);
+    const unsigned warp   = tid >> 5;
+    const unsigned lane   = tid & 31u;
+    const unsigned nwarps = tile_size >> 5;
+
+    // ---- THE ONLY CHANGE vs adaptive_lorenzo_forward_kernel: quantize inline
+    // on read (32-bit rounding intrinsic, not __float2ll_rn: T is always
+    // int16_t/int32_t here and a 64-bit round-trip costs an extra register
+    // pair per thread for no benefit). ----
+    const T v = live ? static_cast<T>(__float2int_rn(raw[gid] * ebx2_r))
+                      : static_cast<T>(0);
+    if (tid == 0) s_q0 = v;
+
+    if (enable_centering) {
+        long long ssum = live ? static_cast<long long>(v) : 0LL;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            ssum += fz::backend::shflDown(ssum, off, 32);
+        if (lane == 0u) red[warp] = ssum;
+    }
+
+    if (lane == 31u) sb_last[warp] = v;
+    if (lane == 30u) sb_prev[warp] = v;
+
+    __syncthreads();
+
+    if (enable_centering) {
+        if (warp == 0u) {
+            long long t = (lane < nwarps) ? red[lane] : 0LL;
+            #pragma unroll
+            for (int off = 16; off > 0; off >>= 1)
+                t += fz::backend::shflDown(t, off, 32);
+            if (lane == 0u) {
+                const long long count =
+                    static_cast<long long>(min(static_cast<size_t>(tile_size), n - base));
+                s_mu = static_cast<T>((t >= 0) ? (t + count / 2) / count
+                                               : (t - count / 2) / count);
+            }
+        }
+    } else if (tid == 0) {
+        s_mu = static_cast<T>(0);
+    }
+
+    T vm1 = fz::backend::shflUp(v, 1u, 32);
+    if (lane == 0u) vm1 = (warp > 0u) ? sb_last[warp - 1] : static_cast<T>(0);
+    const T d1 = static_cast<T>(v - vm1);
+
+    T d1m1 = fz::backend::shflUp(d1, 1u, 32);
+    if (lane == 0u)
+        d1m1 = (warp > 0u) ? static_cast<T>(sb_last[warp - 1] - sb_prev[warp - 1])
+                           : static_cast<T>(0);
+    const T d2 = static_cast<T>(d1 - d1m1);
+
+    __syncthreads();
+
+    const T mu = s_mu;
+    const T q0 = s_q0;
+
+    const uint32_t m1 = live ? static_cast<uint32_t>(absU<T>(d1)) : 0u;
+    const uint32_t m2 = live ? static_cast<uint32_t>(absU<T>(d2)) : 0u;
+    const uint32_t o1 = warpOr(m1);
+    const uint32_t o2 = warpOr(m2);
+    const uint32_t r1rest = warpOr(lane > 0u ? m1 : 0u);
+    const uint32_t r2rest = warpOr(lane > 0u ? m2 : 0u);
+    if (lane == 0) {
+        acc1[warp] = o1;  rest1[warp] = r1rest; first1[warp] = m1;
+        acc2[warp] = o2;  rest2[warp] = r2rest; first2[warp] = m2;
+    }
+
+    CoderStats c1stats{0u, 0u, 0u}, c2stats{0u, 0u, 0u};
+    if (enable_centering && warp == 0u) {
+        const T c0 = static_cast<T>(q0 - mu);
+        const T cr1 = (tid == 0u) ? c0 : d1;
+        T       cr2 = d2;
+        if      (tid == 0u) cr2 = c0;
+        else if (tid == 1u) cr2 = static_cast<T>(d1 - c0);
+        const uint32_t cm1 = live ? static_cast<uint32_t>(absU<T>(cr1)) : 0u;
+        const uint32_t cm2 = live ? static_cast<uint32_t>(absU<T>(cr2)) : 0u;
+        c1stats.all   = warpOr(cm1);
+        c1stats.rest  = warpOr(lane > 0u ? cm1 : 0u);
+        c1stats.first = fz::backend::shfl(cm1, 0, 32);
+        c2stats.all   = warpOr(cm2);
+        c2stats.rest  = warpOr(lane > 0u ? cm2 : 0u);
+        c2stats.first = fz::backend::shfl(cm2, 0, 32);
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        uint32_t c_lz1 = 0, c_lz2 = 0;
+        for (unsigned w = 0; w < nwarps; ++w) {
+            c_lz1 += blockCost(CoderStats{acc1[w], rest1[w], first1[w]}, oracle_kind);
+            c_lz2 += blockCost(CoderStats{acc2[w], rest2[w], first2[w]}, oracle_kind);
+        }
+        uint32_t costs[4];
+        costs[0] = c_lz1;
+        costs[1] = enable_order2 ? c_lz2 : kNoVariant;
+        costs[2] = kNoVariant;
+        costs[3] = kNoVariant;
+        if (enable_centering) {
+            const uint32_t mean_cost = static_cast<uint32_t>(sizeof(T));
+            costs[2] = c_lz1
+                - blockCost(CoderStats{acc1[0], rest1[0], first1[0]}, oracle_kind)
+                + blockCost(c1stats, oracle_kind) + mean_cost;
+            if (enable_order2)
+                costs[3] = c_lz2
+                    - blockCost(CoderStats{acc2[0], rest2[0], first2[0]}, oracle_kind)
+                    + blockCost(c2stats, oracle_kind) + mean_cost;
+        }
+        uint32_t best = 0;
+        for (uint32_t i = 1; i < 4; ++i)
+            if (costs[i] < costs[best]) best = i;
+
+        s_mode = static_cast<uint8_t>(((best & 1u) ? kModeOrder2    : 0u)
+                                    | ((best & 2u) ? kModeCentering : 0u));
+        modes[blockIdx.x] = s_mode;
+        means[blockIdx.x] = mu;
+        flags[blockIdx.x] = (s_mode & kModeCentering) ? 1u : 0u;
+    }
+    __syncthreads();
+
+    if (!live) return;
+    const uint8_t mode = s_mode;
+    const bool    ord2 = (mode & kModeOrder2) != 0;
+    const bool    cent = (mode & kModeCentering) != 0;
+    const T       c0   = static_cast<T>(q0 - mu);
+
+    T out;
+    if (!ord2) {
+        out = (cent && tid == 0u) ? c0 : d1;
+    } else if (!cent) {
+        out = d2;
+    } else {
+        if      (tid == 0u) out = c0;
+        else if (tid == 1u) out = static_cast<T>(d1 - c0);
+        else                out = d2;
+    }
+    residuals[gid] = out;
+}
+
+// Symmetric elementwise dequant for the fused stage's inverse: reconstructs
+// the AdaptiveLorenzo scan's output T codes into float, `out[i] = codes[i] *
+// ebx2`. Deliberately the simple non-high-precision path (matching
+// quantizer_linear_inv_kernel's fast path) — this stage does not expose a
+// linear_high_precision option.
+template<typename T>
+__global__ void linear_dequant_kernel(
+    const T* __restrict__ codes, size_t n, float ebx2, float* __restrict__ out)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = static_cast<float>(codes[i]) * ebx2;
+}
+
 template<typename T>
 __global__ void adaptive_lorenzo_inverse_kernel(
     const T*        __restrict__ residuals,
@@ -434,6 +639,32 @@ void launchAdaptiveLorenzoForward(
     adaptive_lorenzo_forward_kernel<T><<<grid, tile_size, 0, stream>>>(
         d_input, d_residuals, d_modes_dense, d_means_dense, d_flags, n, tile_size,
         enable_order2, enable_centering, oracle_kind);
+    FZ_CUDA_CHECK(cudaGetLastError());
+}
+
+template<typename T>
+void launchFusedQuantAdaptiveLorenzoForward(
+    const float* d_raw, float ebx2_r, T* d_residuals, uint8_t* d_modes_dense,
+    T* d_means_dense, uint32_t* d_flags, size_t n, uint32_t tile_size,
+    bool enable_order2, bool enable_centering, EncodingOracleKind oracle_kind,
+    cudaStream_t stream)
+{
+    if (n == 0) return;
+    const int grid = static_cast<int>((n + tile_size - 1) / tile_size);
+    fused_quant_adaptive_lorenzo_forward_kernel<T><<<grid, tile_size, 0, stream>>>(
+        d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags, n,
+        tile_size, enable_order2, enable_centering, oracle_kind);
+    FZ_CUDA_CHECK(cudaGetLastError());
+}
+
+template<typename T>
+void launchLinearDequant(const T* d_codes, size_t n, float ebx2, float* d_out,
+                         cudaStream_t stream)
+{
+    if (n == 0) return;
+    constexpr int kBlk = 256;
+    const int grid = static_cast<int>((n + kBlk - 1) / kBlk);
+    linear_dequant_kernel<T><<<grid, kBlk, 0, stream>>>(d_codes, n, ebx2, d_out);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -658,6 +889,239 @@ template void launchAdaptiveLorenzoInverse<int16_t>(
 template void launchAdaptiveLorenzoInverse<int32_t>(
     const int32_t*, const uint8_t*, const int32_t*, const uint32_t*, int32_t*, size_t, uint32_t, cudaStream_t);
 
+template void launchFusedQuantAdaptiveLorenzoForward<int32_t>(
+    const float*, float, int32_t*, uint8_t*, int32_t*, uint32_t*, size_t, uint32_t,
+    bool, bool, EncodingOracleKind, cudaStream_t);
+
+template void launchLinearDequant<int32_t>(
+    const int32_t*, size_t, float, float*, cudaStream_t);
+
+// ── FusedQuantAdaptiveLorenzoStage member implementations ───────────────────
+
+template<typename T>
+size_t FusedQuantAdaptiveLorenzoStage<T>::ensureScratch(
+    size_t num_tiles, MemoryPool* pool, cudaStream_t stream) {
+    if (num_tiles <= scratch_tiles_) return num_tiles;
+    if (scratch_pool_) {
+        if (d_modes_dense_) scratch_pool_->free(d_modes_dense_, stream);
+        if (d_means_dense_) scratch_pool_->free(d_means_dense_, stream);
+        if (d_flags_)       scratch_pool_->free(d_flags_, stream);
+        if (d_offsets_)     scratch_pool_->free(d_offsets_, stream);
+    }
+    d_modes_dense_ = static_cast<uint8_t*>(pool->allocate(
+        num_tiles, stream, "fqal_modes", /*persistent=*/true));
+    d_means_dense_ = static_cast<T*>(pool->allocate(
+        num_tiles * sizeof(T), stream, "fqal_means", true));
+    d_flags_ = static_cast<uint32_t*>(pool->allocate(
+        (num_tiles + 1) * sizeof(uint32_t), stream, "fqal_flags", true));
+    d_offsets_ = static_cast<uint32_t*>(pool->allocate(
+        (num_tiles + 1) * sizeof(uint32_t), stream, "fqal_offsets", true));
+    if (!d_modes_dense_ || !d_means_dense_ || !d_flags_ || !d_offsets_)
+        throw std::runtime_error("FusedQuantAdaptiveLorenzoStage: failed to allocate scratch");
+    scratch_tiles_ = num_tiles;
+    scratch_pool_  = pool;
+    return num_tiles;
+}
+
+template<typename T>
+size_t FusedQuantAdaptiveLorenzoStage<T>::ensureInverseScratch(
+    size_t n, MemoryPool* pool, cudaStream_t stream) {
+    if (n <= inverse_codes_elems_) return n;
+    if (inverse_scratch_pool_ && d_inverse_codes_)
+        inverse_scratch_pool_->free(d_inverse_codes_, stream);
+    d_inverse_codes_ = static_cast<T*>(pool->allocate(
+        n * sizeof(T), stream, "fqal_inverse_codes", /*persistent=*/true));
+    if (!d_inverse_codes_)
+        throw std::runtime_error("FusedQuantAdaptiveLorenzoStage: failed to allocate inverse scratch");
+    inverse_codes_elems_  = n;
+    inverse_scratch_pool_ = pool;
+    return n;
+}
+
+template<typename T>
+void FusedQuantAdaptiveLorenzoStage<T>::releaseScratch() {
+    if (scratch_pool_) {
+        if (d_modes_dense_) scratch_pool_->free(d_modes_dense_, 0);
+        if (d_means_dense_) scratch_pool_->free(d_means_dense_, 0);
+        if (d_flags_)       scratch_pool_->free(d_flags_, 0);
+        if (d_offsets_)     scratch_pool_->free(d_offsets_, 0);
+    }
+    if (inverse_scratch_pool_ && d_inverse_codes_)
+        inverse_scratch_pool_->free(d_inverse_codes_, 0);
+    d_modes_dense_ = nullptr; d_means_dense_ = nullptr;
+    d_flags_ = nullptr; d_offsets_ = nullptr;
+    d_inverse_codes_ = nullptr;
+    scratch_tiles_ = 0; scratch_pool_ = nullptr;
+    inverse_codes_elems_ = 0; inverse_scratch_pool_ = nullptr;
+}
+
+template<typename T>
+size_t FusedQuantAdaptiveLorenzoStage<T>::estimateScratchBytes(
+    const std::vector<size_t>& input_sizes) const {
+    const size_t n = (is_inverse_ || input_sizes.empty())
+        ? num_elements_ : input_sizes[0] / sizeof(float);
+    const size_t tiles = numTiles(n);
+    if (tiles == 0) return 0;
+    size_t cub_tmp = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, cub_tmp,
+                                  static_cast<uint32_t*>(nullptr),
+                                  static_cast<uint32_t*>(nullptr), tiles + 1);
+    size_t bytes = tiles * (1 + sizeof(T)) + 2 * (tiles + 1) * sizeof(uint32_t) + cub_tmp;
+    if (is_inverse_) bytes += n * sizeof(T);  // d_inverse_codes_
+    return bytes;
+}
+
+template<typename T>
+void FusedQuantAdaptiveLorenzoStage<T>::execute(
+    cudaStream_t stream,
+    MemoryPool* pool,
+    const std::vector<void*>& inputs,
+    const std::vector<void*>& outputs,
+    const std::vector<size_t>& sizes)
+{
+    if (inputs.empty() || outputs.empty() || sizes.empty())
+        throw std::runtime_error(
+            "FusedQuantAdaptiveLorenzoStage: inputs, outputs, and sizes must be non-empty");
+
+    const size_t byte_size = sizes[0];
+    if (byte_size == 0) {
+        actual_output_sizes_.assign(is_inverse_ ? 1 : 3, 0);
+        return;
+    }
+
+    const uint32_t tile = getTileSize();
+
+    if (!is_inverse_) {
+        const size_t n     = byte_size / sizeof(float);
+        num_elements_      = n;
+        const size_t tiles = numTiles(n);
+        if (outputs.size() < 3 || outputs[1] == nullptr || outputs[2] == nullptr)
+            throw std::runtime_error(
+                "FusedQuantAdaptiveLorenzoStage: the 'modes' and 'means' output ports must be "
+                "connected or left as pipeline outputs");
+
+        ensureScratch(tiles, pool, stream);
+
+        // ── Resolve absolute error bound (same logic/scan as LorenzoQuantStage
+        // and QuantizerStage — see predictors/predictor_utils.cuh). Computed in
+        // float (TInput), not double, and ONLY THEN widened for storage: doing
+        // the multiply/reciprocal in double and narrowing at the end (as an
+        // earlier version of this code did) is not guaranteed bit-identical to
+        // QuantizerStage's own float-only arithmetic (quantizer.cu: `TInput
+        // ebx2_r = TInput(1) / (TInput(2) * computed_abs_eb_)`) — caught by
+        // FusedQuantAdaptiveLorenzoStage.MatchesStagedByteIdentical mismatching
+        // on 3/8229 elements right at a rounding boundary. The double-widened
+        // computed_abs_eb_ member is still worth keeping (matches
+        // LorenzoQuantConfig's own error_bound_f64 precedent for the
+        // *serialized* value), it just has to be an exact widen of the float
+        // result, not an independently-computed double.
+        const auto eb_mode = resolveApproxRelMode(config_.eb_mode, "FusedQuantAdaptiveLorenzoStage");
+        float abs_eb_f32;
+        if (eb_mode == ErrorBoundMode::ABS) {
+            abs_eb_f32           = static_cast<float>(config_.error_bound);
+            computed_value_base_ = 0.0;
+        } else {
+            float value_base = config_.precomputed_value_base;
+            float data_abs_max = 0.0f;
+            if (value_base <= 0.0f) {
+                value_base = computeValueBase<float>(
+                    static_cast<const float*>(inputs[0]), n, eb_mode, stream, pool, &data_abs_max);
+            }
+            computed_value_base_ = static_cast<double>(value_base);
+            if (value_base <= 0.0f) {
+                FZ_LOG(WARN,
+                    "FusedQuantAdaptiveLorenzoStage: value_base is zero for %s mode "
+                    "(constant or empty data?); falling back to ABS",
+                    eb_mode == ErrorBoundMode::NOA ? "NOA" : "PREL");
+                abs_eb_f32 = static_cast<float>(config_.error_bound);
+            } else {
+                abs_eb_f32 = static_cast<float>(config_.error_bound) * value_base;
+            }
+        }
+        computed_abs_eb_ = static_cast<double>(abs_eb_f32);
+        const float ebx2_r = 1.0f / (2.0f * abs_eb_f32);
+
+        launchFusedQuantAdaptiveLorenzoForward<T>(
+            static_cast<const float*>(inputs[0]), ebx2_r, static_cast<T*>(outputs[0]),
+            d_modes_dense_, d_means_dense_, d_flags_,
+            n, tile, config_.enable_order2, config_.enable_centering,
+            getBoundEncodingOracleKind(), stream);
+
+        // flags[tiles] = 0 so offsets[tiles] lands on the total centered count.
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_flags_ + tiles, 0, sizeof(uint32_t), stream));
+
+        auto d_tmp = fz::backend::withTempStorage(pool, stream, "fqal_cub_tmp",
+            [&](void* tmp, size_t& bytes) {
+                cub::DeviceScan::ExclusiveSum(tmp, bytes, d_flags_, d_offsets_,
+                                              tiles + 1, stream);
+            });
+
+        launchAdaptiveLorenzoCompact<T>(
+            d_modes_dense_, d_means_dense_, d_offsets_,
+            static_cast<uint8_t*>(outputs[1]), static_cast<T*>(outputs[2]),
+            tiles, stream);
+
+        fz::backend::freeTempStorage(pool, d_tmp, stream);
+
+        actual_output_sizes_.resize(3);
+        actual_output_sizes_[0] = n * sizeof(T);
+        actual_output_sizes_[1] = (tiles + 3) / 4;
+        actual_output_sizes_[2] = tiles * sizeof(T);
+        pending_tiles_ = tiles;
+        return;
+    }
+
+    if (inputs.size() < 3 || inputs[1] == nullptr || inputs[2] == nullptr)
+        throw std::runtime_error(
+            "FusedQuantAdaptiveLorenzoStage: inverse requires the 'modes' and 'means' inputs");
+
+    const size_t n     = byte_size / sizeof(T);
+    const size_t tiles = numTiles(n);
+    ensureScratch(tiles, pool, stream);
+    ensureInverseScratch(n, pool, stream);
+
+    launchAdaptiveLorenzoFlags(
+        static_cast<const uint8_t*>(inputs[1]), d_flags_, tiles, stream);
+
+    auto d_tmp = fz::backend::withTempStorage(pool, stream, "fqal_cub_tmp",
+        [&](void* tmp, size_t& bytes) {
+            cub::DeviceScan::ExclusiveSum(tmp, bytes, d_flags_, d_offsets_,
+                                          tiles + 1, stream);
+        });
+
+    launchAdaptiveLorenzoInverse<T>(
+        static_cast<const T*>(inputs[0]),
+        static_cast<const uint8_t*>(inputs[1]),
+        static_cast<const T*>(inputs[2]),
+        d_offsets_,
+        d_inverse_codes_, n, tile, stream);
+
+    fz::backend::freeTempStorage(pool, d_tmp, stream);
+
+    // computed_abs_eb_ is an exact double-widen of a float (see the forward
+    // branch above), so narrowing it back recovers that float bit-for-bit;
+    // the multiply is then done in float to match quantizer_linear_inv_kernel's
+    // own `TInput ebx2 = TInput(2) * computed_abs_eb_` exactly.
+    const float ebx2 = 2.0f * static_cast<float>(computed_abs_eb_);
+    launchLinearDequant<T>(d_inverse_codes_, n, ebx2, static_cast<float*>(outputs[0]), stream);
+
+    actual_output_sizes_.assign(1, n * sizeof(float));
+}
+
+template<typename T>
+void FusedQuantAdaptiveLorenzoStage<T>::postStreamSync(cudaStream_t stream) {
+    if (is_inverse_ || pending_tiles_ == 0 || d_offsets_ == nullptr) return;
+    uint32_t centered = 0;
+    FZ_CUDA_CHECK(cudaMemcpyAsync(&centered, d_offsets_ + pending_tiles_,
+                                  sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+    FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (actual_output_sizes_.size() >= 3)
+        actual_output_sizes_[2] = static_cast<size_t>(centered) * sizeof(T);
+    pending_tiles_ = 0;
+}
+
+template class FusedQuantAdaptiveLorenzoStage<int32_t>;
+
 }  // namespace fz
 
 // ── FZM-header reconstruction (self-registered; see stage_registry.h) ─────────
@@ -672,3 +1136,13 @@ fz::Stage* AdaptiveLorenzo_fromHeader(const uint8_t* config, size_t config_size)
 }
 }  // namespace
 FZ_REGISTER_STAGE_FACTORY(fz::StageType::ADAPTIVE_LORENZO, AdaptiveLorenzo_fromHeader);
+
+namespace {
+fz::Stage* FusedQuantAdaptiveLorenzo_fromHeader(const uint8_t* config, size_t config_size) {
+    using fz::FusedQuantAdaptiveLorenzoStage;
+    auto* s = new FusedQuantAdaptiveLorenzoStage<int32_t>();
+    s->deserializeHeader(config, config_size);
+    return s;
+}
+}  // namespace
+FZ_REGISTER_STAGE_FACTORY(fz::StageType::FUSED_QUANT_ADAPTIVE_LORENZO, FusedQuantAdaptiveLorenzo_fromHeader);
