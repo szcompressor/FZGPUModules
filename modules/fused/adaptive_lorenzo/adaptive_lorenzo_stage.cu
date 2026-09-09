@@ -718,6 +718,171 @@ __global__ void fused_quant_adaptive_lorenzo_forward_kernel_ti(
     }
 }
 
+// WP1b: register-array TI design.  The original TI kernel above deliberately
+// kept its per-block oracle state scalar and paid an extra block-0 input pass
+// after the mean became known.  Here BLOCKS_PER_TILE is a compile-time value,
+// so both predictors' CoderStats can remain thread-local arrays.  Retaining the
+// LZ2 tail OR and d1[1] is sufficient to derive the centered block-0 quote
+// algebraically: centering changes only residuals 0 and 1.  Thus prediction and
+// mode analysis touch each input once; the second full traversal only emits the
+// already-selected residual variant.  This is independently re-derived from
+// the CTA kernel's residual algebra above, not from third-party source.
+template<typename T, int TILES_PER_THREAD, int BLOCKS_PER_TILE>
+__global__ void fused_quant_adaptive_lorenzo_forward_kernel_ti_arrays(
+    const float* __restrict__ raw,
+    float ebx2_r,
+    T*        __restrict__ residuals,
+    uint8_t*  __restrict__ modes,
+    T*        __restrict__ means,
+    uint32_t* __restrict__ flags,
+    size_t n,
+    bool enable_order2,
+    bool enable_centering,
+    EncodingOracleKind oracle_kind,
+    size_t num_tiles)
+{
+    constexpr size_t kTileSize = static_cast<size_t>(BLOCKS_PER_TILE) * 32u;
+    const size_t gtid = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t base_tile = gtid * static_cast<size_t>(TILES_PER_THREAD);
+
+    // Deliberately do not unroll across tiles: the per-block arrays should be
+    // reused by successive tiles rather than multiplied by TILES_PER_THREAD.
+    #pragma unroll 1
+    for (int t = 0; t < TILES_PER_THREAD; ++t) {
+        const size_t tile_id = base_tile + static_cast<size_t>(t);
+        if (tile_id >= num_tiles) return;
+
+        const size_t tile_base = tile_id * kTileSize;
+        const size_t live_count = min(kTileSize, n - tile_base);
+        long long sum = 0;
+        T vm1 = static_cast<T>(0);
+        T d1m1 = static_cast<T>(0);
+        T q0 = static_cast<T>(0);
+        T d1_at_1 = static_cast<T>(0);
+        uint32_t lz2_tail_2_31 = 0;
+        CoderStats lz1_stats[BLOCKS_PER_TILE];
+        CoderStats lz2_stats[BLOCKS_PER_TILE];
+
+        // One input pass computes the mean ingredients and every uncentered
+        // per-block oracle quote.  The outer loop is unrolled so array indices
+        // are compile-time constants and nvcc can scalarize the arrays.
+        #pragma unroll
+        for (int blk = 0; blk < BLOCKS_PER_TILE; ++blk) {
+            uint32_t o1 = 0, r1 = 0, f1 = 0;
+            uint32_t o2 = 0, r2 = 0, f2 = 0;
+            #pragma unroll 1
+            for (int k = 0; k < 32; ++k) {
+                const size_t j = static_cast<size_t>(blk) * 32u + static_cast<size_t>(k);
+                const size_t gid = tile_base + j;
+                const bool live = gid < n;
+                const T v = live ? static_cast<T>(__float2int_rn(raw[gid] * ebx2_r))
+                                 : static_cast<T>(0);
+                if (j == 0u) q0 = v;
+                if (live) sum += static_cast<long long>(v);
+
+                const T d1 = static_cast<T>(v - vm1);
+                const T d2 = static_cast<T>(d1 - d1m1);
+                const uint32_t m1 = live ? static_cast<uint32_t>(absU<T>(d1)) : 0u;
+                const uint32_t m2 = live ? static_cast<uint32_t>(absU<T>(d2)) : 0u;
+                if (k == 0) {
+                    f1 = m1;
+                    f2 = m2;
+                } else {
+                    r1 |= m1;
+                    r2 |= m2;
+                }
+                o1 |= m1;
+                o2 |= m2;
+                if (j == 1u) d1_at_1 = d1;
+                if (blk == 0 && k >= 2) lz2_tail_2_31 |= m2;
+                vm1 = v;
+                d1m1 = d1;
+            }
+            lz1_stats[blk] = CoderStats{o1, r1, f1};
+            lz2_stats[blk] = CoderStats{o2, r2, f2};
+        }
+
+        T mu = static_cast<T>(0);
+        if (enable_centering) {
+            const long long count = static_cast<long long>(live_count);
+            mu = static_cast<T>((sum >= 0) ? (sum + count / 2) / count
+                                            : (sum - count / 2) / count);
+        }
+        const T c0 = static_cast<T>(q0 - mu);
+
+        CoderStats centered_lz1{0u, 0u, 0u};
+        CoderStats centered_lz2{0u, 0u, 0u};
+        if (enable_centering) {
+            const uint32_t cm0 = static_cast<uint32_t>(absU<T>(c0));
+            centered_lz1 = CoderStats{
+                lz1_stats[0].rest | cm0, lz1_stats[0].rest, cm0};
+            const uint32_t cm1 = (live_count > 1u)
+                ? static_cast<uint32_t>(absU<T>(static_cast<T>(d1_at_1 - c0)))
+                : 0u;
+            const uint32_t centered_rest2 = lz2_tail_2_31 | cm1;
+            centered_lz2 = CoderStats{centered_rest2 | cm0, centered_rest2, cm0};
+        }
+
+        uint32_t c_lz1 = 0, c_lz2 = 0;
+        #pragma unroll
+        for (int blk = 0; blk < BLOCKS_PER_TILE; ++blk) {
+            c_lz1 += blockCost(lz1_stats[blk], oracle_kind);
+            c_lz2 += blockCost(lz2_stats[blk], oracle_kind);
+        }
+
+        uint32_t costs[4];
+        costs[0] = c_lz1;
+        costs[1] = enable_order2 ? c_lz2 : kNoVariant;
+        costs[2] = kNoVariant;
+        costs[3] = kNoVariant;
+        if (enable_centering) {
+            const uint32_t mean_cost = static_cast<uint32_t>(sizeof(T));
+            costs[2] = c_lz1 - blockCost(lz1_stats[0], oracle_kind)
+                               + blockCost(centered_lz1, oracle_kind) + mean_cost;
+            if (enable_order2) {
+                costs[3] = c_lz2 - blockCost(lz2_stats[0], oracle_kind)
+                                   + blockCost(centered_lz2, oracle_kind) + mean_cost;
+            }
+        }
+        uint32_t best = 0;
+        #pragma unroll
+        for (uint32_t i = 1; i < 4; ++i)
+            if (costs[i] < costs[best]) best = i;
+
+        const uint8_t mode = static_cast<uint8_t>(((best & 1u) ? kModeOrder2 : 0u)
+                                                 | ((best & 2u) ? kModeCentering : 0u));
+        modes[tile_id] = mode;
+        means[tile_id] = mu;
+        flags[tile_id] = (mode & kModeCentering) ? 1u : 0u;
+
+        const bool ord2 = (mode & kModeOrder2) != 0;
+        const bool cent = (mode & kModeCentering) != 0;
+        T emit_vm1 = static_cast<T>(0);
+        T emit_d1m1 = static_cast<T>(0);
+        for (size_t j = 0; j < live_count; ++j) {
+            const size_t gid = tile_base + j;
+            const T v = static_cast<T>(__float2int_rn(raw[gid] * ebx2_r));
+            const T d1 = static_cast<T>(v - emit_vm1);
+            const T d2 = static_cast<T>(d1 - emit_d1m1);
+            T out;
+            if (!ord2) {
+                out = (cent && j == 0u) ? c0 : d1;
+            } else if (!cent) {
+                out = d2;
+            } else if (j == 0u) {
+                out = c0;
+            } else if (j == 1u) {
+                out = static_cast<T>(d1 - c0);
+            } else {
+                out = d2;
+            }
+            residuals[gid] = out;
+            emit_vm1 = v;
+            emit_d1m1 = d1;
+        }
+    }
+}
+
 // Symmetric elementwise dequant for the fused stage's inverse: reconstructs
 // the AdaptiveLorenzo scan's output T codes into float, `out[i] = codes[i] *
 // ebx2`. Deliberately the simple non-high-precision path (matching
@@ -825,17 +990,14 @@ bool alTiEnvOn(const char* name) {
 }  // namespace
 
 /// FZ_AL_TI=1 switches `FusedQuantAdaptiveLorenzoStage`'s forward pass to the
-/// thread-independent kernel above (default OFF — and, per the WP1 measurement
-/// below, should STAY off: TI measured 1.5-1.7x SLOWER end to end than the
-/// CTA-cooperative kernel on NYX/HACC, a negative result, not a pending
-/// default flip. Kept as a correctness-verified diagnostic knob, same
-/// disposition as FZ_AB_FORCE_SCALAR after Lever 3's negative result — see
-/// FZGPUModules/memory/quant_al_partial_fusion_probe.md's WP1 section).
+/// register-array thread-independent kernel above (default OFF — and, per the
+/// WP1b measurement, should STAY off: it remained 1.53-1.64x slower end to end
+/// than CTA on NYX/HACC). The original scalar-state three-pass kernel remains
+/// above as the historical reference but is no longer dispatched.
 /// FZ_AL_TI_TPT (2, 4, or 8) overrides the tiles-per-thread pick; unset uses
-/// 8, the best of the three swept values (all three lose to the CTA kernel;
-/// ncu shows why — the register-budget-conscious 3-pass design saturates the
-/// memory pipe on uncoalesced per-thread accesses well before it's
-/// compute-bound, unlike native FSZ's single denser pass).
+/// 8, the best of the three swept values. The arrays scalarize to registers
+/// (76/thread at blocks_per_tile=8, zero local-memory traffic), but the kernel
+/// remains latency/memory-pipe limited by fully uncoalesced global accesses.
 struct AdaptiveLorenzoTIEnvConfig {
     bool force_ti         = false;
     int  tiles_per_thread = 8;
@@ -854,7 +1016,7 @@ struct AdaptiveLorenzoTIEnvConfig {
     }
 };
 
-template<typename T, int TILES_PER_THREAD>
+template<typename T, int TILES_PER_THREAD, int BLOCKS_PER_TILE>
 static void launchFusedQuantAdaptiveLorenzoForwardTIImpl(
     const float* d_raw, float ebx2_r, T* d_residuals, uint8_t* d_modes_dense,
     T* d_means_dense, uint32_t* d_flags, size_t n, uint32_t tile_size,
@@ -862,21 +1024,60 @@ static void launchFusedQuantAdaptiveLorenzoForwardTIImpl(
     cudaStream_t stream)
 {
     if (n == 0) return;
+    constexpr size_t kTileSize = static_cast<size_t>(BLOCKS_PER_TILE) * 32u;
+    if (tile_size != kTileSize)
+        throw std::invalid_argument("TI array kernel tile-size dispatch mismatch");
     const size_t num_tiles = (n + tile_size - 1) / tile_size;
     if (num_tiles == 0) return;
-    constexpr int kBlockThreads = 256;
+    // One-warp CTAs match the intended thread-independent execution shape and
+    // avoid coupling a high per-thread register count to a 256-thread block.
+    constexpr int kBlockThreads = 32;
     const size_t num_threads_needed =
         (num_tiles + static_cast<size_t>(TILES_PER_THREAD) - 1) / static_cast<size_t>(TILES_PER_THREAD);
     const int grid = static_cast<int>((num_threads_needed + kBlockThreads - 1) / kBlockThreads);
-    fused_quant_adaptive_lorenzo_forward_kernel_ti<T, TILES_PER_THREAD>
+    fused_quant_adaptive_lorenzo_forward_kernel_ti_arrays<T, TILES_PER_THREAD, BLOCKS_PER_TILE>
         <<<grid, kBlockThreads, 0, stream>>>(
             d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
-            n, tile_size, enable_order2, enable_centering, oracle_kind, num_tiles);
+            n, enable_order2, enable_centering, oracle_kind, num_tiles);
     FZ_CUDA_CHECK(cudaGetLastError());
 }
 
+template<typename T, int TILES_PER_THREAD>
+static void launchFusedQuantAdaptiveLorenzoForwardTIByTile(
+    const float* d_raw, float ebx2_r, T* d_residuals, uint8_t* d_modes_dense,
+    T* d_means_dense, uint32_t* d_flags, size_t n, uint32_t tile_size,
+    bool enable_order2, bool enable_centering, EncodingOracleKind oracle_kind,
+    cudaStream_t stream)
+{
+    switch (tile_size / 32u) {
+        case 1:
+            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, TILES_PER_THREAD, 1>(
+                d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
+                n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
+            break;
+        case 2:
+            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, TILES_PER_THREAD, 2>(
+                d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
+                n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
+            break;
+        case 4:
+            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, TILES_PER_THREAD, 4>(
+                d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
+                n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
+            break;
+        case 8:
+            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, TILES_PER_THREAD, 8>(
+                d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
+                n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
+            break;
+        default:
+            throw std::invalid_argument(
+                "TI array kernel supports blocks_per_tile in {1,2,4,8}");
+    }
+}
+
 /// Thread-independent dispatch: picks the TILES_PER_THREAD instantiation named
-/// by `AdaptiveLorenzoTIEnvConfig` (FZ_AL_TI_TPT, default 4) or by the explicit
+/// by `AdaptiveLorenzoTIEnvConfig` (FZ_AL_TI_TPT, default 8) or by the explicit
 /// `tiles_per_thread_override` (>0 wins over the env value — used by tests to
 /// sweep values within one process without racing the env magic-static).
 template<typename T>
@@ -891,17 +1092,17 @@ void launchFusedQuantAdaptiveLorenzoForwardTI(
         : AdaptiveLorenzoTIEnvConfig::get().tiles_per_thread;
     switch (tpt) {
         case 2:
-            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, 2>(
+            launchFusedQuantAdaptiveLorenzoForwardTIByTile<T, 2>(
                 d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
                 n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
             break;
         case 8:
-            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, 8>(
+            launchFusedQuantAdaptiveLorenzoForwardTIByTile<T, 8>(
                 d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
                 n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
             break;
         default:
-            launchFusedQuantAdaptiveLorenzoForwardTIImpl<T, 4>(
+            launchFusedQuantAdaptiveLorenzoForwardTIByTile<T, 4>(
                 d_raw, ebx2_r, d_residuals, d_modes_dense, d_means_dense, d_flags,
                 n, tile_size, enable_order2, enable_centering, oracle_kind, stream);
             break;

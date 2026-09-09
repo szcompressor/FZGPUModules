@@ -664,14 +664,16 @@ void launchAdaptiveLorenzoInverse(
     const T* d_residuals, const uint8_t* d_modes, const T* d_means, T* d_output,
     size_t n, uint32_t tile_size, fz::stream_t stream);
 
-/// WP1: thread-independent forward kernel dispatch for
+/// WP1b: register-array thread-independent forward kernel dispatch for
 /// `FusedQuantAdaptiveLorenzoStage` (env-gated by `FZ_AL_TI`, see
 /// adaptive_lorenzo_stage.cu's `AdaptiveLorenzoTIEnvConfig`). Each thread
 /// serially owns `tiles_per_thread_override` (or the env/default pick, if
 /// <= 0) whole tiles via purely thread-local state — no shuffles, no
-/// barriers, no shared memory. Byte-identical output to
+/// barriers, no shared memory. Per-coder-block oracle state is held in
+/// compile-time local arrays for blocks_per_tile in {1,2,4,8}. Byte-identical
+/// output to
 /// `launchFusedQuantAdaptiveLorenzoForward` for the same input/config; see
-/// `FusedQuantAdaptiveLorenzoStage.MatchesStagedByteIdenticalTI` in
+/// `FusedQuantAdaptiveLorenzoStage.MatchesCTAByteIdentical` in
 /// tests/stages/test_adaptive_lorenzo.cpp.
 template<typename T>
 void launchFusedQuantAdaptiveLorenzoForwardTI(

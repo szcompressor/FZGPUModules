@@ -665,6 +665,33 @@ TEST(FusedQuantAdaptiveLorenzoStage, MatchesCTAAcrossTilesPerThread) {
     }
 }
 
+TEST(FusedQuantAdaptiveLorenzoStage, TIArrayPartialTileEdgesByteIdentical) {
+    // WP1b derives centered block-0 costs from retained scalar facts instead
+    // of rereading block 0. Lock down the live-count edges around residual 1
+    // and the 32-element coder-block boundary where that derivation differs.
+    for (size_t n : {size_t{1}, size_t{2}, size_t{31}, size_t{32}, size_t{33}}) {
+        auto h_float = make_smooth_data<float>(n);
+        FusedQuantAdaptiveLorenzoStage<int32_t>::Config base;
+        base.blocks_per_tile = 8;
+        base.enable_order2 = true;
+        base.enable_centering = true;
+        base.error_bound = 1e-3;
+        base.eb_mode = ErrorBoundMode::ABS;
+
+        auto cta_cfg = base;
+        cta_cfg.ti_dispatch =
+            FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceCTA;
+        auto ti_cfg = base;
+        ti_cfg.ti_dispatch =
+            FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceTI;
+        ti_cfg.ti_tiles_per_thread = 8;
+
+        EXPECT_EQ(compressFusedForced(h_float, cta_cfg),
+                  compressFusedForced(h_float, ti_cfg))
+            << "n=" << n;
+    }
+}
+
 TEST(FusedQuantAdaptiveLorenzoStage, TIForwardRoundTrip) {
     // TI path alone, standalone round trip (not just archive-vs-archive):
     // reconstruction must still fall within the configured error bound.
