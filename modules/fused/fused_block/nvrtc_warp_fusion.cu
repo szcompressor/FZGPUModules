@@ -158,14 +158,31 @@ struct WarpFusionEnvConfig {
     bool  force_ti        = false;  ///< FZ_TI — force the thread-independent path (skips the probe).
     bool  adaptive_probe  = true;   ///< FZ_ADAPTIVE — default on; '0'/'o'/'f' (case-insens.) disables.
     // Measured crossover: xx r~14 (TI wins 393 vs 236), vx r~17.6 (warp-coop wins);
-    // provisional 2-point fit — retune with more fields. FZ_ADAPTIVE_THRESH overrides.
+    // provisional 2-point fit on 1-D cuSZp2 HACC data — retune with more fields.
+    // FZ_ADAPTIVE_THRESH overrides. Applies to Lorenzo1D (EPL==1) chains.
     float adaptive_thresh = 16.0f;
+    // Separate, lower threshold for the tiled 2-D/3-D + PLAIN (non-outlier) chain: the probe
+    // always measures rate via a flattened serial Lorenzo1D estimate (ti_rate_probe_kernel),
+    // which is a poor proxy for the tiled predictor's actual achieved rate — the 16.0 threshold
+    // above, fit on 1-D data, misrouted CESMATM-3D/T and SCALE-LETKF/T to TI at ~2x slower than
+    // single-pass (see reports/fused_execution_paths_map.md, 2026-09-08).
+    // Calibrated 2026-09-09 from FZ_DEBUG_PROBE=1 avg_r on the 10 tiled fields in the large-data
+    // corpus: NOT cleanly separable by any single threshold (CESMATM-3D/CLOUD wants SP at
+    // avg_r=1.749, sitting BELOW EXAFEL/data which wants TI at avg_r=3.641) — 1.4 is the best
+    // single-cut compromise, correctly routing 9/10 fields and costing EXAFEL/data only ~5%
+    // (331.9->315.6 GB/s) while fixing CESMATM-3D/{T,U,CLOUD} and SCALE-LETKF/{T,U,QV} (15-96%
+    // gains). A real fix for the EXAFEL/CLOUD ambiguity needs a per-field or dimension-aware
+    // signal, not a single global constant — flagged for follow-up, not attempted here.
+    // FZ_ADAPTIVE_THRESH_TILED overrides. Outlier-mode tiled chains still use the 16.0 default
+    // above — that combination routes correctly (verified, see the map doc's table).
+    float adaptive_thresh_tiled = 1.4f;
     // Measured optimum with float4 loads (more warps + less local mem than cuSZp's 32).
     // FZ_TI_BPT overrides.
     int   ti_bpt          = 8;
     bool  single_pass     = true;   ///< FZ_SINGLEPASS — default on; '0'/'o'/'f' (case-insens.) disables.
     bool  sp_bpw_forced   = false;  ///< FZ_SP_BPW was set to one of the accepted values below.
     int   sp_bpw          = 0;      ///< Forced blocks-per-warp for the single-pass path.
+    bool  debug_probe     = false;  ///< FZ_DEBUG_PROBE=1 — print avg_r/threshold/decision to stderr.
 
     static const WarpFusionEnvConfig& get() {
         static const WarpFusionEnvConfig cfg = [] {
@@ -177,6 +194,10 @@ struct WarpFusionEnvConfig {
             if (const char* e = std::getenv("FZ_ADAPTIVE_THRESH")) {
                 const float v = std::atof(e); if (v > 0) c.adaptive_thresh = v;
             }
+            if (const char* e = std::getenv("FZ_ADAPTIVE_THRESH_TILED")) {
+                const float v = std::atof(e); if (v > 0) c.adaptive_thresh_tiled = v;
+            }
+            c.debug_probe = envOn("FZ_DEBUG_PROBE");
             if (const char* e = std::getenv("FZ_TI_BPT")) {
                 const int v = std::atoi(e); if (v >= 1 && v <= 256) c.ti_bpt = v;
             }
@@ -300,9 +321,19 @@ size_t launchNvrtcWarpFused(
         if (env_cfg.force_ti) {
             use_ti = true;
         } else if (env_cfg.adaptive_probe) {
+            // Tiled 2-D/3-D + plain (non-outlier) chains get their own, lower threshold — see
+            // adaptive_thresh_tiled's doc comment above for why the 1-D-fit default misroutes them.
+            const bool  tiled_plain = (spec.elems_per_lane > 1) && plain_meta;
+            const float thresh      = tiled_plain ? env_cfg.adaptive_thresh_tiled : env_cfg.adaptive_thresh;
             const float inv2eb  = (params_bytes >= sizeof(float)) ? *reinterpret_cast<const float*>(pred_params) : 0.0f;
             const float avg_r   = probeAvgRate(d_in, n_ab, inv2eb, num_blocks, pool, stream);
-            use_ti = (avg_r <= env_cfg.adaptive_thresh);
+            use_ti = (avg_r <= thresh);
+            if (env_cfg.debug_probe) {
+                std::fprintf(stderr, "[fz_probe] predictor=%s coder=%s epl=%d tiled_plain=%d "
+                             "avg_r=%.3f thresh=%.3f -> %s\n", spec.predictor.c_str(),
+                             spec.coder.c_str(), spec.elems_per_lane, (int)tiled_plain, avg_r,
+                             thresh, use_ti ? "TI" : "warp-cooperative");
+            }
         }
     }
     if (use_ti) {
