@@ -1103,10 +1103,42 @@ static constexpr int kBlk = 256;
 static constexpr int kWarpsPerCta = 8;
 static constexpr int kWarpCtaThreads = kWarpsPerCta * 32;
 
+// EXPERIMENTAL (2026-09-09): at block_size 32/64 this stage has only ever compared
+// two WARP-cooperative strategies against each other (ballot-gather vs bit-transpose,
+// see encode/decodeTransposeThreshold above) — the plain per-thread scalar kernel
+// (encode_rate_kernel/encode_pack_kernel/decode_unpack_kernel, already generic over
+// any block_size, already used below for block_size NOT IN {32,64}) has never been
+// measured at 32/64 at all. This is the exact class of win the cuSZp2/3 "thread-
+// independent" (TI) dispatch found for the fused path (a scalar, no-ballot kernel
+// beating the warp-cooperative one on compressible/low-rate data) — see FZGM
+// memory `quant_al_partial_fusion_probe.md` lever 3. FSZ's AdaptiveLorenzo residuals
+// (well-predicted, low bit-rate, CR 8-22x) are plausibly exactly that regime.
+// FZ_AB_FORCE_SCALAR=1 forces the generic scalar kernel for block_size 32/64 too,
+// for A/B measurement; both are already verified byte-identical output (same
+// sign/bitplane-byte formula, just computed via ballot vs a serial bit loop) by
+// this file's own logic — see test_adaptive_bitpack.cpp for the round-trip check.
+// Not yet auto-selected (no rate probe wired) — this is a manual-only diagnostic
+// knob pending a real measurement pass.
+static bool abForceScalar() {
+    static const bool v = [] {
+        const char* e = std::getenv("FZ_AB_FORCE_SCALAR");
+        return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T');
+    }();
+    return v;
+}
+
 template<typename T>
 void launchEncodeRate(const T* d_in, const Config& c,
                       uint8_t* d_rate, uint32_t* d_cost, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    if (abForceScalar()) {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        encode_rate_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
+            d_rate, d_cost);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     if (c.block_size == 32u) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
         encode_rate_kernel_warp<T, 1><<<grid, kWarpCtaThreads, 0, stream>>>(
@@ -1146,6 +1178,14 @@ void launchEncodePack(const T* d_in, const Config& c,
                       const uint8_t* d_rate, const uint32_t* d_offset,
                       uint8_t* d_payload, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    if (abForceScalar()) {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        encode_pack_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_in, c.num_elements, c.block_size, c.word_bytes, c.num_blocks,
+            d_rate, d_offset, d_payload);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     const uint32_t tr = encodeTransposeThreshold();
     if (tr && (c.block_size == 32u || c.block_size == 64u)) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
@@ -1202,6 +1242,14 @@ void launchDecodeUnpack(const uint8_t* d_rate, const uint32_t* d_offset,
                         const uint8_t* d_payload, const Config& c,
                         T* d_out, cudaStream_t stream) {
     if (c.num_blocks == 0) return;
+    if (abForceScalar()) {
+        int grid = static_cast<int>((c.num_blocks + kBlk - 1) / kBlk);
+        decode_unpack_kernel<T><<<grid, kBlk, 0, stream>>>(
+            d_rate, d_offset, d_payload, c.num_elements, c.block_size,
+            c.word_bytes, c.num_blocks, d_out);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        return;
+    }
     const uint32_t tr = decodeTransposeThreshold();
     if (tr && (c.block_size == 32u || c.block_size == 64u)) {
         int grid = static_cast<int>((c.num_blocks + kWarpsPerCta - 1) / kWarpsPerCta);
