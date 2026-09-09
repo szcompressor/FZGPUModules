@@ -402,6 +402,21 @@ public:
         /// Pre-computed value_range (NOA) or max(|data|) (PREL) to skip the
         /// device scan. Leave at 0 to auto-compute.
         float precomputed_value_base = 0.0f;
+
+        /// WP1 test/debug hook: forces the forward-kernel dispatch instead of
+        /// reading the `FZ_AL_TI` env var (the default `Auto` path). Not
+        /// serialized — this only affects the compress() call it's set for,
+        /// so unit tests can compare the CTA and TI kernels within one
+        /// process without racing the env var's magic-static cache (which,
+        /// like `nvrtc_warp_fusion.cu`'s `WarpFusionEnvConfig`, is parsed
+        /// once and then fixed for the process's lifetime).
+        enum class TIDispatch : uint8_t { Auto = 0, ForceCTA = 1, ForceTI = 2 };
+        TIDispatch ti_dispatch = TIDispatch::Auto;
+        /// Test/debug hook for the TI kernel's tiles-per-thread, overriding
+        /// `FZ_AL_TI_TPT` the same way `ti_dispatch` overrides `FZ_AL_TI`.
+        /// 0 = use the env value (or its default). Only 2, 4, 8 are wired.
+        int ti_tiles_per_thread = 0;
+
         Config() = default;
     };
 
@@ -648,5 +663,21 @@ template<typename T>
 void launchAdaptiveLorenzoInverse(
     const T* d_residuals, const uint8_t* d_modes, const T* d_means, T* d_output,
     size_t n, uint32_t tile_size, fz::stream_t stream);
+
+/// WP1: thread-independent forward kernel dispatch for
+/// `FusedQuantAdaptiveLorenzoStage` (env-gated by `FZ_AL_TI`, see
+/// adaptive_lorenzo_stage.cu's `AdaptiveLorenzoTIEnvConfig`). Each thread
+/// serially owns `tiles_per_thread_override` (or the env/default pick, if
+/// <= 0) whole tiles via purely thread-local state — no shuffles, no
+/// barriers, no shared memory. Byte-identical output to
+/// `launchFusedQuantAdaptiveLorenzoForward` for the same input/config; see
+/// `FusedQuantAdaptiveLorenzoStage.MatchesStagedByteIdenticalTI` in
+/// tests/stages/test_adaptive_lorenzo.cpp.
+template<typename T>
+void launchFusedQuantAdaptiveLorenzoForwardTI(
+    const float* d_raw, float ebx2_r, T* d_residuals, uint8_t* d_modes_dense,
+    T* d_means_dense, uint32_t* d_flags, size_t n, uint32_t tile_size,
+    bool enable_order2, bool enable_centering, EncodingOracleKind oracle_kind,
+    fz::stream_t stream, int tiles_per_thread_override = 0);
 
 } // namespace fz
