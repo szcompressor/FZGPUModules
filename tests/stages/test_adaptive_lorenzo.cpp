@@ -32,6 +32,14 @@
  *   FQAL2 MatchesStagedByteIdentical — identical reconstruction to Quantizer->AdaptiveLorenzo->AdaptiveBitpack
  *   FQAL3 NOAMode                    — value-range-relative bound resolves and round-trips
  *   FQAL4 SerializeDeserialize       — resolved abs_eb survives the FZM header
+ *
+ * WP1 — thread-independent (TI) forward kernel (`FZ_AL_TI`, see
+ * adaptive_lorenzo_stage.cu's fused_quant_adaptive_lorenzo_forward_kernel_ti):
+ *
+ *   TI1  MatchesCTAByteIdentical      — TI kernel vs CTA kernel, several bpt/order2/centering
+ *                                       combinations, both forced via Config::ti_dispatch
+ *   TI2  MatchesCTAAcrossTilesPerThread — same, swept over tiles_per_thread in {2,4,8}
+ *   TI3  ForwardRoundTrip             — TI path alone round-trips losslessly through AdaptiveBitpack
  */
 
 #include <gtest/gtest.h>
@@ -547,6 +555,136 @@ TEST(FusedQuantAdaptiveLorenzoStage, NOAMode) {
         << "NOA-resolved bound should be ~= rel_eb * (max-min) of the data";
     EXPECT_GE(al->getComputedAbsErrorBound(), abs_eb * 0.9);
     EXPECT_LE(al->getComputedAbsErrorBound(), abs_eb * 1.1);
+}
+
+// ── WP1: thread-independent (TI) forward kernel ─────────────────────────────
+//
+// Compares FusedQuantAdaptiveLorenzoStage's TI kernel against its own
+// CTA-cooperative kernel — both already the SAME class, forced onto one path
+// or the other via Config::ti_dispatch (the process-lifetime env-var cache
+// makes flipping FZ_AL_TI between tests unsafe within one gtest binary, see
+// the field's doc comment in adaptive_lorenzo_stage.h). Compresses through
+// the real AdaptiveBitpackStage and compares the raw archive bytes, matching
+// FQAL2's own byte-for-byte bar (not just within-eb round-trip).
+
+namespace {
+
+std::vector<uint8_t> compressFusedForced(
+    const std::vector<float>& h_float,
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c) {
+    const size_t bytes = h_float.size() * sizeof(float);
+
+    float* d_input = nullptr;
+    EXPECT_EQ(cudaMalloc(&d_input, bytes), cudaSuccess);
+    EXPECT_EQ(cudaMemcpy(d_input, h_float.data(), bytes, cudaMemcpyHostToDevice),
+              cudaSuccess);
+
+    Pipeline p(bytes, MemoryStrategy::PREALLOCATE);
+    auto* al = p.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    p.connect(ab, al);
+    p.finalize();
+
+    void* d_archive = nullptr;
+    size_t archive_bytes = 0;
+    p.compress(d_input, bytes, &d_archive, &archive_bytes, 0);
+    EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    std::vector<uint8_t> archive(archive_bytes);
+    EXPECT_EQ(cudaMemcpy(archive.data(), d_archive, archive_bytes,
+                         cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(cudaFree(d_input), cudaSuccess);
+    return archive;
+}
+
+}  // namespace
+
+TEST(FusedQuantAdaptiveLorenzoStage, MatchesCTAByteIdentical) {
+    // 8192+37: exercises a partial coder block and a partial tile, same as
+    // FQAL2. make_smooth_data (not make_mixed) because the fused stage takes
+    // raw float input, not pre-quantized int32 codes.
+    const size_t N = 8192 + 37;
+    auto h_float = make_smooth_data<float>(N);
+
+    // bpt capped at 8 (tile_size <= 256): the CTA kernel this compares
+    // against carries `__launch_bounds__(256, 8)` from M1 (see its own doc
+    // comment above), so a bpt that makes tile_size > 256 threads/block is
+    // already illegal for the CTA path today, independent of WP1's TI kernel.
+    for (uint32_t bpt : {1u, 2u, 4u, 8u}) {
+        for (bool order2 : {true, false}) {
+            for (bool centering : {true, false}) {
+                FusedQuantAdaptiveLorenzoStage<int32_t>::Config base;
+                base.blocks_per_tile  = bpt;
+                base.enable_order2    = order2;
+                base.enable_centering = centering;
+                base.error_bound      = 1e-3;
+                base.eb_mode          = ErrorBoundMode::ABS;
+
+                auto cta_cfg = base;
+                cta_cfg.ti_dispatch = FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceCTA;
+                auto ti_cfg = base;
+                ti_cfg.ti_dispatch = FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceTI;
+
+                const auto cta_archive = compressFusedForced(h_float, cta_cfg);
+                const auto ti_archive  = compressFusedForced(h_float, ti_cfg);
+
+                ASSERT_EQ(cta_archive.size(), ti_archive.size())
+                    << "bpt=" << bpt << " order2=" << order2 << " centering=" << centering;
+                EXPECT_EQ(cta_archive, ti_archive)
+                    << "TI kernel diverged from CTA kernel at bpt=" << bpt
+                    << " order2=" << order2 << " centering=" << centering;
+            }
+        }
+    }
+}
+
+TEST(FusedQuantAdaptiveLorenzoStage, MatchesCTAAcrossTilesPerThread) {
+    // Same byte-identity bar, swept over the TILES_PER_THREAD instantiations
+    // (2/4/8) the WP1 scoping doc calls out as a design question to measure,
+    // not assume. All three must reconstruct identically to the CTA kernel.
+    const size_t N = 8192 + 37;
+    auto h_float = make_smooth_data<float>(N);
+
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config base;
+    base.blocks_per_tile  = 8;
+    base.enable_order2    = true;
+    base.enable_centering = true;
+    base.error_bound      = 1e-3;
+    base.eb_mode          = ErrorBoundMode::ABS;
+
+    auto cta_cfg = base;
+    cta_cfg.ti_dispatch = FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceCTA;
+    const auto cta_archive = compressFusedForced(h_float, cta_cfg);
+
+    for (int tpt : {2, 4, 8}) {
+        auto ti_cfg = base;
+        ti_cfg.ti_dispatch        = FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceTI;
+        ti_cfg.ti_tiles_per_thread = tpt;
+        const auto ti_archive = compressFusedForced(h_float, ti_cfg);
+        EXPECT_EQ(cta_archive, ti_archive) << "tiles_per_thread=" << tpt;
+    }
+}
+
+TEST(FusedQuantAdaptiveLorenzoStage, TIForwardRoundTrip) {
+    // TI path alone, standalone round trip (not just archive-vs-archive):
+    // reconstruction must still fall within the configured error bound.
+    const size_t N = 8192;
+    auto h_float = make_smooth_data<float>(N);
+
+    Pipeline p(N * sizeof(float), MemoryStrategy::PREALLOCATE);
+    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
+    c.error_bound  = 1e-3;
+    c.eb_mode      = ErrorBoundMode::ABS;
+    c.ti_dispatch  = FusedQuantAdaptiveLorenzoStage<int32_t>::Config::TIDispatch::ForceTI;
+    auto* al = p.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
+    auto* ab = p.addStage<AdaptiveBitpackStage<int32_t>>();
+    ab->setBlockSize(32);
+    p.connect(ab, al);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_float, cs.stream);
+    EXPECT_LE(res.max_error, 1e-3 * 1.01);
 }
 
 TEST(FusedQuantAdaptiveLorenzoStage, SerializeDeserialize) {
