@@ -161,7 +161,6 @@ example `setBlockSize(32)` is `block_size = 32`).
 | `Quantizer` | `QuantizerStage` | \ref stage_quantizer "QuantizerStage" |
 | `Zigzag` | `ZigzagStage` | \ref stage_zigzag "ZigzagStage" |
 | `Negabinary` | `NegabinaryStage` | \ref stage_negabinary "NegabinaryStage" |
-| `ADM` | `ADMStage` | \ref stage_adm "ADMStage" |
 | `LogTransform` | `LogTransformStage` | \ref stage_log_transform "LogTransformStage" |
 | `Bitshuffle` | `BitshuffleStage` | \ref stage_bitshuffle "BitshuffleStage" |
 | `TUPL` | `TUPLStage` | \ref stage_tupl "TUPLStage" |

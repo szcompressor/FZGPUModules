@@ -289,8 +289,8 @@ public:
     /// rounded up to a 4-byte boundary for safe atomicOr word access, plus a
     /// small pad so a decode-side 64-bit sliding-window read at the very tail
     /// of a chunk never reads past this stride (see chunk_local_entropy_coder
-    /// _design.md's "tail padding" note — same class of fix as the ADM-stage
-    /// 16-byte vectorized-read padding in cuszp_h100_optimization memory).
+    /// _design.md's "tail padding" note — same class of fix as other
+    /// vectorized-read tail-padding bugs in this codebase).
     /// The header now also carries a kIntervalsPerChunk-entry byte-offset
     /// table (one uint32 per restart interval) instead of just the k word,
     /// and each interval independently rounds its own payload up to a byte

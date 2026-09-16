@@ -51,7 +51,7 @@ CATEGORY="$2"   # transforms | encoders | predictors
 # Strip trailing "Stage" if the user included it, so class is always <NAME>Stage
 NAME="${NAME%Stage}"
 
-# All-caps abbreviations (e.g. ANS, ADM, RLE) must not be snake-cased letter-by-letter.
+# All-caps abbreviations (e.g. ANS, RLE, RZE) must not be snake-cased letter-by-letter.
 # If the name is all uppercase letters/digits, use it directly; otherwise apply camelCase→snake_case.
 if [[ "$NAME" =~ ^[A-Z][A-Z0-9]*$ ]]; then
     LOWER=$(echo "$NAME" | tr '[:upper:]' '[:lower:]')

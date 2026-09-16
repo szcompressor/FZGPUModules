@@ -18,7 +18,6 @@ see \ref third_party_notices "Third-party notices".
 | \ref ack_fzgpu "FZ-GPU" | BSD-3-Clause | Direct port of fused kernels | `BitplaneRZEStage` |
 | \ref ack_cusz_hi "cuSZ-Hi" | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
 | \ref ack_cuszp "cuSZp / cuSZp2 / cuSZp3" | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
-| \ref ack_mans "MANS" | BSD-3-Clause | Direct port of kernels | `ADMStage` |
 | \ref ack_sperr "SPERR" | Apache License 2.0 | Direct port (lifting constants, boundary handling) + algorithmic attribution only (`Speck2DStage`, `OutlierCorrectStage`) | `Cdf97Stage`, `Speck2DStage`, `OutlierCorrectStage`/`Cdf97OutlierCorrectStage` |
 | \ref ack_dietgpu "dietGPU" | MIT | Vendored headers | `ANSStage` |
 | \ref ack_gpulz "GPULZ" | **None declared upstream** | Substantially rewritten derivative | `GPULZStage` |
@@ -208,30 +207,6 @@ SC '24.
 Yafan Huang, Sheng Di, Guanpeng Li, Franck Cappello.
 *GPU Lossy Compression for HPC Can Be Versatile and Ultra-Fast* (cuSZp3 / VGC).
 SC '25. https://doi.org/10.1145/3712285.3759817
-
----
-
-## MANS {#ack_mans}
-
-**Repository:** https://github.com/hpdps-group/MANS  
-**License:** BSD-3-Clause  
-**Developers:** Wenjing Huang, Jinwu Yang, and Dingwen Tao (Institute of
-Computing Technology, Chinese Academy of Sciences), and colleagues  
-**Paper:** Wenjing Huang, Jinwu Yang, Dingwen Tao, et al. "MANS: Efficient and
-Portable ANS Encoding for Multi-Byte Integer Data on CPUs and GPUs." SC '25.
-(Full author list / BibTeX: see `THIRD_PARTY.md`.)
-
-**Stages:**
-
-- **ADMStage** (`modules/transforms/adm/`) — GPU kernels (`mapping_uint16.cu`,
-  `mapping_uint32.cu`) are a direct port of `nv/adm/mapping_uint16.cu` and
-  `nv/adm/mapping_uint32.cu` from MANS. Kernel logic is unchanged.
-
-  **Changes from original:** unused `MansParams` parameter removed; per-call
-  `cudaMalloc`/`cudaFree` replaced by pool-allocated `AdmScratch`; `check_cuda()` replaced
-  by `FZ_CUDA_CHECK`; namespace changed from `mans::nv::adm` to `fz::adm`; kernels renamed
-  with `_u16`/`_u32` suffix to avoid TU-level naming conflicts; inline comments translated
-  to English.
 
 ---
 

@@ -103,7 +103,8 @@ enum class StageType : uint16_t {
     BITSHUFFLE = 17, 
     RZE        = 18,  
     ANS        = 20,   ///< rANS entropy coder (GPU, via dietGPU)
-    ADM        = 19,   ///< Adaptive Data Mapping transform (MANS)
+    // 19 reserved (formerly a removed transform stage; do not reuse — old
+    // archives may still carry it in a serialized stage-type field).
     G_INTERP   = 22,   ///< Spline interpolation predictor + quantizer (cuSZ-Hi G-Interp)
     BITPLANE_RZE = 23, ///< Fused bitplane transpose + zero-group RZE (FZ-GPU lossless encoder)
     ADAPTIVE_BITPACK = 24, ///< Per-block adaptive fixed-rate bit-plane coder (cuSZp plain mode)
@@ -378,7 +379,6 @@ inline std::string stageTypeToString(StageType type) {
         case StageType::TUPL:        return "TUPL";
         case StageType::LORENZO:     return "Lorenzo";
         case StageType::ANS:  return "ANS";
-        case StageType::ADM:  return "ADM";
         case StageType::G_INTERP:    return "GInterp";
         case StageType::BITPLANE_RZE: return "BitplaneRZE";
         case StageType::ADAPTIVE_BITPACK: return "AdaptiveBitpack";

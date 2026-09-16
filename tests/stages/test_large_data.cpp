@@ -18,7 +18,7 @@
  *   FZ_LARGE_DATA_TEST=1 ./test_large_data
  *   FZ_LARGE_DATA_TEST=1 FZ_LARGE_DATA_BYTES=8589934592 ./test_large_data   # 8 GiB
  *
- * Entropy coders (Huffman / ANS / ADM) are intentionally omitted: a raw stress
+ * Entropy coders (Huffman / ANS) are intentionally omitted: a raw stress
  * pattern doesn't satisfy their symbol-range / codebook assumptions, so a large
  * test of them would exercise data shape rather than data size. The list below
  * is a representative cross-section and is straightforward to extend.

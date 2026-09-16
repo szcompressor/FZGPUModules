@@ -286,14 +286,6 @@ fz_add_test(
     LABELS  stages gpu
 )
 
-# ─── ADM stage ────────────────────────────────────────────────────────────
-fz_add_test(
-    NAME    test_adm
-    SOURCES test_adm.cpp
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
-
 # ─── GInterp stage (cuSZ-Hi spline predictor) ─────────────────────────────────
 fz_add_test(
     NAME    test_ginterp

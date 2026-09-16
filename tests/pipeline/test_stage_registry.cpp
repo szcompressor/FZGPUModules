@@ -22,7 +22,7 @@ TEST(StageRegistry, EveryShippedStageTypeHasAFactory) {
         StageType::HUFFMAN, StageType::BITPACK, StageType::MERGE,
         StageType::LORENZO, StageType::QUANTIZER, StageType::ZIGZAG,
         StageType::NEGABINARY, StageType::BITSHUFFLE, StageType::RZE,
-        StageType::ANS, StageType::ADM, StageType::G_INTERP,
+        StageType::ANS, StageType::G_INTERP,
         StageType::BITPLANE_RZE, StageType::ADAPTIVE_BITPACK,
         StageType::TILED_LORENZO, StageType::RRE, StageType::RARE,
         StageType::RAZE, StageType::CLOG, StageType::HCLOG, StageType::TUPL,

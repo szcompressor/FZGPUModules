@@ -528,7 +528,6 @@ static bool matches_diff(const std::string& n)       { return n == "diff" || n =
 static bool matches_rle(const std::string& n)        { return matchWordFamily(n, "rle"); }
 static bool matches_huffman(const std::string& n)    { return n == "huffman" || n == "huf"; }
 static bool matches_ans(const std::string& n)        { return n == "ans"; }
-static bool matches_adm(const std::string& n)        { return n == "adm"; }
 static bool matches_none(const std::string& n)       { return n == "none"; }
 
 template <typename T>
@@ -696,15 +695,6 @@ static Stage* build_ans(Pipeline* pipeline, const CliSettings&, const std::strin
     return pipeline->addStage<ANSStage>();
 }
 
-static Stage* build_adm(Pipeline* pipeline, const CliSettings&, const std::string&, bool) {
-    auto* adm = pipeline->addStage<ADMStage>();
-    // The linear CLI path only ever produces uint16_t codes upstream (both
-    // `lorenzo` and `quantizer` are hardcoded to uint16_t), so U16 is always
-    // right here. Use a TOML config for a U32 ADM.
-    adm->setDtype(ADMDtype::U16);
-    return adm;
-}
-
 template <typename T>
 static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings& s) {
     using MatchFn = bool (*)(const std::string&);
@@ -730,7 +720,6 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
         { matches_rle,        false, build_rle           },
         { matches_huffman,    false, build_huffman       },
         { matches_ans,        false, build_ans           },
-        { matches_adm,        false, build_adm           },
     };
 
     pipeline->setDims(s.nx, s.ny, s.nz);
@@ -768,7 +757,7 @@ static void build_dynamic_linear_pipeline(Pipeline* pipeline, const CliSettings&
                 "Supported: lorenzo, quantizer, bitshuffle, rze[1|2|4|8], rre[1|2|4|8], "
                 "rare[1|2|4|8], raze[1|2|4|8], clog[1|2|4|8], hclog[1|2|4|8], "
                 "tupl[<dim>_<word_size>], gpulz[1|2|4|8], diff, "
-                "rle[1|2|4|8], huffman, ans, adm, none");
+                "rle[1|2|4|8], huffman, ans, none");
         }
         connect_next(entry->build(pipeline, s, name, last_is_codes_port), entry->emits_codes);
     }
@@ -842,7 +831,7 @@ static void print_root_usage(const char* argv0) {
         << "                                    Supported stages: lorenzo, quantizer, bitshuffle,\n"
         << "                                                      rze[1|2|4|8], rre[1|2|4|8], rare[1|2|4|8], raze[1|2|4|8],\n"
         << "                                                      clog[1|2|4|8], hclog[1|2|4|8], tupl[<dim>_<word_size>],\n"
-        << "                                                      gpulz[1|2|4|8], diff, rle[1|2|4|8], huffman, ans, adm\n"
+        << "                                                      gpulz[1|2|4|8], diff, rle[1|2|4|8], huffman, ans\n"
         << "  -m, --mode <rel,abs,noa>          Error bound mode (default: rel)\n"
         << "  -e, --error-bound <val>           Error bound value (default: 1e-3)\n"
         << "  -t, --type <f32,f64>              Data type (default: f32)\n"

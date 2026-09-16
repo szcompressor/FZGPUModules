@@ -181,9 +181,9 @@ every forward call (to read the `ANSCoalescedHeader` for the compressed size) an
 one in every inverse call (to read the header before decoding).
 
 **Byte-level encoding only.** `ANSStage` operates on `uint8_t` symbols (256-entry
-alphabet).  For multi-byte integer streams (e.g., `uint16_t` quantization codes),
-pair it with `ADMStage` (\ref stage_adm) which remaps the wide symbol space into
-the 8-bit domain before ANS coding.
+alphabet).  Multi-byte integer streams (e.g., `uint16_t` quantization codes) need
+an upstream stage that remaps the wide symbol space into the 8-bit domain before
+ANS coding.
 
 **Compression ratio depends on upstream symbol compactness.** ANS achieves its
 theoretical Shannon entropy bound only when the symbol distribution is known at

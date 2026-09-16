@@ -66,7 +66,7 @@ for tag in cuSZp-V2.0.1 cuSZp-V3.0.0; do
 done
 
 # ── git-tracked baselines: record uncommitted local modifications. ──────────
-for d in cuSZ cuSZ-Hi FZ-GPU PFPL lsCOMP MANS MGARD SPERR tthresh SZ3 FSZ zfp; do
+for d in cuSZ cuSZ-Hi FZ-GPU PFPL lsCOMP MGARD SPERR tthresh SZ3 FSZ zfp; do
     [[ -d "$COMPRESSORS/$d/.git" ]] || continue
     if [[ -n "$(git -C "$COMPRESSORS/$d" status --porcelain | grep '^ M' || true)" ]]; then
         echo "==> $d: local modifications"

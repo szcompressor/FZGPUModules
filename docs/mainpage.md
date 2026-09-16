@@ -8,7 +8,7 @@ FZGPUModules is a CUDA library for building composable, high-throughput compress
 pipelines. Each pipeline is a directed acyclic graph (DAG) of stages, connected and executed entirely on the GPU with stream-ordered memory management.
 
 **Key properties:**
-- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, ADM, RLE, RZE, RRE, Bitshuffle, TUPL, Huffman, ANS, …)
+- **Modular** — mix and match stages (Lorenzo, G-Interp, Quantizer, RLE, RZE, RRE, Bitshuffle, TUPL, Huffman, ANS, …)
 - **[Pipeline Specialization](#mainpage_specialization)** — `finalize()` recognizes supported subgraphs and binds declaration-driven specialization strategies; generated kernels are compiled and cached on first use
 - **High throughput** — parallel level execution, persistent scratch, stream-ordered allocation
 - **Memory-efficient** — MINIMAL and PREALLOCATE strategies; buffer coloring to alias non-overlapping allocations
@@ -91,7 +91,6 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_quantizer "QuantizerStage<TInput, TCode>"    | `modules/quantizers/quantizer/quantizer.h`         | Direct-value quantizer (ABS/REL/NOA)           |
 | \ref stage_rle "RLEStage<T>"                      | `modules/coders/rle/rle.h`                         | Run-length encoding                            |
 | \ref stage_diff "DifferenceStage<T, TOut>"         | `modules/predictors/diff/diff.h`                   | First-order difference / cumulative-sum coding |
-| \ref stage_adm "ADMStage"                         | `modules/transforms/adm/adm_stage.h`               | Adaptive data mapping — uint16/32 → 8-bit symbol domain (MANS port) |
 | \ref stage_bitshuffle "BitshuffleStage"                  | `modules/shufflers/bitshuffle/bitshuffle_stage.h`  | Bit-matrix transpose                           |
 | \ref stage_tupl "TUPLStage"                       | `modules/structural/tupl/tupl_stage.h`              | Tuple deinterleave / AoS-to-SoA transpose (LC component) |
 | \ref stage_rze "RZEStage"                         | `modules/coders/rze/rze_stage.h`                   | Zero-word bitmap reducer with recursive bitmap compression (LC component) |

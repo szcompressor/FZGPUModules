@@ -179,7 +179,6 @@ identity is recoverable; the patches capture uncommitted working-tree changes.
 | FZ-GPU | `v.0.1-3-gc7e83f7` | 2 files, 53+/12− | adds compressed-output file I/O + stream param |
 | PFPL | `36f5aae` | makefile, 2 lines | build |
 | lsCOMP | `d920dd9` | CMakeLists, 1 line | build |
-| MANS | `sc-ae-21-g7e9265f` | CMakeLists, 3 lines | build |
 | SZ3 | `v3.3.2-10-ge08c0ba` | none | — |
 | FSZ | `v1.0.0` (`43240ed`) | none | — |
 | zfp | `0.5.0-1195-g5bf9376` | none | — |

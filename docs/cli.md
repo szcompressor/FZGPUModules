@@ -174,7 +174,7 @@ Contract notes for consumers:
 | -i FILE | Input file |
 | -o FILE | Output file |
 | -c FILE.toml | Load pipeline from TOML config |
-| --stages STAGE_CHAIN | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze[1/2/4/8], rre[1/2/4/8], rare[1/2/4/8], raze[1/2/4/8], clog[1/2/4/8], hclog[1/2/4/8], tupl[DIM_WORD_SIZE], gpulz[1/2/4/8], diff, rle[1/2/4/8], huffman, ans, adm, none) |
+| --stages STAGE_CHAIN | Ordered stage chain (lorenzo, quantizer, bitshuffle, rze[1/2/4/8], rre[1/2/4/8], rare[1/2/4/8], raze[1/2/4/8], clog[1/2/4/8], hclog[1/2/4/8], tupl[DIM_WORD_SIZE], gpulz[1/2/4/8], diff, rle[1/2/4/8], huffman, ans, none) |
 | -t f32/f64 | Data type (default: f32) |
 | -m rel/abs/noa | Error bound mode (default: rel) |
 | -e VALUE | Error bound value (default: 1e-3) |

@@ -113,7 +113,7 @@ else() # HIP — SYCL and unknown values already rejected above
   #   export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH
   find_package(hip       CONFIG REQUIRED)
   find_package(hipcub    CONFIG REQUIRED)  # cub facade — mirrors cub's API
-  find_package(rocthrust CONFIG REQUIRED)  # thrust facade, used by ADM's mappings
+  find_package(rocthrust CONFIG REQUIRED)  # thrust facade, used by chunk_fusion/rze/golomb_rice
 
   # hip::host, not hip::device. hip::device exists for the "compile .cpp as HIP
   # via hipcc" workflow and carries `-x hip` as an INTERFACE compile option,
@@ -441,9 +441,6 @@ add_library(fzgmod_modules
   modules/coders/huffman/huffman_stage.cu
   modules/coders/ans/ans_stage.cu
   modules/coders/ans/dietgpu/GpuANS.cu
-  modules/transforms/adm/adm_stage.cu
-  modules/transforms/adm/mapping_uint16.cu
-  modules/transforms/adm/mapping_uint32.cu
   # GInterp (cuSZ-Hi spline interpolation predictor + quantizer — fused)
   modules/fused/ginterp/ginterp_kernels.cu
   modules/fused/ginterp/ginterp_stage.cu

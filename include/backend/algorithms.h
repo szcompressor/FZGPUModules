@@ -13,9 +13,9 @@
  * invocation (still `cub::Device*` under the CUDA backend) stays at the call
  * site via a lambda, so this header does not need to know about cub itself.
  *
- * `exclusiveScan()` wraps the two ADM-stage call sites that use
- * `thrust::exclusive_scan` directly (no scratch-buffer dance — thrust manages
- * its own temporary storage internally).
+ * `exclusiveScan()` wraps call sites that use `thrust::exclusive_scan`
+ * directly (no scratch-buffer dance — thrust manages its own temporary
+ * storage internally).
  *
  * CUDA and HIP are implemented. The two share one implementation: the
  * allocation calls below are spelled with their CUDA names and re-pointed at

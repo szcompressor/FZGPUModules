@@ -52,7 +52,6 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
-#include "transforms/adm/adm_stage.h"
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"

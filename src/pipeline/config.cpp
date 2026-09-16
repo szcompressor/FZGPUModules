@@ -64,7 +64,6 @@
 #include "coders/adaptive_bitpack/adaptive_bitpack_stage.h"
 #include "coders/huffman/huffman_stage.h"
 #include "coders/ans/ans_stage.h"
-#include "transforms/adm/adm_stage.h"
 #include "coders/rle/rle.h"
 #include "predictors/diff/diff.h"
 #include "fused/ginterp/ginterp_stage.h"
@@ -770,13 +769,6 @@ static Stage* addANSStage(Pipeline& p, const toml::table& t) {
     return s;
 }
 
-static Stage* addADMStage(Pipeline& p, const toml::table& t) {
-    auto* s = p.addStage<ADMStage>();
-    std::string dtype_str = optStr(t, "dtype", "uint16");
-    if (dtype_str == "uint32") s->setDtype(ADMDtype::U32);
-    return s;
-}
-
 static Stage* addHuffmanStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "input_type", "uint16"));
     uint32_t bklen = static_cast<uint32_t>(optInt(t, "bklen", 1024));
@@ -1149,11 +1141,6 @@ static void saveANSStage(Stage* s, std::ostringstream& out) {
     out << "prob_bits = " << static_cast<int64_t>(ans->getProbBits()) << "\n";
 }
 
-static void saveADMStage(Stage* s, std::ostringstream& out) {
-    auto* adm = static_cast<ADMStage*>(s);
-    out << "dtype = \"" << (adm->getDtype() == ADMDtype::U16 ? "uint16" : "uint32") << "\"\n";
-}
-
 // Add a GInterp stage (2-D or 3-D — dispatches on code_type).
 // dims are NOT read from TOML — they come from `Pipeline::setDims()` which is
 // already required for any multi-dim pipeline; setDims() is invoked on every
@@ -1323,7 +1310,6 @@ static const StageEntry kStageRegistry[] = {
     { "Bitpack",      StageType::BITPACK,      addBitpackStage,      saveBitpackStage,      "modules/coders/bitpack" },
     { "Huffman",      StageType::HUFFMAN,      addHuffmanStage,      saveHuffmanStage,      "modules/coders/huffman" },
     { "ANS",          StageType::ANS,          addANSStage,          saveANSStage,          "modules/coders/ans" },
-    { "ADM",          StageType::ADM,          addADMStage,          saveADMStage,          "modules/transforms/adm" },
     { "GInterp",      StageType::G_INTERP,     addGInterpStage,      saveGInterpStage,      "modules/fused/ginterp" },
     { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage,  "modules/fused/bitplane_rze" },
     { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage, "modules/coders/adaptive_bitpack" },

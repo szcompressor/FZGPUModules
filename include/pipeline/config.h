@@ -11,7 +11,7 @@
  * Supported stage `type` values: query registeredStageTypes() (below) or run
  * `fzgmod-cli --list-stages`.  Both read the single stage registry in config.cpp,
  * so they cannot go stale — a prose list here did, silently, omitting GInterp,
- * AdaptiveBitpack, TiledLorenzo, GPULZ, ANS, Huffman, ADM and others long after
+ * AdaptiveBitpack, TiledLorenzo, GPULZ, ANS, Huffman and others long after
  * they shipped.
  *
  * File format: human-readable TOML v1.0

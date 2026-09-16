@@ -4,7 +4,6 @@
 NAME       URL                                            COMMIT                                     TAG                    DIRTY
 FSZ        https://github.com/JiajunHuang1999/FSZ.git     43240ed1149ff4c48b52e74c9d8ba998ca5bcf8c   v1.0.0                 0 modified
 FZ-GPU     https://github.com/szcompressor/FZ-GPU.git     c7e83f7614c8505e9b539190606b11589273696b   v.0.1-3-gc7e83f7       2 modified
-MANS       https://github.com/hpdps-group/MANS.git        7e9265f0d90027a7f4ea399feceba376d58b0b24   sc-ae-21-g7e9265f      1 modified
 MGARD      https://github.com/CODARcode/MGARD.git         b40d1a7392f422fe3b01bdf7e860263cd82d8908   1.6.0-3-gb40d1a73      0 modified
 PFPL       https://github.com/burtscher/PFPL.git          36f5aaef42744ed78b4d1525b03a7fb2168b363c   36f5aae                1 modified
 SPERR      https://github.com/NCAR/SPERR.git              b8012586908aaabba993038d183b3937c8ea9c7c   v0.8.5-1-gb801258      0 modified
