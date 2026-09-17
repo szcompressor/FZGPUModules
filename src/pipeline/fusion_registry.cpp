@@ -26,14 +26,14 @@ namespace {
 //    AdaptiveBitpack(outlier). One generic entry replaces the former per-shape
 //    cuszp2/cuszp3 matchers: the stages declare WarpRegister fused-ops (the
 //    predictor op name selects the fused driver), the planner guarantees the
-//    Map -> BlockLocal -> Cooperative ordering, and the runner dispatches on the
+//    Elementwise -> RegionLocal -> SegmentCodec ordering, and the runner dispatches on the
 //    predictor. Like the chunk strategy this is now NVRTC-composed: the predictor
 //    stage declares its device-policy op + packed params + shape (elems_per_lane,
 //    n_ab) via getFusedOp(), and the generic runner builds a WarpFusionSpec and
 //    calls one launcher — no per-predictor dispatch or pre-instantiated launcher.
 //    Adding a predictor, a transform, or a coder = write its policy in warp_fusion.cuh
-//    + declare it on the stage. The chain is Quant(Map) -> Predictor(BlockLocal) ->
-//    {Map|BlockLocal transforms}* -> Coder(Cooperative), all WarpRegister — the register
+//    + declare it on the stage. The chain is Quant(Elementwise) -> Predictor(RegionLocal) ->
+//    {Elementwise|RegionLocal transforms}* -> Coder(SegmentCodec), all WarpRegister — the register
 //    analogue of the chunk chain.
 bool matchesWarpRegister(const std::vector<Stage*>& g) {
     if (g.size() < 3) return false;                // Quant -> Predictor -> ... -> Coder
@@ -47,13 +47,14 @@ bool matchesWarpRegister(const std::vector<Stage*>& g) {
         const FusedOpDecl op = s->getFusedOp();
         if (!op.valid() || op.strategy != FusionStrategy::WarpRegister) return false;
     }
-    if (g.front()->getFusionSpec().access != FusionAccess::Map)          return false; // quant
-    if (g[1]->getFusionSpec().access      != FusionAccess::BlockLocal)   return false; // predictor
-    if (g.back()->getFusionSpec().access  != FusionAccess::Cooperative)  return false; // coder
+    if (g.front()->getFusionSpec().access != FusionAccess::Elementwise)  return false; // quant
+    if (g[1]->getFusionSpec().access      != FusionAccess::RegionLocal)  return false; // predictor
+    if (g.back()->getFusionSpec().access  != FusionAccess::SegmentCodec) return false; // coder
     // Interior stages (between predictor and coder) are register→register transforms.
     for (size_t i = 2; i + 1 < g.size(); ++i) {
         const FusionAccess a = g[i]->getFusionSpec().access;
-        if (a != FusionAccess::Map && a != FusionAccess::BlockLocal) return false;
+        if (a != FusionAccess::Elementwise && a != FusionAccess::RegionLocal)
+            return false;
     }
     return true;
 }
@@ -73,7 +74,7 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     const double quant_step = g.front()->getFusedForwardQuantStep();
     if (!(quant_step > 0.0) || !std::isfinite(quant_step)) {
         throw std::runtime_error(
-            "warp-register specialization requires its Map head to expose a "
+            "warp-register specialization requires its Elementwise head to expose a "
             "finite positive quantization step");
     }
     const float inv2eb = static_cast<float>(1.0 / quant_step);
@@ -84,7 +85,7 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     // its geometry with a leading inv2eb slot (offset 0) it cannot fill (the quantizer
     // owns the bound); patch it here.
     const FusedOpDecl decl      = g[1]->getFusedOp();
-    const FusedOpDecl coder_decl = g.back()->getFusedOp();   // swappable Cooperative sink
+    const FusedOpDecl coder_decl = g.back()->getFusedOp();   // swappable SegmentCodec sink
     fused::WarpFusionSpec spec;
     spec.predictor      = decl.op_name;
     spec.coder          = coder_decl.op_name;
@@ -118,29 +119,29 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
 }
 
 // ── Generic chunk-cooperative fusion. Composes ANY linear
-//    Map -> Transform* -> Coder chain of ChunkCooperative device-ops from the
+//    Elementwise -> Transform* -> Coder chain of ChunkCooperative device-ops from the
 //    stages' own getFusedOp() declarations — no per-pipeline shape hard-coded.
 //    PFPL (Quant-inplace-zigzag -> Difference-negabinary -> Bitshuffle -> {RZE|
 //    RRE|RARE|RAZE...}) is just one instance; a novel compatible chain a user
 //    assembles fuses with zero new registry code. The planner already guarantees
 //    the group is strictly linear, same-block-size, and coder-terminated; this
-//    checks every member is a ChunkCooperative op with a single Map head and
-//    Coder tail (the harness's Map op is the global-memory loader).
+//    checks every member is a ChunkCooperative op with a single Elementwise head and
+//    Coder tail (the harness's elementwise op is the global-memory loader).
 bool matchesChunkCooperative(const std::vector<Stage*>& g) {
-    if (g.size() < 2) return false;                 // need a Map head + a Coder tail
-    int maps = 0, coders = 0;
+    if (g.size() < 2) return false;                 // need an Elementwise head + a Coder tail
+    int elementwise = 0, coders = 0;
     for (Stage* s : g) {
         const FusedOpDecl op = s->getFusedOp();
         if (!op.valid() || op.strategy != FusionStrategy::ChunkCooperative) return false;
         switch (s->getFusionSpec().access) {
-            case FusionAccess::Map:         ++maps;   break;
-            case FusionAccess::Cooperative: ++coders; break;
-            default:                                  break;
+            case FusionAccess::Elementwise:  ++elementwise; break;
+            case FusionAccess::SegmentCodec: ++coders;      break;
+            default:                                       break;
         }
     }
-    return maps == 1 && coders == 1 &&
-           g.front()->getFusionSpec().access == FusionAccess::Map &&
-           g.back()->getFusionSpec().access  == FusionAccess::Cooperative;
+    return elementwise == 1 && coders == 1 &&
+           g.front()->getFusionSpec().access == FusionAccess::Elementwise &&
+           g.back()->getFusionSpec().access  == FusionAccess::SegmentCodec;
 }
 
 size_t runChunkCooperative(const FusedRunContext& ctx) {
@@ -154,7 +155,7 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
 
     // 2. Assemble the fused spec + packed params blob from the ops themselves, by
     //    role (FusionSpec.access). Stage order IS execution order, so the blob is
-    //    naturally [Map][Transforms...][Coder] — the order the kernel expects.
+    //    naturally [Elementwise][Transforms...][Coder] — the order the kernel expects.
     fused::ChunkFusionSpec spec;
     spec.transforms.clear();
     std::vector<uint8_t> blob;
@@ -162,19 +163,26 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
     for (Stage* s : g) {
         const FusedOpDecl op = s->getFusedOp();
         switch (s->getFusionSpec().access) {
-            case FusionAccess::Map:         spec.quant_op = op.op_name;            break;
-            case FusionAccess::Cooperative: spec.coder    = op.op_name; coder = s; break;
-            default:                        spec.transforms.push_back(op.op_name); break;
+            case FusionAccess::Elementwise:
+                spec.quant_op = op.op_name;
+                break;
+            case FusionAccess::SegmentCodec:
+                spec.coder = op.op_name;
+                coder = s;
+                break;
+            default:
+                spec.transforms.push_back(op.op_name);
+                break;
         }
         blob.insert(blob.end(), op.params.begin(), op.params.end());
     }
-    // matchesChunkCooperative() guarantees exactly one Cooperative-access member
-    // (the coder), and the planner guarantees every Cooperative/BlockLocal member
+    // matchesChunkCooperative() guarantees exactly one SegmentCodec member
+    // (the coder), and the planner guarantees every SegmentCodec/RegionLocal member
     // of the group agrees on block_size (see fusion_planner.cpp) — so the coder's
     // own declared block_size IS the chunk size the whole group was matched at.
     spec.chunk_bytes = static_cast<int>(coder->getFusionSpec().block_size);
 
-    // 3. Split-outlier producer? The quant Map declares "QuantSplitOutlier" and its
+    // 3. Split-outlier producer? The Elementwise quantizer declares "QuantSplitOutlier" and its
     //    outlier ports arrive as named escaping side outputs. Hand the pre-allocated buffers to the
     //    launcher; it fills them and reports the outlier count. Absent side outputs
     //    (the common single-output chain), these stay null and the launcher no-ops it.
@@ -247,7 +255,7 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
 }
 
 // ── Generic chunk-cooperative inverse, first admitted shape: PFPL/RZE. ────────
-// Stage order is inverse execution order: Coder -> reverse transforms -> Map.
+// Stage order is inverse execution order: Coder -> reverse transforms -> Elementwise.
 // The kernel harness remains chunk-based and stage-agnostic internally; this
 // matcher is deliberately evidence-gated to the exact RZE/PFPL operation set
 // until additional inverse device ops have correctness/performance coverage.
@@ -308,8 +316,8 @@ size_t runChunkCooperativeInverse(const FusedRunContext& ctx) {
 //
 //    ROLE-BASED, mirroring matchesWarpRegister/runWarpRegister on the compress
 //    side: the stages declare WarpRegister inverse fused-ops
-//    (getInverseFusionSpec/getInverseFusedOp) in the Cooperative / BlockLocal /
-//    Map roles, and this matcher/runner read those declarations by role and build
+//    (getInverseFusionSpec/getInverseFusedOp) in the SegmentCodec / RegionLocal /
+//    Elementwise roles, and this matcher/runner read those declarations by role and build
 //    a WarpFusionSpec from op names — no dynamic_cast to concrete stage types and
 //    no hardcoded predictor/coder. A new warp predictor/coder that declares
 //    forward+inverse ops fuses in BOTH directions with no edits here.
@@ -326,10 +334,10 @@ bool matchesWarpRegisterInverse(const std::vector<Stage*>& g) {
     const FusionSpec coder = g.front()->getInverseFusionSpec();  // reverse-forward order
     const FusionSpec pred  = g[1]->getInverseFusionSpec();
     const FusionSpec quant = g.back()->getInverseFusionSpec();
-    if (coder.access != FusionAccess::Cooperative) return false;
-    if (pred.access  != FusionAccess::BlockLocal)  return false;
-    if (quant.access != FusionAccess::Map)         return false;
-    // Coder and predictor must agree on the warp block size (Map/quant carries 0).
+    if (coder.access != FusionAccess::SegmentCodec) return false;
+    if (pred.access  != FusionAccess::RegionLocal)  return false;
+    if (quant.access != FusionAccess::Elementwise)  return false;
+    // Coder and predictor must agree on the warp region size (Elementwise quant carries 0).
     return coder.block_size != 0 && pred.block_size == coder.block_size;
 }
 
@@ -340,9 +348,9 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
     Stage* quant = nullptr;
     for (Stage* s : g) {
         switch (s->getInverseFusionSpec().access) {
-            case FusionAccess::Cooperative: coder     = s; break;
-            case FusionAccess::BlockLocal:  predictor = s; break;
-            case FusionAccess::Map:         quant     = s; break;
+            case FusionAccess::SegmentCodec: coder = s;     break;
+            case FusionAccess::RegionLocal:  predictor = s; break;
+            case FusionAccess::Elementwise:  quant = s;     break;
             default: break;
         }
     }

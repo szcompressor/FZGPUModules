@@ -21,10 +21,10 @@
  *
  * A group is a maximal chain where every stage opts into fusion
  * (`Stage::getFusionSpec()`), the chain is strictly linear (no fan-in/out
- * inside it), conventional block-local/cooperative members share one block
- * size, and a `Cooperative` coder, if present, terminates the chain (nothing
- * fuses past a variable-length coder). A `TileAdaptive` selector instead owns a
- * larger tile made of equal immediate downstream coder units.
+ * inside it), conventional region-local/segment-codec members share one region
+ * size, and a `SegmentCodec`, if present, terminates the chain because it emits
+ * variable-length segments. A `TileSelector` instead owns a larger tile made of
+ * equal immediate downstream codec segments.
  * See docs/codebase_notes.md CN-FUSE-PROOF.
  */
 
@@ -41,10 +41,10 @@ class CompressionDAG;
 /// Geometry accumulated while extending one candidate fusion chain.
 struct FusionGeometry {
     uint32_t block_size = 0;         ///< legacy same-size block/chunk path
-    uint32_t selector_tile_size = 0; ///< TileAdaptive selector unit
-    uint32_t coder_unit_size = 0;    ///< coder units nested in selector tile
+    uint32_t selector_tile_size = 0; ///< TileSelector unit
+    uint32_t coder_unit_size = 0;    ///< codec segments nested in selector tile
 
-    bool tileAdaptive() const { return selector_tile_size != 0; }
+    bool hasTileSelector() const { return selector_tile_size != 0; }
 };
 
 /// Exact reason a stage spec cannot extend an accumulated group geometry.
@@ -52,7 +52,7 @@ enum class FusionCompatibility : uint8_t {
     Compatible = 0,
     UnfusableStage,
     InvalidTileGeometry,
-    TileAfterBlockLocal,
+    TileAfterRegionLocal,
     MultipleTileSelectors,
     TileInteriorStageUnsupported,
     StandardBlockMismatch,
@@ -69,11 +69,11 @@ const char* fusionCompatibilityName(FusionCompatibility result);
 struct FusionGroup {
     std::vector<Stage*>      stages;       ///< the fused chain, front = producer
     std::vector<std::string> stage_names;  ///< node names, parallel to `stages`
-    uint32_t                 block_size = 0;   ///< shared block size (0 if all Map)
-    uint32_t                 selector_tile_size = 0; ///< TileAdaptive unit, else 0
-    uint32_t                 coder_unit_size = 0;    ///< nested coder unit, else 0
-    bool                     has_tile_adaptive = false;
-    bool                     has_coder  = false;///< ends in a Cooperative coder
+    uint32_t                 block_size = 0;   ///< shared region size (0 if all Elementwise)
+    uint32_t                 selector_tile_size = 0; ///< TileSelector unit, else 0
+    uint32_t                 coder_unit_size = 0;    ///< nested codec segment, else 0
+    bool                     has_tile_selector = false;
+    bool                     has_coder  = false;///< ends in a SegmentCodec
 };
 
 /// Return every maximal legal group (size >= 2) in `dag`. `dag` should be

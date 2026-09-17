@@ -65,10 +65,10 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec);
  * cross-chunk scan/pack tail is shared with the template path in chunk_fusion.cu.
  * Throws std::runtime_error on compile failure.
  */
-/// `side_*` feed the harness Map op's escaping outputs (e.g. an outlier list). Pass
+/// `side_*` feed the harness Elementwise op's escaping outputs (e.g. an outlier list). Pass
 /// nullptr/0 when the composed op produces none — the generated kernel takes the args
 /// unconditionally (an unused `ChunkSideCtx{}` is harmless). `d_side_count` must be a
-/// device counter the caller has zeroed; the Map op atomically appends into it.
+/// device counter the caller has zeroed; the Elementwise op atomically appends into it.
 void launchNvrtcChunkFusedEncode(
     const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
     uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream,
@@ -78,14 +78,14 @@ void launchNvrtcChunkFusedEncode(
 /**
  * Generic chunk-cooperative fused compress — the entry the generic registry runner
  * uses, with no per-pipeline shape. NVRTC-composes `spec` (any linear
- * Map -> Transform* -> Coder chain of ChunkCooperative ops), uploads the packed
+ * Elementwise -> Transform* -> Coder chain of ChunkCooperative ops), uploads the packed
  * per-op params blob (`host_params`/`params_bytes`, ops in execution order), runs
  * the encode kernel plus the shared cross-chunk scan/pack tail, and returns the
  * archive byte length. Always uses NVRTC — the only way to compose an arbitrary
  * runtime op list — but the compiled module is cached by (source, arch), so only
  * the first compress of a given chain pays the JIT cost.
  */
-/// When `d_side_idxs`/`d_side_vals` are non-null the composed Map op is a split-outlier
+/// When `d_side_idxs`/`d_side_vals` are non-null the composed Elementwise op is a split-outlier
 /// producer: this allocates and zeroes a device append-counter, runs the encode so the
 /// op fills the two side buffers (capacity `side_max` elements each), and writes the
 /// final outlier count back to `*out_side_count` (a stream sync happens before it

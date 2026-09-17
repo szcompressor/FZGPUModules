@@ -21,7 +21,7 @@ namespace fz {
 namespace fused {
 namespace chunk {
 
-/// Params for the `QuantInplaceZigzag` Map op (inplace-outlier NOA/ABS quant).
+/// Params for the `QuantInplaceZigzag` Elementwise op (inplace-outlier NOA/ABS quant).
 /// `ebx2_r = 1/(2*abs_eb)`; out-of-radius / over-threshold values become raw
 /// IEEE-754 bits. Filled from the quantizer's primed `computed_abs_eb_`.
 struct QuantInplaceZigzagParams {
@@ -30,12 +30,12 @@ struct QuantInplaceZigzagParams {
     float    threshold;
 };
 
-/// Params for the `QuantSplitOutlier` Map op (3-port outlier NOA/ABS quant). Same
+/// Params for the `QuantSplitOutlier` Elementwise op (3-port outlier NOA/ABS quant). Same
 /// uniform-step layout as the inplace variant — the only difference is where the
 /// outliers go (a side list vs. inline raw bits), not how codes are computed.
 using QuantSplitOutlierParams = QuantInplaceZigzagParams;
 
-/// Side-output context threaded to the harness Map op, so a Map that produces
+/// Side-output context threaded to the harness Elementwise op, so an Elementwise stage that produces
 /// escaping outputs (e.g. `QuantSplitOutlier`) can append them. `out_count` is a
 /// GLOBAL device counter shared across every chunk's CTA (the outlier list is one
 /// pipeline output spanning all chunks); the runner allocates and zeroes it. Ops

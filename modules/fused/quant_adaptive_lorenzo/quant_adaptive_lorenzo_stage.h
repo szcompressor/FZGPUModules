@@ -148,7 +148,7 @@ public:
 
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || !has_bound_oracle_) return {};
-        return FusionSpec{FusionAccess::TileAdaptive, getTileSize(),
+        return FusionSpec{FusionAccess::TileSelector, getTileSize(),
                           config_.coder_block_size};
     }
 

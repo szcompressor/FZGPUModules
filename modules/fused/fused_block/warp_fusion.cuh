@@ -296,7 +296,7 @@ struct TiledLorenzoIdentity3DPredictor {
     }
 };
 
-// ── Coder policies (the swappable Cooperative sink) ──────────────────────────
+// ── Coder policies (the swappable SegmentCodec sink) ──────────────────────────
 // A warp coder is the variable-length tail of the register chain. Its two halves
 // mirror the two-pass driver: `cost()` (called by ALL lanes — it warp-reduces the
 // per-lane deltas) writes the block's `meta` + byte `cost`; `pack()` writes the
@@ -452,7 +452,7 @@ struct AdaptiveBitpackCoder {
 // the existing AdaptiveBitpack inverse decodes it unchanged. It never beats
 // AdaptiveBitpack on size (AB picks the per-block min), which makes it the honest
 // baseline coder for A/B-ing the swappable-coder path. The demonstrator for "swap more
-// than the predictor": a different Cooperative op composed into the same warp chain.
+// than the predictor": a different SegmentCodec op composed into the same warp chain.
 struct PlainBitpackCoder {
     static constexpr uint32_t meta_bytes = 2;   // [rate][0] — always plain, AB-decodable
 

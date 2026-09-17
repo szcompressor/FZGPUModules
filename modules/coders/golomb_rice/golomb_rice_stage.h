@@ -60,7 +60,7 @@
  * replaying an archive whose T is a runtime (not caller-known) fact.
  *
  * ## Fusion (compress-only, SHIPPED 2026-09-06)
- * `getFusionSpec()`/`getFusedOp()` declare `FusionAccess::Cooperative` /
+ * `getFusionSpec()`/`getFusedOp()` declare `FusionAccess::SegmentCodec` /
  * `FusionStrategy::ChunkCooperative` (T=int32_t, chunk_size=16384 only — the
  * chunk_fusion.cuh harness's shared buffers are a fixed uint32_t[4096]
  * shape). The device op (`GolombRiceCoder` in
@@ -144,7 +144,7 @@ public:
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || chunk_size_ != 16384u || !std::is_same<T, int32_t>::value)
             return {};
-        return FusionSpec{FusionAccess::Cooperative, chunk_size_};
+        return FusionSpec{FusionAccess::SegmentCodec, chunk_size_};
     }
 
     /// Chunk-cooperative coder op (the swappable variable-length sink). Stateless.

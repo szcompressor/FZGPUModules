@@ -95,7 +95,7 @@ public:
         return chunk_size_ > 0 ? chunk_size_ : 1;
     }
 
-    // Block-local (chunk-cooperative) in two shapes:
+    // Region-local (chunk-cooperative) in two shapes:
     //  - T != TOut, Mode == NEGABINARY: the fused DiffNegabinary op (unchanged).
     //  - T == TOut (plain difference, no fused encode step): the fused DiffPlain
     //    op, gated to int32_t -- the chunk_fusion.cuh harness's shared buffers
@@ -114,9 +114,9 @@ public:
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || chunk_size_ == 0) return {};
         if constexpr (!std::is_same_v<T, TOut> && Mode == FusionMode::NEGABINARY)
-            return FusionSpec{FusionAccess::BlockLocal, static_cast<uint32_t>(chunk_size_)};
+            return FusionSpec{FusionAccess::RegionLocal, static_cast<uint32_t>(chunk_size_)};
         else if constexpr (std::is_same_v<T, TOut> && std::is_same_v<T, int32_t>)
-            return FusionSpec{FusionAccess::BlockLocal, static_cast<uint32_t>(chunk_size_)};
+            return FusionSpec{FusionAccess::RegionLocal, static_cast<uint32_t>(chunk_size_)};
         else
             return {};
     }

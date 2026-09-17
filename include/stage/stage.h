@@ -297,7 +297,7 @@ public:
      *
      * Default is `Unfusable` — a stage is only ever fused if it opts in by
      * overriding this. Stages whose fusability depends on configuration (e.g. a
-     * quantizer is a pure Map only in linear mode) must reflect that here.
+     * quantizer is Elementwise only in linear mode) must reflect that here.
      * Forward-mode only; an inverse stage should report `Unfusable`.
      */
     virtual FusionSpec getFusionSpec() const { return {}; }
@@ -335,14 +335,14 @@ public:
     virtual FusedOpDecl getInverseFusedOp() const { return {}; }
 
     /**
-     * Coder (Cooperative) inverse hook: the element count the archive
+     * Coder (`SegmentCodec`) inverse hook: the element count the archive
      * reconstructs to, so a generic inverse runner never downcasts the coder
      * stage for it. Default 0; the warp coder stage overrides it.
      */
     virtual size_t getFusedInverseElementCount() const { return 0; }
 
     /**
-     * Quant (Map) forward hook: the linear quantization step (2*abs_eb) used by
+     * Quant (`Elementwise`) forward hook: the linear quantization step (2*abs_eb) used by
      * a warp-register harness. The runner reads this after
      * primeFusedForwardState(), so data-dependent bounds such as NOA are
      * resolved. Default 0 means the stage does not provide this scalar contract.
@@ -350,7 +350,7 @@ public:
     virtual double getFusedForwardQuantStep() const { return 0.0; }
 
     /**
-     * Quant (Map) inverse hook: the linear dequant step (2*abs_eb) the warp
+     * Quant (`Elementwise`) inverse hook: the linear dequant step (2*abs_eb) the warp
      * inverse harness multiplies reconstructed codes by, so a generic inverse
      * runner never downcasts the quantizer stage for it. Linear-quant only —
      * the same generality ceiling as the forward warp path. Default 0; the

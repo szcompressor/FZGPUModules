@@ -103,16 +103,16 @@ public:
 
     /// A per-block fixed-length coder: warp-cooperative reduce+pack whose only
     /// cross-block dependency is the payload offset prefix, which the fused
-    /// driver owns. Fuses as the tail of a block-local chain of the same block
+    /// driver owns. Fuses as the tail of a region-local chain of the same region
     /// size — any multiple of 32 up to 32·kMaxWarpElemsPerLane (block 32 = cuSZp2,
     /// block 128 = SZp). Both plain and outlier modes fuse.
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || block_size_ == 0 || block_size_ % 32u != 0 ||
             block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
-        return FusionSpec{FusionAccess::Cooperative, block_size_};
+        return FusionSpec{FusionAccess::SegmentCodec, block_size_};
     }
 
-    /// Warp-register coder op (the fixed-rate Cooperative sink of the warp chain). The
+    /// Warp-register coder op (the fixed-rate SegmentCodec sink of the warp chain). The
     /// op name is the device coder policy the fused kernel composes — the runner reads
     /// it and the codegen instantiates the rate/pack bodies with it, so the coder is
     /// swappable (see setFusedCoder). Any block = 32·EPL (EPL ≤ cap) fuses; outlier
@@ -130,7 +130,7 @@ public:
         // and PlainRateCoder byte-for-byte for any N (launcher fills in <N> from the
         // paired predictor's block size). Only known when fused_coder_ is left at its
         // default "AdaptiveBitpackCoder" -- a caller who swapped in some other
-        // Cooperative sink via setFusedCoder() has no known TI policy to offer.
+        // SegmentCodec sink via setFusedCoder() has no known TI policy to offer.
         if (outlier_selection_) {
             if (fused_coder_ == "AdaptiveBitpackCoder") d.ti_op_name = "ThreadFixedRateCoderN";
         } else {
@@ -139,7 +139,7 @@ public:
         return d;
     }
 
-    /// Inverse-mode warp coder declaration — the Cooperative role of the warp
+    /// Inverse-mode warp coder declaration — the SegmentCodec role of the warp
     /// decompress chain. Mirrors getFusionSpec()/getFusedOp() with the identical
     /// block-size gating, so forward and inverse eligibility stay in lockstep. Only
     /// the int32_t coder policy is instantiated by the warp inverse harness, so the
@@ -148,7 +148,7 @@ public:
         if (!is_inverse_ || !std::is_same<T, int32_t>::value ||
             block_size_ == 0 || block_size_ % 32u != 0 ||
             block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
-        return FusionSpec{FusionAccess::Cooperative, block_size_};
+        return FusionSpec{FusionAccess::SegmentCodec, block_size_};
     }
     FusedOpDecl getInverseFusedOp() const override {
         if (!getInverseFusionSpec().fusable()) return {};
@@ -316,7 +316,7 @@ private:
     size_t   actual_output_size_ = 0;
     /// Which warp coder policy the fused (NVRTC) path composes for this stage. The
     /// default reproduces this stage's own adaptive packing byte-for-byte; a caller
-    /// may swap in another Cooperative coder (e.g. "PlainBitpackCoder") — every coder
+    /// may swap in another SegmentCodec coder (e.g. "PlainBitpackCoder") — every coder
     /// still emits an AdaptiveBitpack-decodable archive, so the staged inverse is
     /// unchanged. Runtime-only (not serialized): decode never consults it.
     std::string fused_coder_ = "AdaptiveBitpackCoder";

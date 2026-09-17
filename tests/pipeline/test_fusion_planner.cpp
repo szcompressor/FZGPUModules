@@ -19,7 +19,7 @@ using namespace fz;
 
 namespace {
 
-// Planner-only Map that deliberately has no generated op. It extends the
+// Planner-only Elementwise stage that deliberately has no generated op. It extends the
 // maximal legality chain but cannot belong to an executable specialization,
 // exercising selection of a valid interior subspan.
 class PlannerOnlyMapStage final : public Stage {
@@ -45,7 +45,7 @@ public:
         return static_cast<uint8_t>(DataType::FLOAT32);
     }
     FusionSpec getFusionSpec() const override {
-        return FusionSpec{FusionAccess::Map, 0};
+        return FusionSpec{FusionAccess::Elementwise, 0};
     }
 private:
     size_t actual_ = 0;
@@ -145,7 +145,7 @@ void buildCenteredWarp1D(Pipeline& p, size_t n, uint32_t block) {
 } // namespace
 
 // getFusionSpec() must exclude centering outright: a centered Lorenzo is not
-// a fusable BlockLocal predictor today (no fused policy supports its means
+// a fusable RegionLocal predictor today (no fused policy supports its means
 // port), regardless of block size.
 TEST(FusionPlanner, LorenzoCenteringIsUnfusable) {
     LorenzoStage<int32_t> centered(128, /*centering=*/true);
@@ -259,7 +259,7 @@ TEST(FusionPlanner, AutoSelectsExecutableSubspanOfMaximalChain) {
     EXPECT_TRUE(info.fallback_reason.empty());
 }
 
-// A quantizer in the default (outlier) mode is not a pure Map, so it is not
+// A quantizer in the default (outlier) mode is not Elementwise, so it is not
 // fusable and the chain does not form.
 TEST(FusionPlanner, OutlierQuantizerIsNotFusable) {
     Pipeline p(1024 * sizeof(float), MemoryStrategy::PREALLOCATE, 2.0f);
@@ -284,20 +284,20 @@ TEST(FusionPlanner, OutlierQuantizerIsNotFusable) {
 TEST(FusionPlanner, StageFusionSpecs) {
     QuantizerStage<float, uint32_t> qlin;
     qlin.setLinearMode(true);
-    EXPECT_EQ(qlin.getFusionSpec().access, FusionAccess::Map);
+    EXPECT_EQ(qlin.getFusionSpec().access, FusionAccess::Elementwise);
 
     QuantizerStage<float, uint32_t> qout;  // default: outlier
     EXPECT_EQ(qout.getFusionSpec().access, FusionAccess::Unfusable);
 
     LorenzoStage<int32_t> lz; lz.setBlockSize(32);
-    EXPECT_EQ(lz.getFusionSpec().access, FusionAccess::BlockLocal);
+    EXPECT_EQ(lz.getFusionSpec().access, FusionAccess::RegionLocal);
     EXPECT_EQ(lz.getFusionSpec().block_size, 32u);
 
     LorenzoStage<int32_t> lznd;  // N-D default (block_size 0) — not fused yet
     EXPECT_EQ(lznd.getFusionSpec().access, FusionAccess::Unfusable);
 
     AdaptiveBitpackStage<int32_t> ab; ab.setBlockSize(32);
-    EXPECT_EQ(ab.getFusionSpec().access, FusionAccess::Cooperative);
+    EXPECT_EQ(ab.getFusionSpec().access, FusionAccess::SegmentCodec);
     EXPECT_EQ(ab.getFusionSpec().block_size, 32u);
 }
 
@@ -357,32 +357,32 @@ TEST(FusionPlanner, FinalizeBindsAdaptiveOutlierOracleToAdaptiveLorenzo) {
 TEST(FusionPlanner, TileAdaptiveGeometryReportsExactLegalityFailures) {
     FusionGeometry geometry;
     EXPECT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::TileAdaptive, 250, 32}),
+                  geometry, FusionSpec{FusionAccess::TileSelector, 250, 32}),
               FusionCompatibility::InvalidTileGeometry);
 
     geometry = {};
     ASSERT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::TileAdaptive, 256, 32}),
+                  geometry, FusionSpec{FusionAccess::TileSelector, 256, 32}),
               FusionCompatibility::Compatible);
     EXPECT_EQ(geometry.selector_tile_size, 256u);
     EXPECT_EQ(geometry.coder_unit_size, 32u);
     EXPECT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::Map, 0}),
+                  geometry, FusionSpec{FusionAccess::Elementwise, 0}),
               FusionCompatibility::TileInteriorStageUnsupported);
     EXPECT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::Cooperative, 64}),
+                  geometry, FusionSpec{FusionAccess::SegmentCodec, 64}),
               FusionCompatibility::TileCoderUnitMismatch);
 
     geometry = {};
     ASSERT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::BlockLocal, 32}),
+                  geometry, FusionSpec{FusionAccess::RegionLocal, 32}),
               FusionCompatibility::Compatible);
     EXPECT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::BlockLocal, 64}),
+                  geometry, FusionSpec{FusionAccess::RegionLocal, 64}),
               FusionCompatibility::StandardBlockMismatch);
     EXPECT_EQ(extendFusionGeometry(
-                  geometry, FusionSpec{FusionAccess::TileAdaptive, 256, 32}),
-              FusionCompatibility::TileAfterBlockLocal);
+                  geometry, FusionSpec{FusionAccess::TileSelector, 256, 32}),
+              FusionCompatibility::TileAfterRegionLocal);
     EXPECT_STREQ(fusionCompatibilityName(
                      FusionCompatibility::TileCoderUnitMismatch),
                  "tile_coder_unit_mismatch");
@@ -411,7 +411,7 @@ TEST(FusionPlanner, FszLegalChainHasNoUnprofitableExecutionPlan) {
     const auto groups = planFusionGroups(*automatic->getDAG());
     ASSERT_EQ(groups.size(), 1u);
     EXPECT_EQ(groups[0].stages.size(), 3u);
-    EXPECT_TRUE(groups[0].has_tile_adaptive);
+    EXPECT_TRUE(groups[0].has_tile_selector);
     EXPECT_EQ(groups[0].selector_tile_size, 256u);
     EXPECT_EQ(groups[0].coder_unit_size, 32u);
     EXPECT_EQ(groups[0].block_size, 0u);
@@ -852,7 +852,7 @@ TEST(FusionPlanner, PfplChunk4096EngagesInverseFusion) {
 // zigzagged would double-encode. No Bitshuffle -- unlike RZE/RRE (byte-level
 // LC coders that want bit-transposed zero-dense planes), GolombRice needs the
 // per-element magnitude structure intact for its Rice cost model. Exercises
-// the "any Map->Transform*->Coder chain fuses with zero new glue" claim for a
+// the "any Elementwise->Transform*->Coder chain fuses with zero new glue" claim for a
 // coder shaped nothing like the LC family (variable per-chunk parameter k,
 // restart-interval byte offsets, escape-bounded codes).
 static void buildDiffPlainGolombRice(Pipeline& p, size_t n) {
@@ -967,7 +967,7 @@ TEST(FusionPlanner, GenericRunnerFusesRazeCoderNoRegistryEntry) {
 }
 
 // PFPL with SPLIT outliers (3-port): Quantizer(ABS,zigzag, inplace=OFF) -> Difference
-// -> Bitshuffle -> RZE. The quant Map now emits a clean codes stream (0 at outlier
+// -> Bitshuffle -> RZE. The Elementwise quantizer now emits a clean codes stream (0 at outlier
 // positions) plus an escaping (index,value) outlier list — the `QuantSplitOutlier`
 // fused op that consumes the multi-output plumbing. Unlike the inplace/single-output
 // chains, the archive is NOT byte-identical to staged: the outlier list is filled by a
@@ -1006,7 +1006,7 @@ TEST(FusionPlanner, PfplSplitOutlierFusesAndRoundTrips) {
     float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
     ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
 
-    // Confirm the chain fuses into one group (the split quant is still a Map head).
+    // Confirm the chain fuses into one group (the split quantizer is still an Elementwise head).
     { Pipeline pg(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
       buildPfplSplit(pg, n); pg.finalize();
       auto groups = planFusionGroups(*pg.getDAG());
@@ -1118,7 +1118,7 @@ TEST(FusionPlanner, PfplStagesDeclareFusedOps) {
         EXPECT_EQ(op.op_name, kNames[i]);
         EXPECT_FALSE(op.include_header.empty());
     }
-    // Only the Map (quant) op is parametric; its params match the shared POD.
+    // Only the Elementwise (quant) op is parametric; its params match the shared POD.
     EXPECT_EQ(groups[0].stages[0]->getFusedOp().params.size(),
               sizeof(fused::chunk::QuantInplaceZigzagParams));
     EXPECT_TRUE(groups[0].stages[1]->getFusedOp().params.empty());
@@ -1488,7 +1488,7 @@ TEST(FusionPlanner, Cuszp3_3D_FusesMatchesStaged) {
     cudaFree(d_in);
 }
 
-// The swappable-coder payoff: fuse the SAME warp chain with a different Cooperative
+// The swappable-coder payoff: fuse the SAME warp chain with a different SegmentCodec
 // sink (PlainBitpackCoder) composed in by a data change — no new launcher/dispatch,
 // mirroring how RARE/RAZE proved chunk generality. PlainBitpack emits an
 // AdaptiveBitpack-decodable archive (all blocks plain-mode), so the existing inverse
@@ -1593,19 +1593,19 @@ TEST(FusionPlanner, Cuszp3ChainIsOneGroup) {
     EXPECT_TRUE(groups[0].has_coder);
 }
 
-// TiledLorenzo declares BlockLocal(tile_elems) both directions: forward via
+// TiledLorenzo declares RegionLocal(tile_elems) both directions: forward via
 // getFusionSpec, inverse (cuSZp3 warp decode) via getInverseFusionSpec. The
 // forward getFusionSpec stays Unfusable on an inverse instance (the inverse
 // contract lives on the *Inverse* hooks).
 TEST(FusionPlanner, TiledLorenzoFusionSpec) {
     TiledLorenzoStage<int32_t> tl; tl.setTileShape(8, 8);
-    EXPECT_EQ(tl.getFusionSpec().access, FusionAccess::BlockLocal);
+    EXPECT_EQ(tl.getFusionSpec().access, FusionAccess::RegionLocal);
     EXPECT_EQ(tl.getFusionSpec().block_size, 64u);
     EXPECT_EQ(tl.getInverseFusionSpec().access, FusionAccess::Unfusable);  // forward instance
 
     TiledLorenzoStage<int32_t> tli; tli.setTileShape(8, 8); tli.setInverse(true);
     EXPECT_EQ(tli.getFusionSpec().access, FusionAccess::Unfusable);        // inverse instance
-    EXPECT_EQ(tli.getInverseFusionSpec().access, FusionAccess::BlockLocal);
+    EXPECT_EQ(tli.getInverseFusionSpec().access, FusionAccess::RegionLocal);
     EXPECT_EQ(tli.getInverseFusionSpec().block_size, 64u);
     EXPECT_EQ(tli.getInverseFusedOp().op_name, "TiledLorenzo2DPredictor");
     EXPECT_EQ(tli.getInverseFusedOp().strategy, FusionStrategy::WarpRegister);
@@ -1844,7 +1844,7 @@ TEST(FusionPlanner, FusedGroupsPruneInternalBuffersAndRetainColoring) {
 // ── Warp-register INVERSE fusion is role/declaration-based (host-only, no GPU). ──
 // Mirrors WarpStagesDeclareFusedOps / PfplStagesDeclareFusedOps for the decompress
 // side: each inverse stage declares its WarpRegister fused-op in the right role
-// (Cooperative coder / BlockLocal predictor / Map quant) via getInverseFusionSpec()
+// (SegmentCodec coder / RegionLocal predictor / Elementwise quant) via getInverseFusionSpec()
 // + getInverseFusedOp(), plus the two generic scalar hooks the runner needs. Locks
 // the declaration contract so a new warp predictor/coder inherits inverse fusion.
 TEST(FusionPlanner, WarpInverseStagesDeclareOps) {
@@ -1854,7 +1854,7 @@ TEST(FusionPlanner, WarpInverseStagesDeclareOps) {
         ab.setInverse(true);
         ab.setBlockSize(128);
         ab.setOutlierSelection(false);
-        EXPECT_EQ(ab.getInverseFusionSpec().access, FusionAccess::Cooperative);
+        EXPECT_EQ(ab.getInverseFusionSpec().access, FusionAccess::SegmentCodec);
         EXPECT_EQ(ab.getInverseFusionSpec().block_size, 128u);
         const FusedOpDecl op = ab.getInverseFusedOp();
         EXPECT_TRUE(op.valid());
@@ -1878,12 +1878,12 @@ TEST(FusionPlanner, WarpInverseStagesDeclareOps) {
         EXPECT_FALSE(abf.getInverseFusedOp().valid());
         EXPECT_FALSE(abf.getInverseFusionSpec().fusable());
     }
-    // Predictor — 1-D block Lorenzo -> BlockLocal + Lorenzo1DPredictor.
+    // Predictor — 1-D block Lorenzo -> RegionLocal + Lorenzo1DPredictor.
     {
         LorenzoStage<int32_t> lz;
         lz.setInverse(true);
         lz.setBlockSize(128);
-        EXPECT_EQ(lz.getInverseFusionSpec().access, FusionAccess::BlockLocal);
+        EXPECT_EQ(lz.getInverseFusionSpec().access, FusionAccess::RegionLocal);
         EXPECT_EQ(lz.getInverseFusionSpec().block_size, 128u);
         const FusedOpDecl op = lz.getInverseFusedOp();
         EXPECT_TRUE(op.valid());
@@ -1897,7 +1897,7 @@ TEST(FusionPlanner, WarpInverseStagesDeclareOps) {
         lz.setInverse(true);
         EXPECT_FALSE(lz.getInverseFusedOp().valid());
     }
-    // Quant — linear ABS float/uint32 -> Map + LinearDequant marker + dequant step.
+    // Quant — linear ABS float/uint32 -> Elementwise + LinearDequant marker + dequant step.
     {
         QuantizerStage<float, uint32_t> q;
         q.setErrorBound(1e-3);
@@ -1905,7 +1905,7 @@ TEST(FusionPlanner, WarpInverseStagesDeclareOps) {
         q.setLinearMode(true);
         q.setInverse(true);
         q.primeAbsEbForFusion();
-        EXPECT_EQ(q.getInverseFusionSpec().access, FusionAccess::Map);
+        EXPECT_EQ(q.getInverseFusionSpec().access, FusionAccess::Elementwise);
         EXPECT_EQ(q.getInverseFusionSpec().block_size, 0u);
         const FusedOpDecl op = q.getInverseFusedOp();
         EXPECT_TRUE(op.valid());
@@ -1957,14 +1957,14 @@ TEST(FusionPlanner, WarpInverseMatcherIsRoleBased) {
         ASSERT_NE(impl, nullptr);
         EXPECT_STREQ(impl->name, "warp-register-inverse");
     }
-    // Non-linear quant tail -> no match (quant declares no Map inverse op).
+    // Non-linear quant tail -> no match (quant declares no Elementwise inverse op).
     {
         AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
         QuantizerStage<float, uint32_t> q;
         auto chain = makeChain(ab, lz, q, 128, false, /*linear=*/false);
         EXPECT_EQ(findFusedImpl(chain, false), nullptr);
     }
-    // Missing the quant tail -> no match (need Cooperative + BlockLocal + Map).
+    // Missing the quant tail -> no match (need SegmentCodec + RegionLocal + Elementwise).
     {
         AdaptiveBitpackStage<int32_t> ab; LorenzoStage<int32_t> lz;
         QuantizerStage<float, uint32_t> q;

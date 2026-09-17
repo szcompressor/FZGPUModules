@@ -168,7 +168,7 @@ public:
     size_t getNumInputs()  const override { return 1; }
     size_t getNumOutputs() const override { return 1; }
 
-    // Block-local for fusion: forward, 2-D tile (tz == 1). The block a downstream
+    // Region-local for specialization: forward, 2-D tile (tz == 1). The region a downstream
     // coder sees is one tile (tile_elems); the fused driver (cuSZp3) recomputes
     // the separable delta per element. tz > 1 is not fused yet.
     FusionSpec getFusionSpec() const override {
@@ -176,9 +176,9 @@ public:
         // Both delta (plain/outlier) and no-delta (cuSZp3 fixed) fuse: the fixed
         // variant uses the identity warp predictor (getFusedOp selects the op name).
         if (is_inverse_) return {};
-        // Block-local for fusion; the block is one tile. 2-D (tz==1) and 3-D (tz>1)
+        // Region-local for specialization; the region is one tile. 2-D (tz==1) and 3-D (tz>1)
         // both fuse — the warp op gate (getFusedOp) requires tile_elems==64 (EPL=2).
-        return FusionSpec{FusionAccess::BlockLocal, t[0] * t[1] * t[2]};
+        return FusionSpec{FusionAccess::RegionLocal, t[0] * t[1] * t[2]};
     }
 
     /// Warp-register predictor op (cuSZp3): 2-D separable tiled Lorenzo, EPL=2 (tile
@@ -224,7 +224,7 @@ public:
     FusionSpec getInverseFusionSpec() const override {
         const auto t = effectiveTile();
         if (!is_inverse_ || t[0] * t[1] * t[2] != 64u) return {};
-        return FusionSpec{FusionAccess::BlockLocal, 64u};
+        return FusionSpec{FusionAccess::RegionLocal, 64u};
     }
 
     FusedOpDecl getInverseFusedOp() const override {

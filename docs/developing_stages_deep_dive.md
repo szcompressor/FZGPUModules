@@ -36,8 +36,8 @@ sections as authoritative.
 
 ## 3. The access pattern decision (this is the load-bearing one)
 
-- [ ] Mapping the algorithm to a `FusionAccess` role (Map / BlockLocal /
-      Cooperative / TileAdaptive / Unfusable) — and why that choice determines
+- [ ] Mapping the algorithm to a `FusionAccess` role (Elementwise / RegionLocal /
+      SegmentCodec / TileSelector / Unfusable) — and why that choice determines
       everything downstream about how (and whether) the stage can be optimized.
 - [ ] Block geometry: choosing a reset period / block size; alignment to warps
       (32·EPL) vs. chunks (16 KB); how the choice interacts with occupancy.
@@ -87,7 +87,7 @@ sections as authoritative.
 
 ## 7. Worked examples (to be written)
 
-- [ ] A Map stage from scratch (e.g. a transform), staged → declared → fused.
-- [ ] A BlockLocal predictor, including its forward+inverse device policy.
-- [ ] A Cooperative coder, including the exact encoded-size oracle contract.
+- [ ] An Elementwise stage from scratch (e.g. a transform), staged → declared → fused.
+- [ ] A RegionLocal predictor, including its forward+inverse device policy.
+- [ ] A SegmentCodec coder, including the exact encoded-size oracle contract.
 - [ ] A structural stage (no compression op) and why it exists.

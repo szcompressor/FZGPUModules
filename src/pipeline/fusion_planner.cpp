@@ -26,28 +26,28 @@ FusionCompatibility extendFusionGeometry(
     FusionGeometry& geometry, const FusionSpec& next)
 {
     if (!next.fusable()) return FusionCompatibility::UnfusableStage;
-    if (next.access == FusionAccess::Map) {
-        return geometry.tileAdaptive()
+    if (next.access == FusionAccess::Elementwise) {
+        return geometry.hasTileSelector()
             ? FusionCompatibility::TileInteriorStageUnsupported
             : FusionCompatibility::Compatible;
     }
 
-    if (next.access == FusionAccess::TileAdaptive) {
+    if (next.access == FusionAccess::TileSelector) {
         if (next.block_size == 0 || next.coder_unit_size == 0 ||
             next.block_size % next.coder_unit_size != 0) {
             return FusionCompatibility::InvalidTileGeometry;
         }
         if (geometry.block_size != 0)
-            return FusionCompatibility::TileAfterBlockLocal;
-        if (geometry.tileAdaptive())
+            return FusionCompatibility::TileAfterRegionLocal;
+        if (geometry.hasTileSelector())
             return FusionCompatibility::MultipleTileSelectors;
         geometry.selector_tile_size = next.block_size;
         geometry.coder_unit_size = next.coder_unit_size;
         return FusionCompatibility::Compatible;
     }
 
-    if (geometry.tileAdaptive()) {
-        if (next.access != FusionAccess::Cooperative)
+    if (geometry.hasTileSelector()) {
+        if (next.access != FusionAccess::SegmentCodec)
             return FusionCompatibility::TileInteriorStageUnsupported;
         if (next.block_size != geometry.coder_unit_size)
             return FusionCompatibility::TileCoderUnitMismatch;
@@ -67,7 +67,7 @@ const char* fusionCompatibilityName(FusionCompatibility result) {
         case FusionCompatibility::Compatible: return "compatible";
         case FusionCompatibility::UnfusableStage: return "unfusable_stage";
         case FusionCompatibility::InvalidTileGeometry: return "invalid_tile_geometry";
-        case FusionCompatibility::TileAfterBlockLocal: return "tile_after_block_local";
+        case FusionCompatibility::TileAfterRegionLocal: return "tile_after_region_local";
         case FusionCompatibility::MultipleTileSelectors: return "multiple_tile_selectors";
         case FusionCompatibility::TileInteriorStageUnsupported:
             return "tile_interior_stage_unsupported";
@@ -95,7 +95,7 @@ std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
             continue;
         }
         // A coder as the very first stage is a group of one — nothing to fuse.
-        if (sspec.access == FusionAccess::Cooperative) continue;
+        if (sspec.access == FusionAccess::SegmentCodec) continue;
 
         FusionGroup g;
         DAGNode* cur = start;
@@ -108,7 +108,7 @@ std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
             g.stage_names.push_back(cur->name);
             const FusionSpec cs = cur->stage->getFusionSpec();
             consumed.insert(cur);
-            if (cs.access == FusionAccess::Cooperative) { coder = true; break; }  // coder terminates
+            if (cs.access == FusionAccess::SegmentCodec) { coder = true; break; }  // codec terminates
 
             if (cur->dependents.size() != 1) break;
             DAGNode* nxt = cur->dependents[0];
@@ -124,7 +124,7 @@ std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
             g.block_size = geometry.block_size;
             g.selector_tile_size = geometry.selector_tile_size;
             g.coder_unit_size = geometry.coder_unit_size;
-            g.has_tile_adaptive = geometry.tileAdaptive();
+            g.has_tile_selector = geometry.hasTileSelector();
             g.has_coder  = coder;
             groups.push_back(std::move(g));
         }

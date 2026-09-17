@@ -11,25 +11,24 @@ namespace fz {
 class MemoryPool;
 
 /**
- * @brief How a stage accesses its input — the property that decides whether it
- *        can be fused into a single kernel with its neighbours.
+ * @brief A stage's dependency and codec role for generated execution.
  *
  * Fusion keeps a block's data register/shared-resident across a chain of stages
  * instead of materialising each intermediate to DRAM. Whether that is possible
- * depends only on a stage's data-access pattern, not on what it computes:
+ * depends on a stage's dependency scope and whether it terminates a
+ * variable-length encoded segment, not on its concrete algorithm:
  *
- *  - `Map`         element-wise, `out[i] = f(in[i])`. Composes with anything.
- *  - `BlockLocal`  bounded, resettable neighbourhood inside a fixed-size block
- *                  (e.g. 1-D Lorenzo delta with a per-block reset). Fusable with
- *                  other block-local / map stages of the same block size.
- *  - `Cooperative` warp/block reduce+scan producing variable-length output — a
- *                  fixed-length coder. Fusable as the *tail* of a block-local
- *                  chain (its per-block work consumes the block still in
- *                  registers); the cross-block offset prefix is handled by the
- *                  fused driver.
- *  - `TileAdaptive` one cooperative selector owns a larger tile containing an
- *                  integer number of downstream coder units. Its tile size and
- *                  coder-unit size are separate legality constraints.
+ *  - `Elementwise`  element-wise, `out[i] = f(in[i])`. Composes with anything.
+ *  - `RegionLocal`  bounded, resettable neighbourhood inside a fixed-size
+ *                  logical region (e.g. 1-D Lorenzo delta with a per-region
+ *                  reset). Fusable with other region-local/elementwise stages
+ *                  of the same region size.
+ *  - `SegmentCodec` encodes or decodes one fixed-size logical segment. It is a
+ *                  group tail because encoded segments have data-dependent
+ *                  lengths; the fused driver assigns cross-segment offsets.
+ *  - `TileSelector` one selector owns a larger tile containing an integer
+ *                  number of downstream codec segments. Its tile size and
+ *                  codec-segment size are separate legality constraints.
  *  - `Unfusable`   opaque kernel or a genuine global dependency (entropy coder
  *                  with a global codebook, whole-array scan). A fusion barrier.
  *
@@ -37,10 +36,10 @@ class MemoryPool;
  */
 enum class FusionAccess : uint8_t {
     Unfusable = 0,
-    Map,
-    BlockLocal,
-    TileAdaptive,
-    Cooperative,
+    Elementwise,
+    RegionLocal,
+    TileSelector,
+    SegmentCodec,
 };
 
 /**
@@ -52,11 +51,11 @@ enum class FusionAccess : uint8_t {
 struct FusionSpec {
     /// Access pattern class.
     FusionAccess access = FusionAccess::Unfusable;
-    /// Reset/tile period in elements for `BlockLocal`/`Cooperative`; 0 = N/A.
-    /// Block-local and cooperative members of one fused group must agree on this.
-    /// For TileAdaptive this is the selector tile size.
+    /// Region or codec-segment size in elements for `RegionLocal`/`SegmentCodec`;
+    /// 0 = N/A. Region-local and segment-codec members of one fused group must
+    /// agree on this. For `TileSelector` this is the selector-tile size.
     uint32_t block_size = 0;
-    /// TileAdaptive only: immediate downstream coder unit in elements. Must
+    /// `TileSelector` only: immediate downstream codec segment in elements. Must
     /// divide block_size. Zero for every other access class.
     uint32_t coder_unit_size = 0;
 

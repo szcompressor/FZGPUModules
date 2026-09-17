@@ -134,7 +134,7 @@ public:
     /// dropped to -113 dB). See `memory/szp_faithfulness_native_comparison.md`.
     FusionSpec getFusionSpec() const override {
         if (isInverse() || centeringActive() || block_size_ == 0) return {};
-        return FusionSpec{FusionAccess::BlockLocal, block_size_};
+        return FusionSpec{FusionAccess::RegionLocal, block_size_};
     }
 
     /// Warp-register predictor op (cuSZp2): 1-D Lorenzo, EPL=1 (block 32). Declares
@@ -169,7 +169,7 @@ public:
         return d;
     }
 
-    /// Inverse-mode warp predictor declaration — the BlockLocal role of the warp
+    /// Inverse-mode warp predictor declaration — the RegionLocal role of the warp
     /// decompress chain. Same block-size gating as the forward getFusedOp() so
     /// forward/inverse eligibility stay in lockstep. Per-block mean centering has
     /// no warp inverse harness (the `undelta` policy is plain first-difference), so
@@ -180,7 +180,7 @@ public:
         if (!isInverse() || centeringActive() || block_size_ == 0 ||
             block_size_ % 32u != 0 ||
             block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
-        return FusionSpec{FusionAccess::BlockLocal, block_size_};
+        return FusionSpec{FusionAccess::RegionLocal, block_size_};
     }
     FusedOpDecl getInverseFusedOp() const override {
         if (!getInverseFusionSpec().fusable()) return {};

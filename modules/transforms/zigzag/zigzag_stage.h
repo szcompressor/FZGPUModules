@@ -59,13 +59,13 @@ public:
     bool isByteTransparent() const   { return byte_transparent_; }
 
     // ── Fusion (warp-register transform) ─────────────────────────────────────
-    // Element-wise TCMS is a Map — composes anywhere. As a warp-register op it slots
+    // Element-wise TCMS is Elementwise — it composes anywhere. As a warp-register op it slots
     // between a predictor and the coder (the register→register `ZigzagTransform`).
     // Restricted to the 32-bit signed form the device op implements; a chunk group
     // won't pick it up (its op declares the WarpRegister strategy, not chunk).
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || !std::is_same<TIn, int32_t>::value) return {};
-        return FusionSpec{FusionAccess::Map, 0};
+        return FusionSpec{FusionAccess::Elementwise, 0};
     }
     FusedOpDecl getFusedOp() const override {
         if (is_inverse_ || !std::is_same<TIn, int32_t>::value) return {};

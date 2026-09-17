@@ -14,7 +14,7 @@
  * only ever touch a runtime element count are not.
  *
  * The DESIGN (see docs/codebase_notes.md CN-CHUNK-FUSE):
- *   - Each fusable stage contributes a small __device__ OP (below): a Map op that
+ *   - Each fusable stage contributes a small __device__ OP (below): an Elementwise op that
  *     loads+transforms global input, a stencil/fixed transform op that maps one
  *     smem buffer to another, or a variable-length CODER op (the sink) with the
  *     uniform LC signature. The ops are the hand-written per-stage logic.
@@ -66,12 +66,12 @@ __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
     return a;
 }
 
-// ── Map op: linear/NOA quant with inplace outliers + TCMS(zigzag) codes. ─────
+// ── Elementwise op: linear/NOA quant with inplace outliers + TCMS(zigzag) codes. ─
 // Loads global floats and writes codes to smem. Out-of-radius / over-threshold
 // values are stored as raw IEEE-754 bits (matches quantizer_abs_fwd_inplace_kernel).
 struct QuantInplaceZigzag {
     using Params = QuantInplaceZigzagParams;   // shared POD (chunk_op_params.h)
-    // Every Map op takes a `const void* pp` pointing at its slice of the packed
+    // Every Elementwise op takes a `const void* pp` pointing at its slice of the packed
     // params blob (parametric ops cast it, stateless ignore it — the blob is
     // exactly-sized so a tail op may get a one-past-end pointer, never
     // dereferenced) and a `ChunkSideCtx` for escaping outputs (this variant emits
@@ -93,7 +93,7 @@ struct QuantInplaceZigzag {
     }
 };
 
-// ── Map op: NOA/ABS quant with SPLIT outliers (3-port). Codes stream stays clean —
+// ── Elementwise op: NOA/ABS quant with SPLIT outliers (3-port). Codes stream stays clean —
 // a `0` sentinel at each outlier position, TCMS(zigzag) elsewhere — and outliers are
 // appended to a side list of (global index, value) pairs via a GLOBAL atomic counter
 // shared across all chunk CTAs. Reproduces quantizer_abs_fwd_kernel<...,Zigzag=true>
@@ -172,7 +172,7 @@ struct DiffPlain {
 // ── Fixed-length cooperative op: 32-bit bitshuffle. The partial tail chunk is
 // copied through (the staged bitshuffle memcpys its sub-chunk tail). Templated
 // on chunk size — its plane-stride math (NELEM/NPP) depends on it, unlike the
-// Map/stencil ops above which only ever touch a runtime element count. ───────
+// Elementwise/stencil ops above which only ever touch a runtime element count. ──
 template <int ChunkBytes>
 struct Bitshuffle32 {
     using Params = EmptyParams;
@@ -214,7 +214,7 @@ struct RRECoder {
 };
 // RARE/RAZE (auto-k generalizations of RRE/RZE) — same uniform LC signature, so they
 // drop into the harness as coder ops with no new glue. Their stages just declare
-// getFusedOp() and any Map->Transform*->{RARE|RAZE} chain fuses via the generic runner.
+// getFusedOp() and any Elementwise->Transform*->{RARE|RAZE} chain fuses via the generic runner.
 template <int ChunkBytes>
 struct RARECoder {
     using Params = EmptyParams;
@@ -232,7 +232,7 @@ struct RAZECoder {
 
 // CLOG / HCLOG — LC leading-zero + bit-packing coders (byte-word, matching each stage's
 // word_size==1 dispatch → d_CLOG<uint8_t>). Same uniform LC signature, so they drop in with
-// no new glue: their stages declare getFusedOp() and any Map->Transform*->{CLOG|HCLOG} fuses.
+// no new glue: their stages declare getFusedOp() and any Elementwise->Transform*->{CLOG|HCLOG} fuses.
 template <int ChunkBytes>
 struct CLOGCoder {
     using Params = EmptyParams;
@@ -499,7 +499,7 @@ template<class T, class... R> struct Chain<T, R...> {
     }
 };
 
-// ── Harness body: one CTA per chunk. Quant (Map) -> Transforms... -> Coder (sink).
+// ── Harness body: one CTA per chunk. Quant (Elementwise) -> Transforms... -> Coder (sink).
 // Stage-agnostic: it composes whatever ops it is given. Factored out of the
 // __global__ entry so the NVRTC codegen path can wrap it in an `extern "C"`
 // kernel (a __global__ cannot call another __global__). Both the compile-time
@@ -508,7 +508,7 @@ template<class T, class... R> struct Chain<T, R...> {
 // `params` is the packed per-op Params blob, ops in execution order
 // ([QuantOp][Transforms...][Coder]); each op is handed its slice at a
 // compile-time offset. Stateless ops ignore it.
-// `side` carries escaping outputs (e.g. an outlier list); the Map op uses it or
+// `side` carries escaping outputs (e.g. an outlier list); the Elementwise op uses it or
 // ignores it. Defaulted so callers that never fuse a side-output op need not pass it.
 template<int ChunkBytes, class QuantOp, class Coder, class... Transforms>
 __device__ __forceinline__ void

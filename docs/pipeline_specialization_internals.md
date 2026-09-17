@@ -29,14 +29,15 @@ the POD `Params` struct is **shared verbatim** between host and device (see
 
 `include/stage/fusion.h` defines the vocabulary.
 
-`FusionAccess` — a stage's data-access pattern, which decides *how* it can fuse:
+`FusionAccess` — a stage's dependency and codec role, which constrains how it
+can be composed:
 
 | Role | Meaning | Example |
 |---|---|---|
-| `Map` | element-wise `out[i] = f(in[i])` | linear Quantizer |
-| `BlockLocal` | bounded, resettable neighbourhood in a fixed block | 1-D Lorenzo (block reset) |
-| `Cooperative` | warp/CTA reduce+scan producing variable-length output (a coder) | AdaptiveBitpack |
-| `TileAdaptive` | one selector tile containing N coder units | FSZ selector |
+| `Elementwise` | each output depends only on its corresponding input | linear Quantizer |
+| `RegionLocal` | values may depend within a fixed logical region, with no cross-region dependency | 1-D Lorenzo (region reset) |
+| `SegmentCodec` | encodes or decodes one fixed-size logical segment with a data-dependent encoded length | AdaptiveBitpack |
+| `TileSelector` | chooses one representation over a tile containing N codec segments | FSZ selector |
 | `Unfusable` (default) | opaque / global dependency — a fusion barrier | Huffman (global codebook) |
 
 `FusionStrategy` — which execution model the op belongs to. A fused group is
@@ -58,10 +59,10 @@ as part of strategy matching.
 
 <!-- doc-check: skip — class-member fragments, not standalone TUs -->
 ```cpp
-// Predictor example (LorenzoStage). Role = BlockLocal.
+// Predictor example (LorenzoStage). Role = RegionLocal.
 FusionSpec getFusionSpec() const override {
     if (isInverse() || block_size_ == 0) return {};            // Unfusable
-    return FusionSpec{FusionAccess::BlockLocal, block_size_};   // role + reset period
+    return FusionSpec{FusionAccess::RegionLocal, block_size_};   // role + reset period
 }
 
 FusedOpDecl getFusedOp() const override {
@@ -89,13 +90,13 @@ Conventions:
 - **The `inv2eb` slot convention.** Every warp predictor's `Params` begins with
   `float inv2eb` at offset 0. The predictor stage cannot know the error bound (the
   quantizer owns it), so it packs `0` there; the runner overwrites those 4 bytes
-  from the Map head's `getFusedForwardQuantStep()` contract after priming. The
+  from the Elementwise head's `getFusedForwardQuantStep()` contract after priming. The
   quantizer is absorbed into the predictor (it quantizes inline in `delta()`), which
-  is why the Map/quant stage declares op `"LinearQuant"` with empty params.
+  is why the Elementwise quant stage declares op `"LinearQuant"` with empty params.
 - **elems_per_lane** (= `block_size / 32`) is the harness's compile-time template
   arg; **n_ab** is the padded block-covering element count (0 = 1-D, no padding).
 
-The coder (Cooperative, the group tail) declares similarly with `op_name` naming its
+The coder (`SegmentCodec`, the group tail) declares similarly with `op_name` naming its
 coder policy (`"PlainRateCoder"` / `"AdaptiveBitpackCoder"`).
 
 ---
@@ -111,7 +112,7 @@ structs and the same policy type names (the policy carries the inverse methods).
 FusionSpec getInverseFusionSpec() const override {
     if (!isInverse() || centeringActive() || block_size_ % 32u != 0 ||
         block_size_ / 32u > fused::warp::kMaxWarpElemsPerLane) return {};
-    return FusionSpec{FusionAccess::BlockLocal, block_size_};   // same role as forward
+    return FusionSpec{FusionAccess::RegionLocal, block_size_};   // same role as forward
 }
 FusedOpDecl getInverseFusedOp() const override {
     if (!getInverseFusionSpec().fusable()) return {};
@@ -129,10 +130,10 @@ Two generic scalar hooks let the inverse runner pull what it needs **without
 
 <!-- doc-check: skip -->
 ```cpp
-// On the Cooperative/coder stage: how many elements the archive reconstructs to.
+// On the SegmentCodec/coder stage: how many elements the archive reconstructs to.
 size_t getFusedInverseElementCount() const override { return num_elements_; }
 
-// On the Map/quant stage: the linear dequant step (2*abs_eb) the harness multiplies by.
+// On the Elementwise quant stage: the linear dequant step (2*abs_eb) the harness multiplies by.
 double getFusedInverseDequantStep() const override {
     return 2.0 * static_cast<double>(computed_abs_eb_);
 }
@@ -195,7 +196,7 @@ struct MyPredictor {
 };
 ```
 
-**Coder** (the Cooperative sink; forward cost/pack + inverse decode):
+**Coder** (the SegmentCodec sink; forward cost/pack + inverse decode):
 <!-- doc-check: skip -->
 ```cpp
 struct MyCoder {
@@ -224,9 +225,9 @@ match the staged stage's kernels bit-for-bit.
 1. **Device policy** in `warp_fusion.cuh`: add `MyPredictor` with `fromParams`,
    `delta`, and `undelta`. Add its `Params` POD to `warp_op_params.h` (leading
    `float inv2eb`).
-2. **Forward declaration** on your stage: `getFusionSpec` → `BlockLocal`;
+2. **Forward declaration** on your stage: `getFusionSpec` → `RegionLocal`;
    `getFusedOp` → `{WarpRegister, "MyPredictor", elems_per_lane, params}`.
-3. **Inverse declaration**: `getInverseFusionSpec` → `BlockLocal`;
+3. **Inverse declaration**: `getInverseFusionSpec` → `RegionLocal`;
    `getInverseFusedOp` → `{WarpRegister, "MyPredictor", elems_per_lane}`.
 4. **Nothing else.** `matchesWarpRegister` / `runWarpRegister` and their inverse
    counterparts are role-based over the declarations — they build the
@@ -235,7 +236,7 @@ match the staged stage's kernels bit-for-bit.
    your policy name.
 5. **Validate against the staged oracle** (see below) and add a test.
 
-Adding a new **coder** is the same, at the Cooperative role, with `decode` alongside
+Adding a new **coder** is the same, at the `SegmentCodec` role, with `decode` alongside
 `cost`/`pack`. Adding a new **quantizer dequant** is currently linear-only (the
 harness hard-codes `code · 2·eb`); a non-linear dequant would extend the harness with
 a dequant policy, the same way a predictor is added.
@@ -247,17 +248,18 @@ a dequant policy, the same way a predictor is added.
 `src/pipeline/fusion_registry.cpp` — role-based, mirrored for forward and inverse:
 
 - **Matcher** (`matchesWarpRegister`): every stage declares a `WarpRegister` op;
-  `front` is Map, one `BlockLocal` predictor, interior Map/BlockLocal transforms,
-  `back` is Cooperative. No concrete types named.
+  `front` is Elementwise, one `RegionLocal` predictor, interior
+  Elementwise/RegionLocal transforms, and `back` is SegmentCodec. No concrete
+  types are named.
 - **Runner** (`runWarpRegister`): primes each stage, then builds
-  `WarpFusionSpec{predictor = the BlockLocal op's name, coder = the Cooperative op's
+  `WarpFusionSpec{predictor = the RegionLocal op's name, coder = the SegmentCodec op's
   name, transforms = interior op names, elems_per_lane}`, obtains the quantization
   step and reports coder state through generic `Stage` hooks, patches `inv2eb`, and
   calls `launchNvrtcWarpFused`. It does not downcast the forward stages.
 
 The inverse pair (`matchesWarpRegisterInverse` / `runWarpRegisterInverse`) is the
 same, over `getInverseFusionSpec`/`getInverseFusedOp`, with roles reversed
-(Cooperative coder → BlockLocal predictor → Map quant) and the two scalar hooks for
+(SegmentCodec coder → RegionLocal predictor → Elementwise quant) and the two scalar hooks for
 element count and dequant step.
 
 The planner (`planFusionGroups`) only enumerates maximal fusable chains from
@@ -292,7 +294,7 @@ Same declaration surface (`getFusionSpec`/`getFusedOp` with
 `Geom<Bytes>`) with shared-memory ping-pong; the POD params live in
 `chunk_op_params.h`. The harness is NVRTC-composed from an op list, with the
 chunk size baked into the generated template args (`ChunkFusionSpec::chunk_bytes`),
-so a novel `Map → Transform* → Coder` chunk chain fuses with zero new glue —
+so a novel `Elementwise → Transform* → SegmentCodec` chunk chain fuses with zero new glue —
 proven for `Quant → Diff → Bitshuffle → {RZE, RRE, RARE, RAZE}` at all three
 sizes. All participating ops in a group must declare the same `block_size`
 (chunk size) or the planner rejects the group. The NVRTC surface needs the op

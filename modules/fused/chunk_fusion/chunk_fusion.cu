@@ -147,7 +147,7 @@ size_t launchFusedChunkPfpl(
     auto* d_scratch = static_cast<byte*>(pool->allocate(nc * (size_t)chunk_bytes, stream, "chunk_scratch"));
     auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
 
-    // Build the packed params blob on device. For PFPL only the quant Map op is
+    // Build the packed params blob on device. For PFPL only the quant Elementwise op is
     // parametric, so the blob is exactly its Params; the stateless diff/bitshuffle/
     // coder ops contribute nothing. (The generic runner of Phase C will assemble
     // this blob from each stage's getFusedOp().params instead of hardcoding it.)
@@ -191,7 +191,7 @@ size_t launchGenericChunkFusion(
     auto* d_scratch = static_cast<byte*>(pool->allocate(nc * (size_t)spec.chunk_bytes, stream, "chunk_scratch"));
     auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
 
-    // Upload the caller-assembled params blob (already ordered [Map][Trs...][Coder]).
+    // Upload the caller-assembled params blob (already ordered [Elementwise][Trs...][Coder]).
     // Allocate >=1 byte so the device pointer is valid even with no parametric op.
     const size_t pbytes = params_bytes ? params_bytes : 1;
     auto* d_params = static_cast<byte*>(pool->allocate(pbytes, stream, "chunk_params"));
@@ -199,7 +199,7 @@ size_t launchGenericChunkFusion(
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_params, host_params, params_bytes,
                                       cudaMemcpyHostToDevice, stream));
 
-    // Split-outlier producer: a device append-counter, zeroed so the Map op's
+    // Split-outlier producer: a device append-counter, zeroed so the Elementwise op's
     // atomicAdd starts at 0. The counter is GLOBAL across all chunk CTAs (the
     // outlier list is one pipeline output spanning every chunk).
     const bool side = (d_side_idxs != nullptr && d_side_vals != nullptr);

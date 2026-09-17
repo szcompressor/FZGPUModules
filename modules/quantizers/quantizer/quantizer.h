@@ -257,22 +257,22 @@ public:
     void setInverse(bool inverse) override { is_inverse_ = inverse; }
     bool isInverse() const override        { return is_inverse_; }
 
-    /// Fusable as a pure single-"codes"-port Map in either single-output forward
+    /// Fusable as a pure single-"codes"-port Elementwise stage in either single-output forward
     /// mode: linear/no-outlier (cuSZp, warp-register strategy) or in-place outlier
     /// + zigzag under ABS/NOA (PFPL, chunk-cooperative strategy). The default
-    /// 3-port outlier mode scatters to side buffers and is not a map.
+    /// 3-port outlier mode scatters to side buffers and is not elementwise.
     FusionSpec getFusionSpec() const override {
         if (is_inverse_) return {};
         if (isLinearMode() && !config_.linear_high_precision)
-            return FusionSpec{FusionAccess::Map, 0};
+            return FusionSpec{FusionAccess::Elementwise, 0};
         if (isInplaceMode() && config_.zigzag_codes &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
-            return FusionSpec{FusionAccess::Map, 0};
-        // Split-outlier (3-port) ABS/NOA zigzag quant is a Map too: codes flow to the
+            return FusionSpec{FusionAccess::Elementwise, 0};
+        // Split-outlier (3-port) ABS/NOA zigzag quant is Elementwise too: codes flow to the
         // next stage (port 0), outlier_vals/idxs (ports 1,2) escape as pipeline leaves
         // that the fused runner fills and the pipeline auto-concatenates. Dither is
         // excluded (the fused op has no per-element dither path).
-        if (isSplitOutlierFusable()) return FusionSpec{FusionAccess::Map, 0};
+        if (isSplitOutlierFusable()) return FusionSpec{FusionAccess::Elementwise, 0};
         return {};
     }
 
@@ -317,13 +317,13 @@ public:
         actual_output_sizes_ = {output_bytes};
     }
 
-    /// Inverse-mode warp quant declaration — the Map role (linear dequant tail)
+    /// Inverse-mode warp quant declaration — the Elementwise role (linear dequant tail)
     /// of the warp decompress chain. Gated exactly on supportsWarpInverseFusion()
     /// (linear, non-high-precision, ABS/NOA, float, uint32 code), the inverse
-    /// mirror of the forward getFusionSpec() Map declaration.
+    /// mirror of the forward getFusionSpec() Elementwise declaration.
     FusionSpec getInverseFusionSpec() const override {
         if (!is_inverse_ || !supportsWarpInverseFusion()) return {};
-        return FusionSpec{FusionAccess::Map, 0};
+        return FusionSpec{FusionAccess::Elementwise, 0};
     }
     FusedOpDecl getInverseFusedOp() const override {
         if (!getInverseFusionSpec().fusable()) return {};
@@ -343,11 +343,11 @@ public:
     }
 
     /// Fused-op identity for the chunk-cooperative harness: the inplace+zigzag
-    /// ABS/NOA float quant maps to the `QuantInplaceZigzag` Map op. Params are
+    /// ABS/NOA float quant maps to the `QuantInplaceZigzag` elementwise op. Params are
     /// packed from the primed bound (`primeFusedForwardState` must run first).
     FusedOpDecl getFusedOp() const override {
         if (!std::is_same<TInput, float>::value || is_inverse_) return {};  // device ops read float
-        // Warp-register (cuSZp): linear float quant is the Map loader, for ABS or NOA
+        // Warp-register (cuSZp): linear float quant is the Elementwise loader, for ABS or NOA
         // (both resolve to one uniform-step absolute bound — the runner primes the NOA
         // range scan and passes the resolved abs_eb). REL is excluded: it is log-domain
         // per-value quant, not a single abs_eb, so it can't ride the fused kernel.
@@ -635,7 +635,7 @@ private:
 
     void applyUniformBoundPolicy(TInput data_abs_max, bool have_data_abs_max);
 
-    /// True when this stage is a fusable 3-port split-outlier Map: standard outlier
+    /// True when this stage is a fusable 3-port split-outlier Elementwise stage: standard outlier
     /// mode (not inplace, not linear), zigzag codes, ABS or NOA (uniform step), no
     /// dither. Its codes stream matches quantizer_abs_fwd_kernel<...,Zigzag=true> and
     /// the outliers become escaping side outputs. Forward only (device op reads float).

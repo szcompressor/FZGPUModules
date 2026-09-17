@@ -92,7 +92,7 @@ public:
     FusionSpec getFusionSpec() const override {
         if (is_inverse_ || word_size_ != 1 ||
             (chunk_size_ != 4096u && chunk_size_ != 8192u && chunk_size_ != 16384u)) return {};
-        return FusionSpec{FusionAccess::Cooperative, chunk_size_};
+        return FusionSpec{FusionAccess::SegmentCodec, chunk_size_};
     }
 
     /// Chunk-cooperative coder op (the swappable variable-length sink). Stateless.

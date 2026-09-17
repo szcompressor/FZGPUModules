@@ -10,6 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Renamed `FusionAccess` roles to describe dependency and codec semantics: `Map` → `Elementwise`, `BlockLocal` → `RegionLocal`, `Cooperative` → `SegmentCodec`, and `TileAdaptive` → `TileSelector`.
 - Removed the remaining concrete quantizer and coder casts from the generic warp-register forward runner; stages now provide the quantization step and archive-size handoff through `Stage` specialization contracts.
 - **Moved `experimental/` under `modules/experimental/`** so the quarantined
   reference-compressor tree reads unambiguously as an experimental *module*
