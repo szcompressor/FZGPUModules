@@ -540,7 +540,7 @@ static Stage* addGolombRiceStage(Pipeline& p, const toml::table& t) {
 }
 
 static void saveGolombRiceStage(Stage* s, std::ostringstream& out) {
-    uint8_t buf[5] = {};
+    uint8_t buf[9] = {};
     if (s->serializeHeader(0, buf, sizeof(buf)) >= 5) {
         uint32_t chunk_size = 0;
         std::memcpy(&chunk_size, buf, sizeof(uint32_t));

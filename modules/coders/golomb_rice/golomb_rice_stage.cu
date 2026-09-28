@@ -315,20 +315,33 @@ struct GrBitReader {
     uint64_t buf;
     uint32_t nbits;
     uint64_t byte_pos;
+    uint64_t limit;    // readable bytes from base (end of this chunk's stream)
 
+    // The prefetch runs up to 8 bytes ahead of the last codeword. An archive read
+    // back from disk carries no tail pad, so bytes at/after `limit` read as zero
+    // instead of running off the end of the input buffer.
     __device__ __forceinline__ void refill() {
         while (nbits <= 32u) {
-            const uint32_t w = static_cast<uint32_t>(base[byte_pos])
-                | (static_cast<uint32_t>(base[byte_pos + 1]) << 8)
-                | (static_cast<uint32_t>(base[byte_pos + 2]) << 16)
-                | (static_cast<uint32_t>(base[byte_pos + 3]) << 24);
+            uint32_t w;
+            if (byte_pos + 4 <= limit) {
+                w = static_cast<uint32_t>(base[byte_pos])
+                  | (static_cast<uint32_t>(base[byte_pos + 1]) << 8)
+                  | (static_cast<uint32_t>(base[byte_pos + 2]) << 16)
+                  | (static_cast<uint32_t>(base[byte_pos + 3]) << 24);
+            } else {
+                w = 0u;
+                for (uint32_t j = 0; j < 4u; ++j)
+                    if (byte_pos + j < limit)
+                        w |= static_cast<uint32_t>(base[byte_pos + j]) << (8u * j);
+            }
             buf   |= static_cast<uint64_t>(w) << nbits;
             nbits += 32u;
             byte_pos += 4;
         }
     }
-    __device__ __forceinline__ void init(const uint8_t* p, uint64_t start_bit) {
+    __device__ __forceinline__ void init(const uint8_t* p, uint64_t start_bit, uint64_t n_bytes) {
         base = p;
+        limit = n_bytes;
         byte_pos = start_bit >> 3;
         const uint32_t skip = static_cast<uint32_t>(start_bit & 7u);
         buf = 0; nbits = 0;
@@ -406,7 +419,9 @@ __global__ void golombRiceDecodeKernel(
     T* out = reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(d_out) + d_out_offsets[cid]) + iv_start;
 
     GrBitReader<T> br;
-    br.init(payload, static_cast<uint64_t>(iv_byte_off) * 8ull);
+    const uint64_t payload_bytes =
+        static_cast<uint64_t>(comp_size) - (4u + static_cast<uint64_t>(kIntervalsPerChunk) * 4u);
+    br.init(payload, static_cast<uint64_t>(iv_byte_off) * 8ull, payload_bytes);
     for (uint32_t i = 0; i < iv_n; ++i) {
         const uint32_t window = br.peek32();
         const uint32_t inv24  = (~window) & kEscMask;

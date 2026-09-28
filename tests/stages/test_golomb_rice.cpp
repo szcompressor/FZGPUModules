@@ -123,12 +123,21 @@ TEST(GolombRiceStage, Int16RoundTrip) {
 TEST(GolombRiceStage, HeaderSerialization) {
     GolombRiceStage<int32_t> gr;
     gr.setChunkSize(16384);
-    uint8_t buf[5] = {};
-    ASSERT_EQ(gr.serializeHeader(0, buf, sizeof(buf)), 5u);
+    gr.setFusedResult(1000, 123456);   // sets the original byte count carried in the header
+    uint8_t buf[9] = {};
+    ASSERT_EQ(gr.serializeHeader(0, buf, sizeof(buf)), 9u);
     GolombRiceStage<int32_t> gr2;
     gr2.deserializeHeader(buf, sizeof(buf));
     EXPECT_EQ(gr2.getChunkSize(), 16384u);
     EXPECT_EQ(static_cast<DataType>(buf[4]), GolombRiceStage<int32_t>::getElementDataType());
+    // A standalone decompress sizes the inverse output from the header's original size.
+    gr2.setInverse(true);
+    EXPECT_EQ(gr2.estimateOutputSizes({1000}).at(0), 123456u);
+
+    // Legacy 5-byte headers (no original size) still load.
+    GolombRiceStage<int32_t> gr3;
+    gr3.deserializeHeader(buf, 5);
+    EXPECT_EQ(gr3.getChunkSize(), 16384u);
 }
 
 TEST(GolombRiceStage, NegativeRampRoundTrip) {
