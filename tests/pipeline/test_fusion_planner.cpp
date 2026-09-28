@@ -991,6 +991,30 @@ static void buildPfplSplit(Pipeline& p, size_t n) {
     p.connect(c, b);
 }
 
+// Same split-outlier main path, but the index side output crosses the
+// specialization boundary and continues through a staged RLE node before it
+// becomes a terminal archive stream. This is the representative
+// specialized-region + staged-remainder topology.
+static void buildPfplSplitContinued(Pipeline& p, size_t n) {
+    p.setDims(n, 1, 1);
+    auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
+    quant->setErrorBound(1e-3f); quant->setErrorBoundMode(ErrorBoundMode::ABS);
+    quant->setQuantRadius(32768); quant->setZigzagCodes(true);
+    quant->setInplaceOutliers(false);
+    quant->setOutlierThreshold(1.0f);
+    auto* difference = p.addStage<DifferenceStage<int32_t, uint32_t>>();
+    difference->setChunkSize(16384);
+    p.connect(difference, quant, "codes");
+    auto* bitshuffle = p.addStage<BitshuffleStage>();
+    bitshuffle->setElementWidth(4); bitshuffle->setBlockSize(16384);
+    p.connect(bitshuffle, difference);
+    auto* rze = p.addStage<RZEStage>();
+    rze->setWordSize(1); rze->setChunkSize(16384);
+    p.connect(rze, bitshuffle);
+    auto* index_rle = p.addStage<RLEStage<uint32_t>>();
+    p.connect(index_rle, quant, "outlier_idxs");
+}
+
 TEST(FusionPlanner, PfplSplitOutlierFusesAndRoundTrips) {
     const size_t n  = 1u << 20;
     const float  eb = 1e-3f;
@@ -1050,6 +1074,76 @@ TEST(FusionPlanner, PfplSplitOutlierFusesAndRoundTrips) {
     for (size_t i = 0; i < n; i += 512)
         EXPECT_FLOAT_EQ(rf[i], 5.0f) << "outlier at " << i << " not restored";
     cudaFree(d_in);
+}
+
+TEST(FusionPlanner, BoundaryOutputContinuesThroughStagedConsumer) {
+    const size_t n = 1u << 20;
+    const size_t bytes = n * sizeof(float);
+    const float eb = 1e-3f;
+    std::vector<float> input(n);
+    for (size_t i = 0; i < n; ++i) {
+        input[i] = 0.2f * std::sin(i * 0.001f);
+        if (i % 512 == 0) input[i] = 5.0f;
+    }
+
+    float* d_input = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_input, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_input, input.data(), bytes, cudaMemcpyHostToDevice),
+              cudaSuccess);
+
+    auto roundtrip = [&](MemoryStrategy strategy, FusionPolicy policy,
+                         std::vector<float>& reconstructed) {
+        Pipeline p(bytes, strategy, 6.0f);
+        p.setFusionPolicy(policy);
+        buildPfplSplitContinued(p, n);
+        p.finalize();
+
+        if (policy == FusionPolicy::Auto) {
+            ASSERT_EQ(p.getFusedGroupCount(), 1u);
+            ASSERT_EQ(p.getFusionInfo().installed_groups.size(), 1u);
+            EXPECT_EQ(p.getFusionInfo().installed_groups[0].implementation,
+                      "chunk-coop");
+            EXPECT_EQ(p.getFusionInfo().installed_groups[0].stages.size(), 4u);
+        }
+
+        void* d_compressed = nullptr;
+        size_t compressed_bytes = 0;
+        p.compress(d_input, bytes, &d_compressed, &compressed_bytes, 0);
+
+        void* d_reconstructed = nullptr;
+        size_t reconstructed_bytes = 0;
+        p.decompress(d_compressed, compressed_bytes,
+                     &d_reconstructed, &reconstructed_bytes, 0);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        ASSERT_EQ(reconstructed_bytes, bytes);
+
+        if (policy == FusionPolicy::Auto &&
+            strategy == MemoryStrategy::PREALLOCATE) {
+            ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u);
+            EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
+                      "chunk-coop-inverse");
+        } else if (strategy == MemoryStrategy::MINIMAL) {
+            EXPECT_TRUE(p.getFusionInfo().installed_inverse_groups.empty());
+        }
+
+        reconstructed.resize(n);
+        ASSERT_EQ(cudaMemcpy(reconstructed.data(), d_reconstructed, bytes,
+                             cudaMemcpyDeviceToHost), cudaSuccess);
+    };
+
+    for (MemoryStrategy strategy :
+         {MemoryStrategy::PREALLOCATE, MemoryStrategy::MINIMAL}) {
+        std::vector<float> staged, specialized;
+        roundtrip(strategy, FusionPolicy::Off, staged);
+        roundtrip(strategy, FusionPolicy::Auto, specialized);
+        ASSERT_EQ(staged, specialized);
+        for (size_t i = 0; i < n; ++i)
+            EXPECT_LE(std::abs(specialized[i] - input[i]), eb * 1.001f);
+        for (size_t i = 0; i < n; i += 512)
+            EXPECT_FLOAT_EQ(specialized[i], 5.0f);
+    }
+
+    cudaFree(d_input);
 }
 
 // Regression: the fused NOA range scan must exclude the chunk-aligned zero-padding

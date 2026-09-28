@@ -202,12 +202,14 @@ public:
      * writing the tail node's output buffer. See fusion_registry.h.
      */
     struct FusedGroupExec {
-        DAGNode*              head = nullptr;   ///< first node (fused kernel runs here)
+        DAGNode*              head = nullptr;   ///< first logical node on the fused main path
         DAGNode*              tail = nullptr;   ///< last node; its output = the archive
+        DAGNode*              dispatch = nullptr; ///< member whose schedule point launches the kernel
         std::vector<DAGNode*> members;          ///< all group nodes (skipped individually)
         std::vector<Stage*>   stages;           ///< group stages for the runner context
         const FusedImpl*      impl = nullptr;   ///< matched fused implementation
         std::string           execution_path;   ///< last runtime path, when reported by runner
+        bool                  executed = false; ///< reset between DAG executions
     };
 
     /** Install fused groups (from Pipeline::finalize) that execute() will honor. */
@@ -291,7 +293,7 @@ private:
 
     // Fusion: groups whose staged execute()s are replaced by one fused runner.
     std::vector<FusedGroupExec>          fused_groups_;
-    std::unordered_map<DAGNode*, size_t> fused_head_;   ///< head node → index in fused_groups_
+    std::unordered_map<DAGNode*, size_t> fused_dispatch_; ///< dispatch node → group index
     std::unordered_set<DAGNode*>         fused_member_; ///< every node covered by a group
     /// Logical edges wholly contained inside a fused group. They retain size and
     /// topology metadata for serialization/debugging but need no device storage.

@@ -11,6 +11,27 @@
 
 namespace fz {
 
+namespace {
+
+DAGNode* nodeById(const CompressionDAG& dag, int id) {
+    for (DAGNode* node : dag.getNodes())
+        if (node && node->id == id) return node;
+    return nullptr;
+}
+
+// Follow the inverse representation carried on output port 0. Other inputs to
+// the successor are legal region-boundary inputs and are supplied separately to
+// a matching fused runner.
+DAGNode* mainSuccessor(const CompressionDAG& dag, DAGNode* node) {
+    const auto output = node->output_index_to_buffer_id.find(0);
+    if (output == node->output_index_to_buffer_id.end()) return nullptr;
+    const BufferInfo& buffer = dag.getBufferInfo(output->second);
+    if (buffer.consumer_stage_ids.size() != 1) return nullptr;
+    return nodeById(dag, buffer.consumer_stage_ids.front());
+}
+
+} // namespace
+
 std::pair<std::unique_ptr<CompressionDAG>, std::unordered_map<Stage*, int>>
 Pipeline::buildInverseDAG(
     const std::vector<FwdStageDesc>&          fwd_stages,
@@ -125,8 +146,9 @@ Pipeline::buildInverseDAG(
             "buildInverseDAG: no source stages found in forward topology");
     }
 
-    // Install evidence-gated inverse implementations over linear inverse chains.
-    // Registry matching, not the topology walker, owns semantic eligibility.
+    // Install evidence-gated inverse implementations over linear main paths.
+    // A member may also receive boundary inputs from staged inverse branches;
+    // registry matching, not the topology walker, owns semantic eligibility.
     if (enable_inverse_fusion) {
         std::vector<CompressionDAG::FusedGroupExec> installed;
         std::unordered_set<DAGNode*> claimed;
@@ -135,9 +157,7 @@ Pipeline::buildInverseDAG(
             std::vector<DAGNode*> chain;
             for (DAGNode* cur = start; cur && !claimed.count(cur);) {
                 chain.push_back(cur);
-                if (cur->dependents.size() != 1 ||
-                    cur->dependents[0]->dependencies.size() != 1) break;
-                cur = cur->dependents[0];
+                cur = mainSuccessor(*inv_dag, cur);
             }
             for (size_t begin = 0; begin + 1 < chain.size();) {
                 const FusedImpl* selected = nullptr;
@@ -156,6 +176,11 @@ Pipeline::buildInverseDAG(
                 CompressionDAG::FusedGroupExec fg;
                 fg.head = chain[begin];
                 fg.tail = chain[selected_end - 1];
+                // Side-input producers execute on their staged branches before
+                // the fused inverse consumes them. The tail's topological point
+                // is after all such dependencies, so dispatch there rather than
+                // prematurely at the main archive source.
+                fg.dispatch = fg.tail;
                 fg.impl = selected;
                 for (size_t i = begin; i < selected_end; ++i) {
                     fg.members.push_back(chain[i]);

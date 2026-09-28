@@ -84,7 +84,7 @@ void CompressionDAG::colorBuffers() {
     // born there, and every external input remains live through that same point.
     // Inclusive ranges then prevent input/output aliasing within the kernel.
     for (const FusedGroupExec& fg : fused_groups_) {
-        const int fused_level = fg.head->level;
+        const int fused_level = (fg.dispatch ? fg.dispatch : fg.head)->level;
         for (const DAGNode* member : fg.members)
             node_level[member->id] = fused_level;
     }

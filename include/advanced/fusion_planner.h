@@ -19,12 +19,14 @@
  * and selects non-overlapping profitable candidates. Unmatched stages keep
  * running staged.
  *
- * A group is a maximal chain where every stage opts into fusion
- * (`Stage::getFusionSpec()`), the chain is strictly linear (no fan-in/out
- * inside it), conventional region-local/segment-codec members share one region
- * size, and a `SegmentCodec`, if present, terminates the chain because it emits
- * variable-length segments. A `TileSelector` instead owns a larger tile made of
- * equal immediate downstream codec segments.
+ * A group is a maximal primary-output chain where every stage opts into fusion
+ * (`Stage::getFusionSpec()`), the chain is strictly linear internally,
+ * conventional region-local/segment-codec members share one region size, and a
+ * `SegmentCodec`, if present, terminates the chain because it emits
+ * variable-length segments. Declared auxiliary outputs may cross the group
+ * boundary and continue through staged consumers; they are materialized by the
+ * fused runner while primary-path intermediates remain virtual. A `TileSelector`
+ * instead owns a larger tile made of equal immediate downstream codec segments.
  * See docs/codebase_notes.md CN-FUSE-PROOF.
  */
 

@@ -382,12 +382,14 @@ void CompressionDAG::finalize() {
 
 void CompressionDAG::setFusedGroups(std::vector<FusedGroupExec> groups) {
     fused_groups_ = std::move(groups);
-    fused_head_.clear();
+    fused_dispatch_.clear();
     fused_member_.clear();
     fused_internal_buffers_.clear();
     for (size_t i = 0; i < fused_groups_.size(); ++i) {
-        const FusedGroupExec& fg = fused_groups_[i];
-        fused_head_[fg.head] = i;
+        FusedGroupExec& fg = fused_groups_[i];
+        if (!fg.dispatch) fg.dispatch = fg.head;
+        fg.executed = false;
+        fused_dispatch_[fg.dispatch] = i;
         std::unordered_set<int> member_ids;
         for (DAGNode* m : fg.members) {
             fused_member_.insert(m);
@@ -411,36 +413,55 @@ void CompressionDAG::setFusedGroups(std::vector<FusedGroupExec> groups) {
     }
 }
 
-// ── Fusion: a matched group runs one fused kernel at its head node and its
-// member stages' individual execute()s are bypassed. Only reached with
+// ── Fusion: a matched group runs one fused kernel at its selected dispatch
+// node and its member stages' individual execute()s are bypassed. Forward groups
+// normally dispatch at the head; inverse groups with staged boundary inputs may
+// dispatch at the tail, after those inputs have been produced. Only reached with
 // fusion enabled (which also disables graph capture). Returns false if
 // `node` is not part of any fused group, so the caller falls through to
 // normal per-stage dispatch.
 bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
     if (fused_member_.empty() || !fused_member_.count(node)) return false;
 
-    auto head_it = fused_head_.find(node);
-    if (head_it == fused_head_.end()) {
-        // Non-head member: nothing to run; satisfy any waiter.
-        FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, stream));
-        return true;
+    auto dispatch_it = fused_dispatch_.find(node);
+    if (dispatch_it == fused_dispatch_.end()) return true;
+
+    FusedGroupExec& fg = fused_groups_[dispatch_it->second];
+    if (fg.executed) return true;
+
+    std::unordered_set<int> member_ids;
+    for (DAGNode* m : fg.members) member_ids.insert(m->id);
+
+    // A boundary input may enter any member, not only the logical head. Wait for
+    // every staged producer outside the group before launching the fused kernel.
+    std::unordered_set<int> waited_dependencies;
+    for (DAGNode* m : fg.members) {
+        for (DAGNode* dep : m->dependencies) {
+            if (member_ids.count(dep->id) || !waited_dependencies.insert(dep->id).second)
+                continue;
+            FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
+        }
     }
-    FusedGroupExec& fg = fused_groups_[head_it->second];
-    for (auto* dep : node->dependencies)
-        FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, dep->completion_event));
+
+    // PREALLOCATE already assigned these pointers. MINIMAL mode must allocate
+    // the tail plus every materialized boundary output before the fused runner
+    // receives their addresses.
+    if (strategy_ != MemoryStrategy::PREALLOCATE) {
+        for (DAGNode* m : fg.members)
+            for (int buffer_id : m->output_buffer_ids)
+                allocateBuffer(buffer_id, stream);
+    }
 
     if (profiling_enabled_ && node->start_event && !capture_mode_)
         FZ_CUDA_CHECK(cudaEventRecord(node->start_event, stream));
 
-    const BufferInfo& in_buf  = buffers_.at(node->input_buffer_ids[0]);
+    const BufferInfo& in_buf  = buffers_.at(fg.head->input_buffer_ids[0]);
     const int   main_out_id = fg.tail->output_buffer_ids[0];
     BufferInfo& out_buf     = buffers_.at(main_out_id);
 
-    // Collect the group's escaping side outputs: any member output-port
-    // buffer with no consumers (a pipeline leaf) that is not the main
-    // archive. The runner writes these (e.g. an outlier list) and reports
-    // their sizes; the pipeline auto-concatenates them. Empty for the
-    // common single-output case, so those runners are unaffected.
+    // Collect declared outputs crossing the specialized-region boundary. A
+    // boundary output may be a terminal archive stream or feed a staged
+    // consumer. The fused runner materializes it and reports its actual size.
     std::vector<FusedSideOutput> side;
     std::vector<int>             side_ids;
     for (DAGNode* m : fg.members) {
@@ -449,14 +470,19 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
             const int buf_id = kv.second;
             if (buf_id == main_out_id) continue;
             BufferInfo& b = buffers_.at(buf_id);
-            if (!b.consumer_stage_ids.empty()) continue;   // internal to the group
             FusedAuxOutputDecl declaration;
             const auto declared = std::find_if(
                 declarations.begin(), declarations.end(),
                 [&](const FusedAuxOutputDecl& d) {
                     return d.output_index == kv.first;
                 });
-            if (declared != declarations.end()) declaration = *declared;
+            if (declared == declarations.end()) continue;
+            const bool crosses_boundary = b.consumer_stage_ids.empty() ||
+                std::any_of(
+                    b.consumer_stage_ids.begin(), b.consumer_stage_ids.end(),
+                    [&](int consumer_id) { return !member_ids.count(consumer_id); });
+            if (!crosses_boundary) continue;
+            declaration = *declared;
             side.push_back(FusedSideOutput{
                 m->stage, kv.first, b.d_ptr, b.allocated_size, 0,
                 std::move(declaration)});
@@ -468,8 +494,6 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
     // the head's first/main input (already exposed as d_input). This
     // is primarily for inverse groups whose tail quantizer consumes
     // separately archived outlier values and indices.
-    std::unordered_set<int> member_ids;
-    for (DAGNode* m : fg.members) member_ids.insert(m->id);
     std::vector<FusedSideInput> side_inputs;
     for (DAGNode* m : fg.members) {
         for (size_t input_index = 0; input_index < m->input_buffer_ids.size(); ++input_index) {
@@ -507,8 +531,28 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
                 "' side output overflowed its buffer");
         buffers_.at(side_ids[k]).size = side[k].size;
     }
-    for (DAGNode* m : fg.members)
+
+    // Consume every buffer entering the group from outside exactly where the
+    // corresponding staged member would have consumed it. This matters for
+    // MINIMAL-mode reclamation and for inverse groups fed by staged side paths.
+    for (DAGNode* m : fg.members) {
+        for (int buffer_id : m->input_buffer_ids) {
+            BufferInfo& b = buffers_.at(buffer_id);
+            if (b.producer_stage_id >= 0 && member_ids.count(b.producer_stage_id))
+                continue;
+            --b.remaining_consumers;
+            if (b.remaining_consumers == 0 && !b.is_persistent &&
+                strategy_ != MemoryStrategy::PREALLOCATE) {
+                freeBuffer(buffer_id, stream);
+            }
+        }
+    }
+
+    for (DAGNode* m : fg.members) {
         FZ_CUDA_CHECK(cudaEventRecord(m->completion_event, stream));
+        m->is_executed = true;
+    }
+    fg.executed = true;
     return true;
 }
 
@@ -672,6 +716,8 @@ void CompressionDAG::setCaptureMode(bool capture) {
 }
 
 void CompressionDAG::reset(cudaStream_t stream) {
+    for (auto& fg : fused_groups_) fg.executed = false;
+
     for (auto& [buffer_id, buffer] : buffers_) {
         // PREALLOCATE: buffers are owned for the lifetime of the DAG (they were
         // allocated once in preallocateBuffers() and execute() never re-allocates

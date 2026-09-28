@@ -2,22 +2,62 @@
 #include "advanced/dag.h"
 #include "stage/stage.h"
 
+#include <algorithm>
 #include <unordered_set>
 
 namespace fz {
 
 namespace {
 
-// A fused edge requires a strictly linear producer→consumer link: `prod` feeds
-// exactly one stage and `cons` is fed by exactly one stage, and both opt into
-// fusion. (Fan-in/out inside a group would break register-resident composition.)
-bool linearFusableEdge(const DAGNode* prod, const DAGNode* cons) {
+bool declaresAuxOutput(const Stage* stage, int output_index) {
+    const auto declarations = stage->getFusedAuxOutputs();
+    return std::any_of(
+        declarations.begin(), declarations.end(),
+        [&](const FusedAuxOutputDecl& d) {
+            return d.valid() && d.output_index == output_index;
+        });
+}
+
+DAGNode* nodeById(const CompressionDAG& dag, int id) {
+    for (DAGNode* node : dag.getNodes())
+        if (node && node->id == id) return node;
+    return nullptr;
+}
+
+// A fused edge follows output port 0, the main representation carried by every
+// registered/generated specialization. The main path remains strictly linear.
+// Other connected output ports may cross the region boundary only when the
+// producer declares how the fused runner materializes and sizes them.
+bool linearFusableEdge(
+    const CompressionDAG& dag, const DAGNode* prod, const DAGNode* cons)
+{
     if (!prod->stage || !cons->stage) return false;
     if (!prod->stage->getFusionSpec().fusable()) return false;
     if (!cons->stage->getFusionSpec().fusable()) return false;
-    if (prod->dependents.size() != 1 || prod->dependents[0] != cons) return false;
     if (cons->dependencies.size() != 1 || cons->dependencies[0] != prod) return false;
+
+    const auto main_it = prod->output_index_to_buffer_id.find(0);
+    if (main_it == prod->output_index_to_buffer_id.end()) return false;
+    const BufferInfo& main = dag.getBufferInfo(main_it->second);
+    if (main.consumer_stage_ids.size() != 1 ||
+        main.consumer_stage_ids.front() != cons->id) return false;
+
+    for (const auto& [output_index, buffer_id] : prod->output_index_to_buffer_id) {
+        if (output_index == 0) continue;
+        const BufferInfo& output = dag.getBufferInfo(buffer_id);
+        if (!output.consumer_stage_ids.empty() &&
+            !declaresAuxOutput(prod->stage, output_index)) return false;
+    }
     return true;
+}
+
+DAGNode* mainFusableSuccessor(const CompressionDAG& dag, DAGNode* prod) {
+    const auto it = prod->output_index_to_buffer_id.find(0);
+    if (it == prod->output_index_to_buffer_id.end()) return nullptr;
+    const BufferInfo& main = dag.getBufferInfo(it->second);
+    if (main.consumer_stage_ids.size() != 1) return nullptr;
+    DAGNode* cons = nodeById(dag, main.consumer_stage_ids.front());
+    return cons && linearFusableEdge(dag, prod, cons) ? cons : nullptr;
 }
 
 } // namespace
@@ -91,7 +131,7 @@ std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
         // NOT a linear fusable edge into it (otherwise it is mid-chain and will
         // be picked up when its predecessor's chain is walked).
         if (start->dependencies.size() == 1 &&
-            linearFusableEdge(start->dependencies[0], start)) {
+            linearFusableEdge(dag, start->dependencies[0], start)) {
             continue;
         }
         // A coder as the very first stage is a group of one — nothing to fuse.
@@ -110,9 +150,8 @@ std::vector<FusionGroup> planFusionGroups(const CompressionDAG& dag) {
             consumed.insert(cur);
             if (cs.access == FusionAccess::SegmentCodec) { coder = true; break; }  // codec terminates
 
-            if (cur->dependents.size() != 1) break;
-            DAGNode* nxt = cur->dependents[0];
-            if (!linearFusableEdge(cur, nxt)) break;
+            DAGNode* nxt = mainFusableSuccessor(dag, cur);
+            if (!nxt) break;
             FusionGeometry extended = geometry;
             if (extendFusionGeometry(extended, nxt->stage->getFusionSpec()) !=
                 FusionCompatibility::Compatible) break;

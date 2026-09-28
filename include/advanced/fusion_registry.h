@@ -37,11 +37,11 @@ class Stage;
 class MemoryPool;
 
 /// A group member's escaping output port — a side output (e.g. an outlier list)
-/// the fused kernel produces in addition to the main archive. These become
-/// pipeline leaf outputs and are auto-concatenated by the pipeline, so a fused op
-/// can emit outliers without moving that work out of the fused kernel. The runner
-/// writes `d_ptr` and reports the bytes it wrote in `size`; the DAG then sizes the
-/// buffer from it. Empty for the common single-output case.
+/// the fused kernel produces in addition to the main archive. It may be a
+/// pipeline leaf or continue through staged consumers outside the specialized
+/// region. The runner writes `d_ptr` and reports the bytes it wrote in `size`;
+/// the DAG then sizes the boundary buffer. Empty for the common single-output
+/// case.
 struct FusedSideOutput {
     Stage* producer;       ///< the group member that owns this output port
     int    output_index;   ///< which of the producer's output ports this is

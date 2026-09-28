@@ -137,6 +137,11 @@ FZ_SPECIALIZE=auto fzgmod-cli -c examples/presets/szp_composed.toml \
   nodes, port wiring, and FZM header are built exactly as in the staged path. That
   is why decode of a specialized archive is unaffected and old archives are
   unaffected.
+- **Region boundaries remain ordinary graph edges.** A declared auxiliary output
+  may leave a specialized main path and continue through staged consumers. Only
+  edges wholly internal to the selected region are eliminated; boundary buffers
+  remain materialized, sized by the specialized runner, and consumed through the
+  original port wiring in both forward and inverse execution.
 - **Lower peak memory.** Under `PREALLOCATE`, specialization also shrinks the peak
   memory usage: an intermediate buffer that lives entirely inside a fused group is
   never allocated (the kernel keeps it in registers/shared memory), and the group

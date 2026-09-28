@@ -47,16 +47,16 @@ std::vector<StageTimingResult> CompressionDAG::collectTimings() {
     results.reserve(nodes_.size());
 
     for (auto* node : nodes_) {
-        // A fused group has one measured execution interval at its head. Its
+        // A fused group has one measured execution interval at its dispatch node. Its
         // other logical stages are retained for topology/archive semantics but
         // never record start events, so reporting them as individual timings is
         // both misleading and an invalid CUDA event query.
-        if (fused_member_.count(node) && !fused_head_.count(node)) continue;
+        if (fused_member_.count(node) && !fused_dispatch_.count(node)) continue;
         if (!node->start_event || !node->completion_event) continue;
 
         StageTimingResult r;
-        auto fused_it = fused_head_.find(node);
-        r.name = fused_it == fused_head_.end()
+        auto fused_it = fused_dispatch_.find(node);
+        r.name = fused_it == fused_dispatch_.end()
             ? node->name
             : std::string("fused:") + fused_groups_[fused_it->second].impl->name;
         r.level      = node->level;
@@ -146,7 +146,7 @@ size_t CompressionDAG::computeTopoPoolSize() const {
     for (const auto* node : nodes_)
         node_level[node->id] = node->level;
     for (const FusedGroupExec& fg : fused_groups_) {
-        const int fused_level = fg.head->level;
+        const int fused_level = (fg.dispatch ? fg.dispatch : fg.head)->level;
         for (const DAGNode* member : fg.members)
             node_level[member->id] = fused_level;
     }

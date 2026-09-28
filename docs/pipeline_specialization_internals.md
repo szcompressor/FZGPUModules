@@ -176,6 +176,16 @@ does nothing for this; just make sure `getFusedAuxOutputs()` / the side-output
 hooks correctly identify any port that *escapes* the group (an outlier list, a
 means stream) so it stays materialized.
 
+An escaping auxiliary port does **not** have to be a pipeline leaf. It may feed
+ordinary staged consumers outside the specialized region. The planner follows
+the group's linear port-0 main path while allowing declared auxiliary ports to
+cross its boundary; the executor materializes and sizes those buffers before
+their staged consumers run. On the inverse DAG, the corresponding staged branch
+runs first and its result enters the specialized inverse through `side_inputs`.
+Only declared auxiliary ports receive this treatment: an undeclared branch, or a
+fan-out of the main representation, remains a specialization barrier because the
+runner has no contract for reproducing that boundary value.
+
 ---
 
 ## The device policy contract (warp-register harness)
