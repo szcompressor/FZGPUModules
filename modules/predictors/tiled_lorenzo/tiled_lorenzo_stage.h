@@ -200,7 +200,7 @@ public:
         d.strategy       = FusionStrategy::WarpRegister;
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
-        if (tz == 1u) {   // 2-D
+        if (tz == 1u && dz == 1u) {   // 2-D (single slice; a stack of 2-D-tiled slices takes the 3-D op with tz == 1)
             d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
             d.ti_op_name = predict_ ? "ThreadTiledLorenzo2DPredictor" : "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
@@ -263,7 +263,7 @@ public:
         // thread to hide the dependency latency via intra-thread ILP). Forward
         // (compress) ti_op_name is unaffected: it is set for BOTH modes above and
         // both measured real wins there.
-        if (tz == 1u) {   // 2-D
+        if (tz == 1u && dz == 1u) {   // 2-D (single slice; a stack of 2-D-tiled slices takes the 3-D op with tz == 1)
             d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
             if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
