@@ -240,16 +240,21 @@ public:
     // ── Serialization ──────────────────────────────────────────────────────
     static DataType getElementDataType() { return fused::dataTypeOf<T>(); }
 
+    // [0..3] chunk_size, [4] element DataType, [5..8] original byte count. The
+    // original size lets a standalone decompress size the inverse output before the
+    // stream header is read (as RZE does); 5-byte headers from older archives still load.
     size_t serializeHeader(size_t, uint8_t* buf, size_t max_size) const override {
-        if (max_size < 5) return 0;
+        if (max_size < 9) return 0;
         std::memcpy(buf, &chunk_size_, sizeof(uint32_t));
         buf[4] = static_cast<uint8_t>(getElementDataType());
-        return 5;
+        std::memcpy(buf + 5, &cached_orig_bytes_, sizeof(uint32_t));
+        return 9;
     }
     void deserializeHeader(const uint8_t* buf, size_t size) override {
         if (size >= 4) std::memcpy(&chunk_size_, buf, sizeof(uint32_t));
+        if (size >= 9) std::memcpy(&cached_orig_bytes_, buf + 5, sizeof(uint32_t));
     }
-    size_t getMaxHeaderSize(size_t) const override { return 5; }
+    size_t getMaxHeaderSize(size_t) const override { return 9; }
 
     void saveState() override { saved_chunk_size_ = chunk_size_; }
     void restoreState() override { chunk_size_ = saved_chunk_size_; }
