@@ -1137,6 +1137,10 @@ private:
     // compress() zero-pads to this boundary transparently.
     size_t     input_alignment_bytes_;
     PoolBuffer d_pad_buf_;
+    /// Set at finalize(): every source buffer is read only by fused groups that accept
+    /// an unpadded input, so compress() skips the zero-padded copy (and finalize()
+    /// never allocates d_pad_buf_) — the fused kernel reads zeros past the real data.
+    bool       fused_source_unpadded_ = false;
 
     // Original (pre-padding) input size. decompress() uses this to trim the
     // reported output back to what the caller provided. 0 when no padding.

@@ -65,7 +65,11 @@ struct FusedSideInput {
 struct FusedRunContext {
     const std::vector<Stage*>* stages;   ///< group stages, producer→consumer
     const void* d_input;                 ///< the group's input buffer
-    size_t      input_bytes;             ///< bytes of d_input
+    size_t      input_bytes;             ///< bytes of d_input (logical, chunk-aligned)
+    /// Bytes of real data at d_input when it is shorter than input_bytes: the pipeline
+    /// skipped the zero-padded copy (FusedImpl::accepts_unpadded_input). Reading at or
+    /// past it is out of bounds; the runner must treat that tail as zeros. 0 = input_bytes.
+    size_t      input_valid_bytes = 0;
     void*       d_output;                ///< the group's MAIN output buffer (tail port 0, >= worst case)
     size_t      output_capacity = 0;     ///< allocated bytes available at d_output
     MemoryPool* pool;                    ///< pool for the runner's scratch
@@ -92,6 +96,10 @@ struct FusedImpl {
     bool   (*matches)(const std::vector<Stage*>& group);
     /// Run the fused compress; return the archive length written to d_output.
     size_t (*run)(const FusedRunContext& ctx);
+    /// True if `run` honours FusedRunContext::input_valid_bytes (reads nothing past it
+    /// and treats the rest of input_bytes as zeros), so the pipeline may hand it the
+    /// caller's unpadded input instead of a zero-padded copy.
+    bool accepts_unpadded_input = false;
 };
 
 /// First registered impl whose matcher accepts `group`, or nullptr. Experimental

@@ -345,7 +345,15 @@ void Pipeline::finalize() {
     if (graph_mode_enabled_)
         setupGraphModeInput();
 
-    preallocatePadBuffer();
+    fused_source_unpadded_ = input_alignment_bytes_ > 1 && !graph_mode_enabled_ &&
+        !input_buffer_ids_.empty() &&
+        std::all_of(input_buffer_ids_.begin(), input_buffer_ids_.end(),
+                    [&](int id) { return dag_->consumedOnlyByUnpaddedFusion(id); });
+    if (fused_source_unpadded_)
+        FZ_LOG(INFO, "Input padding: skipped (every source consumer is a fused group that "
+               "reads the unpadded input); no pad buffer allocated");
+    else
+        preallocatePadBuffer();
 
     num_streams_ = std::max(1, static_cast<int>(dag_->getStreamCount()));
     preallocateConcatBuffers();
@@ -437,6 +445,8 @@ void Pipeline::refinePoolSize() {
     constexpr float kTopoSafetyMargin = 1.1f;  // 10% headroom for transient CUB allocations
     const size_t topo_base  = dag_->computeTopoPoolSize();
     // d_pad_buf_ is pool-allocated but never appears in buffers_, so add it manually.
+    // (Runs before fused_source_unpadded_ is known; a skipped pad buffer only makes
+    // this sizing hint generous, and the pool never pre-reserves it.)
     const size_t pad_bytes  = (input_alignment_bytes_ > 1) ? input_size_hint_ : 0;
     const size_t topo_sized = static_cast<size_t>((topo_base + pad_bytes) * kTopoSafetyMargin);
     // UINT64_MAX: never trim pool pages between calls — avoids re-page-fault latency spikes.

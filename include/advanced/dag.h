@@ -50,6 +50,9 @@ struct BufferInfo {
     bool is_allocated;
     bool is_persistent;  ///< If true, survives reset() until DAG destruction.
     bool is_external;    ///< If true, pointer is caller-owned — DAG never allocs or frees.
+    /// Real bytes at d_ptr when `size` is a logical, chunk-aligned length the caller's
+    /// (external, unpadded) buffer does not physically cover. 0 = all of `size` is real.
+    size_t valid_size = 0;
 
     BufferInfo()
         : size(0), initial_size(0), allocated_size(0), d_ptr(nullptr), tag(""),
@@ -167,6 +170,20 @@ public:
     void setExternalPointer(int buffer_id, void* external_ptr);
 
     void updateBufferSize(int buffer_id, size_t new_size);
+
+    /**
+     * Declare that only the first `valid_bytes` of an external buffer's logical `size`
+     * exist (0 clears it). Only legal when every consumer is a fused group whose
+     * implementation accepts unpadded input (see consumedOnlyByUnpaddedFusion()).
+     */
+    void setExternalValidSize(int buffer_id, size_t valid_bytes);
+
+    /**
+     * True if every consumer of `buffer_id` is the head of an installed fused group
+     * whose implementation reads an unpadded input safely (FusedImpl::
+     * accepts_unpadded_input), so the pipeline may skip the zero-padded input copy.
+     */
+    bool consumedOnlyByUnpaddedFusion(int buffer_id) const;
 
     // ── Query & debug ─────────────────────────────────────────────────────────
 

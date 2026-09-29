@@ -804,6 +804,64 @@ static void chunkFusionEndToEnd(const std::function<void(Pipeline&, size_t)>& bu
     cudaFree(d_in);
 }
 
+// Unaligned input (not a multiple of the 16 KB chunk): staged execution zero-pads a
+// full-size copy of the input; the fused chunk path must instead read the caller's
+// buffer directly (zeros past the real data) with a byte-identical archive, a
+// correct unpadded round trip, and no pad buffer in the pool.
+static void chunkFusionUnalignedEndToEnd(const std::function<void(Pipeline&, size_t)>& build) {
+    const size_t n = (1u << 20) + 777;           // tail chunk is partial
+    const size_t bytes = n * sizeof(float);
+    std::vector<float> h(n);
+    double lo = 1e30, hi = -1e30;
+    for (size_t i = 0; i < n; ++i) {
+        h[i] = 0.6f*std::sin(i*0.001f) + 0.3f*std::cos(i*0.017f) + 0.05f*std::sin(i*0.13f);
+        lo = std::min(lo, (double)h[i]); hi = std::max(hi, (double)h[i]);
+    }
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);   // exact size
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    struct Result { std::vector<uint8_t> archive; std::vector<float> recon; size_t peak = 0; size_t dsz = 0; };
+    auto run = [&](FusionPolicy pol) {
+        Result r;
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        build(p, n);
+        p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        cudaDeviceSynchronize();
+        r.peak = p.getPeakMemoryUsage();
+        r.archive.resize(sz);
+        EXPECT_EQ(cudaMemcpy(r.archive.data(), d_comp, sz, cudaMemcpyDeviceToHost), cudaSuccess);
+        void* d_decomp = nullptr;
+        p.decompress(d_comp, sz, &d_decomp, &r.dsz, 0);
+        cudaDeviceSynchronize();
+        r.recon.assign(n, 0.0f);
+        EXPECT_EQ(cudaMemcpy(r.recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost), cudaSuccess);
+        return r;
+    };
+    const Result staged = run(FusionPolicy::Off);
+    const Result fused  = run(FusionPolicy::Auto);
+    EXPECT_EQ(staged.archive, fused.archive) << "unpadded fused archive not byte-identical to staged";
+    EXPECT_EQ(fused.dsz, bytes) << "round trip must return the unpadded length";
+    EXPECT_EQ(staged.recon, fused.recon);
+    double m = 0;
+    for (size_t i = 0; i < n; ++i) m = std::max(m, (double)std::abs(fused.recon[i] - h[i]));
+    EXPECT_LE(m, 1e-3 * (hi - lo) * 1.001) << "fused round trip exceeds the NOA bound";
+    // Output + chunk scratch + side buffers fit well under 2.5x; a full-size pad
+    // copy of the input on top would not.
+    EXPECT_LT(fused.peak, bytes * 5 / 2) << "fused pool peak suggests a padded input copy";
+    cudaFree(d_in);
+}
+
+TEST(FusionPlanner, PfplUnalignedInputFusedSkipsPadCopy) {
+    chunkFusionUnalignedEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/false); });
+}
+TEST(FusionPlanner, PfplSplitOutlierUnalignedInputFusedSkipsPadCopy) {
+    chunkFusionUnalignedEndToEnd([](Pipeline& p, size_t n){ buildPfplCapacityLimitedSplit(p, n); });
+}
+
 TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) {
     chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/false); });
 }

@@ -66,6 +66,15 @@ __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
     return a;
 }
 
+// Elements at or beyond `n_valid` read as 0.0f. The pipeline may hand the fused
+// group an UNPADDED input whose logical length `n` is rounded up to the chunk
+// alignment; staged execution zero-fills that tail in a padded copy, so reading
+// zeros here reproduces its archive byte-for-byte without the full-size copy.
+__device__ __forceinline__ float loadOrZero(const float* __restrict__ in, size_t idx,
+                                            size_t n_valid) {
+    return idx < n_valid ? in[idx] : 0.0f;
+}
+
 // ── Elementwise op: linear/NOA quant with inplace outliers + TCMS(zigzag) codes. ─
 // Loads global floats and writes codes to smem. Out-of-radius / over-threshold
 // values are stored as raw IEEE-754 bits (matches quantizer_abs_fwd_inplace_kernel).
@@ -78,10 +87,10 @@ struct QuantInplaceZigzag {
     // none — outliers go inline — so it ignores side).
     __device__ static void load(const float* __restrict__ in, size_t base, int cnt,
                                 uint32_t* __restrict__ s, const void* pp,
-                                const ChunkSideCtx& /*side*/) {
+                                const ChunkSideCtx& /*side*/, size_t n_valid = ~size_t(0)) {
         const Params p = *static_cast<const Params*>(pp);
         for (int i = threadIdx.x; i < cnt; i += TPB) {
-            const float x = in[base + i];
+            const float x = loadOrZero(in, base + i, n_valid);
             const int   q = __float2int_rn(x * p.ebx2_r);
             uint32_t c;
             if (q > -(int)p.radius && q < (int)p.radius && fabsf(x) < p.threshold)
@@ -104,11 +113,11 @@ struct QuantSplitOutlier {
     using Params = QuantSplitOutlierParams;   // == QuantInplaceZigzagParams layout
     __device__ static void load(const float* __restrict__ in, size_t base, int cnt,
                                 uint32_t* __restrict__ s, const void* pp,
-                                const ChunkSideCtx& side) {
+                                const ChunkSideCtx& side, size_t n_valid = ~size_t(0)) {
         const Params p = *static_cast<const Params*>(pp);
         const int lane = threadIdx.x & 31;
         for (int i = threadIdx.x; i < cnt; i += TPB) {
-            const float x = in[base + i];
+            const float x = loadOrZero(in, base + i, n_valid);
             const int   q = __float2int_rn(x * p.ebx2_r);
             if (q > -(int)p.radius && q < (int)p.radius && fabsf(x) < p.threshold) {
                 s[i] = (uint32_t)((q << 1) ^ (q >> 31));   // zigzag(q)
@@ -515,7 +524,7 @@ __device__ __forceinline__ void
 chunk_fused_body(const float* __restrict__ in, size_t n,
                  const byte* __restrict__ params,
                  byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
-                 ChunkSideCtx side = ChunkSideCtx{}) {
+                 ChunkSideCtx side = ChunkSideCtx{}, size_t n_valid = ~size_t(0)) {
     constexpr int NELEM = Geom<ChunkBytes>::NELEM;
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
@@ -526,7 +535,7 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
     const int      cnt  = (int)min((size_t)NELEM, n - base);
     const bool     full = (cnt == NELEM);
 
-    QuantOp::load(in, base, cnt, sA, params /* + 0: quant is first in the blob */, side);
+    QuantOp::load(in, base, cnt, sA, params /* + 0: quant is first in the blob */, side, n_valid);
     __syncthreads();
 
     constexpr int kTransOff = OpParamBytes<QuantOp>::value;

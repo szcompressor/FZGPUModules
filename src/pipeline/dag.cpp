@@ -510,6 +510,7 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
     ctx.stages       = &fg.stages;
     ctx.d_input      = in_buf.d_ptr;
     ctx.input_bytes  = in_buf.size;
+    ctx.input_valid_bytes = in_buf.valid_size;
     ctx.d_output     = out_buf.d_ptr;
     ctx.output_capacity = out_buf.allocated_size;
     ctx.pool         = mem_pool_;
@@ -791,6 +792,33 @@ const BufferInfo& CompressionDAG::getBufferInfo(int buffer_id) const {
         throw std::runtime_error("Invalid buffer ID: " + std::to_string(buffer_id));
     }
     return it->second;
+}
+
+void CompressionDAG::setExternalValidSize(int buffer_id, size_t valid_bytes) {
+    auto it = buffers_.find(buffer_id);
+    if (it == buffers_.end())
+        throw std::runtime_error("Invalid buffer ID: " + std::to_string(buffer_id));
+    if (valid_bytes != 0 && !consumedOnlyByUnpaddedFusion(buffer_id))
+        throw std::runtime_error(
+            "setExternalValidSize: buffer " + std::to_string(buffer_id) +
+            " has a consumer that would read past the caller's unpadded data");
+    it->second.valid_size = valid_bytes;
+}
+
+bool CompressionDAG::consumedOnlyByUnpaddedFusion(int buffer_id) const {
+    auto it = buffers_.find(buffer_id);
+    if (it == buffers_.end() || it->second.consumer_stage_ids.empty()) return false;
+    for (int consumer : it->second.consumer_stage_ids) {
+        const bool ok = std::any_of(fused_groups_.begin(), fused_groups_.end(),
+            [&](const FusedGroupExec& fg) {
+                return fg.head && fg.head->id == consumer && fg.impl &&
+                       fg.impl->accepts_unpadded_input &&
+                       !fg.head->input_buffer_ids.empty() &&
+                       fg.head->input_buffer_ids[0] == buffer_id;
+            });
+        if (!ok) return false;
+    }
+    return true;
 }
 
 void CompressionDAG::setExternalPointer(int buffer_id, void* external_ptr) {

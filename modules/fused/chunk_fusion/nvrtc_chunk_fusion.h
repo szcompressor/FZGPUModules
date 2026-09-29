@@ -73,7 +73,8 @@ void launchNvrtcChunkFusedEncode(
     const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
     uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream,
     uint32_t* d_side_idxs = nullptr, float* d_side_vals = nullptr,
-    uint32_t* d_side_count = nullptr, uint32_t side_max = 0);
+    uint32_t* d_side_count = nullptr, uint32_t side_max = 0,
+    size_t n_valid = ~size_t(0));
 
 /**
  * Generic chunk-cooperative fused compress — the entry the generic registry runner
@@ -95,7 +96,8 @@ size_t launchGenericChunkFusion(
     const uint8_t* host_params, size_t params_bytes,
     uint8_t* d_out, MemoryPool* pool, fz::stream_t stream,
     uint32_t* d_side_idxs = nullptr, float* d_side_vals = nullptr,
-    uint32_t side_max = 0, uint32_t* out_side_count = nullptr);
+    uint32_t side_max = 0, uint32_t* out_side_count = nullptr,
+    size_t n_valid = ~size_t(0));
 
 } // namespace fused
 } // namespace fz

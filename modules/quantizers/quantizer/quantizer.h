@@ -403,7 +403,10 @@ public:
     void primeFusedForwardState(const FusedPrimeContext& c) override {
         fused_outlier_count_set_ = false;   // reset per fused compress; set by setFusedSideOutput
         num_elements_ = c.input_bytes / sizeof(TInput);
-        primeComputedAbsEb(c.d_input, c.input_bytes / sizeof(TInput), c.pool, c.stream);
+        // Never scan past the real data: the input may be the caller's unpadded buffer.
+        const size_t valid = (c.input_valid_bytes != 0 && c.input_valid_bytes < c.input_bytes)
+            ? c.input_valid_bytes : c.input_bytes;
+        primeComputedAbsEb(c.d_input, valid / sizeof(TInput), c.pool, c.stream);
     }
 
     /// The fused split-outlier runner fills the outlier ports (1 = vals TInput,
