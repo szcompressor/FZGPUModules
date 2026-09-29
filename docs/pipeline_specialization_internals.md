@@ -315,6 +315,42 @@ NVRTC rejects an unannotated function merely being *present*, not just called
 (see `chunk_geometry.h`'s `isSupportedChunkBytes`). Decompress generalization
 for this path beyond PFPL/RZE is future work.
 
+### Chunk-cooperative memory
+
+The forward chunk path holds, beyond the caller's input, only the worst-case
+archive buffer, any split-outlier side buffers, and one look-back word per chunk:
+
+- **No padded input copy.** `FusedImpl::accepts_unpadded_input` is set for
+  `chunk-coop`. When every source consumer is such a group, `finalize()` skips the
+  pad buffer and `compress()` passes the caller's buffer with a logical
+  (chunk-aligned) length plus `FusedRunContext::input_valid_bytes`. The elementwise
+  load ops read `0.0f` past the valid length (`loadOrZero`), reproducing the staged
+  zero padding bit for bit, and the NOA prime scan is clamped to the valid length.
+- **No chunk scratch.** `chunk_fused_direct_body` encodes a chunk in shared memory,
+  publishes its size, resolves its payload offset by decoupled look-back (warp 0
+  checks 32 predecessors at a time), and writes the size-table entry and payload
+  straight into the archive with a funnel-shift word store (after PFPL's `s2g`).
+  The archive is byte-identical to the scratch path, which remains available as
+  `FZ_CHUNK_SCRATCH=1` (full input-size scratch, then CUB scan + `chunk_pack`).
+  One CTA per chunk with `cid = blockIdx.x`, relying on in-order block dispatch as
+  CUB's look-back does.
+
+Measured on an H100 (PFPL preset, `-b --runs 10`, median compress device time,
+direct vs scratch): CESM-2D/CLDHGH (26 MB) 10% faster, a 0.5 MB synthetic input
+15% faster, HACC/vx (1.12 GB) 2% faster, NYX/temperature (537 MB, very
+compressible) 9% slower.
+On NYX each chunk encodes quickly, so a block's wait on its predecessors' sizes is
+not hidden; the scratch path never waits. Rejected variants on the same inputs: a
+single-thread serial look-back (NYX +12% vs scratch); an atomic chunk ticket
+instead of `blockIdx.x` (NYX +5% vs the `blockIdx.x` version); a persistent grid
+with an atomic chunk counter, native PFPL's scheme (NYX +16%, HACC +3% vs scratch); `__nanosleep` backoff in the spin
+(no change). Both kernels use 32 registers and ~36.9 KB static shared memory, so
+occupancy is not the difference.
+
+Peak live device memory of a PFPL Auto compress, measured with
+`cuda_mem_probe` against `d511ebc`: HACC/vx 4721 -> 2671 MB, NYX 2255 -> 1192 MB,
+CESM-2D/CLDHGH 108.9 -> 59.4 MB (input, archive, outliers, ~1/CR concat copy).
+
 ---
 
 ## Deeper reading

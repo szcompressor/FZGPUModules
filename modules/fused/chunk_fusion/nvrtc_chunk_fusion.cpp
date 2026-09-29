@@ -49,6 +49,57 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec) {
     return src;
 }
 
+namespace {
+std::string chunkTemplateArgs(const ChunkFusionSpec& spec) {
+    const std::string cb = std::to_string(spec.chunk_bytes);
+    std::string targs = cb + ", " + spec.quant_op + ", " + spec.coder + "<" + cb + ">";
+    for (const auto& t : spec.transforms) {
+        targs += ", " + t;
+        if (t == "Bitshuffle32") targs += "<" + cb + ">";
+    }
+    return targs;
+}
+} // namespace
+
+std::string generateChunkFusionDirectSource(const ChunkFusionSpec& spec) {
+    std::string src;
+    src += "#include \"fused/chunk_fusion/chunk_fusion.cuh\"\n";
+    src += "extern \"C\" __global__ void __launch_bounds__(" +
+           std::to_string(chunk::TPB) + ") fz_fused_chunk_direct(\n";
+    src += "    const float* in, unsigned long long n, const unsigned char* params,\n";
+    src += "    unsigned char* archive, unsigned int nc,\n";
+    src += "    unsigned long long* state,\n";
+    src += "    unsigned int* side_idxs, float* side_vals, unsigned int* side_count,\n";
+    src += "    unsigned int side_max, unsigned long long n_valid) {\n";
+    src += "  using namespace fz::fused::chunk;\n";
+    src += "  chunk_fused_direct_body< " + chunkTemplateArgs(spec) + " >(\n";
+    src += "      in, (size_t)n, params, archive, nc, state,\n";
+    src += "      ChunkSideCtx{side_idxs, side_vals, side_count, side_max}, (size_t)n_valid);\n";
+    src += "}\n";
+    return src;
+}
+
+void launchNvrtcChunkFusedEncodeDirect(
+    const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
+    uint8_t* d_archive, unsigned nc, unsigned long long* d_state,
+    fz::stream_t stream, uint32_t* d_side_idxs, float* d_side_vals,
+    uint32_t* d_side_count, uint32_t side_max, size_t n_valid)
+{
+    const std::string src  = generateChunkFusionDirectSource(spec);
+    CUfunction        func = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_chunk_direct"));
+
+    unsigned long long n_arg = n;
+    unsigned long long n_valid_arg = n_valid < n ? n_valid : n;
+    unsigned int nc_arg = nc;
+    void* args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+                     (void*)&d_archive, (void*)&nc_arg, (void*)&d_state,
+                     (void*)&d_side_idxs, (void*)&d_side_vals,
+                     (void*)&d_side_count, (void*)&side_max, (void*)&n_valid_arg };
+
+    CU_CHECK(cuLaunchKernel(func, nc, 1, 1, (unsigned)chunk::TPB, 1, 1, 0,
+                            (CUstream)stream, args, nullptr));
+}
+
 bool nvrtcChunkFusionAvailable() { return nvrtcAvailable(); }
 
 void launchNvrtcChunkFusedEncode(

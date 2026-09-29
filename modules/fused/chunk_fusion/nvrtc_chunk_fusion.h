@@ -91,6 +91,20 @@ void launchNvrtcChunkFusedEncode(
 /// op fills the two side buffers (capacity `side_max` elements each), and writes the
 /// final outlier count back to `*out_side_count` (a stream sync happens before it
 /// returns, so the count and the packed archive are both ready).
+/** Source of the single-pass (decoupled look-back) kernel for `spec`; see
+ *  chunk_fused_direct_body in chunk_fusion.cuh. */
+std::string generateChunkFusionDirectSource(const ChunkFusionSpec& spec);
+
+/** Launch the single-pass kernel: writes the size table and payload of every chunk
+ *  straight into `d_archive` (whose 8-byte prefix the caller writes). `d_state`
+ *  (nc words) must be zeroed first. */
+void launchNvrtcChunkFusedEncodeDirect(
+    const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
+    uint8_t* d_archive, unsigned nc, unsigned long long* d_state,
+    fz::stream_t stream, uint32_t* d_side_idxs = nullptr, float* d_side_vals = nullptr,
+    uint32_t* d_side_count = nullptr, uint32_t side_max = 0,
+    size_t n_valid = ~size_t(0));
+
 size_t launchGenericChunkFusion(
     const ChunkFusionSpec& spec, const float* d_in, size_t n,
     const uint8_t* host_params, size_t params_bytes,

@@ -47,6 +47,14 @@ __global__ void scatter_pfpl_outliers(const float* __restrict__ vals,
     if (i < count && static_cast<size_t>(idxs[i]) < n) out[idxs[i]] = vals[i];
 }
 
+// FZ_CHUNK_SCRATCH=1 selects the original scratch + scan + pack encode (a full
+// input-size scratch buffer) instead of the single-pass look-back encode. Kept as a
+// byte-identity reference and an escape hatch.
+bool useChunkScratch() {
+    const char* e = std::getenv("FZ_CHUNK_SCRATCH");
+    return e && e[0] == '1';
+}
+
 bool useNvrtcFusion() {
     const char* e = std::getenv("FZ_FUSION_NVRTC");
     return e && e[0] == '1';
@@ -188,9 +196,7 @@ size_t launchGenericChunkFusion(
         throw std::runtime_error("launchGenericChunkFusion: spec.chunk_bytes must be 4096, 8192, or 16384");
     const size_t nelem = (size_t)spec.chunk_bytes / 4;
     const size_t nc    = (n + nelem - 1) / nelem;
-
-    auto* d_scratch = static_cast<byte*>(pool->allocate(nc * (size_t)spec.chunk_bytes, stream, "chunk_scratch"));
-    auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
+    const bool   scratch_path = useChunkScratch();
 
     // Upload the caller-assembled params blob (already ordered [Elementwise][Trs...][Coder]).
     // Allocate >=1 byte so the device pointer is valid even with no parametric op.
@@ -210,12 +216,45 @@ size_t launchGenericChunkFusion(
         FZ_CUDA_CHECK(cudaMemsetAsync(d_side_count, 0, sizeof(uint32_t), stream));
     }
 
-    // Compose + launch the fused encode from the spec (NVRTC), then the shared tail.
-    launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
-                                (unsigned)nc, stream,
-                                d_side_idxs, d_side_vals, d_side_count, side_max, n_valid);
-    const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream,
-                                        spec.chunk_bytes);
+    // Compose + launch the fused encode from the spec (NVRTC).
+    size_t out_bytes = 0;
+    if (scratch_path) {
+        auto* d_scratch = static_cast<byte*>(pool->allocate(nc * (size_t)spec.chunk_bytes, stream, "chunk_scratch"));
+        auto* d_sizes   = static_cast<uint32_t*>(pool->allocate(nc * 4, stream, "chunk_sizes"));
+        launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
+                                    (unsigned)nc, stream,
+                                    d_side_idxs, d_side_vals, d_side_count, side_max, n_valid);
+        out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream,
+                               spec.chunk_bytes);
+    } else {
+        // Single pass: every chunk writes its size-table entry and payload straight
+        // into d_out at an offset found by decoupled look-back; the archive bytes are
+        // identical to the scratch path. Look-back state: one word per chunk.
+        const uint32_t header = 8u + 4u * (uint32_t)nc;
+        auto* d_lb = static_cast<unsigned long long*>(
+            pool->allocate(nc * sizeof(unsigned long long), stream, "chunk_lookback"));
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_lb, 0, nc * sizeof(unsigned long long), stream));
+        const uint32_t hdr[2] = { (uint32_t)(n * 4), (uint32_t)nc };
+        FZ_CUDA_CHECK(cudaMemcpyAsync(d_out, hdr, 8, cudaMemcpyHostToDevice, stream));
+
+        launchNvrtcChunkFusedEncodeDirect(spec, d_in, n, d_params, d_out, (unsigned)nc,
+                                          d_lb, stream,
+                                          d_side_idxs, d_side_vals, d_side_count, side_max,
+                                          n_valid);
+
+        unsigned long long last = 0;
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&last, d_lb + nc - 1, sizeof(last),
+                                      cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if ((last >> 62) != 2ull)
+            throw std::runtime_error("launchGenericChunkFusion: look-back did not complete");
+        const size_t total  = header + (size_t)(last & ((1ull << 62) - 1ull));
+        const size_t padded = (total + 3) & ~size_t(3);
+        if (padded > total)
+            FZ_CUDA_CHECK(cudaMemsetAsync(d_out + total, 0, padded - total, stream));
+        pool->free(d_lb, stream);
+        out_bytes = padded;
+    }
 
     // Read back the outlier count (data-dependent, known only after the kernel). Sync
     // so the caller can size the side buffers from it immediately on return.
