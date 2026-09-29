@@ -1038,7 +1038,10 @@ private:
         MemoryStrategy                            strategy,
         const std::unordered_map<Stage*, size_t>& source_sizes,
         bool                                      enable_profiling,
-        bool                                      enable_inverse_fusion = false
+        bool                                      enable_inverse_fusion = false,
+        /// True when the caller installs each result buffer with setExternalPointer()
+        /// before every execute(); the result is then never preallocated or colored.
+        bool                                      caller_supplies_results = false
     );
 
     // ── Concat helpers ────────────────────────────────────────────────────────

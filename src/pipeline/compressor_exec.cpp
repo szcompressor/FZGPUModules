@@ -678,7 +678,8 @@ void Pipeline::buildOrReuseInvCache(
             fwd_topology, po_map, mem_pool_.get(), strategy_,
             source_sizes, profiling_enabled_,
             fusion_info_.policy != FusionPolicy::Off &&
-                strategy_ == MemoryStrategy::PREALLOCATE);
+                strategy_ == MemoryStrategy::PREALLOCATE,
+            /*caller_supplies_results=*/true);
 
         std::unordered_map<int, int> fwd_to_inv_ext_buf;
         for (auto* node : inv_dag_up->getNodes()) {

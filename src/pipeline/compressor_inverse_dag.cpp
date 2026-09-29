@@ -40,7 +40,8 @@ Pipeline::buildInverseDAG(
     MemoryStrategy                            strategy,
     const std::unordered_map<Stage*, size_t>& source_sizes,
     bool                                      enable_profiling,
-    bool                                      enable_inverse_fusion
+    bool                                      enable_inverse_fusion,
+    bool                                      caller_supplies_results
 ) {
     auto inv_dag = std::make_unique<CompressionDAG>(pool, strategy);
     if (enable_profiling) inv_dag->enableProfiling(true);
@@ -137,6 +138,14 @@ Pipeline::buildInverseDAG(
         }
         int res_buf_id = inv_sink->output_buffer_ids[0];
         inv_dag->setBufferPersistent(res_buf_id, true);
+        // decompress() installs its own output (caller's or pool-managed) with
+        // setExternalPointer() before every execute(). Register the result as external
+        // now so preallocation and coloring never reserve it: a preallocated result
+        // was replaced on every call and, once coloring had placed it in a shared
+        // region, stayed resident for the pipeline's lifetime (a full output-size
+        // buffer). decompressFromFile() instead lets its MINIMAL DAG allocate the
+        // result lazily, which keeps it out of the early stages' peak.
+        if (caller_supplies_results) inv_dag->setExternalPointer(res_buf_id, nullptr);
         inv_result_map[src_stage] = res_buf_id;
         FZ_LOG(DEBUG, "Inverse sink: stage '%s', result_buf_id=%d",
                src_stage->getName().c_str(), res_buf_id);

@@ -862,6 +862,43 @@ TEST(FusionPlanner, PfplSplitOutlierUnalignedInputFusedSkipsPadCopy) {
     chunkFusionUnalignedEndToEnd([](Pipeline& p, size_t n){ buildPfplCapacityLimitedSplit(p, n); });
 }
 
+// decompress() installs its own output for the inverse DAG's result buffer, so that
+// buffer must never be preallocated: once coloring had placed it in a shared region
+// it stayed resident, and every later compress() ran with an extra full-size buffer
+// live (peak grew by ~1x input from the second cycle on). Steady state must equal
+// the first cycle's peak.
+TEST(FusionPlanner, PfplRepeatedRoundTripPeakDoesNotGrow) {
+    const size_t n = 1u << 20;
+    const size_t bytes = n * sizeof(float);
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i) h[i] = 0.6f*std::sin(i*0.001f) + 0.3f*std::cos(i*0.017f);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+    for (FusionPolicy pol : {FusionPolicy::Off, FusionPolicy::Auto}) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
+        p.setFusionPolicy(pol);
+        // Caller-owned decompress outputs: a pool-managed output legitimately stays
+        // valid (and resident) until the next decompress(), which is not the bug here.
+        p.setPoolManagedDecompOutput(false);
+        buildPfpl(p, n, /*useRre=*/false);
+        p.finalize();
+        size_t peak[2] = {0, 0};
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            void* d_comp = nullptr; size_t sz = 0;
+            p.compress(d_in, bytes, &d_comp, &sz, 0);
+            void* d_decomp = nullptr; size_t dsz = 0;
+            p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
+            cudaDeviceSynchronize();
+            cudaFree(d_decomp);
+            peak[cycle] = p.getPeakMemoryUsage();
+        }
+        EXPECT_EQ(peak[1], peak[0])
+            << (pol == FusionPolicy::Auto ? "Auto" : "Off")
+            << ": pool peak grew on the second round trip (a retained inverse buffer?)";
+    }
+    cudaFree(d_in);
+}
+
 TEST(FusionPlanner, PfplRzeEndToEndFusedMatchesStaged) {
     chunkFusionEndToEnd([](Pipeline& p, size_t n){ buildPfpl(p, n, /*useRre=*/false); });
 }
