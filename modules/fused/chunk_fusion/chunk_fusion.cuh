@@ -82,9 +82,15 @@ struct QuantInplaceZigzag {
         const Params p = *static_cast<const Params*>(pp);
         for (int i = threadIdx.x; i < cnt; i += TPB) {
             const float x = in[base + i];
-            const int   q = __float2int_rn(x * p.ebx2_r);
+            const int q = p.verify_reconstruction
+                ? static_cast<int>(roundf(x * p.ebx2_r))
+                : __float2int_rn(x * p.ebx2_r);
             uint32_t c;
-            if (q > -(int)p.radius && q < (int)p.radius && fabsf(x) < p.threshold)
+            bool representable = q > -(int)p.radius && q < (int)p.radius
+                              && fabsf(x) < p.threshold;
+            if (representable && p.verify_reconstruction)
+                representable = fabsf(x - __fmul_rn(static_cast<float>(q), p.ebx2)) <= p.abs_eb;
+            if (representable)
                 c = (uint32_t)((q << 1) ^ (q >> 31));
             else
                 c = __float_as_uint(x);   // raw IEEE-754 bits (NVRTC-portable bit-cast)

@@ -111,10 +111,21 @@ void build(Pipeline& p) {
 FZ_SPECIALIZE=off|auto|force
 ```
 
-`FZ_SPECIALIZE` wins over whatever `setSpecializationPolicy()` requested, so you can
-flip specialization on or off for an already-built binary without recompiling.
+The policy can also be declared with the pipeline in TOML:
 
-**From the CLI:** there's no policy flag — drive it with the environment variable:
+```toml
+[pipeline]
+specialization = "auto"
+```
+
+`FZ_SPECIALIZE` wins over the TOML or programmatic policy, so you can flip
+specialization on or off for an already-built pipeline without editing its config
+or recompiling. Without an environment override, TOML and
+`setSpecializationPolicy()` set the same pipeline policy before `finalize()`.
+
+**From the CLI:** put the policy in the loaded TOML as above. There is no
+dedicated command-line flag; use the environment variable when you need to
+override a config for an A/B run:
 
 ```bash
 FZ_SPECIALIZE=auto fzgmod-cli -c examples/presets/szp_composed.toml \

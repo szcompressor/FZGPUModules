@@ -151,7 +151,9 @@ size_t launchFusedChunkPfpl(
     // parametric, so the blob is exactly its Params; the stateless diff/bitshuffle/
     // coder ops contribute nothing. (The generic runner of Phase C will assemble
     // this blob from each stage's getFusedOp().params instead of hardcoding it.)
-    QuantInplaceZigzagParams qp{ ebx2_r, radius, threshold };
+    QuantInplaceZigzagParams qp{
+        ebx2_r, 1.0f / ebx2_r, 0.5f / ebx2_r, radius, threshold, uint8_t{0}, {}
+    };
     auto* d_params = static_cast<byte*>(pool->allocate(sizeof(qp), stream, "chunk_params"));
     FZ_CUDA_CHECK(cudaMemcpyAsync(d_params, &qp, sizeof(qp), cudaMemcpyHostToDevice, stream));
 

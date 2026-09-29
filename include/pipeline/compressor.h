@@ -54,8 +54,9 @@ namespace fz {
  * select non-overlapping partial groups from one larger compatible chain; a
  * specialization need not consume the maximal chain. Decompression is specialized
  * on the same policy and stays byte-exact vs the staged inverse. Overridable at
- * runtime with FZ_SPECIALIZE=off|auto|force (FZ_FUSION is a deprecated alias;
- * "experimental" aliases force).
+ * through `[pipeline] specialization = "off"|"auto"|"force"` in TOML, or at
+ * runtime with FZ_SPECIALIZE=off|auto|force (the environment wins;
+ * FZ_FUSION is a deprecated alias and "experimental" aliases force).
  *
  * See docs/pipeline_specialization.md.
  */

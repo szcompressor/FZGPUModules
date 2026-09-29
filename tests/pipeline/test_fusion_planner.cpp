@@ -685,7 +685,8 @@ static void buildPfpl(Pipeline& p, size_t n, bool useRre) {
     p.setDims(n, 1, 1);
     auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
     q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
-    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    q->setQuantRadius(1 << 22); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    q->setVerifyReconstruction(true);
     auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(16384);
     p.connect(d, q, "codes");
     auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(16384);
@@ -694,7 +695,7 @@ static void buildPfpl(Pipeline& p, size_t n, bool useRre) {
     else        { auto* c = p.addStage<RZEStage>(); c->setWordSize(1); c->setChunkSize(16384); p.connect(c, b); }
 }
 
-// The production PFPL preset uses split outliers with a finite capacity.  A field
+// A split-outlier PFPL-shaped pipeline uses a finite capacity. A field
 // with a large absolute offset and a narrow range can put nearly every value outside
 // the zero-centred quantizer radius; Auto must reject it just as staged execution
 // does, rather than serialize only the first capacity entries and decode the rest
@@ -731,7 +732,8 @@ static void buildPfplAtChunkSize(Pipeline& p, size_t n, bool useRre, uint32_t ch
     p.setDims(n, 1, 1);
     auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
     q->setErrorBound(1e-3f); q->setErrorBoundMode(ErrorBoundMode::NOA);
-    q->setQuantRadius(32768); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    q->setQuantRadius(1 << 22); q->setZigzagCodes(true); q->setInplaceOutliers(true);
+    q->setVerifyReconstruction(true);
     auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>(); d->setChunkSize(chunk_bytes);
     p.connect(d, q, "codes");
     auto* b = p.addStage<BitshuffleStage>(); b->setElementWidth(4); b->setBlockSize(chunk_bytes);

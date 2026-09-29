@@ -45,7 +45,8 @@ struct QuantizerConfig {
     uint8_t  dither;            ///< 1 if "_R"-style dithered reconstruction is enabled (LC QUANT_*_R).
     uint8_t  linear_high_precision; ///< 1 if linear coordinates are evaluated in double precision.
     uint8_t  power_of_two_bound;    ///< 1 if the uniform absolute EB was rounded down to a power of two.
-    uint8_t  _pad[3];           ///< Alignment padding (dither_seed needs 8-byte alignment) — must be zero.
+    uint8_t  verify_reconstruction; ///< 1 if in-place quantization verifies the reconstructed value.
+    uint8_t  _pad[2];           ///< Alignment padding (dither_seed needs 8-byte alignment) — must be zero.
     uint64_t dither_seed;       ///< Deterministic per-element dither seed; meaningful only when dither.
     float    dither_strength;   ///< Dither offset amplitude as a fraction of abs_eb, in (0,1]; meaningful only when dither.
     uint32_t _pad2;             ///< Alignment padding (the f64 fields need 8-byte alignment) — must be zero.
@@ -64,7 +65,8 @@ struct QuantizerConfig {
           eb_mode(0), zigzag_codes(0),
           outlier_threshold(std::numeric_limits<float>::infinity()),
           inplace_outliers(0), linear_mode(0), dither(0),
-          linear_high_precision(0), power_of_two_bound(0), _pad{}, dither_seed(0),
+          linear_high_precision(0), power_of_two_bound(0), verify_reconstruction(0),
+          _pad{}, dither_seed(0),
           dither_strength(1.0f), _pad2(0),
           abs_error_bound_f64(0.0), value_base_f64(0.0) {}
 };
@@ -170,6 +172,12 @@ public:
         /// shift. Inspired by SLEEK (IPDPS 2026), Sec. III-A. REL is unsupported
         /// because it quantizes in log space.
         bool  power_of_two_bound     = false;
+        /// In-place ABS/NOA/PREL: after choosing a representable bin, reconstruct
+        /// it in TInput precision and store the original value losslessly if the
+        /// result exceeds the resolved absolute error bound. This matches PFPL's
+        /// native QUANT_NOA_0 safety check and protects large-offset fields from
+        /// floating-point scaling/reconstruction disagreement.
+        bool  verify_reconstruction  = false;
         /// ABS/NOA/REL: reconstruct to a deterministic pseudo-random point within
         /// the bin/error-bound interval instead of always the bin center (LC's
         /// QUANT_*_R vs. QUANT_*_0). Decorrelates reconstruction error from the
@@ -357,10 +365,15 @@ public:
         // Chunk-cooperative (PFPL): inplace+zigzag ABS/NOA float quant.
         if (isInplaceMode() && config_.zigzag_codes &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA)) {
-            fused::chunk::QuantInplaceZigzagParams p;
-            p.ebx2_r    = 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
+            fused::chunk::QuantInplaceZigzagParams p{};
+            p.ebx2_r    = config_.verify_reconstruction
+                ? 0.5f / static_cast<float>(computed_abs_eb_)
+                : 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
+            p.ebx2      = 2.0f * static_cast<float>(computed_abs_eb_);
+            p.abs_eb    = static_cast<float>(computed_abs_eb_);
             p.radius    = static_cast<uint32_t>(config_.quant_radius);
             p.threshold = config_.outlier_threshold;
+            p.verify_reconstruction = config_.verify_reconstruction ? uint8_t{1} : uint8_t{0};
             FusedOpDecl d;
             d.strategy       = FusionStrategy::ChunkCooperative;
             d.op_name        = "QuantInplaceZigzag";
@@ -373,10 +386,13 @@ public:
         // uniform-step params as inplace; the op appends outliers to side buffers
         // instead of inlining raw bits (see QuantSplitOutlier in chunk_fusion.cuh).
         if (isSplitOutlierFusable()) {
-            fused::chunk::QuantSplitOutlierParams p;
+            fused::chunk::QuantSplitOutlierParams p{};
             p.ebx2_r    = 1.0f / (2.0f * static_cast<float>(computed_abs_eb_));
+            p.ebx2      = 2.0f * static_cast<float>(computed_abs_eb_);
+            p.abs_eb    = static_cast<float>(computed_abs_eb_);
             p.radius    = static_cast<uint32_t>(config_.quant_radius);
             p.threshold = config_.outlier_threshold;
+            p.verify_reconstruction = uint8_t{0};
             FusedOpDecl d;
             d.strategy       = FusionStrategy::ChunkCooperative;
             d.op_name        = "QuantSplitOutlier";
@@ -482,7 +498,7 @@ public:
     void setZigzagCodes(bool enable)         { config_.zigzag_codes = enable; }
     /// ABS/NOA: |x| >= threshold → lossless outlier regardless of bin (LC reference parameter).
     void setOutlierThreshold(float t)        { config_.outlier_threshold = t; }
-    /// ABS/NOA: encode outliers in-place (raw float bits in codes array; no scatter buffers).
+    /// ABS/NOA/PREL: encode outliers in-place (raw input bits in codes array; no scatter buffers).
     void setInplaceOutliers(bool enable)     { config_.inplace_outliers = enable; }
     /// ABS/NOA: linear / no-outlier mode (cuSZp-style signed codes; see Config::linear_mode).
     void setLinearMode(bool enable)          { config_.linear_mode = enable; }
@@ -490,6 +506,9 @@ public:
     void setLinearHighPrecision(bool enable) { config_.linear_high_precision = enable; }
     /// Uniform modes: tighten the resolved absolute EB to the next lower power of two.
     void setPowerOfTwoBound(bool enable)     { config_.power_of_two_bound = enable; }
+    /// In-place uniform quantization: losslessly escape any bin whose actual
+    /// TInput reconstruction would exceed the resolved absolute error bound.
+    void setVerifyReconstruction(bool enable){ config_.verify_reconstruction = enable; }
     /// ABS/NOA/REL: dithered ("_R"-style) reconstruction; see Config::dither.
     /// Throws at execute() if combined with linear_mode or inplace_outliers.
     void setDither(bool enable)              { config_.dither = enable; }
@@ -509,6 +528,7 @@ public:
     bool           getLinearMode()        const { return config_.linear_mode; }
     bool           getLinearHighPrecision() const { return config_.linear_high_precision; }
     bool           getPowerOfTwoBound()   const { return config_.power_of_two_bound; }
+    bool           getVerifyReconstruction() const { return config_.verify_reconstruction; }
     bool           getDither()            const { return config_.dither; }
     uint64_t       getDitherSeed()        const { return config_.dither_seed; }
     float          getDitherStrength()    const { return config_.dither_strength; }
@@ -579,7 +599,8 @@ private:
     /// always TCMS-encodes valid codes; see quantizer_abs_fwd_inplace_kernel).
     void launchInplaceForward(fz::stream_t stream, int grid, int block,
                                const TInput* in, size_t num_elements,
-                               TInput ebx2_r, TCode* codes);
+                               TInput ebx2_r, TInput ebx2, TInput abs_eb,
+                               TCode* codes);
     /// Forward: ABS/NOA split-outlier quant, dispatched on zigzag x dither.
     void launchAbsNoaForward(fz::stream_t stream, int grid, int block,
                               const TInput* in, size_t num_elements,
@@ -623,6 +644,12 @@ private:
     }
 
     TInput resolveUniformBound(TInput scale = TInput(1)) const {
+        // Native PFPL's float32 path parses the user bound into float and then
+        // multiplies the float range by that float. Preserve that operation
+        // order when its reconstruction guard is selected: even a one-ULP
+        // difference changes which near-boundary values are embedded raw.
+        if (config_.verify_reconstruction && std::is_same<TInput, float>::value)
+            return static_cast<TInput>(config_.error_bound) * scale;
         const double resolved = config_.error_bound * static_cast<double>(scale);
         TInput bound = static_cast<TInput>(resolved);
         // The strict path must never loosen a decimal/TOML request merely because

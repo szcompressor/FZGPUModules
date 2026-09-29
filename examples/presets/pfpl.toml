@@ -11,9 +11,11 @@ input_type = "float32"
 code_type = "uint32"
 error_bound = 1e-4
 error_bound_mode = "NOA"
-quant_radius = 32768
+quant_radius = 4194304
 outlier_capacity = 0.1
 zigzag_codes = true
+inplace_outliers = true
+verify_reconstruction = true
 
 [[stage]]
 name = "diff"

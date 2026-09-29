@@ -22,12 +22,17 @@ namespace fused {
 namespace chunk {
 
 /// Params for the `QuantInplaceZigzag` Elementwise op (inplace-outlier NOA/ABS quant).
-/// `ebx2_r = 1/(2*abs_eb)`; out-of-radius / over-threshold values become raw
+/// `ebx2_r = 0.5/abs_eb` (matching PFPL's float operation order); out-of-radius /
+/// over-threshold values become raw
 /// IEEE-754 bits. Filled from the quantizer's primed `computed_abs_eb_`.
 struct QuantInplaceZigzagParams {
     float    ebx2_r;
+    float    ebx2;
+    float    abs_eb;
     uint32_t radius;
     float    threshold;
+    uint8_t  verify_reconstruction;
+    uint8_t  _pad[3];
 };
 
 /// Params for the `QuantSplitOutlier` Elementwise op (3-port outlier NOA/ABS quant). Same

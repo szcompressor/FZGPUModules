@@ -104,6 +104,7 @@ All keys are optional. Absent keys use the pipeline constructor defaults.
 | input_size | integer | 0 | Input buffer size hint in bytes. Used for pool sizing at finalize(). |
 | dims | array of 3 integers | [0, 1, 1] | Spatial dimensions [x, y, z]. x=0 means infer from input_size. Used by LorenzoND kernels. |
 | memory_strategy | string | "MINIMAL" | "MINIMAL" or "PREALLOCATE". |
+| specialization | string | "off" | Finalize-time pipeline specialization policy: "off", "auto", or "force". "auto" installs production-ready matching implementations; "force" also admits experimental implementations. `FZ_SPECIALIZE` overrides this setting when present. |
 | pool_multiplier | float | 3.0 | Pool capacity = input_size x pool_multiplier. Relevant for PREALLOCATE. |
 | num_streams | integer | 1 | Number of CUDA streams for multi-stream execution. |
 | primary_source | string | "" (unset) | Stage `name` whose inverse output `decompress()` returns. Only needed when `__external__` (see below) creates more than one source stage; unset uses the sole/first-discovered source. |
@@ -196,6 +197,12 @@ downward to a power of two; it is therefore a tighter, separately labelled
 rate-distortion configuration. See the Quantizer reference for constraints and
 effective-bound semantics.
 
+For a native-PFPL-compatible float32 front end, set
+`inplace_outliers = true`, `zigzag_codes = true`, `quant_radius = 4194304`,
+and `verify_reconstruction = true`. The last option losslessly embeds any
+otherwise representable value whose actual reconstructed float would exceed
+the resolved absolute bound.
+
 ### CDF97
 
 CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half). Lossless,
@@ -281,10 +288,10 @@ inputs = [{ from = "bshuf_codes" }]
 # -> they become pipeline outputs stored directly in the .fzm file.
 ```
 
-### PFPL pipeline (Quantizer, REL error)
+### PFPL pipeline (Quantizer, range-relative error)
 
 The PFPL (Predictor-Free Pipeline) preset -- direct-value quantizer with
-relative error bound, followed by Difference -> Bitshuffle -> RZE.
+range-relative (NOA) error bound, followed by Difference -> Bitshuffle -> RZE.
 This is the examples/presets/pfpl.toml configuration.
 
 ```toml
@@ -298,9 +305,11 @@ input_type       = "float32"
 code_type        = "uint32"
 error_bound      = 1e-4
 error_bound_mode = "NOA"
-quant_radius     = 32768
+quant_radius     = 4194304
 outlier_capacity = 0.1
 zigzag_codes     = true
+inplace_outliers = true
+verify_reconstruction = true
 
 [[stage]]
 name        = "diff"

@@ -78,11 +78,14 @@ static void build_pfpl_pipeline(
     auto* quant = p.addStage<QuantizerStage<float, uint32_t>>();
     quant->setErrorBound(eb);
     quant->setErrorBoundMode(mode);
-    quant->setQuantRadius(mode == ErrorBoundMode::ABS ? (1 << 22) : 32768);
+    quant->setQuantRadius(mode == ErrorBoundMode::REL ? 32768 : (1 << 22));
     quant->setOutlierCapacity(0.05f);
     quant->setZigzagCodes(true);
     if (std::isfinite(threshold)) quant->setOutlierThreshold(threshold);
-    if (mode != ErrorBoundMode::REL) quant->setInplaceOutliers(true);
+    if (mode != ErrorBoundMode::REL) {
+        quant->setInplaceOutliers(true);
+        quant->setVerifyReconstruction(true);
+    }
 
     auto* diff = p.addStage<DifferenceStage<int32_t, uint32_t>>();
     diff->setChunkSize(CHUNK);

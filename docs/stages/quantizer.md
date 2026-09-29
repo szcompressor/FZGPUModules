@@ -49,6 +49,7 @@ Using any other combination will result in a linker error. Most common: `Quantiz
 | `setLinearMode(enable)` | Signed codes, no outliers | ABS/NOA only; cuSZp-style; see below |
 | `setLinearHighPrecision(enable)` | Strict linear coordinate arithmetic | Linear mode only; double forward/inverse arithmetic and rounding reserve |
 | `setPowerOfTwoBound(enable)` | Tighten uniform bound to a power of two | ABS/NOA/PREL; rounds down, so effective EB is 1x–2x tighter |
+| `setVerifyReconstruction(enable)` | Losslessly escape unsafe reconstructed bins | Inplace ABS/NOA/PREL only; matches native PFPL's safety check |
 | `setValueBase(v)` | Precomputed value range | NOA only; optional, see below |
 | `setDither(enable)` | Dithered ("_R"-style) reconstruction | ABS/NOA/REL; incompatible with linear/inplace modes; see below |
 | `setDitherSeed(seed)` | Seed for the dither offset | Persisted in the header; default 0 |
@@ -62,6 +63,7 @@ quant->setOutlierCapacity(0.05f);      // fraction of N reserved for outliers
 quant->setZigzagCodes(true);           // improves compressibility (ABS/NOA only)
 quant->setOutlierThreshold(threshold); // |x| >= threshold -> forced outlier
 quant->setInplaceOutliers(true);       // ABS/NOA: embed outliers in codes array
+quant->setVerifyReconstruction(true);  // escape any bin whose reconstruction exceeds EB
 quant->setValueBase(range);            // NOA: skip internal data scan
 ```
 
@@ -249,6 +251,16 @@ quant->setInplaceOutliers(true);  // runtime error
 
 **Why:** the inplace kernel stores outlier raw bits with `__builtin_memcpy(&raw, &x, sizeof(TCode))`.
 If the sizes differ the copy is truncated or out-of-bounds.
+
+### Optional PFPL reconstruction check
+
+`setVerifyReconstruction(true)` recomputes `q * (2 * abs_eb)` in the input
+type before accepting an otherwise representable bin. If floating-point
+scaling and reconstruction place that result outside the resolved absolute
+bound, the encoder stores the original value's raw bits instead. Native PFPL's
+`QUANT_NOA_0` path performs this check; enable it with a radius of `2^22` to
+reproduce that float32 quantizer policy. The option requires inplace mode and
+is serialized so archive reconstruction retains the same declared contract.
 
 ### Why REL does not support inplace outliers
 

@@ -98,6 +98,23 @@ static std::string strategyToString(MemoryStrategy s) {
     return s == MemoryStrategy::PREALLOCATE ? "PREALLOCATE" : "MINIMAL";
 }
 
+static SpecializationPolicy specializationPolicyFromString(const std::string& s) {
+    if (s == "off")   return SpecializationPolicy::Off;
+    if (s == "auto")  return SpecializationPolicy::Auto;
+    if (s == "force") return SpecializationPolicy::Force;
+    throw std::runtime_error(
+        "loadConfig: unknown specialization policy \"" + s +
+        "\" (expected off|auto|force)");
+}
+
+static const char* specializationPolicyToString(SpecializationPolicy policy) {
+    switch (policy) {
+        case SpecializationPolicy::Auto:  return "auto";
+        case SpecializationPolicy::Force: return "force";
+        default:                          return "off";
+    }
+}
+
 static ErrorBoundMode ebModeFromString(const std::string& s) {
     if (s == "ABS")  return ErrorBoundMode::ABS;
     if (s == "REL")  return ErrorBoundMode::REL;
@@ -365,6 +382,7 @@ static Stage* addQuantizerStage(Pipeline& p, const toml::table& t) {
         quant->setLinearMode(linear);
         quant->setLinearHighPrecision(optBool(t, "linear_high_precision", false));
         quant->setPowerOfTwoBound(optBool(t, "power_of_two_bound", false));
+        quant->setVerifyReconstruction(optBool(t, "verify_reconstruction", false));
         quant->setDither(optBool(t, "dither", false));
         quant->setDitherSeed(static_cast<uint64_t>(optInt(t, "dither_seed", 0)));
         quant->setDitherStrength(static_cast<float>(optDbl(t, "dither_strength", 1.0)));
@@ -894,6 +912,7 @@ static void saveQuantizerStage(Stage* s, std::ostringstream& out) {
         if (q->getLinearMode())       out << "linear_mode = true\n";
         if (q->getLinearHighPrecision()) out << "linear_high_precision = true\n";
         if (q->getPowerOfTwoBound()) out << "power_of_two_bound = true\n";
+        if (q->getVerifyReconstruction()) out << "verify_reconstruction = true\n";
         if (q->getDither()) {
             out << "dither = true\n";
             out << "dither_seed = " << static_cast<int64_t>(q->getDitherSeed()) << "\n";
@@ -1409,6 +1428,9 @@ void Pipeline::loadConfig(const std::string& path) {
         if (auto v = (*pl)["memory_strategy"].as_string())
             setMemoryStrategy(strategyFromString(v->get()));
 
+        if (auto v = (*pl)["specialization"].as_string())
+            setSpecializationPolicy(specializationPolicyFromString(v->get()));
+
         if (auto v = (*pl)["pool_multiplier"].as_floating_point())
             pool_multiplier_ = static_cast<float>(v->get());
         else if (auto vi = (*pl)["pool_multiplier"].as_integer())
@@ -1543,6 +1565,8 @@ void Pipeline::saveConfig(const std::string& path) const {
     out << "[pipeline]\n";
     out << "input_size = " << static_cast<int64_t>(input_size_hint_) << "\n";
     out << "memory_strategy = \"" << strategyToString(strategy_) << "\"\n";
+    if (fusion_policy_ != SpecializationPolicy::Off)
+        out << "specialization = \"" << specializationPolicyToString(fusion_policy_) << "\"\n";
     // Only emitted when non-default, so round-tripping a normal pipeline does not
     // grow a key nobody set. Round-trips through loadConfig()'s "coloring" reader.
     if (!coloring_enabled_) out << "coloring = false\n";

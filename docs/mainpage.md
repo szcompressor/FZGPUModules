@@ -180,7 +180,8 @@ p.finalize();
 p.compress(d_input, input_bytes, &d_comp, &comp_sz, stream);  // specialized where supported
 ```
 
-or at runtime with `FZ_SPECIALIZE=auto`, or `--report-json` from the CLI to see
+or declare `specialization = "auto"` in the pipeline TOML. `FZ_SPECIALIZE=auto`
+is the highest-precedence runtime override. Use `--report-json` from the CLI to see
 what was installed. Full guide, guarantees, and how to make your own stages
 specialization-compatible: see \ref pipeline_specialization "Pipeline Specialization" in the Performance Tuning page.
 

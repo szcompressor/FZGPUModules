@@ -237,6 +237,7 @@ TEST(ConfigSave, RoundTrip) {
 
     // ── Build & save ──────────────────────────────────────────────────────────
     Pipeline p1(in_bytes, MemoryStrategy::MINIMAL);
+    p1.setSpecializationPolicy(SpecializationPolicy::Auto);
     auto* lrz = p1.addStage<LorenzoQuantStage<float, uint16_t>>();
     lrz->setErrorBound(EB);
     lrz->setQuantRadius(512);
@@ -251,6 +252,8 @@ TEST(ConfigSave, RoundTrip) {
     // ── Reload & compare ──────────────────────────────────────────────────────
     Pipeline p2;
     p2.loadConfig(cfg_path);
+    EXPECT_EQ(p2.getSpecializationPolicy(), SpecializationPolicy::Auto);
+    EXPECT_EQ(p2.getSpecializationInfo().policy, SpecializationPolicy::Auto);
 
     CudaStream stream;
     auto h_input = make_smooth_data<float>(N);
@@ -276,6 +279,7 @@ TEST(ConfigSave, PreservesParams) {
 
     size_t in_bytes = (1 << 13) * sizeof(float);
     Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 5.0f);
+    p.setSpecializationPolicy(SpecializationPolicy::Force);
     p.setNumStreams(2);
 
     auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
@@ -306,6 +310,7 @@ TEST(ConfigSave, PreservesParams) {
 
     // Pipeline-level
     EXPECT_EQ(doc["pipeline"]["memory_strategy"].value_or<std::string>(""), "PREALLOCATE");
+    EXPECT_EQ(doc["pipeline"]["specialization"].value_or<std::string>(""), "force");
     EXPECT_EQ(doc["pipeline"]["num_streams"].value_or<int64_t>(0), 2);
     EXPECT_NEAR(doc["pipeline"]["pool_multiplier"].value_or<double>(0.0), 5.0, 1e-4);
 
@@ -347,6 +352,26 @@ TEST(ConfigSave, PreservesParams) {
     EXPECT_EQ(inp0["port"].value_or<std::string>(""), "codes");
 
     std::remove(cfg_path.c_str());
+}
+
+TEST(ConfigLoad, RejectsUnknownSpecializationPolicy) {
+    const std::string path = "/tmp/fzgmod_bad_specialization.toml";
+    {
+        std::ofstream f(path);
+        f << R"toml(
+[pipeline]
+specialization = "sometimes"
+
+[[stage]]
+name = "zigzag"
+type = "Zigzag"
+input_type = "int32"
+)toml";
+    }
+
+    Pipeline p;
+    EXPECT_THROW(p.loadConfig(path), std::runtime_error);
+    std::remove(path.c_str());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

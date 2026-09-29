@@ -141,6 +141,7 @@ int main(int argc, char* argv[]) {
     m_quant.setOutlierCapacity(0.05f);
     m_quant.setZigzagCodes(true);
     m_quant.setInplaceOutliers(true);   // single "codes" output, no scatter buffers
+    m_quant.setVerifyReconstruction(true);
 
     DifferenceStage<int32_t, uint32_t> m_diff;
     m_diff.setChunkSize(CHUNK);
@@ -210,6 +211,7 @@ int main(int argc, char* argv[]) {
     dq->setOutlierCapacity(0.05f);
     dq->setZigzagCodes(true);
     dq->setInplaceOutliers(true);
+    dq->setVerifyReconstruction(true);
 
     auto* dd = dag_p.addStage<DifferenceStage<int32_t, uint32_t>>();
     dd->setChunkSize(CHUNK);

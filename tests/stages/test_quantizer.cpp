@@ -37,12 +37,13 @@
  *   QZ16  QuantizerTypeMatrix/FloatUint16_ConstantExact — <float,uint16_t> constant input
  *   QZ17  QuantizerTypeMatrix/FloatUint16_ZigzagCodes   — <float,uint16_t> with zigzag
  *
- * Inplace outliers (QZ18-QZ22):
+ * Inplace outliers (QZ18-QZ23):
  *   QZ18  QuantizerInplace/ABSRoundTrip                 — inplace outlier ABS round-trip
  *   QZ19  QuantizerInplace/NOARoundTrip                 — inplace outlier NOA round-trip
  *   QZ20  QuantizerInplace/AllOutliersRoundTrip         — all elements become outliers
  *   QZ21  QuantizerInplace/SerializeDeserialize         — inplace config preserved through header
  *   QZ22  QuantizerInplace/BackwardCompatOldHeader      — old 24-byte header still loads correctly
+ *   QZ23  QuantizerInplace/VerifyReconstructionEscapesUnsafeBin — PFPL safety check
  *
  * Outlier threshold (QZ23-QZ27):
  *   QZ23  QuantizerThreshold/ABSForcesOutliersAboveThreshold  — |x|>=threshold → outlier in ABS
@@ -1149,6 +1150,7 @@ TEST(QuantizerInplace, SerializeDeserialize) {
     src.setQuantRadius(1 << 22);
     src.setZigzagCodes(true);
     src.setInplaceOutliers(true);
+    src.setVerifyReconstruction(true);
     src.setOutlierThreshold(500.0f);
 
     uint8_t cfg[128] = {};
@@ -1160,8 +1162,45 @@ TEST(QuantizerInplace, SerializeDeserialize) {
 
     EXPECT_TRUE(dst.getInplaceOutliers())
         << "inplace_outliers=true not recovered after serialization";
+    EXPECT_TRUE(dst.getVerifyReconstruction())
+        << "verify_reconstruction=true not recovered after serialization";
     EXPECT_FLOAT_EQ(dst.getOutlierThreshold(), 500.0f)
         << "outlier_threshold not recovered after serialization";
+}
+
+TEST(QuantizerInplace, VerifyReconstructionEscapesUnsafeBin) {
+    // Float scaling and reconstruction can disagree by just over the requested
+    // bound even when q is inside the code radius. Native PFPL losslessly embeds
+    // the original bits in this case instead of accepting the unsafe bin.
+    CudaStream stream;
+    constexpr float EB = 1e-3f;
+    const std::vector<float> h_input = {14.369000434875488f};
+    auto pool = make_test_pool(4096);
+
+    auto run = [&](bool verify) {
+        QuantizerStage<float, uint32_t> fwd;
+        fwd.setErrorBound(EB);
+        fwd.setErrorBoundMode(ErrorBoundMode::ABS);
+        fwd.setQuantRadius(1 << 22);
+        fwd.setZigzagCodes(true);
+        fwd.setInplaceOutliers(true);
+        fwd.setVerifyReconstruction(verify);
+        auto encoded = run_quantizer_forward_inplace(fwd, h_input, stream, *pool);
+
+        QuantizerStage<float, uint32_t> inv;
+        inv.setInverse(true);
+        uint8_t cfg[128] = {};
+        inv.deserializeHeader(cfg, fwd.serializeHeader(0, cfg, sizeof(cfg)));
+        return run_quantizer_inverse_inplace(inv, encoded, h_input.size(), stream, *pool);
+    };
+
+    const auto unchecked = run(false);
+    const auto checked   = run(true);
+    // The generic in-place policy retains its round-to-nearest-even behavior;
+    // the PFPL policy follows native roundf arithmetic and then escapes this
+    // boundary case after checking the resulting reconstruction.
+    EXPECT_NE(unchecked[0], h_input[0]);
+    EXPECT_FLOAT_EQ(checked[0], h_input[0]);
 }
 
 TEST(QuantizerInplace, BackwardCompatOldHeader) {

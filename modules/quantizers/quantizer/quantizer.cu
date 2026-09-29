@@ -146,18 +146,38 @@ template<typename TInput, typename TCode>
 __global__ void quantizer_abs_fwd_inplace_kernel(
     const TInput* __restrict__ in, size_t n,
     TInput ebx2_r,
+    TInput ebx2,
+    TInput abs_eb,
     float  threshold,
     TCode  quant_radius,
+    bool   verify_reconstruction,
     TCode* __restrict__ codes
 ) {
     size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x;
     if (i >= n) return;
 
     TInput x = in[i];
-    int    q = quantRound<TInput>(x * ebx2_r);
+    // The reconstruction-verifying policy models LC/PFPL: its caller forms
+    // 0.5f / abs_eb and PFPL uses roundf. Preserve the generic in-place
+    // quantizer's prior round-to-nearest-even behavior when the policy is off.
+    int q = verify_reconstruction
+        ? static_cast<int>(roundf(static_cast<float>(x * ebx2_r)))
+        : quantRound<TInput>(x * ebx2_r);
 
-    if (q > -(int)quant_radius && q < (int)quant_radius
-        && quantAbs(x) < static_cast<TInput>(threshold)) {
+    bool representable = q > -(int)quant_radius && q < (int)quant_radius
+                      && quantAbs(x) < static_cast<TInput>(threshold);
+    if (representable && verify_reconstruction) {
+        // Keep the multiply rounded as a standalone float operation, matching
+        // PFPL's `recon = bin * eb2` before its subsequent subtraction. Without
+        // the explicit intrinsic nvcc may contract the multiply into the error
+        // subtraction and classify a different set of boundary values.
+        const TInput recon = std::is_same<TInput, float>::value
+            ? static_cast<TInput>(__fmul_rn(static_cast<float>(q), static_cast<float>(ebx2)))
+            : static_cast<TInput>(q) * ebx2;
+        representable = quantAbs(x - recon) <= abs_eb;
+    }
+
+    if (representable) {
         // TCMS (zigzag) encode: valid codes are in [0, 2 * quant_radius)
         uint32_t uq = static_cast<uint32_t>((q << 1) ^ (q >> 31));
         codes[i] = static_cast<TCode>(uq);
@@ -715,12 +735,13 @@ template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::launchInplaceForward(
     fz::stream_t stream, int grid, int block,
     const TInput* in, size_t num_elements,
-    TInput ebx2_r, TCode* codes)
+    TInput ebx2_r, TInput ebx2, TInput abs_eb, TCode* codes)
 {
     quantizer_abs_fwd_inplace_kernel<TInput, TCode><<<grid, block, 0, stream>>>(
-        in, num_elements, ebx2_r,
+        in, num_elements, ebx2_r, ebx2, abs_eb,
         config_.outlier_threshold,
         static_cast<TCode>(config_.quant_radius),
+        config_.verify_reconstruction,
         codes
     );
 }
@@ -870,6 +891,10 @@ void QuantizerStage<TInput, TCode>::execute(
     if (config_.power_of_two_bound && config_.eb_mode == ErrorBoundMode::REL)
         throw std::runtime_error(
             "QuantizerStage: power_of_two_bound is incompatible with REL error-bound mode");
+    if (config_.verify_reconstruction && !isInplaceMode())
+        throw std::runtime_error(
+            "QuantizerStage: verify_reconstruction requires inplace_outliers=true "
+            "with an ABS, NOA, or PREL error-bound mode");
 
     // =========================================================================
     // DECOMPRESSION MODE — 3 inputs → 1 output (1 input in inplace mode)
@@ -1181,7 +1206,10 @@ void QuantizerStage<TInput, TCode>::execute(
 
             launchInplaceForward(stream, grid, kBlock,
                 static_cast<const TInput*>(inputs[0]), num_elements,
-                ebx2_r, static_cast<TCode*>(outputs[0]));
+                config_.verify_reconstruction
+                    ? static_cast<TInput>(static_cast<float>(0.5f / static_cast<float>(computed_abs_eb_)))
+                    : ebx2_r,
+                ebx2, computed_abs_eb_, static_cast<TCode*>(outputs[0]));
             FZ_CUDA_CHECK(cudaGetLastError());
             actual_output_sizes_ = {num_elements * sizeof(TCode)};
             return;
@@ -1331,6 +1359,7 @@ size_t QuantizerStage<TInput, TCode>::serializeHeader(
     cfg.dither            = config_.dither ? uint8_t{1} : uint8_t{0};
     cfg.linear_high_precision = config_.linear_high_precision ? uint8_t{1} : uint8_t{0};
     cfg.power_of_two_bound = config_.power_of_two_bound ? uint8_t{1} : uint8_t{0};
+    cfg.verify_reconstruction = config_.verify_reconstruction ? uint8_t{1} : uint8_t{0};
     cfg.dither_seed       = config_.dither_seed;
     cfg.dither_strength   = config_.dither_strength;
 
@@ -1393,11 +1422,13 @@ void QuantizerStage<TInput, TCode>::deserializeHeader(
         config_.dither_strength = cfg.dither_strength;
         config_.linear_high_precision = (cfg.linear_high_precision != 0);
         config_.power_of_two_bound = (cfg.power_of_two_bound != 0);
+        config_.verify_reconstruction = (cfg.verify_reconstruction != 0);
     } else {
         // Pre-dither_strength headers always meant full-amplitude dithering.
         config_.dither_strength = 1.0f;
         config_.linear_high_precision = false;
         config_.power_of_two_bound = false;
+        config_.verify_reconstruction = false;
     }
 }
 

@@ -1,0 +1,83 @@
+# PFPL preset with a specialization/debugging checklist.
+#
+# This preset enables the production specialization policy directly. The optional
+# FZ_SPECIALIZE environment variable overrides the TOML policy, which is useful for
+# a controlled staged-versus-specialized comparison:
+#
+#   ./build_benchmarking/bin/fzgmod-cli \
+#     -b -i /path/to/data.f32 -l XxYxZ -t f32 \
+#     -c examples/presets/pfpl_specialization.toml \
+#     --runs 10 --compare /path/to/data.f32 \
+#     --report-json /tmp/pfpl-specialization.json
+#
+# Do not add --graph: CUDA Graph capture and specialization are mutually exclusive.
+# The first specialized execution compiles the generated kernel with NVRTC; use
+# multiple benchmark runs so one-time compilation is not mistaken for steady-state
+# performance. Use a Release build compiled for the installed GPU architecture.
+#
+# Verify the decision (requires jq):
+#
+#   jq '.specialization' /tmp/pfpl-specialization.json
+#
+# Expected for this exact f32 graph (unless FZ_SPECIALIZE overrides the policy):
+#   policy:                        "auto"
+#   legal_group_count:             1
+#   installed_group_count:         1
+#   groups[0].implementation:      "chunk-coop"
+#   groups[0].stages:              Quantizer, Difference, Bitshuffle, RZE
+#   inverse_installed_group_count: 1
+#   inverse_groups[0].implementation: "chunk-coop-inverse"
+#   fallback_reason:               null
+#
+# A standalone `-x` decompression does specialize when the environment variable is
+# set, but its JSON report does not expose the inverse decision. Use `-b`, as above,
+# to build both directions and check inverse_installed_group_count.
+#
+# Quick staged-versus-specialized A/B (same input/config/build):
+#
+#   FZ_SPECIALIZE=off  ... --report-json /tmp/pfpl-off.json
+#   FZ_SPECIALIZE=auto ... --report-json /tmp/pfpl-auto.json
+#
+# Compare steady-state device times, compressed size, reconstruction checksum, and
+# max error. Do not compare a one-run Auto host time against a warmed staged run.
+
+[pipeline]
+# PREALLOCATE is recommended and required by the specialized path's persistent
+# scratch allocation.
+memory_strategy = "PREALLOCATE"
+specialization = "auto"
+
+[[stage]]
+name = "quant"
+type = "Quantizer"
+input_type = "float32"
+code_type = "uint32"
+error_bound = 1e-4
+error_bound_mode = "NOA"
+# Native-compatible f32 PFPL quantization contract.
+quant_radius = 4194304
+zigzag_codes = true
+inplace_outliers = true
+verify_reconstruction = true
+
+[[stage]]
+name = "diff"
+type = "Difference"
+input_type = "int32"
+output_type = "uint32"
+chunk_size = 16384
+inputs = [{from = "quant", port = "codes"}]
+
+[[stage]]
+name = "bshuf"
+type = "Bitshuffle"
+element_width = 4
+block_size = 16384
+inputs = [{from = "diff", port = "output"}]
+
+[[stage]]
+name = "rze"
+type = "RZE"
+word_size = 1
+chunk_size = 16384
+inputs = [{from = "bshuf", port = "output"}]
