@@ -454,8 +454,9 @@ static __global__ void golombRicePackKernel(
     uint32_t scratch_stride, uint32_t header_off)
 {
     const uint32_t cid     = blockIdx.x;
-    const uint32_t src_off = cid * scratch_stride;
-    const uint32_t dst_off = header_off + d_dst_offsets[cid];
+    // 64-bit: cid * scratch_stride passes 2^32 near chunk 149k (~2.4 GB of int32 input).
+    const size_t   src_off = static_cast<size_t>(cid) * scratch_stride;
+    const size_t   dst_off = static_cast<size_t>(header_off) + d_dst_offsets[cid];
     const uint32_t sz      = d_sizes[cid] & 0x7FFFFFFFu;
     const uint8_t* src = d_scratch + src_off;
     uint8_t*       dst = d_out     + dst_off;

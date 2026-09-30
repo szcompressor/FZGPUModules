@@ -156,8 +156,9 @@ static __global__ void rzePackKernel(
     uint32_t CS, uint32_t header_off)
 {
     const uint32_t cid     = blockIdx.x;
-    const uint32_t src_off = cid * CS;
-    const uint32_t dst_off = header_off + d_dst_offsets[cid];
+    // 64-bit: cid * CS passes 2^32 on inputs of 4 GB and up.
+    const size_t   src_off = static_cast<size_t>(cid) * CS;
+    const size_t   dst_off = static_cast<size_t>(header_off) + d_dst_offsets[cid];
     const uint32_t sz      = d_sizes[cid] & 0x7FFFFFFFu;
     const byte* src = d_scratch + src_off;
     byte*       dst = d_out     + dst_off;
