@@ -10,6 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- In-process `decompress()` no longer preallocates the inverse DAG's result buffer, which every call replaced with its own output; once coloring had placed it in a shared region it stayed resident, adding 1x output-size to every later `compress()` peak.
 - Chunk-cooperative fusion no longer copies the input into a zero-padded buffer: when every source consumer is a fused group that accepts unpadded input, `finalize()` skips the pad buffer and the fused kernel reads zeros past the real data. Archives are byte-identical; PFPL-style pipelines use 1x input less device memory.
 - Pipeline specialization now follows a linear main path through branching DAGs while materializing declared auxiliary outputs for downstream staged consumers; inverse specializations likewise wait for and consume staged boundary inputs, with `PREALLOCATE` and `MINIMAL` forward round-trip coverage.
 - Renamed `FusionAccess` roles to describe dependency and codec semantics: `Map` → `Elementwise`, `BlockLocal` → `RegionLocal`, `Cooperative` → `SegmentCodec`, and `TileAdaptive` → `TileSelector`.
