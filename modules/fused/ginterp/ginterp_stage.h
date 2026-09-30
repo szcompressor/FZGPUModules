@@ -282,8 +282,7 @@ public:
     void onFinalize(size_t estimated_inlen, MemoryPool* pool) override;
 
     size_t estimateDeviceFootprintBytes(size_t /*estimated_inlen*/) const override {
-        return needsProfilingScratch()
-            ? kProfilingErrCount * (sizeof(float) + sizeof(unsigned long long)) : 0;
+        return needsProfilingScratch() ? kProfilingErrCount * sizeof(float) : 0;
     }
     size_t estimatePinnedFootprintBytes(size_t /*estimated_inlen*/) const override {
         return needsProfilingScratch() ? kProfilingErrCount * sizeof(float) : 0;
@@ -455,9 +454,6 @@ private:
     /// Lives for the stage lifetime; freed in the destructor.
     static constexpr size_t kProfilingErrCount = 36;
     float*   d_profiling_errors_ = nullptr;
-    /// Fixed-point accumulators for the mode-3/4 probe; they live in the same
-    /// device allocation, right after the kProfilingErrCount floats.
-    unsigned long long* d_profiling_accum_ = nullptr;  // ginterp_att_err_t
     float*   h_profiling_errors_ = nullptr;
     /// Pointer to the MemoryPool that owns the persistent scratch above —
     /// captured in onFinalize() / initProfilingScratch() so the destructor

@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 namespace fz {
 namespace ginterp {
@@ -377,16 +378,17 @@ void launchGInterpProfileMode2(
 // The kernel's internal `pre_compute_att` reads BIY to dispatch the variant
 // for that grid block (see ginterp_md.inl pre_compute_att SPLINE_DIM==3 block).
 
-// Converts the fixed-point accumulators (ginterp_att_err_t, see ginterp_md.inl)
-// to the float errors the host tuning logic reads. `scale` maps one unit back
-// to data units for the structural probe; the alpha/beta probe counts nonzero
-// codes, so its scale is 1. Equal sums convert to equal floats, so ties
-// resolve by slot order on every run.
-__global__ void ginterpAttErrorsToFloat(const ginterp_att_err_t* acc, float* out,
-                                        int n, double scale)
+// Adds the per-block profiling sums (pa_spline_infprecis_data writes one slice
+// of `n` floats per sampled block) in block order, so the totals do not depend
+// on scheduling. Blocks that do not own a slot leave it zero.
+__global__ void ginterpReduceBlockErrors(const float* blocks, float* out, int n,
+                                         unsigned num_blocks)
 {
     const int i = static_cast<int>(threadIdx.x);
-    if (i < n) out[i] = static_cast<float>(static_cast<double>(acc[i]) * scale);
+    if (i >= n) return;
+    float sum = 0.0f;
+    for (unsigned b = 0; b < num_blocks; ++b) sum += blocks[static_cast<size_t>(b) * n + i];
+    out[i] = sum;
 }
 
 template <typename TInput>
@@ -397,13 +399,12 @@ void launchGInterpProfileMode3(
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
-    ginterp_att_err_t* d_accum,
+    float* d_block_errors,
+    size_t block_capacity,
     bool workflow,                // true: mode-3 (structural); false: mode-4 (a/b)
     GInterp2DGeometry geometry,
     cudaStream_t stream)
 {
-    FZ_CUDA_CHECK(cudaMemsetAsync(d_accum, 0,
-                                  kGInterpProfilingErrCount * sizeof(ginterp_att_err_t), stream));
     // grid.y: workflow=true mode 3 — 9 for 3-D (cuSZ-Hi spline3.cu line 217),
     // 11 for 2-D (cuSZ-Hi line 294). workflow=false mode 4 — 11 in both
     // (cuSZ-Hi line 409/421). Internal pre_compute_att reads BIY to dispatch
@@ -415,6 +416,15 @@ void launchGInterpProfileMode3(
     unsigned grid_y;
     if (workflow) grid_y = (dim == 3) ? 9u : 11u;
     else          grid_y = 11u;
+    if (block_num > block_capacity) {
+        throw std::runtime_error(
+            "GInterp profiling: " + std::to_string(block_num) +
+            " sample blocks exceed the per-block error buffer (" +
+            std::to_string(block_capacity) + ")");
+    }
+    FZ_CUDA_CHECK(cudaMemsetAsync(
+        d_block_errors, 0,
+        static_cast<size_t>(block_num) * kGInterpProfilingErrCount * sizeof(float), stream));
     dim3 grid(block_num, grid_y, 1);
     dim3 block(kLinearBlockSize, 1, 1);
     dim3 data_st3 = stride3FromLen3(data_len3);
@@ -431,7 +441,7 @@ void launchGInterpProfileMode3(
                 const_cast<TInput*>(d_data), data_len3, data_st3,
                 sample_starts, sample_block_grid_sizes, sample_strides,
                 eb_r, ebx2, intp_param,
-                d_accum,
+                d_block_errors,
                 workflow);
     } else if (geometry == GInterp2DGeometry::Native64) {
         fz::ginterp::pa_spline_infprecis_data<
@@ -442,7 +452,7 @@ void launchGInterpProfileMode3(
             <<<grid, block, 0, stream>>>(
                 const_cast<TInput*>(d_data), data_len3, data_st3,
                 sample_starts, sample_block_grid_sizes, sample_strides,
-                eb_r, ebx2, intp_param, d_accum, workflow);
+                eb_r, ebx2, intp_param, d_block_errors, workflow);
     } else {
         // 2-D: LEVEL=4, AnchorBlockSize=16×16×1, numAnchorBlock=1×1×1.
         // Same LEVEL as 3-D so we can reuse the 16×16 anchor tile choice
@@ -460,14 +470,11 @@ void launchGInterpProfileMode3(
                 const_cast<TInput*>(d_data), data_len3, data_st3,
                 sample_starts, sample_block_grid_sizes, sample_strides,
                 eb_r, ebx2, intp_param,
-                d_accum,
+                d_block_errors,
                 workflow);
     }
-    const double scale = workflow
-        ? 1.0 / (static_cast<double>(eb_r) * kGInterpAttErrScale)
-        : 1.0;
-    ginterpAttErrorsToFloat<<<1, kGInterpProfilingErrCount, 0, stream>>>(
-        d_accum, d_errors, kGInterpProfilingErrCount, scale);
+    ginterpReduceBlockErrors<<<1, kGInterpProfilingErrCount, 0, stream>>>(
+        d_block_errors, d_errors, kGInterpProfilingErrCount, block_num);
 }
 
 // ─── forward (compress) launcher — 2-D ───────────────────────────────────────
@@ -661,7 +668,7 @@ void launchGInterpInverse2D(
         const TIN*, dim3, int, float*, cudaStream_t);                    \
     template void launchGInterpProfileMode3<TIN>(                        \
         const TIN*, dim3, int, dim3, dim3, dim3, float, float,          \
-        const INTERPOLATION_PARAMS&, float*, ginterp_att_err_t*, bool,       \
+        const INTERPOLATION_PARAMS&, float*, float*, size_t, bool,           \
         GInterp2DGeometry, cudaStream_t);
 
 FZ_GINTERP_INSTANTIATE_CORE(float)

@@ -18,14 +18,12 @@
 // only by ginterp_kernels.cu and ginterp_stage.cu, the two consumers).
 struct INTERPOLATION_PARAMS;
 
-// Fixed-point auto-tune error accumulator (see ginterp_md.inl).
-using ginterp_att_err_t = unsigned long long;
-
 namespace fz {
 enum class GInterp2DGeometry : uint8_t;
 namespace ginterp {
 
-/// Slots in the auto-tune profiling scratch (float errors and accumulators).
+/// Slots in the auto-tune profiling scratch (and per sampled block in the
+/// mode-3/4 per-block buffer).
 constexpr int kGInterpProfilingErrCount = 36;
 
 /**
@@ -173,10 +171,11 @@ void launchGInterpProfileMode2(
 
 /**
  * Profiling mode 3 — runs the structural `pa_spline_infprecis_data` kernel
- * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks. The
- * kernel sums into `d_accum` (kGInterpProfilingErrCount fixed-point slots,
- * zeroed here) so the sums do not depend on atomic ordering; the launcher then
- * writes them to `d_errors` as floats in the layout below.
+ * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks. Each
+ * sampled block writes its sums to its own kGInterpProfilingErrCount-float
+ * slice of `d_block_errors` (room for `block_capacity` blocks; zeroed here), and
+ * the launcher adds the slices in block order into `d_errors`, in the layout
+ * below. No atomics, so the result is identical on every run.
  *
  * `dim` selects the spline-kernel branch (3 → SPLINE_DIM=3, 2 → SPLINE_DIM=2).
  * `geometry` selects the 2-D template and has no effect on 3-D.
@@ -215,7 +214,8 @@ void launchGInterpProfileMode3(
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
-    ginterp_att_err_t* d_accum,
+    float* d_block_errors,
+    size_t block_capacity,
     bool workflow,
     GInterp2DGeometry geometry,
     fz::stream_t stream);

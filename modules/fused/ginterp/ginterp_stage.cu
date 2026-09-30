@@ -89,7 +89,6 @@ GInterpStage<TInput, TCode>::~GInterpStage()
         if (d_outlier_count_scratch_) persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
     }
     d_profiling_errors_      = nullptr;
-    d_profiling_accum_       = nullptr;
     h_profiling_errors_      = nullptr;
     d_outlier_count_scratch_ = nullptr;
     persistent_pool_         = nullptr;
@@ -130,14 +129,9 @@ void GInterpStage<TInput, TCode>::initProfilingScratch(MemoryPool* pool)
     persistent_pool_    = pool;
     static_assert(kProfilingErrCount == static_cast<size_t>(fz::ginterp::kGInterpProfilingErrCount),
                   "profiling scratch size must match the kernel launcher");
-    static_assert((kProfilingErrCount * sizeof(float)) % alignof(ginterp_att_err_t) == 0,
-                  "accumulators must be aligned after the float errors");
     d_profiling_errors_ = static_cast<float*>(
         pool->allocatePersistentDevice(
-            kProfilingErrCount * (sizeof(float) + sizeof(ginterp_att_err_t)),
-            "ginterp_profiling_d"));
-    d_profiling_accum_ = reinterpret_cast<ginterp_att_err_t*>(
-        d_profiling_errors_ + kProfilingErrCount);
+            kProfilingErrCount * sizeof(float), "ginterp_profiling_d"));
     h_profiling_errors_ = static_cast<float*>(
         pool->allocatePersistentPinned(
             kProfilingErrCount * sizeof(float), "ginterp_profiling_h"));
@@ -167,12 +161,18 @@ static double pickAlphaFromRelEb(double rel_eb)
     return a5;
 }
 
-// The mode-3/4 fixed-point accumulators sit right after the float errors in
-// the same device allocation (see initProfilingScratch).
-static ginterp_att_err_t* profilingAccum(float* d_errors)
+// Per-block sums for the mode-3/4 probe (see launchGInterpProfileMode3).
+struct ProfilingBlockBuffer {
+    float* data     = nullptr;
+    size_t capacity = 0;   // sampled blocks it can hold
+};
+
+// Upper bound on sampled blocks: the probes step every S_STRIDE >= 128 elements
+// per axis (calc_start_size gives at most dim / S_STRIDE + 1 per axis).
+static size_t profilingBlockBound(dim3 data_len3)
 {
-    return reinterpret_cast<ginterp_att_err_t*>(
-        d_errors + fz::ginterp::kGInterpProfilingErrCount);
+    auto axis = [](unsigned d) { return static_cast<size_t>(d) / 128 + 2; };
+    return axis(data_len3.x) * axis(data_len3.y) * axis(data_len3.z);
 }
 
 // ─── runAutoTuneMode1: cheap reverse-only ────────────────────────────────────
@@ -295,6 +295,7 @@ static void runAutoTuneMode3(
     INTERPOLATION_PARAMS intp_param,
     float* d_errors,
     float* h_errors,
+    ProfilingBlockBuffer blocks,
     cudaStream_t stream,
     uint8_t (&out_use_md)[6],
     uint8_t (&out_use_natural)[6],
@@ -326,7 +327,7 @@ static void runAutoTuneMode3(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, profilingAccum(d_errors), /*workflow=*/true, GInterp2DGeometry::Fine16, stream);
+        d_errors, blocks.data, blocks.capacity, /*workflow=*/true, GInterp2DGeometry::Fine16, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 18 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -393,6 +394,7 @@ static void runAutoTuneMode4(
     INTERPOLATION_PARAMS intp_param,   // carries the mode-3-resolved flags
     float* d_errors,
     float* h_errors,
+    ProfilingBlockBuffer blocks,
     cudaStream_t stream,
     double& out_alpha,
     double& out_beta)
@@ -422,7 +424,7 @@ static void runAutoTuneMode4(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, profilingAccum(d_errors), /*workflow=*/false, GInterp2DGeometry::Fine16, stream);
+        d_errors, blocks.data, blocks.capacity, /*workflow=*/false, GInterp2DGeometry::Fine16, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -480,6 +482,7 @@ static void runAutoTuneMode3_2D(
     INTERPOLATION_PARAMS intp_param,
     float* d_errors,
     float* h_errors,
+    ProfilingBlockBuffer blocks,
     cudaStream_t stream,
     GInterp2DGeometry geometry,
     uint8_t (&out_use_md)[6],
@@ -512,7 +515,7 @@ static void runAutoTuneMode3_2D(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, profilingAccum(d_errors), /*workflow=*/true, geometry, stream);
+        d_errors, blocks.data, blocks.capacity, /*workflow=*/true, geometry, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 27 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -578,6 +581,7 @@ static void runAutoTuneMode4_2D(
     INTERPOLATION_PARAMS intp_param,
     float* d_errors,
     float* h_errors,
+    ProfilingBlockBuffer blocks,
     cudaStream_t stream,
     GInterp2DGeometry geometry,
     double& out_alpha,
@@ -608,7 +612,7 @@ static void runAutoTuneMode4_2D(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, profilingAccum(d_errors), /*workflow=*/false, geometry, stream);
+        d_errors, blocks.data, blocks.capacity, /*workflow=*/false, geometry, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -1016,6 +1020,11 @@ void GInterpStage<TInput, TCode>::execute(
                 resolved_reverse_);
         } else if (config_.auto_tuning_mode == 3 ||
                    config_.auto_tuning_mode == 4) {
+            ProfilingBlockBuffer blocks;
+            blocks.capacity = profilingBlockBound(data_len3);
+            blocks.data = static_cast<float*>(pool->allocate(
+                blocks.capacity * kProfilingErrCount * sizeof(float), stream,
+                "ginterp_profiling_blocks"));
             INTERPOLATION_PARAMS profile_param = buildIntpParam();
             profile_param.alpha = resolved_alpha_;
             profile_param.beta  = resolved_beta_;
@@ -1023,13 +1032,13 @@ void GInterpStage<TInput, TCode>::execute(
                 runAutoTuneMode3<TInput, TCode>(
                     static_cast<const TInput*>(inputs[0]), data_len3,
                     eb_r, ebx2, profile_param,
-                    d_profiling_errors_, h_profiling_errors_, stream,
+                    d_profiling_errors_, h_profiling_errors_, blocks, stream,
                     resolved_use_md_, resolved_use_natural_, resolved_reverse_);
             } else {
                 runAutoTuneMode3_2D<TInput, TCode>(
                     static_cast<const TInput*>(inputs[0]), data_len3,
                     eb_r, ebx2, profile_param,
-                    d_profiling_errors_, h_profiling_errors_, stream,
+                    d_profiling_errors_, h_profiling_errors_, blocks, stream,
                     config_.geometry_2d,
                     resolved_use_md_, resolved_use_natural_, resolved_reverse_);
             }
@@ -1045,17 +1054,18 @@ void GInterpStage<TInput, TCode>::execute(
                     runAutoTuneMode4<TInput, TCode>(
                         static_cast<const TInput*>(inputs[0]), data_len3,
                         eb_r, ebx2, sweep_param,
-                        d_profiling_errors_, h_profiling_errors_, stream,
+                        d_profiling_errors_, h_profiling_errors_, blocks, stream,
                         resolved_alpha_, resolved_beta_);
                 } else {
                     runAutoTuneMode4_2D<TInput, TCode>(
                         static_cast<const TInput*>(inputs[0]), data_len3,
                         eb_r, ebx2, sweep_param,
-                        d_profiling_errors_, h_profiling_errors_, stream,
+                        d_profiling_errors_, h_profiling_errors_, blocks, stream,
                         config_.geometry_2d,
                         resolved_alpha_, resolved_beta_);
                 }
             }
+            pool->free(blocks.data, stream);
         }
       } else if (config_.auto_tuning_mode > 0 &&
                  config_.auto_tuning_mode != 5 && dim == 3) {
