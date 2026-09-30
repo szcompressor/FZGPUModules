@@ -4,6 +4,7 @@
 // module by (arch, source), return device functions by name). See nvrtc_jit.h.
 
 #include "fused/common/nvrtc_jit.h"
+#include "log.h"
 
 #include <nvrtc.h>
 #include <cuda.h>
@@ -186,6 +187,14 @@ void* nvrtcGetKernel(const std::string& src, const char* entry) {
     if (it != mod.funcs.end()) return reinterpret_cast<void*>(it->second);
     CUfunction func = nullptr;
     CU_CHECK(cuModuleGetFunction(&func, mod.module, entry));
+    {
+        int regs = 0, lmem = 0, smem = 0;
+        cuFuncGetAttribute(&regs, CU_FUNC_ATTRIBUTE_NUM_REGS, func);
+        cuFuncGetAttribute(&lmem, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, func);
+        cuFuncGetAttribute(&smem, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, func);
+        FZ_LOG(DEBUG, "NVRTC kernel '%s': %d regs, %d B local, %d B static smem",
+               entry, regs, lmem, smem);
+    }
     mod.funcs.emplace(entry, func);
     return reinterpret_cast<void*>(func);
 }

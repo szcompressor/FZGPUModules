@@ -525,18 +525,25 @@ template<class T, class... R> struct Chain<T, R...> {
 // compile-time offset. Stateless ops ignore it.
 // `side` carries escaping outputs (e.g. an outlier list); the Elementwise op uses it or
 // ignores it. Defaulted so callers that never fuse a side-output op need not pass it.
+// One chunk's encoded result, left in shared memory by chunk_encode_at().
+struct ChunkEncoded {
+    const byte* src;        ///< encoded (or raw fallback) bytes, in shared memory
+    uint32_t    nbytes;     ///< bytes at src
+    uint32_t    size_word;  ///< archive size-table entry (bit 31 = raw fallback)
+};
+
+// Encode chunk `cid` into the block's shared-memory ping-pong buffers. Shared by
+// the scratch-emitting and the direct (look-back) bodies, so the archive bytes
+// cannot diverge between them.
 template<int ChunkBytes, class QuantOp, class Coder, class... Transforms>
-__device__ __forceinline__ void
-chunk_fused_body(const float* __restrict__ in, size_t n,
-                 const byte* __restrict__ params,
-                 byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
-                 ChunkSideCtx side = ChunkSideCtx{}, size_t n_valid = ~size_t(0)) {
+__device__ __forceinline__ ChunkEncoded
+chunk_encode_at(uint32_t cid, const float* __restrict__ in, size_t n,
+                const byte* __restrict__ params, ChunkSideCtx side, size_t n_valid) {
     constexpr int NELEM = Geom<ChunkBytes>::NELEM;
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
     __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
 
-    const uint32_t cid  = blockIdx.x;
     const size_t   base = (size_t)cid * NELEM;
     const int      cnt  = (int)min((size_t)NELEM, n - base);
     const bool     full = (cnt == NELEM);
@@ -561,14 +568,127 @@ chunk_fused_body(const float* __restrict__ in, size_t n,
                                reinterpret_cast<byte*>(alt), sTemp, params + kCoderOff);
     __syncthreads();
 
+    if (good && csize < in_size)
+        return ChunkEncoded{reinterpret_cast<const byte*>(alt), (uint32_t)csize, (uint32_t)csize};
+    return ChunkEncoded{reinterpret_cast<const byte*>(cur), (uint32_t)in_size,
+                        (1u << 31) | (uint32_t)in_size};
+}
+
+// Scratch-emitting body: chunk `blockIdx.x` lands at scratch[cid * ChunkBytes] and a
+// separate scan + pack (chunk_fusion.cu packChunks) compacts it into the archive.
+// Needs a full input-size scratch buffer; kept as the FZ_CHUNK_SCRATCH=1 reference
+// path and for the compile-time template kernel.
+template<int ChunkBytes, class QuantOp, class Coder, class... Transforms>
+__device__ __forceinline__ void
+chunk_fused_body(const float* __restrict__ in, size_t n,
+                 const byte* __restrict__ params,
+                 byte* __restrict__ scratch, uint32_t* __restrict__ sizes,
+                 ChunkSideCtx side = ChunkSideCtx{}, size_t n_valid = ~size_t(0)) {
+    const uint32_t cid = blockIdx.x;
+    const ChunkEncoded e =
+        chunk_encode_at<ChunkBytes, QuantOp, Coder, Transforms...>(cid, in, n, params, side, n_valid);
     byte* out = scratch + (size_t)cid * ChunkBytes;
-    if (good && csize < in_size) {
-        for (int i = threadIdx.x; i < csize; i += TPB) out[i] = reinterpret_cast<byte*>(alt)[i];
-        if (threadIdx.x == 0) sizes[cid] = (uint32_t)csize;
-    } else {
-        for (int i = threadIdx.x; i < in_size; i += TPB) out[i] = reinterpret_cast<byte*>(cur)[i];
-        if (threadIdx.x == 0) sizes[cid] = (1u << 31) | (uint32_t)in_size;
+    for (uint32_t i = threadIdx.x; i < e.nbytes; i += TPB) out[i] = e.src[i];
+    if (threadIdx.x == 0) sizes[cid] = e.size_word;
+}
+
+// ── Direct (single-pass) emit: decoupled look-back over per-chunk byte counts. ──
+// Each chunk publishes its size, resolves its exclusive byte offset from its
+// predecessors, and writes its bytes and size-table entry straight into the
+// archive, so no scratch buffer, scan, or pack pass is needed. The archive is
+// byte-identical to the scratch path: same size table, same payload order.
+// State word per chunk: bits 63..62 = 0 (not ready) | 1 (aggregate: own size) |
+// 2 (inclusive: size of chunks 0..cid); bits 61..0 = byte count.
+constexpr unsigned long long kLookbackAggregate = 1ull << 62;
+constexpr unsigned long long kLookbackInclusive = 2ull << 62;
+constexpr unsigned long long kLookbackValueMask = (1ull << 62) - 1ull;
+
+__device__ __forceinline__ unsigned long long lookbackLoad(const unsigned long long* p) {
+    return *reinterpret_cast<const volatile unsigned long long*>(p);
+}
+
+// Block-wide shared->global copy to an arbitrarily aligned destination (after
+// PFPL's s2g): byte-copy up to the first word boundary, then word stores that
+// realign the (16-byte aligned) shared source with __funnelshift_r. Reading
+// src word w+1 stays inside the chunk buffer because len <= ChunkBytes.
+__device__ __forceinline__ void storeChunkBytes(byte* __restrict__ dst,
+                                                const byte* __restrict__ src, uint32_t len) {
+    if (len < 128) {
+        for (uint32_t i = threadIdx.x; i < len; i += TPB) dst[i] = src[i];
+        return;
     }
+    const uint32_t mis  = (uint32_t)((size_t)dst & 3u);
+    const uint32_t head = mis ? 4u - mis : 0u;
+    if (threadIdx.x < head) dst[threadIdx.x] = src[threadIdx.x];
+    const uint32_t words = (len - head) / 4u;
+    uint32_t* __restrict__ dw = reinterpret_cast<uint32_t*>(dst + head);
+    const uint32_t* __restrict__ sw = reinterpret_cast<const uint32_t*>(src);
+    if (head == 0) {
+        for (uint32_t w = threadIdx.x; w < words; w += TPB) dw[w] = sw[w];
+    } else {
+        const uint32_t shift = head * 8u;
+        for (uint32_t w = threadIdx.x; w < words; w += TPB)
+            dw[w] = __funnelshift_r(sw[w], sw[w + 1], shift);
+    }
+    for (uint32_t i = head + 4u * words + threadIdx.x; i < len; i += TPB) dst[i] = src[i];
+}
+
+// Publish chunk `cid`'s size, resolve its exclusive payload offset by decoupled
+// look-back, and write its size-table entry and payload into the archive. Warp 0
+// inspects 32 predecessors at a time (lane k -> chunk cid-1-k), sums aggregates,
+// and stops at the nearest inclusive prefix.
+__device__ __forceinline__ void
+chunk_emit_direct(uint32_t cid, const ChunkEncoded& e, byte* __restrict__ archive,
+                  uint32_t nc, unsigned long long* __restrict__ state) {
+    __shared__ unsigned long long s_offset;
+    if (threadIdx.x < 32) {
+        const uint32_t lane = threadIdx.x;
+        if (lane == 0) {
+            reinterpret_cast<uint32_t*>(archive + 8)[cid] = e.size_word;
+            atomicExch(&state[cid], (cid == 0 ? kLookbackInclusive : kLookbackAggregate) | e.nbytes);
+        }
+        unsigned long long prefix = 0;
+        for (long long window = (long long)cid - 1; window >= 0; window -= 32) {
+            const long long j = window - (long long)lane;
+            unsigned long long v = kLookbackInclusive;           // before chunk 0: prefix 0
+            if (j >= 0) {
+                while (((v = lookbackLoad(&state[j])) >> 62) == 0ull) {}
+            }
+            const unsigned incl = __ballot_sync(0xffffffffu, (v >> 62) == 2ull);
+            const unsigned upto = incl ? (__ffs(incl) - 1) : 31u;  // nearest inclusive lane
+            unsigned long long part = (lane <= upto) ? (v & kLookbackValueMask) : 0ull;
+            for (int off = 16; off > 0; off >>= 1)
+                part += __shfl_down_sync(0xffffffffu, part, off);
+            prefix += __shfl_sync(0xffffffffu, part, 0);
+            if (incl) break;
+        }
+        if (lane == 0) {
+            if (cid != 0) atomicExch(&state[cid], kLookbackInclusive | (prefix + e.nbytes));
+            s_offset = prefix;
+        }
+    }
+    __syncthreads();
+    storeChunkBytes(archive + 8u + 4ull * nc + s_offset, e.src, e.nbytes);
+}
+
+// `archive` = the RZE-family container: [u32 n*4][u32 nc][u32 size_word x nc][payload].
+// The 8-byte prefix is written by the launcher. One CTA per chunk with cid =
+// blockIdx.x: like CUB's decoupled look-back, this relies on blocks being
+// dispatched in increasing blockIdx order, so every predecessor a block waits on
+// has already started. (A persistent grid with an atomic chunk counter, native
+// PFPL's scheme, measured slower here: see docs/pipeline_specialization_internals.md,
+// "Chunk-cooperative memory".)
+template<int ChunkBytes, class QuantOp, class Coder, class... Transforms>
+__device__ __forceinline__ void
+chunk_fused_direct_body(const float* __restrict__ in, size_t n,
+                        const byte* __restrict__ params,
+                        byte* __restrict__ archive, uint32_t nc,
+                        unsigned long long* __restrict__ state,
+                        ChunkSideCtx side = ChunkSideCtx{}, size_t n_valid = ~size_t(0)) {
+    const uint32_t cid = blockIdx.x;
+    const ChunkEncoded e =
+        chunk_encode_at<ChunkBytes, QuantOp, Coder, Transforms...>(cid, in, n, params, side, n_valid);
+    chunk_emit_direct(cid, e, archive, nc, state);
 }
 
 // Compile-time template entry (the FZ_FUSION path without NVRTC). The NVRTC path
