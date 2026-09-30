@@ -652,12 +652,21 @@ void Pipeline::buildOrReuseInvCache(
 {
     std::unordered_map<Stage*, size_t> source_sizes = {{src_stage, src_sz}};
 
+    // The cached inverse DAG preallocates internal buffers from the stream sizes of
+    // the compress it was built after. An unchanged source size does not pin those:
+    // a stage can emit a data- or state-dependent intermediate length (cuSZ-Hi's
+    // RZE side stream grew 1946952 -> 1948040 bytes between compresses of the same
+    // field), and decoding the larger stream into the reused buffer overran it.
+    const std::vector<size_t> fwd_sig = forwardSizeSignature();
     bool cache_valid = (inv_cache_ != nullptr);
     if (cache_valid) {
         auto it = inv_cache_->source_sizes.find(src_stage);
         if (it == inv_cache_->source_sizes.end() || it->second != src_sz) {
             cache_valid = false;
             FZ_LOG(DEBUG, "decompress: inv DAG cache invalidated (source size changed)");
+        } else if (inv_cache_->fwd_size_signature != fwd_sig) {
+            cache_valid = false;
+            FZ_LOG(DEBUG, "decompress: inv DAG cache invalidated (a stage's stream size changed)");
         }
     }
 
@@ -699,6 +708,7 @@ void Pipeline::buildOrReuseInvCache(
         inv_cache_->inv_result_map     = std::move(inv_result_map_new);
         inv_cache_->fwd_to_inv_ext_buf = std::move(fwd_to_inv_ext_buf);
         inv_cache_->source_sizes       = source_sizes;
+        inv_cache_->fwd_size_signature = fwd_sig;
         fusion_info_.installed_inverse_groups.clear();
         for (const auto& fg : inv_cache_->inv_dag->getFusedGroups()) {
             FusionGroupInfo info;
@@ -720,6 +730,18 @@ void Pipeline::buildOrReuseInvCache(
         inv_cache_->inv_dag->enableProfiling(profiling_enabled_);
         FZ_LOG(DEBUG, "decompress: reusing cached inverse DAG");
     }
+}
+
+std::vector<size_t> Pipeline::forwardSizeSignature() const {
+    std::vector<size_t> sig;
+    for (const auto& stage_ptr : stages_) {
+        const auto sizes = stage_ptr->getActualOutputSizesByName();
+        std::vector<std::pair<std::string, size_t>> sorted(sizes.begin(), sizes.end());
+        std::sort(sorted.begin(), sorted.end());
+        sig.push_back(sorted.size());               // delimiter: port count per stage
+        for (const auto& kv : sorted) sig.push_back(kv.second);
+    }
+    return sig;
 }
 
 // ── getMaxCompressedSize ──────────────────────────────────────────────────────

@@ -1170,8 +1170,15 @@ private:
         std::unordered_map<Stage*, int>    inv_result_map;
         std::unordered_map<int, int>       fwd_to_inv_ext_buf;
         std::unordered_map<Stage*, size_t> source_sizes;
+        /// Every stage's actual output sizes after the compress the DAG was built
+        /// from (forwardSizeSignature()). The inverse of a stage produces its forward
+        /// input, so the cached DAG's preallocated buffers are only valid while these
+        /// match; see buildOrReuseInvCache().
+        std::vector<size_t>                fwd_size_signature;
     };
     std::unique_ptr<InvDAGCache> inv_cache_;
+    /** Actual output sizes of every stage from the last forward pass, in stage order. */
+    std::vector<size_t> forwardSizeSignature() const;
 
     struct BufferMetadata {
         int         buffer_id;

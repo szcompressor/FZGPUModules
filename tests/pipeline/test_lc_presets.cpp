@@ -16,6 +16,8 @@
  *   LCP2  LCPresets/RatioRoundTrip        — cusz_hi_cr.toml loads + round-trips
  *   LCP3  LCPresets/SaveLoadRoundTrip     — save→load of the tp pipeline round-trips
  *   LCP4  LCPresets/DeterministicCompress — repeated compress is bit-identical
+ *   LCP5  LCPresets/ReusedPipelineGrowingSideStream — the cached inverse DAG is
+ *         rebuilt when an internal stream grows at an unchanged source size
  */
 
 #include <gtest/gtest.h>
@@ -161,4 +163,60 @@ TEST(LCPresets, DeterministicCompress) {
     ASSERT_EQ(b1.size(), b3.size()) << "compressed size varies across runs";
     EXPECT_EQ(b1, b2) << "compressed blob is non-deterministic (run 1 vs 2)";
     EXPECT_EQ(b1, b3) << "compressed blob is non-deterministic (run 1 vs 3)";
+}
+
+// LCP5: decompress() caches the inverse DAG and preallocates its internal buffers
+// from the stream sizes of the compress it was built after. A second compress of a
+// same-size field that routes far more residuals to the outlier chain grows an
+// internal stream without changing the source size; the reused DAG used to decode
+// that stream into the too-small cached buffer (an out-of-bounds write that
+// corrupted neighbouring pool memory intermittently). The pipeline must rebuild
+// and reconstruct exactly as a fresh pipeline does.
+TEST(LCPresets, ReusedPipelineGrowingSideStream) {
+    // The ratio preset codes the GInterp outlier chain internally (Merge -> RRE,
+    // Zigzag -> RZE), so a larger outlier set grows a stream the inverse DAG
+    // allocates itself rather than one it receives as a refreshed external input.
+    const std::string preset = std::string(FZ_PRESETS_DIR) + "/cusz_hi_cr.toml";
+    auto smooth = make_smooth_data<float>(NX * NY);
+    // Same size and range, far higher entropy: every coded stream downstream of
+    // GInterp (Huffman -> Merge -> RRE -> Zigzag -> RZE) grows substantially.
+    auto spiky = smooth;
+    uint32_t lcg = 12345u;
+    for (auto& v : spiky) {
+        lcg = lcg * 1664525u + 1013904223u;
+        v += 60.0f * (static_cast<float>(lcg >> 8) / 16777216.0f - 0.5f);
+    }
+    const size_t in_bytes = smooth.size() * sizeof(float);
+    CudaStream stream;
+
+    auto round_trip = [&](Pipeline& p, const std::vector<float>& h) {
+        CudaBuffer<float> d_in(h.size());
+        d_in.upload(h, stream);
+        stream.sync();
+        void* d_comp = nullptr; size_t comp_sz = 0;
+        p.compress(d_in.void_ptr(), in_bytes, &d_comp, &comp_sz, stream);
+        void* d_dec = nullptr; size_t dec_sz = 0;
+        p.decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream);
+        stream.sync();
+        std::vector<float> recon(dec_sz / sizeof(float));
+        cudaMemcpy(recon.data(), d_dec, dec_sz, cudaMemcpyDeviceToHost);
+        return recon;
+    };
+
+    Pipeline reused;
+    reused.setDims(NX, NY, 1);
+    reused.loadConfig(preset);
+    (void)round_trip(reused, smooth);                 // builds + caches the inverse DAG
+    const std::vector<float> got = round_trip(reused, spiky);
+
+    Pipeline fresh;
+    fresh.setDims(NX, NY, 1);
+    fresh.loadConfig(preset);
+    const std::vector<float> want = round_trip(fresh, spiky);
+
+    ASSERT_EQ(got.size(), want.size());
+    EXPECT_EQ(got, want) << "reused pipeline decoded a grown side stream differently";
+    const float vmin = *std::min_element(spiky.begin(), spiky.end());
+    const float vmax = *std::max_element(spiky.begin(), spiky.end());
+    EXPECT_LE(max_abs_error(spiky, got), 2.0f * PRESET_EB * (vmax - vmin));
 }
