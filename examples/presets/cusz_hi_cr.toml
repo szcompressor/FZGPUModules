@@ -19,6 +19,7 @@ error_bound_mode = "NOA"
 quant_radius = 2048                 # explicit so Huffman bklen can match: bklen = 2*radius
                                     # NOA eb=1e-3 auto-radius ≈ ceil(2/eb) = 2000; 2048 covers it
 outlier_capacity = 0.2
+geometry_2d = "fine16"             # default 2-D geometry; leave this unless running a native64 comparison preset
 
 [[stage]]
 name = "huf"

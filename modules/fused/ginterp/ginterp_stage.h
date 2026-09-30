@@ -5,9 +5,7 @@
  * @brief G-Interp spline-interpolation predictor + quantizer (cuSZ-Hi port).
  *
  * Supports 2-D and 3-D inputs. 1-D is rejected (cuSZ-Hi has no 1-D path).
- * `INTERPOLATION_PARAMS` auto-tuning (modes 1 and 3) is currently wired for
- * the 3-D path only; in 2-D the stage logs a warning and falls back to the
- * deterministic baseline.
+ * Auto-tuning mode 1 is 3-D-only; modes 2--5 support 2-D and 3-D.
  */
 
 #include "stage/stage.h"
@@ -33,6 +31,9 @@ struct INTERPOLATION_PARAMS;
 
 namespace fz {
 
+/// Selects the two supported 2-D spline geometries. 3-D always uses 16^3.
+enum class GInterp2DGeometry : uint8_t { Fine16 = 0, Native64 = 1 };
+
 /**
  * Serialized G-Interp configuration stored in FZMBufferEntry.stage_config.
  * Fits within the 128-byte `FZM_STAGE_CONFIG_SIZE` limit.
@@ -46,7 +47,7 @@ struct GInterpConfig {
     uint32_t outlier_count;     ///< Actual outlier count (post-execute).
     DataType input_type;        ///< Float input type (1 B).
     DataType code_type;         ///< Quant code type (1 B).
-    uint8_t  ndim;              ///< Spatial dimensionality (3 in MVP).
+    uint8_t  ndim;              ///< Spatial dimensionality (2 or 3).
     uint8_t  eb_mode;           ///< ErrorBoundMode cast to uint8_t.
     uint32_t dim_x;             ///< X (fast) dimension.
     uint32_t dim_y;             ///< Y dimension.
@@ -68,7 +69,8 @@ struct GInterpConfig {
     uint8_t  intp_use_natural[6];
     uint8_t  intp_reverse[6];
     uint8_t  auto_tuning_mode;  ///< 0=off, 1=cheap, 3=full, 4=full+alpha sweep, 5+=manual α/β.
-    uint8_t  pad[8];            ///< Reserved for future fields (alignment also).
+    uint8_t  geometry_2d;       ///< 0=fine16 (legacy), 1=native64.
+    uint8_t  pad[7];            ///< Reserved; keep the serialized struct size fixed.
 
     // ~96 bytes. Comfortable margin under FZM_STAGE_CONFIG_SIZE (128 B);
     // the static_assert below is the source of truth.
@@ -84,13 +86,13 @@ struct GInterpConfig {
           intp_use_md{1, 1, 0, 0, 0, 0},
           intp_use_natural{0, 0, 0, 0, 0, 0},
           intp_reverse{0, 0, 0, 0, 0, 0},
-          auto_tuning_mode(0), pad{} {}
+          auto_tuning_mode(0), geometry_2d(0), pad{} {}
 };
 static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
               "GInterpConfig must fit in FZM_STAGE_CONFIG_SIZE");
 
 /**
- * G-Interp predictor with error-bounded quantization (3-D, MVP).
+ * G-Interp predictor with error-bounded quantization (2-D and 3-D).
  *
  * @note **Prior work:** the underlying spline kernels are adapted from the
  *       cuSZ-Hi compressor (Indiana University, Argonne National Laboratory),
@@ -99,7 +101,8 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *
  * Forward outputs (compression):
  *   - [0] codes          — quantization codes (`TCode`, full N elements)
- *   - [1] anchor         — corner anchor values (`TInput`, ~N/4096 elements)
+ *   - [1] anchor         — corner anchor values (`TInput`); the 2-D native64
+ *                          layout reserves a zeroed /16 grid with /64 anchors.
  *   - [2] outlier_vals   — out-of-range residuals (`TInput`)
  *   - [3] outlier_idxs   — outlier element indices (`uint32_t`)
  *
@@ -117,8 +120,8 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *
  * The error bound `eb` is a **target**, not a hard guarantee. The multi-level
  * interpolation tree predicts finer-level values from already-lossy coarser-
- * level reconstructions, so prediction errors accumulate across the four
- * levels. In practice the maximum element-wise error is:
+ * level reconstructions, so prediction errors accumulate across levels.
+ * In practice the maximum element-wise error is:
  *   - typically `<= 1.1 * eb` on smooth data
  *   - up to `~2 * eb` on data with many outliers (large spikes that the spline
  *     can't predict — these are stored exactly via the outlier triplet, but
@@ -144,14 +147,11 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  * Other limitations to be aware of:
  *   - **2-D and 3-D only**; `setDims()` throws for 1-D input.
  *   - 3-D path: best results when each `dim` is a multiple of 16 (the 3-D
- *     anchor tile size). 2-D path: anchor tile is 32×8, so best results when
- *     `dim_x` is a multiple of 32 and `dim_y` of 8. Ragged dims still work
+ *     anchor tile size). 2-D path: anchor tile is 16×16, so best results when
+ *     `dim_x` and `dim_y` are multiples of 16. Ragged dims still work
  *     but edge elements see slightly worse prediction.
- *   - `INTERPOLATION_PARAMS` auto-tuning (`setAutoTuning(1)` / `(3)`) is wired
- *     for the 3-D path only. In 2-D the stage logs a warning and falls back
- *     to the deterministic baseline (`alpha=1.75`, `beta=4.0`,
- *     `use_md={t,t,f,f,f,f}`). 2-D auto-tune (cuSZ-Hi `auto_tuning_mode == 2`)
- *     is a follow-up.
+ *   - Auto-tuning mode 1 is 3-D-only. Modes 0 and 2--5 support both 2-D and
+ *     3-D; profiling modes 2--4 synchronize to read their error arrays.
  *
  * ## Precision (`float` / `double`) and shared memory
  *
@@ -169,17 +169,15 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  *     it goes through the same dynamic-shmem code path.
  *   - The launcher (`ginterpRaiseSmemIfNeeded`) only calls
  *     `cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, …)`
- *     when the tile exceeds 48 KB. So in practice the opt-in fires **only for the
- *     3-D `double` path**; `float` (and all 2-D) use the default dynamic region
- *     and never touch the attribute.
+ *     when the tile exceeds 48 KB. The opt-in is needed for 3-D `double` and
+ *     2-D `native64` `double`; `float` and 2-D `fine16` use the default region.
  *   - Performance impact on `float` is expected to be negligible: the requested
  *     shared-memory size, occupancy, and in-kernel access pattern are unchanged
  *     versus the previous static-`__shared__` version; only the tile base
  *     address is now a launch-time value.
- *   - The 3-D `double` path therefore needs a GPU whose opt-in max dynamic
- *     shared memory is ≥ ~77 KB (Volta and newer). On older GPUs capped at 48 KB
- *     the `cudaFuncSetAttribute` call fails and the launch surfaces the error;
- *     2-D `double` and all `float` configs are unaffected.
+ *   - The 3-D `double` path needs an opt-in max of ~77 KB, while 2-D `native64`
+ *     `double` needs 67,600 B. The launcher reports an error on GPUs below
+ *     those limits. The 2-D `fine16` path and all `float` configs are unaffected.
  *   - Auto-tuning (profiling modes 1-4) is **`float`-only**; `double` inputs with
  *     a profiling mode set fall back to the deterministic baseline with a warning
  *     (mode 5 manual `alpha`/`beta` is still honored for `double`).
@@ -240,11 +238,8 @@ public:
         ///       / `manual_beta` to use them verbatim; otherwise the
         ///       piecewise-linear `alpha` from `rel_eb` (cuSZ-Hi recipe) is
         ///       used with `beta=4.0`. The structural flags stay at baseline.
-        /// Modes 1, 3, 4 are 3-D-only; on 2-D inputs they fall back to
-        /// baseline. Mode 5 is dim-agnostic.
-        /// Mode 2 from cuSZ-Hi is not yet wired (3-D-only alternate cheap
-        /// probe — same value as mode 1).
-        /// Any non-zero mode that does profiling (1/3/4) forces a host-blocking
+        /// Mode 1 is 3-D-only; modes 2--5 support both 2-D and 3-D.
+        /// Any non-zero mode that does profiling (1--4) forces a host-blocking
         /// D2H sync inside execute() and is **incompatible with CUDA graph
         /// capture**. Mode 5 (manual) is graph-safe.
         uint8_t auto_tuning_mode = 0;
@@ -255,6 +250,10 @@ public:
         double  manual_alpha = 0.0;
         /// Manual beta override for `auto_tuning_mode == 5`. Same convention.
         double  manual_beta  = 0.0;
+
+        /// 2-D spline geometry; ignored for 3-D fields. The default preserves
+        /// previously written FZM archives and the existing 16x16 path.
+        GInterp2DGeometry geometry_2d = GInterp2DGeometry::Fine16;
 
         Config() = default;
     };
@@ -333,6 +332,12 @@ public:
     /// Profiling modes (1/3/4) disable CUDA graph capture for this stage;
     /// mode 5 (manual override) is graph-safe.
     void setAutoTuning(uint8_t mode)          { config_.auto_tuning_mode = mode; }
+    void set2DGeometry(GInterp2DGeometry geometry) {
+        if (geometry != GInterp2DGeometry::Fine16 &&
+            geometry != GInterp2DGeometry::Native64)
+            throw std::invalid_argument("GInterpStage: unsupported 2-D geometry");
+        config_.geometry_2d = geometry;
+    }
     /// Set the manual alpha/beta override pair used when
     /// `auto_tuning_mode == 5`. Both must be > 0 to take effect; passing 0
     /// for either field defers to the cuSZ-Hi piecewise-linear schedule
@@ -352,6 +357,7 @@ public:
     ErrorBoundMode getErrorBoundMode()   const { return config_.eb_mode; }
     float          getValueBase()        const { return config_.precomputed_value_base; }
     uint8_t        getAutoTuningMode()   const { return config_.auto_tuning_mode; }
+    GInterp2DGeometry get2DGeometry()   const { return config_.geometry_2d; }
     std::array<size_t, 3> getDims()      const { return config_.dims; }
 
     void setInverse(bool inv) override { is_inverse_ = inv; }

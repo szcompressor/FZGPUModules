@@ -19,6 +19,7 @@
 struct INTERPOLATION_PARAMS;
 
 namespace fz {
+enum class GInterp2DGeometry : uint8_t;
 namespace ginterp {
 
 /**
@@ -30,11 +31,9 @@ dim3 ginterpAnchorLen3(size_t nx, size_t ny, size_t nz);
 
 /**
  * Compute the anchor grid extent for a 2-D input of size `(nx, ny)`. The 2-D
- * tile configuration mirrors the 3-D path with the z axis flattened:
- * `AnchorBlockSize{X,Y,Z}={16,16,1}` × `numAnchorBlock{X,Y,Z}={1,1,1}`. Each
- * grid block covers `16×16` input elements and emits one corner anchor, so
- * the anchor extent is `(ceil(nx/16), ceil(ny/16), 1)` — roughly 1/256 of
- * the input.
+ * anchor port is `(ceil(nx/16), ceil(ny/16), 1)` for both geometries.
+ * Fine16 fills that grid. Native64 emits one anchor per 64x64 block into a
+ * sparse subset of the same zeroed grid, matching the pinned native format.
  */
 dim3 ginterpAnchorLen2(size_t nx, size_t ny);
 
@@ -92,8 +91,8 @@ void launchGInterpInverse3D(
 /**
  * Forward (compress) launcher for 2-D input. Identical contract to the 3-D
  * variant — `data_len3.z` is assumed to be `1`. Internally instantiates the
- * spline kernels with `SPLINE_DIM=2`, `AnchorBlockSize={16,16,1}`,
- * `numAnchorBlock={1,1,1}` (3-D-like tile, z flattened).
+ * spline kernels with `SPLINE_DIM=2` and the requested Fine16 or Native64
+ * geometry (LEVEL=4/16x16 or LEVEL=6/64x64, respectively).
  *
  * Pre-conditions:
  *   - `data_len3.z == 1`
@@ -110,6 +109,7 @@ void launchGInterpForward2D(
     uint32_t d_outlier_capacity,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
+    GInterp2DGeometry geometry,
     fz::stream_t stream);
 
 /**
@@ -125,6 +125,7 @@ void launchGInterpInverse2D(
     TInput* d_out,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
+    GInterp2DGeometry geometry,
     fz::stream_t stream);
 
 /**
@@ -170,6 +171,7 @@ void launchGInterpProfileMode2(
  * must `launchGInterpResetErrors` first.
  *
  * `dim` selects the spline-kernel branch (3 → SPLINE_DIM=3, 2 → SPLINE_DIM=2).
+ * `geometry` selects the 2-D template and has no effect on 3-D.
  *
  * Outputs depend on `dim`:
  *   - 3-D, LEVEL=4, errors[0..17] (workflow=true):
@@ -177,14 +179,16 @@ void launchGInterpProfileMode2(
  *       errors[3..5]   level 2 variants (same triad)
  *       errors[6..11]  level 1 (6 variants: rev×{off,on}, use_md×{0,1}, use_nat×{0,1})
  *       errors[12..17] level 0 (same 6 variants)
- *   - 2-D, LEVEL=4, errors[6..26] (workflow=true; [0..5] are degenerate at
- *     this tile size and ignored by the host analysis):
+ *   - 2-D, LEVEL=4 fine16, errors[6..26] (workflow=true; [0..5] are
+ *     degenerate at this tile size and ignored by the host analysis):
  *       errors[6..8]    coarsest probed level (kernel level=3) — 3 variants
  *       errors[9..14]   kernel level=2 (intp_param[2]) — 6 variants
  *       errors[15..20]  kernel level=1 (intp_param[1]) — 6 variants
  *       errors[21..26]  kernel level=0 (intp_param[0]) — 6 variants
  *     The level=0 atomic offset is locally patched from `errors+15+BIY` to
  *     `errors+16+BIY` (see adapter-changes block at top of ginterp_md.inl).
+ *   - 2-D, LEVEL=6 native64 additionally uses errors[0..2] for level 5 and
+ *     errors[3..5] for level 4; all six interpolation levels are tuned.
  *
  * `sample_starts`, `sample_block_grid_sizes`, `sample_strides` are derived
  * from `data_len3` (see cuSZ-Hi `spline3.cu` `calc_start_size` for the recipe;
@@ -204,6 +208,7 @@ void launchGInterpProfileMode3(
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
     bool workflow,
+    GInterp2DGeometry geometry,
     fz::stream_t stream);
 
 /**

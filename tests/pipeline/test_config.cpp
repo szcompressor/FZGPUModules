@@ -93,6 +93,44 @@ static float round_trip_error(Pipeline& p, const std::vector<float>& h_input,
     return max_abs_error(h_input, h_recon);
 }
 
+TEST(ConfigLoad, GInterpNative64GeometryRoundTrip) {
+    constexpr size_t nx = 128, ny = 128;
+    const std::string path = write_toml("ginterp_native64", R"(
+[pipeline]
+input_size = 65536
+dims = [128, 128, 1]
+memory_strategy = "PREALLOCATE"
+
+[[stage]]
+name = "gi"
+type = "GInterp"
+input_type = "float32"
+code_type = "uint16"
+error_bound = 0.01
+error_bound_mode = "ABS"
+quant_radius = 2048
+geometry_2d = "native64"
+)");
+
+    Pipeline p(nx * ny * sizeof(float));
+    ASSERT_NO_THROW(p.loadConfig(path));
+    const std::string saved = "/tmp/fzgmod_cfg_test_ginterp_native64_saved.toml";
+    ASSERT_NO_THROW(p.saveConfig(saved));
+    auto doc = toml::parse_file(saved);
+    ASSERT_EQ(doc["stage"].as_array()->size(), 1u);
+    EXPECT_EQ(doc["stage"][0]["geometry_2d"].value<std::string>(), "native64");
+
+    std::vector<float> input(nx * ny);
+    for (size_t y = 0; y < ny; ++y)
+        for (size_t x = 0; x < nx; ++x)
+            input[x + nx * y] = std::sin(0.03f * x) * std::cos(0.04f * y);
+    CudaStream stream;
+    EXPECT_LE(round_trip_error(p, input, stream), 0.02f);
+
+    std::remove(path.c_str());
+    std::remove(saved.c_str());
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CL1: ConfigLoad/LorenzoOnly — load minimal single-stage config, round-trip
 // ─────────────────────────────────────────────────────────────────────────────

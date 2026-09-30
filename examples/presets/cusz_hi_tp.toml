@@ -25,6 +25,7 @@ quant_radius = 128                 # match cuSZ-Hi's spline default (dict_size=2
                                    # native 13.33x) at identical fidelity. Auto-tuning adds <0.5%.
 outlier_capacity = 0.2             # radius-128 pushes more residuals to outliers than a wide
                                    # radius would; 20% capacity covers sharp fields (e.g. NYX).
+geometry_2d = "fine16"             # default 2-D geometry; leave this unless running a native64 comparison preset
 
 # ── codes chain: TCMS1 -> BIT1 -> RRE1 ──
 [[stage]]

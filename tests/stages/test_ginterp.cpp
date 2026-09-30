@@ -490,6 +490,166 @@ TEST(GInterpStage, GI16_FileRoundTrip2D) {
     std::remove(path.c_str());
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GI49: 2-D geometry selection is deliberately opt-in.  Fine16 remains the
+// default so old callers and old, zero-filled reserved header bytes retain the
+// established 16-wide anchor layout.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI49_2DGeometry_DefaultAndHeaderCompatibility) {
+    using Geometry = GInterp2DGeometry;
+
+    GInterpStage<float, uint16_t> stage;
+    EXPECT_EQ(stage.get2DGeometry(), Geometry::Fine16);
+
+    stage.setDims(128, 64, 1);
+    stage.set2DGeometry(Geometry::Native64);
+    uint8_t native_header[128] = {};
+    const size_t native_written =
+        stage.serializeHeader(0, native_header, sizeof(native_header));
+
+    GInterpStage<float, uint16_t> native_restored;
+    native_restored.deserializeHeader(native_header, native_written);
+    EXPECT_EQ(native_restored.get2DGeometry(), Geometry::Native64);
+
+    // Legacy headers left the newly assigned byte at zero.  Serialize the
+    // default selection to reproduce that wire value, then deserialize into a
+    // stage that starts in the non-default mode.
+    GInterpStage<float, uint16_t> legacy_source;
+    legacy_source.setDims(128, 64, 1);
+    uint8_t legacy_header[128] = {};
+    const size_t legacy_written =
+        legacy_source.serializeHeader(0, legacy_header, sizeof(legacy_header));
+
+    GInterpStage<float, uint16_t> legacy_restored;
+    legacy_restored.set2DGeometry(Geometry::Native64);
+    legacy_restored.deserializeHeader(legacy_header, legacy_written);
+    EXPECT_EQ(legacy_restored.get2DGeometry(), Geometry::Fine16);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI50/GI51: native 64-wide 2-D anchors handle both a tile-aligned field and
+// ragged right/bottom edges.  Keep these focused on the new geometry rather
+// than duplicating the established Fine16 coverage above.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI50_Native64_RoundTrip2D_Aligned) {
+    const size_t NX = 128, NY = 128, NZ = 1;
+    const float eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+    Pipeline p(NX * NY * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    stage->set2DGeometry(GInterp2DGeometry::Native64);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Native64 aligned 2-D max_error=" << res.max_error;
+}
+
+TEST(GInterpStage, GI51_Native64_RoundTrip2D_Ragged) {
+    const size_t NX = 100, NY = 50, NZ = 1;
+    const float eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+    Pipeline p(NX * NY * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->setErrorBoundMode(ErrorBoundMode::ABS);
+    stage->set2DGeometry(GInterp2DGeometry::Native64);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 2.0)
+        << "Native64 ragged 2-D max_error=" << res.max_error;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GI52/GI53: the structural-tuning and FZM paths must retain the geometry;
+// otherwise a decoder can silently select Fine16 for a Native64 payload.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(GInterpStage, GI52_Native64_AutoTuneMode3_2D) {
+    const size_t NX = 128, NY = 128, NZ = 1;
+    const float eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+    Pipeline p(NX * NY * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->set2DGeometry(GInterp2DGeometry::Native64);
+    stage->setAutoTuning(3);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Native64 mode 3 2-D max_error=" << res.max_error;
+}
+
+TEST(GInterpStage, GI53_Native64_FileRoundTrip2D) {
+    const size_t NX = 128, NY = 128, NZ = 1;
+    const float eb = 1e-2f;
+    const std::string path = "/tmp/test_ginterp_gi53_native64.fzm";
+
+    auto h_input = make_smooth_2d(NX, NY);
+    Pipeline p(NX * NY * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->set2DGeometry(GInterp2DGeometry::Native64);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_file_round_trip<float>(p, h_input, cs.stream, path);
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Native64 2-D file round-trip max_error=" << res.max_error;
+    std::remove(path.c_str());
+}
+
+// The 2-D geometry setting must be ignored by the 3-D launch/anchor path.
+TEST(GInterpStage, GI54_Native64SelectionDoesNotChange3DDispatch) {
+    const size_t NX = 32, NY = 32, NZ = 32;
+    const float eb = 1e-2f;
+
+    auto h_input = make_smooth_3d(NX, NY, NZ);
+    Pipeline p(NX * NY * NZ * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, NZ);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->set2DGeometry(GInterp2DGeometry::Native64);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "3-D dispatch regressed when Native64 was selected";
+}
+
+TEST(GInterpStage, GI55_Native64_AutoTuneMode4_2D) {
+    const size_t NX = 128, NY = 128;
+    const float eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+    Pipeline p(NX * NY * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setDims(NX, NY, 1);
+    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+    stage->setErrorBound(eb);
+    stage->set2DGeometry(GInterp2DGeometry::Native64);
+    stage->setAutoTuning(4);
+    p.finalize();
+
+    CudaStream cs;
+    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
+    EXPECT_LE(res.max_error, eb * 1.5)
+        << "Native64 mode 4 2-D max_error=" << res.max_error;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Comprehensive feature coverage (GI17–GI29)
 // ═════════════════════════════════════════════════════════════════════════════

@@ -37,9 +37,8 @@ only the *original input values* of its neighbours. The quantizer is a clean
 post-processing step that can be applied (or not) independently.
 
 G-Interp does not work that way. The forward pass is an interpolation
-**pyramid**: level 4 anchors are exact, then level 3 samples are predicted
-from level-4 anchors, level 2 from the *quantized-and-reconstructed* level-3
-samples, level 1 from the reconstructed level-2 samples, and so on. Each
+**pyramid**: coarsest-level anchors are exact, then each finer level is
+predicted from *quantized-and-reconstructed* coarser-level samples. Each
 finer level depends on the **lossy reconstruction** of every coarser level —
 exactly the reconstruction the decoder will see — because that's the only
 way the encoder can guarantee its error bound matches what the decoder
@@ -63,7 +62,7 @@ to the algorithm — G-Interp ships only as the fused stage.
 
 | Parameter | Constraint |
 |---|---|
-| `TInput` | `float` or `double`. Both run the **same** dynamic-shared-memory kernels — there is no separate float/double code path. The 3-D `double` path needs a Volta-or-newer GPU (opt-in dynamic shared memory ≥ ~77 KB); see "Precision and shared memory" below. |
+| `TInput` | `float` or `double`. Both run the **same** dynamic-shared-memory kernels — there is no separate float/double code path. The 3-D `double` path needs a Volta-or-newer GPU (opt-in dynamic shared memory ≥ ~77 KB); 2-D `native64` needs opt-in shared memory for `double` too (≥ 67,600 B). See "Precision and shared memory" below. |
 | `TCode`  | `uint8_t`, `uint16_t`, or `uint32_t` |
 
 ## Available instantiations
@@ -88,17 +87,23 @@ the launcher), unconditionally — this is **not** a double-only branch:
   memory is used. `float` is ~38.5 KB — under the cap, but it goes through the
   same dynamic-shmem path.
 - The launcher only calls `cudaFuncSetAttribute(...,
-  cudaFuncAttributeMaxDynamicSharedMemorySize, …)` when the tile exceeds 48 KB,
-  so the opt-in fires **only for 3-D double**. `float` (and all 2-D) use the
-  default dynamic region and never touch the attribute.
+  cudaFuncAttributeMaxDynamicSharedMemorySize, …)` when the tile exceeds 48 KB.
+  This includes 3-D `double` and 2-D `native64` `double`; `float` and 2-D
+  `fine16` use the default dynamic region.
 - `float` throughput is expected to be unchanged versus the previous
   static-`__shared__` version: same shared-memory size, same occupancy, same
   in-kernel access pattern — only the tile base address is now a launch-time
   value.
 - The 3-D `double` path therefore requires a GPU whose opt-in max dynamic shared
-  memory is ≥ ~77 KB (Volta and newer). On older GPUs capped at 48 KB the
-  `cudaFuncSetAttribute` call fails and the launch surfaces the error. 2-D
-  `double` and all `float` configs are unaffected.
+  memory is ≥ ~77 KB; 2-D `native64` `double` requires ≥ 67,600 B. On GPUs
+  below those limits, the launcher reports an error. The 2-D `fine16` path
+  and all `float` configurations are unaffected.
+- The default 2-D `fine16` tile is `(16+1)²`, so it needs only 2,312 B for
+  `float` or 4,624 B for `double`. The 2-D `native64` tile is `(64+1)²`, so it
+  needs 33,800 B for `float` (within the default 48 KB limit) or 67,600 B for
+  `double` (requires a GPU with an opt-in dynamic-shared-memory ceiling at
+  least that large). In particular, 64 KiB-only devices cannot launch native64
+  `double`.
 - **Auto-tuning (modes 1-4) is float-only.** The cuSZ-Hi profiling kernels
   write their metrics into a data-typed buffer while the host analysis is
   `float`; `double` inputs with a profiling mode set fall back to the
@@ -117,6 +122,28 @@ the launcher), unconditionally — this is **not** a double-only branch:
 | `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (PREL); set before graph capture |
 | `setAutoTuning(mode)` | `uint8_t` | `0` | Enable `INTERPOLATION_PARAMS` auto-tuning — see "Auto-tuning" below |
 | `setManualAlphaBeta(α, β)` | `double, double` | `0, 0` | Mode 5 only. Either value `0` falls back to the cuSZ-Hi piecewise-linear α schedule / `β = 4.0` default. Both `> 0` is required for graph-safe mode 5. |
+| `set2DGeometry(g)` / `geometry_2d` | `GInterp2DGeometry` / string | `fine16` | 2-D kernel geometry: `fine16` (default) or `native64` (native cuSZ-Hi compatibility); ignored for 3-D. |
+
+### 2-D geometry
+
+`fine16` is the default and keeps the established FZGM 2-D configuration:
+`LEVEL=4` with one 16×16 tile per grid block. Select `native64` only when a
+2-D native cuSZ-Hi-aligned comparison needs it; it instantiates the active
+native geometry, `LEVEL=6` with one 64×64 tile per grid block.
+
+The native layout retains the upstream sparse anchor convention: its anchor
+buffer is allocated and zeroed at `N / 16` elements, while only the native
+64×64 anchor positions are written. This is deliberately not interchangeable
+with the dense-looking fine16 anchor layout. Geometry is carried in the stage
+configuration/header, so an archive is decoded with the geometry it was
+written with.
+
+For TOML, omit `geometry_2d` (or write `"fine16"`) for the default; opt in
+explicitly for a native-aligned 2-D run:
+
+```toml
+geometry_2d = "native64"  # 2-D only; LEVEL=6, 64x64
+```
 
 ### Radius auto-tune
 
@@ -172,7 +199,7 @@ writes 6 errors covering forward/reverse × {cubic, natural} on a tiny
 shared-mem sample. Picks one global `use_natural` (sum-based vote) and one
 global `reverse` (margin-based vote: 3× in 3-D, 2× in 2-D) and replicates both
 across all levels, clearing `use_md`. Cheaper than mode 3 by ~10× and works on
-both 2-D and 3-D inputs (unlike modes 1/3/4). Good middle ground when mode 1's
+both 2-D and 3-D inputs (unlike mode 1). Good middle ground when mode 1's
 single decision feels too coarse but mode 3's cost is too high.
 
 **Mode 4 — alpha/beta sweep.** Adds a second pass on top of mode 3 that probes
@@ -224,7 +251,7 @@ re-tuning on the inverse path.
 
 The error bound `eb` is a **target**, not a hard guarantee. The multi-level
 interpolation tree predicts finer-level values from already-lossy coarser-level
-reconstructions, so prediction errors accumulate across the four levels. In
+reconstructions, so prediction errors can accumulate across levels. In
 practice the maximum element-wise error is:
 
 - typically `≤ 1.1 × eb` on smooth data;
@@ -236,9 +263,9 @@ Other limitations:
 
 - **2-D and 3-D only.** `setDims()` throws for 1-D input. 2-D inputs set
   `dims[2] = 1` and pick the 2-D launcher automatically.
-- Best results when each `dim` is a multiple of 16 (the anchor tile size,
-  used by both the 3-D and 2-D paths). Ragged dims still work but edge
-  voxels see slightly worse prediction.
+- Best results when each 3-D `dim` is a multiple of 16. For 2-D, use multiples
+  of 16 with `fine16` (the default) or multiples of 64 with `native64`.
+  Ragged dims still work but edge voxels see slightly worse prediction.
 - **Profiling auto-tune mode 1 is 3-D only.** On 2-D inputs it logs a warning
   and falls through to the deterministic baseline. Modes 2, 3, 4, 5 all work
   on both 2-D and 3-D inputs.
@@ -247,14 +274,11 @@ Other limitations:
   pre-set, and (for mode 5) `manual_alpha > 0`. Modes 1/2/3/4 each end with a
   D2H + `cudaStreamSynchronize` of the error array, so those remain
   graph-incompatible.
-- **Fixed LEVEL = 4 and anchor tile size 16 on every axis** for both
-  3-D (16×16×16) and 2-D (16×16) — these stay aligned with cuSZ-Hi's hardcoded
-  choices for the 3-D path. The 2-D path uses the same `LEVEL=4 / 16×16` tile
-  rather than upstream cuSZ-Hi's `LEVEL=6 / 8×8 × 4`-numAnchorBlocks default
-  (which has a known `c_gather_anchor` off-by-numAnchorBlock bug). Varying
-  LEVEL would explode templated kernel instantiations and require encoding
-  the choice in the FZM header. No planned work here unless a workload
-  demonstrates a CR gap.
+- **3-D is fixed at `LEVEL=4` with 16×16×16 tiles.** 2-D defaults to
+  `fine16` (`LEVEL=4`, 16×16), while the `native64` opt-in uses the active
+  native cuSZ-Hi `LEVEL=6`, 64×64 instantiation and its sparse, zeroed `N/16`
+  anchor buffer. The geometry is serialized so both 2-D layouts remain
+  decodable.
 - **2-D auto-tune mode 3** uses a locally patched offset in
   `pa_spline_infprecis_data`: upstream cuSZ-Hi writes the SPLINE_DIM==2
   level==0 atomic at `errors+15+BIY` (BIY=5..10 → slots 20..25), which
@@ -332,7 +356,8 @@ error_bound_mode = "ABS"    # "ABS", "NOA", or "PREL"
 quant_radius = 0            # 0 = auto-tune (default); positive = manual override
 outlier_capacity = 0.10
 auto_tuning  = 0            # 0=off, 1=cheap, 3=full, 4=full+a/b sweep, 5=manual
-                            # (cuSZ-Hi's mode 2 is not wired; 1/3/4 are 3-D only)
+                            # (mode 1 is 3-D only; modes 2--4 also support 2-D)
+geometry_2d = "fine16"      # default 2-D geometry; use "native64" only for native-aligned 2-D runs
 ```
 
 ---

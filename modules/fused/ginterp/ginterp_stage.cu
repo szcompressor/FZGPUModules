@@ -230,8 +230,9 @@ static void runAutoTuneMode2_3D(
 //
 // cuSZ-Hi spline3.cu lines 149-170 (auto_tuning==2, l3.z == 1). Slightly
 // different decision rule: nat is summed over 4 slots (not 6), the reverse
-// margin is 2× (not 3×), and the flags are written to all 6 level slots
-// (LEVEL=6 in the 2-D path vs LEVEL=4 in 3-D).
+// margin is 2× (not 3×), and the flags are written to all 6 parameter slots.
+// Fine16 consumes four levels and native64 consumes six; both use the six
+// parameter slots in INTERPOLATION_PARAMS.
 template <typename TInput>
 static void runAutoTuneMode2_2D(
     const TInput* d_data,
@@ -309,7 +310,7 @@ static void runAutoTuneMode3(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/true, stream);
+        d_errors, /*workflow=*/true, GInterp2DGeometry::Fine16, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 18 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -405,7 +406,7 @@ static void runAutoTuneMode4(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/false, stream);
+        d_errors, /*workflow=*/false, GInterp2DGeometry::Fine16, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -454,7 +455,7 @@ static void runAutoTuneMode4(
 //   use_natural = ((best_idx + 3) % 6) > 2
 //   use_md      = ((best_idx + 3) % 6) == 2 or == 5
 //   reverse     = (best_idx + 3) % 3
-// `S_STRIDE = 20 * AnchorBlockSizeX = 320` matches cuSZ-Hi line 174.
+// `S_STRIDE = 20 * AnchorBlockSizeX`: 320 for fine16, 1280 for native64.
 template <typename TInput, typename TCode>
 static void runAutoTuneMode3_2D(
     const TInput* d_data,
@@ -464,12 +465,13 @@ static void runAutoTuneMode3_2D(
     float* d_errors,
     float* h_errors,
     cudaStream_t stream,
+    GInterp2DGeometry geometry,
     uint8_t (&out_use_md)[6],
     uint8_t (&out_use_natural)[6],
     uint8_t (&out_reverse)[6])
 {
-    constexpr int kBlock16  = 16;
-    const int     S_STRIDE  = 20 * kBlock16;
+    const int block_size = geometry == GInterp2DGeometry::Native64 ? 64 : 16;
+    const int S_STRIDE = 20 * block_size;
 
     auto calc_start_size = [&](int dim, int& s_start, int& s_size, int block_sz) {
         int mid = dim / 2;
@@ -482,10 +484,10 @@ static void runAutoTuneMode3_2D(
     };
     int sx_start, sy_start, sz_start;
     int sx_size,  sy_size,  sz_size;
-    calc_start_size((int)data_len3.x, sx_start, sx_size, kBlock16);
-    calc_start_size((int)data_len3.y, sy_start, sy_size, kBlock16);
+    calc_start_size((int)data_len3.x, sx_start, sx_size, block_size);
+    calc_start_size((int)data_len3.y, sy_start, sy_size, block_size);
     // z fixed at 1 for 2-D — calc_start_size with size=1 produces s_start=0, s_size=1.
-    calc_start_size((int)data_len3.z, sz_start, sz_size, kBlock16);
+    calc_start_size((int)data_len3.z, sz_start, sz_size, block_size);
 
     fz::ginterp::launchGInterpResetErrors(d_errors, stream);
     fz::ginterp::launchGInterpProfileMode3<TInput>(
@@ -494,13 +496,23 @@ static void runAutoTuneMode3_2D(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/true, stream);
+        d_errors, /*workflow=*/true, geometry, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 27 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    // Level 3 (kernel coarsest, errors[6..8]): 3 variants — rev off, rev on, use_md.
+    if (geometry == GInterp2DGeometry::Native64) {
+        for (int level = 5; level >= 4; --level) {
+            const int base = (5 - level) * 3;
+            const bool reverse = h_errors[base + 1] < h_errors[base];
+            const float best = reverse ? h_errors[base + 1] : h_errors[base];
+            out_reverse[level] = reverse ? 1 : 0;
+            out_use_md[level] = h_errors[base + 2] < best ? 1 : 0;
+        }
+    }
+
+    // Level 3 (kernel coarsest for fine16, errors[6..8]): 3 variants.
     float best;
     if (h_errors[6] > h_errors[7]) { best = h_errors[7]; out_reverse[3] = 1; }
     else                            { best = h_errors[6]; out_reverse[3] = 0; }
@@ -544,11 +556,12 @@ static void runAutoTuneMode4_2D(
     float* d_errors,
     float* h_errors,
     cudaStream_t stream,
+    GInterp2DGeometry geometry,
     double& out_alpha,
     double& out_beta)
 {
-    constexpr int kBlock16 = 16;
-    const int     S_STRIDE = 20 * kBlock16;
+    const int block_size = geometry == GInterp2DGeometry::Native64 ? 64 : 16;
+    const int S_STRIDE = 20 * block_size;
 
     auto calc_start_size = [&](int dim, int& s_start, int& s_size, int block_sz) {
         int mid = dim / 2;
@@ -561,9 +574,9 @@ static void runAutoTuneMode4_2D(
     };
     int sx_start, sy_start, sz_start;
     int sx_size,  sy_size,  sz_size;
-    calc_start_size((int)data_len3.x, sx_start, sx_size, kBlock16);
-    calc_start_size((int)data_len3.y, sy_start, sy_size, kBlock16);
-    calc_start_size((int)data_len3.z, sz_start, sz_size, kBlock16);
+    calc_start_size((int)data_len3.x, sx_start, sx_size, block_size);
+    calc_start_size((int)data_len3.y, sy_start, sy_size, block_size);
+    calc_start_size((int)data_len3.z, sz_start, sz_size, block_size);
 
     fz::ginterp::launchGInterpResetErrors(d_errors, stream);
     fz::ginterp::launchGInterpProfileMode3<TInput>(
@@ -572,7 +585,7 @@ static void runAutoTuneMode4_2D(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/false, stream);
+        d_errors, /*workflow=*/false, geometry, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -640,14 +653,11 @@ std::vector<size_t> GInterpStage<TInput, TCode>::estimateOutputSizes(
     size_t N           = input_bytes / sizeof(TInput);
     size_t max_outliers = getMaxOutlierCount(N);
 
-    // Anchor count from cached dims (set by setDims). If setDims wasn't
-    // called (e.g. estimate is being called before finalize from a pre-finalize
-    // path), fall back to a conservative 1/64 estimate (worst case for the
-    // smallest legal volume: nx=ny=nz=2 → anchor 1×1×1, but we use a
-    // generous upper bound here since the DAG only sizes once).
+    // Anchor count from cached dims (set by setDims). Native64 also reserves
+    // the /16 plane because the pinned native representation is sparse there.
     size_t anchor_N = (anchor_dims_[0] && anchor_dims_[1] && anchor_dims_[2])
         ? (anchor_dims_[0] * anchor_dims_[1] * anchor_dims_[2])
-        : ((N + 4095) / 4096);  // ≤ 1/4096 of N for any valid setDims()
+        : N;  // Conservative until setDims() provides the actual geometry.
 
     return {
         N           * sizeof(TCode),    // codes
@@ -743,7 +753,7 @@ void GInterpStage<TInput, TCode>::execute(
                 d_outlier_tmp,
                 static_cast<TInput*>(outputs[0]),
                 eb_r, ebx2, static_cast<int>(config_.quant_radius),
-                intp_param,
+                intp_param, config_.geometry_2d,
                 stream);
         }
         FZ_CUDA_CHECK(cudaGetLastError());
@@ -997,6 +1007,7 @@ void GInterpStage<TInput, TCode>::execute(
                     static_cast<const TInput*>(inputs[0]), data_len3,
                     eb_r, ebx2, profile_param,
                     d_profiling_errors_, h_profiling_errors_, stream,
+                    config_.geometry_2d,
                     resolved_use_md_, resolved_use_natural_, resolved_reverse_);
             }
             if (config_.auto_tuning_mode == 4) {
@@ -1018,6 +1029,7 @@ void GInterpStage<TInput, TCode>::execute(
                         static_cast<const TInput*>(inputs[0]), data_len3,
                         eb_r, ebx2, sweep_param,
                         d_profiling_errors_, h_profiling_errors_, stream,
+                        config_.geometry_2d,
                         resolved_alpha_, resolved_beta_);
                 }
             }
@@ -1066,6 +1078,13 @@ void GInterpStage<TInput, TCode>::execute(
     // elements, so they don't hit this.)
     FZ_CUDA_CHECK(cudaMemsetAsync(outputs[0], 0, N * sizeof(TCode), stream));
 
+    // Native cuSZ-Hi allocates a /16 anchor plane but its 64x64 kernel writes
+    // only the /64 subset. Its remaining entries are zero in the encoded port.
+    if (dim == 2 && config_.geometry_2d == GInterp2DGeometry::Native64) {
+        const size_t anchor_N = anchor_dims_[0] * anchor_dims_[1];
+        FZ_CUDA_CHECK(cudaMemsetAsync(outputs[1], 0, anchor_N * sizeof(TInput), stream));
+    }
+
     INTERPOLATION_PARAMS intp_param = buildIntpParam();
     if (dim == 3) {
         ginterp::launchGInterpForward3D<TInput, TCode>(
@@ -1089,7 +1108,7 @@ void GInterpStage<TInput, TCode>::execute(
             d_outlier_count_scratch_,
             static_cast<uint32_t>(getMaxOutlierCount(num_elements_)),
             eb_r_d, ebx2_d, static_cast<int>(config_.quant_radius),
-            intp_param,
+            intp_param, config_.geometry_2d,
             stream);
     }
     FZ_CUDA_CHECK(cudaGetLastError());
@@ -1226,6 +1245,7 @@ size_t GInterpStage<TInput, TCode>::serializeHeader(
         c.intp_reverse[i]     = resolved_reverse_[i];
     }
     c.auto_tuning_mode = config_.auto_tuning_mode;
+    c.geometry_2d = static_cast<uint8_t>(config_.geometry_2d);
     std::memcpy(buf, &c, sizeof(c));
     return sizeof(c);
 }
@@ -1241,6 +1261,9 @@ void GInterpStage<TInput, TCode>::deserializeHeader(
     GInterpConfig c;
     std::memset(&c, 0, sizeof(c));  // zero alignment padding for a reproducible serialized header
     std::memcpy(&c, buf, sizeof(c));
+
+    if (c.geometry_2d > static_cast<uint8_t>(GInterp2DGeometry::Native64))
+        throw std::runtime_error("GInterpStage::deserializeHeader: invalid 2-D geometry");
 
     computed_abs_eb_       = static_cast<TInput>(c.error_bound);
     config_.error_bound    = c.user_eb;
@@ -1276,6 +1299,7 @@ void GInterpStage<TInput, TCode>::deserializeHeader(
         resolved_reverse_[i]     = c.intp_reverse[i];
     }
     config_.auto_tuning_mode = c.auto_tuning_mode;
+    config_.geometry_2d = static_cast<GInterp2DGeometry>(c.geometry_2d);
 }
 
 // ─── Explicit instantiations ─────────────────────────────────────────────────

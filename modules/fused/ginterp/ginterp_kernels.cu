@@ -7,9 +7,10 @@
  *        cuSZ-Hi profiling kernels used by phase-2 auto-tuning, and the
  *        small outlier-scatter helper used on the inverse path.
  *
- * The 3D-only MVP wires the LEVEL=4, AnchorBlockSize=16³, numAnchorBlock=1³
- * configuration that matches cuSZ-Hi's `if (l3.z != 1)` branch in upstream
- * `spline3.cu` line 530. `INTERPOLATION_PARAMS` is passed by reference from
+ * The 3-D path wires LEVEL=4, AnchorBlockSize=16³, numAnchorBlock=1³;
+ * 2-D supports both the fine16 default and the native cuSZ-Hi LEVEL=6,
+ * AnchorBlockSize=64², numAnchorBlock=1² geometry. `INTERPOLATION_PARAMS` is
+ * passed by reference from
  * the host wrapper — phase 1 callers pass a default-constructed struct
  * (deterministic baseline: alpha=1.75, beta=4.0); phase-2 callers pass the
  * auto-tuned result of `c_spline_profiling_data` (mode 1) or
@@ -17,10 +18,11 @@
  *
  * Mode-2 profiling (`c_spline_profiling_data_2` — `auto_tuning==2`), mode-4
  * (alpha/beta sweep inside `pa_spline_infprecis_data` with workflow=false),
- * and the 2-D path are all wired here.
+ * and both 2-D geometries are wired here.
  */
 
 #include "fused/ginterp/ginterp_kernels.h"
+#include "fused/ginterp/ginterp_stage.h"
 #include "fused/ginterp/ginterp_md.inl"
 
 #include "backend/api.h"
@@ -46,15 +48,14 @@ static constexpr int kNumAnchorBlockY3    = 1;
 static constexpr int kNumAnchorBlockZ3    = 1;
 
 // 2-D path: structurally mirrors the 3-D layout (anchor tile 16×16, one anchor
-// per grid block) with the z axis flattened. The upstream cuSZ-Hi default of
-// `AnchorBlockSize={8,8,1}, numAnchorBlock={4,1,1}` would make
-// `c_gather_anchor` write 4× too few anchors per block (it emits one anchor
-// per grid block regardless of numAnchorBlockX; see the
-// `// 2d bug may be here!` comment in ginterp_md.inl c_gather_anchor). Our
-// {16,16,1}/{1,1,1} variant sidesteps that — every grid block gathers exactly
-// the corner anchor that `x_reset_scratch_data` will look for in the inverse
-// path, matching the 3-D contract.
+// per grid block) with the z axis flattened. This is finer grained than the
+// pinned cuSZ-Hi path, which instantiates LEVEL=6 with a 64×64 tile and
+// numAnchorBlock={1,1,1}. The templates can support that geometry, but selecting
+// it also requires matching anchor sizing, auto-tuning analysis, and serialized
+// geometry metadata so existing FZM archives remain decodable.
 static constexpr int kSplineDim2          = 2;
+static constexpr int kNativeLevel2        = 6;
+static constexpr int kNativeBlockSize2    = 64;
 static constexpr int kAnchorBlockSizeX2   = 16;
 static constexpr int kAnchorBlockSizeY2   = 16;
 static constexpr int kAnchorBlockSizeZ2   = 1;
@@ -384,6 +385,7 @@ void launchGInterpProfileMode3(
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
     bool workflow,                // true: mode-3 (structural); false: mode-4 (a/b)
+    GInterp2DGeometry geometry,
     cudaStream_t stream)
 {
     // grid.y: workflow=true mode 3 — 9 for 3-D (cuSZ-Hi spline3.cu line 217),
@@ -415,6 +417,16 @@ void launchGInterpProfileMode3(
                 eb_r, ebx2, intp_param,
                 d_errors,
                 workflow);
+    } else if (geometry == GInterp2DGeometry::Native64) {
+        fz::ginterp::pa_spline_infprecis_data<
+            TInput*, float,
+            kNativeLevel2, kSplineDim2,
+            kNativeBlockSize2, kNativeBlockSize2, 1,
+            1, 1, 1, kLinearBlockSize>
+            <<<grid, block, 0, stream>>>(
+                const_cast<TInput*>(d_data), data_len3, data_st3,
+                sample_starts, sample_block_grid_sizes, sample_strides,
+                eb_r, ebx2, intp_param, d_errors, workflow);
     } else {
         // 2-D: LEVEL=4, AnchorBlockSize=16×16×1, numAnchorBlock=1×1×1.
         // Same LEVEL as 3-D so we can reuse the 16×16 anchor tile choice
@@ -449,13 +461,38 @@ void launchGInterpForward2D(
     uint32_t d_outlier_capacity,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
+    GInterp2DGeometry geometry,
     cudaStream_t stream)
 {
     auto div_up = [](unsigned int a, unsigned int b) -> unsigned int {
         return (a + b - 1) / b;
     };
 
-    // 2-D grid: each block covers AnchorBlockSize*numAnchorBlock = 32×8 input
+    if (geometry == GInterp2DGeometry::Native64) {
+        dim3 grid_dim(div_up(data_len3.x, kNativeBlockSize2),
+                      div_up(data_len3.y, kNativeBlockSize2), 1u);
+        dim3 data_st3 = stride3FromLen3(data_len3);
+        dim3 anchor_st3 = stride3FromLen3(anchor_len3);
+        auto kernel = &fz::ginterp::c_spline_infprecis_data<
+            TInput*, TCode*, TInput,
+            kNativeLevel2, kSplineDim2,
+            kNativeBlockSize2, kNativeBlockSize2, 1,
+            1, 1, 1, kLinearBlockSize>;
+        const size_t smem = ginterpSplineSmemBytes<TInput>(
+            kSplineDim2, kNativeBlockSize2, kNativeBlockSize2, 1, 1, 1, 1);
+        ginterpRaiseSmemIfNeeded(kernel, smem);
+        kernel<<<grid_dim, dim3(kLinearBlockSize, 1, 1), smem, stream>>>(
+            const_cast<TInput*>(d_data), data_len3, data_st3,
+            d_ectrl, data_len3, data_st3,
+            d_anchor, anchor_st3,
+            d_outlier_vals, d_outlier_idxs, d_outlier_count_scratch,
+            d_outlier_capacity,
+            static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
+            intp_param);
+        return;
+    }
+
+    // 2-D grid: each block covers AnchorBlockSize*numAnchorBlock = 16×16 input
     // elements; z dimension is exactly 1.
     dim3 grid_dim(
         div_up(data_len3.x, kAnchorBlockSizeX2 * kNumAnchorBlockX2),
@@ -498,11 +535,34 @@ void launchGInterpInverse2D(
     TInput* d_out,
     double eb_r, double ebx2, int radius,
     const INTERPOLATION_PARAMS& intp_param,
+    GInterp2DGeometry geometry,
     cudaStream_t stream)
 {
     auto div_up = [](unsigned int a, unsigned int b) -> unsigned int {
         return (a + b - 1) / b;
     };
+
+    if (geometry == GInterp2DGeometry::Native64) {
+        dim3 grid_dim(div_up(data_len3.x, kNativeBlockSize2),
+                      div_up(data_len3.y, kNativeBlockSize2), 1u);
+        dim3 data_st3 = stride3FromLen3(data_len3);
+        dim3 anchor_st3 = stride3FromLen3(anchor_len3);
+        auto kernel = &fz::ginterp::x_spline_infprecis_data<
+            TCode*, TInput*, TInput,
+            kNativeLevel2, kSplineDim2,
+            kNativeBlockSize2, kNativeBlockSize2, 1,
+            1, 1, 1, kLinearBlockSize>;
+        const size_t smem = ginterpSplineSmemBytes<TInput>(
+            kSplineDim2, kNativeBlockSize2, kNativeBlockSize2, 1, 1, 1, 1);
+        ginterpRaiseSmemIfNeeded(kernel, smem);
+        kernel<<<grid_dim, dim3(kLinearBlockSize, 1, 1), smem, stream>>>(
+            const_cast<TCode*>(d_ectrl), data_len3, data_st3,
+            const_cast<TInput*>(d_anchor), anchor_len3, anchor_st3,
+            d_out, data_len3, data_st3, d_outlier_tmp,
+            static_cast<TInput>(eb_r), static_cast<TInput>(ebx2), radius,
+            intp_param);
+        return;
+    }
 
     dim3 grid_dim(
         div_up(data_len3.x, kAnchorBlockSizeX2 * kNumAnchorBlockX2),
@@ -544,7 +604,7 @@ void launchGInterpInverse2D(
     template void launchGInterpForward2D<TIN, TCODE>(                     \
         const TIN*, dim3, TCODE*, TIN*, dim3,                            \
         TIN*, uint32_t*, uint32_t*, uint32_t, double, double, int,       \
-        const INTERPOLATION_PARAMS&, cudaStream_t);
+        const INTERPOLATION_PARAMS&, GInterp2DGeometry, cudaStream_t);
 
 #define FZ_GINTERP_INSTANTIATE_INVERSE(TIN, TCODE)                       \
     template void launchGInterpInverse3D<TIN, TCODE>(                     \
@@ -552,7 +612,8 @@ void launchGInterpInverse2D(
         double, double, int, const INTERPOLATION_PARAMS&, cudaStream_t); \
     template void launchGInterpInverse2D<TIN, TCODE>(                     \
         const TCODE*, dim3, const TIN*, dim3, TIN*, TIN*,                \
-        double, double, int, const INTERPOLATION_PARAMS&, cudaStream_t);
+        double, double, int, const INTERPOLATION_PARAMS&,                 \
+        GInterp2DGeometry, cudaStream_t);
 
 // Core compress/decompress + outlier scatter — instantiated for float AND
 // double. These are the data path.
@@ -579,7 +640,7 @@ void launchGInterpInverse2D(
         const TIN*, dim3, int, float*, cudaStream_t);                    \
     template void launchGInterpProfileMode3<TIN>(                        \
         const TIN*, dim3, int, dim3, dim3, dim3, float, float,          \
-        const INTERPOLATION_PARAMS&, float*, bool, cudaStream_t);
+        const INTERPOLATION_PARAMS&, float*, bool, GInterp2DGeometry, cudaStream_t);
 
 FZ_GINTERP_INSTANTIATE_CORE(float)
 FZ_GINTERP_INSTANTIATE_CORE(double)

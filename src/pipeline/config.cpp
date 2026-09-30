@@ -133,6 +133,14 @@ static std::string ebModeToString(ErrorBoundMode m) {
     }
 }
 
+static GInterp2DGeometry ginterp2DGeometryFromString(const std::string& s) {
+    if (s == "fine16")   return GInterp2DGeometry::Fine16;
+    if (s == "native64") return GInterp2DGeometry::Native64;
+    throw std::runtime_error(
+        "loadConfig: unknown GInterp geometry_2d \"" + s +
+        "\" (expected fine16|native64)");
+}
+
 static std::string tomlEscape(const std::string& s) {
     std::string out;
     out.reserve(s.size());
@@ -1177,6 +1185,8 @@ static Stage* addGInterpStage(Pipeline& p, const toml::table& t) {
         g->setQuantRadius(static_cast<int>(optInt(t, "quant_radius", 0)));
         g->setOutlierCapacity(static_cast<float>(optDbl(t, "outlier_capacity", 0.10)));
         g->setAutoTuning(static_cast<uint8_t>(optInt(t, "auto_tuning", 0)));
+        g->set2DGeometry(ginterp2DGeometryFromString(
+            optStr(t, "geometry_2d", "fine16")));
         s = g;
     };
     auto dispatch = [&](auto input_tag) {
@@ -1206,12 +1216,14 @@ static void saveGInterpStage(Stage* s, std::ostringstream& out) {
     ErrorBoundMode ebm = ErrorBoundMode::ABS;
     int qr = 0;
     uint8_t at = 0;
+    GInterp2DGeometry geometry_2d = GInterp2DGeometry::Fine16;
     auto read = [&](auto* g) {
         eb  = g->getErrorBound();
         ebm = g->getErrorBoundMode();
         qr  = g->getQuantRadius();
         cap = g->getOutlierCapacity();
         at  = g->getAutoTuningMode();
+        geometry_2d = g->get2DGeometry();
     };
     auto dispatch = [&](auto input_tag) {
         using TInput = decltype(input_tag);
@@ -1228,6 +1240,8 @@ static void saveGInterpStage(Stage* s, std::ostringstream& out) {
     // Omit auto_tuning when 0 (the default) to keep round-trip configs minimal.
     if (at != 0)
         out << "auto_tuning = " << static_cast<int>(at) << "\n";
+    if (geometry_2d == GInterp2DGeometry::Native64)
+        out << "geometry_2d = \"native64\"\n";
 }
 
 static void saveHuffmanStage(Stage* s, std::ostringstream& out) {
