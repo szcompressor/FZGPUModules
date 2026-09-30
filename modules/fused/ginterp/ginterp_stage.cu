@@ -89,6 +89,7 @@ GInterpStage<TInput, TCode>::~GInterpStage()
         if (d_outlier_count_scratch_) persistent_pool_->freePersistentDevice(d_outlier_count_scratch_);
     }
     d_profiling_errors_      = nullptr;
+    d_profiling_accum_       = nullptr;
     h_profiling_errors_      = nullptr;
     d_outlier_count_scratch_ = nullptr;
     persistent_pool_         = nullptr;
@@ -127,9 +128,16 @@ void GInterpStage<TInput, TCode>::initProfilingScratch(MemoryPool* pool)
             "GInterpStage: auto-tuning requires a MemoryPool");
     }
     persistent_pool_    = pool;
+    static_assert(kProfilingErrCount == static_cast<size_t>(fz::ginterp::kGInterpProfilingErrCount),
+                  "profiling scratch size must match the kernel launcher");
+    static_assert((kProfilingErrCount * sizeof(float)) % alignof(ginterp_att_err_t) == 0,
+                  "accumulators must be aligned after the float errors");
     d_profiling_errors_ = static_cast<float*>(
         pool->allocatePersistentDevice(
-            kProfilingErrCount * sizeof(float), "ginterp_profiling_d"));
+            kProfilingErrCount * (sizeof(float) + sizeof(ginterp_att_err_t)),
+            "ginterp_profiling_d"));
+    d_profiling_accum_ = reinterpret_cast<ginterp_att_err_t*>(
+        d_profiling_errors_ + kProfilingErrCount);
     h_profiling_errors_ = static_cast<float*>(
         pool->allocatePersistentPinned(
             kProfilingErrCount * sizeof(float), "ginterp_profiling_h"));
@@ -157,6 +165,14 @@ static double pickAlphaFromRelEb(double rel_eb)
     if (rel_eb >= e4) return a4 + (a3 - a4) * (rel_eb - e4) / (e3 - e4);
     if (rel_eb >= e5) return a5 + (a4 - a5) * (rel_eb - e5) / (e4 - e5);
     return a5;
+}
+
+// The mode-3/4 fixed-point accumulators sit right after the float errors in
+// the same device allocation (see initProfilingScratch).
+static ginterp_att_err_t* profilingAccum(float* d_errors)
+{
+    return reinterpret_cast<ginterp_att_err_t*>(
+        d_errors + fz::ginterp::kGInterpProfilingErrCount);
 }
 
 // ─── runAutoTuneMode1: cheap reverse-only ────────────────────────────────────
@@ -310,7 +326,7 @@ static void runAutoTuneMode3(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/true, GInterp2DGeometry::Fine16, stream);
+        d_errors, profilingAccum(d_errors), /*workflow=*/true, GInterp2DGeometry::Fine16, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 18 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -406,7 +422,7 @@ static void runAutoTuneMode4(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/false, GInterp2DGeometry::Fine16, stream);
+        d_errors, profilingAccum(d_errors), /*workflow=*/false, GInterp2DGeometry::Fine16, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
@@ -496,12 +512,19 @@ static void runAutoTuneMode3_2D(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/true, geometry, stream);
+        d_errors, profilingAccum(d_errors), /*workflow=*/true, geometry, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 27 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));
     FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
+    FZ_LOG(DEBUG, "GInterp mode-3 2-D errors: %.9g %.9g %.9g | %.9g %.9g %.9g | %.9g %.9g %.9g | "
+        "%.9g %.9g %.9g %.9g %.9g %.9g | %.9g %.9g %.9g %.9g %.9g %.9g | %.9g %.9g %.9g %.9g %.9g %.9g",
+        h_errors[0], h_errors[1], h_errors[2], h_errors[3], h_errors[4], h_errors[5],
+        h_errors[6], h_errors[7], h_errors[8], h_errors[9], h_errors[10], h_errors[11],
+        h_errors[12], h_errors[13], h_errors[14], h_errors[15], h_errors[16], h_errors[17],
+        h_errors[18], h_errors[19], h_errors[20], h_errors[21], h_errors[22], h_errors[23],
+        h_errors[24], h_errors[25], h_errors[26]);
     if (geometry == GInterp2DGeometry::Native64) {
         for (int level = 5; level >= 4; --level) {
             const int base = (5 - level) * 3;
@@ -585,7 +608,7 @@ static void runAutoTuneMode4_2D(
         dim3((unsigned)sx_size,  (unsigned)sy_size,  (unsigned)sz_size),
         dim3((unsigned)S_STRIDE, (unsigned)S_STRIDE, (unsigned)S_STRIDE),
         eb_r, ebx2, intp_param,
-        d_errors, /*workflow=*/false, geometry, stream);
+        d_errors, profilingAccum(d_errors), /*workflow=*/false, geometry, stream);
     FZ_CUDA_CHECK(cudaGetLastError());
     FZ_CUDA_CHECK(cudaMemcpyAsync(h_errors, d_errors, 11 * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream));

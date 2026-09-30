@@ -18,9 +18,15 @@
 // only by ginterp_kernels.cu and ginterp_stage.cu, the two consumers).
 struct INTERPOLATION_PARAMS;
 
+// Fixed-point auto-tune error accumulator (see ginterp_md.inl).
+using ginterp_att_err_t = unsigned long long;
+
 namespace fz {
 enum class GInterp2DGeometry : uint8_t;
 namespace ginterp {
+
+/// Slots in the auto-tune profiling scratch (float errors and accumulators).
+constexpr int kGInterpProfilingErrCount = 36;
 
 /**
  * Compute the anchor grid extent for an input volume of size
@@ -167,8 +173,10 @@ void launchGInterpProfileMode2(
 
 /**
  * Profiling mode 3 — runs the structural `pa_spline_infprecis_data` kernel
- * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks. Caller
- * must `launchGInterpResetErrors` first.
+ * (cuSZ-Hi `auto_tuning >= 3`) that probes a grid of sample blocks. The
+ * kernel sums into `d_accum` (kGInterpProfilingErrCount fixed-point slots,
+ * zeroed here) so the sums do not depend on atomic ordering; the launcher then
+ * writes them to `d_errors` as floats in the layout below.
  *
  * `dim` selects the spline-kernel branch (3 → SPLINE_DIM=3, 2 → SPLINE_DIM=2).
  * `geometry` selects the 2-D template and has no effect on 3-D.
@@ -207,6 +215,7 @@ void launchGInterpProfileMode3(
     float eb_r, float ebx2,
     const INTERPOLATION_PARAMS& intp_param,
     float* d_errors,
+    ginterp_att_err_t* d_accum,
     bool workflow,
     GInterp2DGeometry geometry,
     fz::stream_t stream);

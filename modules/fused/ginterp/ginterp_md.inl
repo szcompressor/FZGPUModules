@@ -8,6 +8,9 @@
  *
  * Local adaptations relative to upstream:
  *   - namespace `cusz` → `fz::ginterp` to avoid future collisions
+ *   - auto-tune profiling errors accumulate in 64-bit fixed point
+ *     (`ginterp_att_err_t`) instead of float atomics, so the tuning choice
+ *     and the archive are reproducible run to run
  *   - dropped `utils/err.hh` and `utils/timer.hh` (host wrappers use
  *     FZGPUModules equivalents; the .inl itself only contains kernels
  *     and device helpers and needs neither)
@@ -71,6 +74,27 @@ constexpr int BLOCK17 = 17;
 constexpr int DEFAULT_LINEAR_BLOCK_SIZE = BLOCK_DIM_SIZE;
 
 #define SHM_ERROR s_ectrl
+
+// Auto-tune profiling errors (pa_spline_infprecis_data) are accumulated in
+// 64-bit fixed point instead of float. Upstream sums them with float
+// atomicAdd, whose result depends on thread/block arrival order; variants
+// whose errors tie exactly (e.g. 2-D use_md with and without use_natural)
+// then resolve differently from run to run and change the archive. Integer
+// addition is associative, so these sums are identical on every run.
+// One unit is eb / kGInterpAttErrScale (eb_r = 1/eb); per-sample errors are
+// clamped to 2^36 units so a sum of up to 2^27 samples cannot overflow.
+using ginterp_att_err_t = unsigned long long;
+constexpr double kGInterpAttErrScale = 256.0;
+
+template <typename FP>
+__forceinline__ __device__ void ginterp_att_err_add(
+    volatile ginterp_att_err_t* acc, double abs_err, FP eb_r)
+{
+    const double q = fmin(abs_err * static_cast<double>(eb_r) * kGInterpAttErrScale,
+                          68719476736.0);  // 2^36
+    atomicAdd(const_cast<ginterp_att_err_t*>(acc),
+              static_cast<ginterp_att_err_t>(__double2ull_rn(q)));
+}
 
 namespace fz { namespace ginterp {
 
@@ -185,7 +209,7 @@ __global__ void pa_spline_infprecis_data(
     FP      eb_r,
     FP      ebx2,
     INTERPOLATION_PARAMS intp_param,
-    TITER errors,
+    ginterp_att_err_t* errors,
     bool workflow = SPLINE3_PRED_ATT
     );
 
@@ -248,7 +272,7 @@ __device__ void spline_layout_interpolate_att(
     volatile T s_data[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]       
                     [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)][AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)],
      DIM3    data_size,
-    DIM3 global_starts,FP eb_r, FP ebx2,uint8_t level,INTERPOLATION_PARAMS intp_param,volatile T *error);
+    DIM3 global_starts,FP eb_r, FP ebx2,uint8_t level,INTERPOLATION_PARAMS intp_param,volatile ginterp_att_err_t *error);
 
 
 }  // namespace device_api
@@ -2016,14 +2040,14 @@ __global__ void fz::ginterp::reset_errors(TITER errors)
 }
 
 template <typename T, int SPLINE_DIM>
-__forceinline__ __device__ void pre_compute_att(DIM3 sam_starts, DIM3 sam_bgs, DIM3 sam_strides, DIM3 &global_starts, INTERPOLATION_PARAMS &intp_param, uint8_t &level, uint8_t &unit, volatile T err[6], bool workflow);
+__forceinline__ __device__ void pre_compute_att(DIM3 sam_starts, DIM3 sam_bgs, DIM3 sam_strides, DIM3 &global_starts, INTERPOLATION_PARAMS &intp_param, uint8_t &level, uint8_t &unit, volatile ginterp_att_err_t err[6], bool workflow);
 
 // template <typename T>
 // __forceinline__ __device__ void pre_compute_att<T, 3>(DIM3 sam_starts, DIM3 sam_bgs, DIM3 sam_strides, DIM3 &global_starts, INTERPOLATION_PARAMS &intp_param, uint8_t &level, uint8_t &unit, volatile T err[6], bool workflow){
 template <typename T, int SPLINE_DIM, int LEVEL>
-__forceinline__ __device__ void pre_compute_att(DIM3 sam_starts, DIM3 sam_bgs, DIM3 sam_strides, DIM3 &global_starts, INTERPOLATION_PARAMS &intp_param, uint8_t &level, uint8_t &unit, volatile T err[9], bool workflow){
+__forceinline__ __device__ void pre_compute_att(DIM3 sam_starts, DIM3 sam_bgs, DIM3 sam_strides, DIM3 &global_starts, INTERPOLATION_PARAMS &intp_param, uint8_t &level, uint8_t &unit, volatile ginterp_att_err_t err[9], bool workflow){
 
-    if(TIX < 9) err[TIX] = 0.0;
+    if(TIX < 9) err[TIX] = 0;
 
     auto grid_idx_x = BIX % sam_bgs.x;
     auto grid_idx_y = (BIX / sam_bgs.x) % sam_bgs.y;
@@ -2181,7 +2205,7 @@ __forceinline__ __device__ void interpolate_stage_att(
     FP eb_r,
     FP ebx2,
     bool interpolator,
-    volatile T* error,
+    volatile ginterp_att_err_t* error,
     int  BLOCK_DIMX,
     int  BLOCK_DIMY,
     int  BLOCK_DIMZ)
@@ -2304,13 +2328,13 @@ __forceinline__ __device__ void interpolate_stage_att(
                 }
                 
                 s_data[z][y][x]  = pred + code * ebx2;
-                atomicAdd(const_cast<T*>(error),code!=0);
+                atomicAdd(const_cast<ginterp_att_err_t*>(error), static_cast<ginterp_att_err_t>(code != 0));
                 
 
             }
             else{
                 // if(TIX == 0 and BIX == 0) printf("BIY=%d s_data[%d][%d][%d]=%f, pred=%f\n", BIY, z, y, x, s_data[z][y][x], pred);
-                atomicAdd(const_cast<T*>(error),fabs(s_data[z][y][x]-pred));
+                ginterp_att_err_add(error, fabs(s_data[z][y][x]-pred), eb_r);
             }
         }
     };
@@ -2369,7 +2393,7 @@ __forceinline__ __device__ void interpolate_stage_md_att(
     FP eb_r,
     FP ebx2,
     INTERP cubic_interpolator,
-    volatile T* error,
+    volatile ginterp_att_err_t* error,
     int NUM_ELE)
 {
     // static_assert(COARSEN or (NUM_ELE <= BLOCK_DIM_SIZE), "block oversized");
@@ -2692,10 +2716,10 @@ __forceinline__ __device__ void interpolate_stage_md_att(
                     code = int(code / 2) ;
                 }
                 s_data[z][y][x]  = pred + code * ebx2;
-                atomicAdd(const_cast<T*>(error),code!=0);
+                atomicAdd(const_cast<ginterp_att_err_t*>(error), static_cast<ginterp_att_err_t>(code != 0));
             }
             else{
-                atomicAdd(const_cast<T*>(error),fabs(s_data[z][y][x]-pred));
+                ginterp_att_err_add(error, fabs(s_data[z][y][x]-pred), eb_r);
             }
         }
     };
@@ -2724,7 +2748,7 @@ __device__ void fz::ginterp::device_api::spline_layout_interpolate_att(
     [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
     [AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)],
     DIM3    data_size,
-    DIM3 global_starts, FP eb_r, FP ebx2, uint8_t level, INTERPOLATION_PARAMS intp_param, volatile T *error)
+    DIM3 global_starts, FP eb_r, FP ebx2, uint8_t level, INTERPOLATION_PARAMS intp_param, volatile ginterp_att_err_t *error)
 {
     auto xblue = [] __device__(int _tix, int unit) -> int { return unit * (_tix * 2); };
     auto yblue = [] __device__(int _tiy, int unit) -> int { return unit * (_tiy * 2); };
@@ -2943,7 +2967,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
     FP eb_r,
     FP eb_x2,
     INTERPOLATION_PARAMS intp_param,
-    TITER errors,
+    ginterp_att_err_t* errors,
     bool workflow
     )
 {
@@ -2962,7 +2986,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
         __shared__    T shmem_data[AnchorBlockSizeZ * numAnchorBlockZ + (SPLINE_DIM >= 3)]
         [AnchorBlockSizeY * numAnchorBlockY + (SPLINE_DIM >= 2)]
         [AnchorBlockSizeX * numAnchorBlockX + (SPLINE_DIM >= 1)];
-        __shared__    T shmem_err[9];
+        __shared__    ginterp_att_err_t shmem_err[9];
         
         // if CONSTEXPR (SPLINE_DIM == 2)
         // __shared__ struct {
@@ -3002,7 +3026,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                     intp_param.use_md[2] = true;
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err+5);
                     if(TIX<6){
-                        atomicAdd(const_cast<T*>(errors+TIX),shmem_err[TIX]);
+                        atomicAdd((errors+TIX),static_cast<ginterp_att_err_t>(shmem_err[TIX]));
                     }
                 }
                 else if (level == 1){
@@ -3015,13 +3039,13 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err+2);
 
                     if(TIX<3){
-                    atomicAdd(const_cast<T*>(errors + 3 + BIY * 3 + TIX),shmem_err[TIX]);
+                    atomicAdd((errors + 3 + BIY * 3 + TIX),static_cast<ginterp_att_err_t>(shmem_err[TIX]));
                     }
                 }
                 else{
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size, global_starts, eb_r, eb_x2, level, intp_param, shmem_err);
                     if(TIX==0){
-                        atomicAdd(const_cast<T*>(errors + 9 + BIY), shmem_err[0]);
+                        atomicAdd((errors + 9 + BIY), static_cast<ginterp_att_err_t>(shmem_err[0]));
                     }
                 }
                 
@@ -3029,7 +3053,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
             else{
                 fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_AB_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err);
                 if(TIX==0)
-                    atomicAdd(const_cast<T*>(errors+BIY),shmem_err[0]);
+                    atomicAdd((errors+BIY),static_cast<ginterp_att_err_t>(shmem_err[0]));
             
             }
         }
@@ -3065,7 +3089,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                     intp_param.use_md[3] = true;
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err+8);
                     if(TIX<9){
-                        atomicAdd(const_cast<T*>(errors+TIX),shmem_err[TIX]);
+                        atomicAdd((errors+TIX),static_cast<ginterp_att_err_t>(shmem_err[TIX]));
                     }
                 }
                 else if (level == 2){
@@ -3078,7 +3102,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err+2);
 
                     if(TIX<3){
-                    atomicAdd(const_cast<T*>(errors + 6 + BIY * 3 + TIX),shmem_err[TIX]);
+                    atomicAdd((errors + 6 + BIY * 3 + TIX),static_cast<ginterp_att_err_t>(shmem_err[TIX]));
                     }
                 }
                 else if (level == 1){
@@ -3091,7 +3115,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                     fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_PRED_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err+2);
 
                     if(TIX<3){
-                    atomicAdd(const_cast<T*>(errors + 6 + BIY * 3 + TIX),shmem_err[TIX]);
+                    atomicAdd((errors + 6 + BIY * 3 + TIX),static_cast<ginterp_att_err_t>(shmem_err[TIX]));
                     }
                 }
                 else{
@@ -3103,7 +3127,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
                         // write (level_id=1 fills 18..20). Host analysis reads
                         // level_id=0 at errors[21..26], so corrected to
                         // `errors + 16 + BIY`. See adapter-changes comment.
-                        atomicAdd(const_cast<T*>(errors + 16 + BIY), shmem_err[0]);
+                        atomicAdd((errors + 16 + BIY), static_cast<ginterp_att_err_t>(shmem_err[0]));
                     }
                 }
 
@@ -3111,7 +3135,7 @@ __global__ void fz::ginterp::pa_spline_infprecis_data(
             else{
                 fz::ginterp::device_api::spline_layout_interpolate_att<T, FP, LEVEL, SPLINE_DIM, AnchorBlockSizeX, AnchorBlockSizeY, AnchorBlockSizeZ, numAnchorBlockX, numAnchorBlockY, numAnchorBlockZ, LINEAR_BLOCK_SIZE, SPLINE3_AB_ATT>(shmem_data, data_size,global_starts,eb_r,eb_x2,level,intp_param,shmem_err);
                 if(TIX==0)
-                    atomicAdd(const_cast<T*>(errors+BIY),shmem_err[0]);
+                    atomicAdd((errors+BIY),static_cast<ginterp_att_err_t>(shmem_err[0]));
 
             }
         }

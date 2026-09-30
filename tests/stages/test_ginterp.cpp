@@ -650,6 +650,52 @@ TEST(GInterpStage, GI55_Native64_AutoTuneMode4_2D) {
         << "Native64 mode 4 2-D max_error=" << res.max_error;
 }
 
+// The 2-D mode-3 probe measures some variants that tie exactly (in native64 the
+// level-1 use_natural triplet duplicates the use_natural=0 one). With float
+// atomic sums the tie resolved by arrival order, so repeated compressions of
+// the same field picked different parameters and produced different archives.
+// Fixed-point accumulation must make every run byte-identical.
+TEST(GInterpStage, GI56_Native64_AutoTuneMode3_2D_Deterministic) {
+    const size_t NX = 1024, NY = 1024;
+    const float eb = 1e-2f;
+
+    auto h_input = make_smooth_2d(NX, NY);
+    uint32_t lcg = 12345u;
+    for (auto& v : h_input) {
+        lcg = lcg * 1664525u + 1013904223u;
+        v += static_cast<float>(lcg >> 8) / static_cast<float>(1u << 24) * 0.5f;
+    }
+
+    CudaStream cs;
+    CudaBuffer<float> d_in(h_input.size());
+    d_in.upload(h_input, cs.stream);
+    cudaStreamSynchronize(cs.stream);
+
+    std::vector<uint8_t> first;
+    for (int run = 0; run < 12; ++run) {
+        Pipeline p(NX * NY * sizeof(float), MemoryStrategy::PREALLOCATE);
+        p.setDims(NX, NY, 1);
+        auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
+        stage->setErrorBound(eb);
+        stage->set2DGeometry(GInterp2DGeometry::Native64);
+        stage->setAutoTuning(3);
+        p.finalize();
+
+        void*  d_comp  = nullptr;
+        size_t comp_sz = 0;
+        p.compress(d_in.void_ptr(), NX * NY * sizeof(float), &d_comp, &comp_sz, cs.stream);
+        cudaStreamSynchronize(cs.stream);
+        std::vector<uint8_t> bytes(comp_sz);
+        ASSERT_EQ(cudaMemcpy(bytes.data(), d_comp, comp_sz, cudaMemcpyDeviceToHost), cudaSuccess);
+        if (run == 0) {
+            first = std::move(bytes);
+        } else {
+            ASSERT_EQ(bytes.size(), first.size()) << "run " << run;
+            ASSERT_TRUE(bytes == first) << "run " << run << " differs from run 0";
+        }
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Comprehensive feature coverage (GI17–GI29)
 // ═════════════════════════════════════════════════════════════════════════════
