@@ -40,11 +40,11 @@ std::string generateChunkFusionSource(const ChunkFusionSpec& spec) {
     src += "    const float* in, unsigned long long n, const unsigned char* params,\n";
     src += "    unsigned char* scratch, unsigned int* sizes,\n";
     src += "    unsigned int* side_idxs, float* side_vals, unsigned int* side_count,\n";
-    src += "    unsigned int side_max) {\n";
+    src += "    unsigned int side_max, unsigned long long n_valid) {\n";
     src += "  using namespace fz::fused::chunk;\n";
     src += "  chunk_fused_body< " + targs + " >(\n";
     src += "      in, (size_t)n, params, scratch, sizes,\n";
-    src += "      ChunkSideCtx{side_idxs, side_vals, side_count, side_max});\n";
+    src += "      ChunkSideCtx{side_idxs, side_vals, side_count, side_max}, (size_t)n_valid);\n";
     src += "}\n";
     return src;
 }
@@ -54,16 +54,18 @@ bool nvrtcChunkFusionAvailable() { return nvrtcAvailable(); }
 void launchNvrtcChunkFusedEncode(
     const ChunkFusionSpec& spec, const float* d_in, size_t n, const uint8_t* d_params,
     uint8_t* d_scratch, uint32_t* d_sizes, unsigned nc, fz::stream_t stream,
-    uint32_t* d_side_idxs, float* d_side_vals, uint32_t* d_side_count, uint32_t side_max)
+    uint32_t* d_side_idxs, float* d_side_vals, uint32_t* d_side_count, uint32_t side_max,
+    size_t n_valid)
 {
     const std::string src  = generateChunkFusionSource(spec);
     CUfunction        func = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_chunk"));
 
     unsigned long long n_arg = n;
+    unsigned long long n_valid_arg = n_valid < n ? n_valid : n;
     void* args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
                      (void*)&d_scratch, (void*)&d_sizes,
                      (void*)&d_side_idxs, (void*)&d_side_vals,
-                     (void*)&d_side_count, (void*)&side_max };
+                     (void*)&d_side_count, (void*)&side_max, (void*)&n_valid_arg };
 
     CU_CHECK(cuLaunchKernel(func,
                             nc, 1, 1,                     // grid  = one CTA per chunk

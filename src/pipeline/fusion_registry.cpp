@@ -149,8 +149,11 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
 
     // 1. Prime each stage's forward-computed state its own inverse will read (the
     //    runner bypasses execute()) — e.g. the quantizer's NOA value-range scan.
-    const FusedPrimeContext pc{ ctx.d_input, ctx.input_bytes, ctx.pool,
-                                static_cast<fz::stream_t>(ctx.stream) };
+    const size_t valid_bytes = (ctx.input_valid_bytes != 0 && ctx.input_valid_bytes < ctx.input_bytes)
+        ? ctx.input_valid_bytes : ctx.input_bytes;
+    FusedPrimeContext pc{ ctx.d_input, ctx.input_bytes, ctx.pool,
+                          static_cast<fz::stream_t>(ctx.stream) };
+    pc.input_valid_bytes = valid_bytes;
     for (Stage* s : g) s->primeFusedForwardState(pc);
 
     // 2. Assemble the fused spec + packed params blob from the ops themselves, by
@@ -211,7 +214,8 @@ size_t runChunkCooperative(const FusedRunContext& ctx) {
     const size_t archive_bytes = fused::launchGenericChunkFusion(
         spec, static_cast<const float*>(ctx.d_input), n, blob.data(), blob.size(),
         static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream),
-        d_side_idxs, d_side_vals, side_max, &outlier_count);
+        d_side_idxs, d_side_vals, side_max, &outlier_count,
+        valid_bytes / sizeof(float));
 
     // 5. Size the outlier side buffers from the readback count and report the byte
     //    counts back to the producer, so its serializeHeader records the count the
@@ -385,7 +389,8 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
 
 const FusedImpl kBuiltins[] = {
     { "warp-register",  true,  &matchesWarpRegister,     &runWarpRegister     },
-    { "chunk-coop",     true,  &matchesChunkCooperative, &runChunkCooperative },
+    { "chunk-coop",     true,  &matchesChunkCooperative, &runChunkCooperative,
+      /*accepts_unpadded_input=*/true },
     { "chunk-coop-inverse", true, &matchesChunkCooperativeInverse,
                                       &runChunkCooperativeInverse },
     { "warp-register-inverse", true, &matchesWarpRegisterInverse,

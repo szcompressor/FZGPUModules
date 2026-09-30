@@ -179,7 +179,8 @@ size_t launchGenericChunkFusion(
     const ChunkFusionSpec& spec, const float* d_in, size_t n,
     const uint8_t* host_params, size_t params_bytes,
     uint8_t* d_out, MemoryPool* pool, cudaStream_t stream,
-    uint32_t* d_side_idxs, float* d_side_vals, uint32_t side_max, uint32_t* out_side_count)
+    uint32_t* d_side_idxs, float* d_side_vals, uint32_t side_max, uint32_t* out_side_count,
+    size_t n_valid)
 {
     if (n == 0) {
         if (out_side_count) *out_side_count = 0;
@@ -214,7 +215,7 @@ size_t launchGenericChunkFusion(
     // Compose + launch the fused encode from the spec (NVRTC), then the shared tail.
     launchNvrtcChunkFusedEncode(spec, d_in, n, d_params, d_scratch, d_sizes,
                                 (unsigned)nc, stream,
-                                d_side_idxs, d_side_vals, d_side_count, side_max);
+                                d_side_idxs, d_side_vals, d_side_count, side_max, n_valid);
     const size_t out_bytes = packChunks(d_in, n, nc, d_scratch, d_sizes, d_out, pool, stream,
                                         spec.chunk_bytes);
 

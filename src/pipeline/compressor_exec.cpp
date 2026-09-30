@@ -38,6 +38,12 @@ std::pair<const void*, size_t> Pipeline::prepareInputSource(
     if (input_alignment_bytes_ > 1 && input_size % input_alignment_bytes_ != 0) {
         const size_t padded = ((input_size + input_alignment_bytes_ - 1)
                                / input_alignment_bytes_) * input_alignment_bytes_;
+        if (fused_source_unpadded_) {
+            // No copy: the fused consumers read the caller's buffer up to input_size
+            // and treat the rest of the logical length as zeros (see compress()).
+            original_input_size_ = input_size;
+            return {d_input, padded};
+        }
         if (padded > d_pad_buf_.capacity) {
             if (!d_pad_buf_.allocate(mem_pool_.get(), padded, stream,
                                      "pipeline_input_pad", /*persistent=*/true)) {
@@ -96,9 +102,12 @@ void Pipeline::compress(
     // Pipeline::setPrimarySource()). This is NOT a duplicate/tee: no stage
     // writes into its own forward input in place, so aliasing the same
     // pointer across sources is safe.
+    const size_t valid_sz = (fused_source_unpadded_ && d_source == d_input && source_sz > input_size)
+        ? input_size : 0;
     for (int buf_id : input_buffer_ids_) {
         dag_->setExternalPointer(buf_id, const_cast<void*>(d_source));
         dag_->updateBufferSize(buf_id, source_sz);
+        if (fused_source_unpadded_) dag_->setExternalValidSize(buf_id, valid_sz);
     }
     source_input_sizes_.assign(input_buffer_ids_.size(), source_sz);
     input_size_ = source_sz;

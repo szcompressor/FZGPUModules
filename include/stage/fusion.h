@@ -204,9 +204,10 @@ struct FusedOpDecl {
  */
 struct FusedPrimeContext {
     const void*  d_input     = nullptr;  ///< device input buffer
-    size_t       input_bytes = 0;        ///< its size in bytes
+    size_t       input_bytes = 0;        ///< its size in bytes (logical, chunk-aligned)
     MemoryPool*  pool        = nullptr;  ///< scratch pool
     fz::stream_t stream      = nullptr;  ///< stream to prime on
+    size_t       input_valid_bytes = 0;  ///< real bytes at d_input; 0 = input_bytes
 };
 
 } // namespace fz
