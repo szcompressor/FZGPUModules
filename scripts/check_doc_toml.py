@@ -31,10 +31,9 @@ CONFIG_CPP = os.path.join(REPO, "src", "pipeline", "config.cpp")
 # Keys consumed by the generic [[stage]] / [pipeline] plumbing rather than by any
 # one stage's loader, so they never appear in an addXxxStage() body.
 STRUCTURAL_STAGE_KEYS = {"name", "type", "inputs", "from", "port"}
-PIPELINE_KEYS = {
-    "input_size", "dims", "memory_strategy", "pool_multiplier", "num_streams",
-    "primary_source",
-}
+# [pipeline] keys are parsed from loadConfig() at run time (parse_pipeline_keys);
+# a hardcoded list here went stale when `specialization`/`coloring` were added.
+PIPELINE_KEYS = set()
 # Reserved `from` value meaning "bind directly to the pipeline's raw input"
 # (Pipeline::bindExternalInput()) rather than another declared stage's output
 # -- never itself a declared stage name, so it's exempted from the dangling-
@@ -61,6 +60,14 @@ def parse_registry(src):
         ):
             out[type_name] = load_fn
     return out
+
+
+def parse_pipeline_keys(src):
+    """The [pipeline] keys loadConfig() reads, i.e. every `(*pl)["key"]`."""
+    keys = set(re.findall(r'\(\*pl\)\[\s*"([^"]+)"\s*\]', src))
+    if not keys:
+        sys.exit("could not locate [pipeline] key reads in config.cpp")
+    return keys
 
 
 def parse_loader_keys(src, fn_name):
@@ -154,6 +161,7 @@ def main():
 
     src = open(CONFIG_CPP, encoding="utf-8").read()
     registry = parse_registry(src)
+    PIPELINE_KEYS.update(parse_pipeline_keys(src))
     keys_by_type = {t: parse_loader_keys(src, fn) for t, fn in registry.items()}
 
     files = sorted(glob.glob(os.path.join(REPO, "docs", "**", "*.md"), recursive=True))

@@ -142,6 +142,9 @@ For TOML, omit `geometry_2d` (or write `"fine16"`) for the default; opt in
 explicitly for a native-aligned 2-D run:
 
 ```toml
+[[stage]]
+name        = "ginterp"
+type        = "GInterp"
 geometry_2d = "native64"  # 2-D only; LEVEL=6, 64x64
 ```
 
