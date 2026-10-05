@@ -1441,6 +1441,12 @@ template<typename TInput, typename TCode>
 void QuantizerStage<TInput, TCode>::primeComputedAbsEb(
     const void* d_in, size_t scan_n, MemoryPool* pool, fz::stream_t stream)
 {
+    // A fused runner bypasses execute(), but the pipeline still calls
+    // postStreamSync(). Clear the staged kernel's flag so that hook cannot read
+    // uninitialized or previous-run state; the f64 runner validates its own bins.
+    if (isLinearMode() && d_linear_overflow_scratch_ != nullptr)
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_linear_overflow_scratch_, 0,
+                                      sizeof(uint32_t), stream));
     if (config_.eb_mode == ErrorBoundMode::ABS) {
         computed_abs_eb_     = resolveUniformBound();
         computed_value_base_ = static_cast<TInput>(0);

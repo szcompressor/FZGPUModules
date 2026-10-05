@@ -312,10 +312,10 @@ public:
                 config_.eb_mode == ErrorBoundMode::NOA);
     }
     /// The warp-register inverse tail: linear (cuSZp / SZp) dequant is just
-    /// `code * 2*abs_eb` in float, which the fused unpack kernel does inline.
-    /// High-precision (double) linear reconstruction stays staged.
+    /// `code * 2*abs_eb` in the input type, which the fused unpack kernel does inline.
+    /// The opt-in strict linear_high_precision policy stays staged.
     bool supportsWarpInverseFusion() const {
-        return std::is_same<TInput, float>::value &&
+        return (std::is_same<TInput, float>::value || std::is_same<TInput, double>::value) &&
                std::is_same<TCode, uint32_t>::value &&
                isLinearMode() && !config_.linear_high_precision &&
                (config_.eb_mode == ErrorBoundMode::ABS ||
@@ -327,7 +327,7 @@ public:
 
     /// Inverse-mode warp quant declaration — the Elementwise role (linear dequant tail)
     /// of the warp decompress chain. Gated exactly on supportsWarpInverseFusion()
-    /// (linear, non-high-precision, ABS/NOA, float, uint32 code), the inverse
+    /// (linear, non-high-precision, ABS/NOA, float/double, uint32 code), the inverse
     /// mirror of the forward getFusionSpec() Elementwise declaration.
     FusionSpec getInverseFusionSpec() const override {
         if (!is_inverse_ || !supportsWarpInverseFusion()) return {};
@@ -354,14 +354,19 @@ public:
     /// ABS/NOA float quant maps to the `QuantInplaceZigzag` elementwise op. Params are
     /// packed from the primed bound (`primeFusedForwardState` must run first).
     FusedOpDecl getFusedOp() const override {
-        if (!std::is_same<TInput, float>::value || is_inverse_) return {};  // device ops read float
-        // Warp-register (cuSZp): linear float quant is the Elementwise loader, for ABS or NOA
+        if (is_inverse_) return {};
+        // Warp-register (cuSZp): linear float/double quant is the Elementwise loader, for ABS or NOA
         // (both resolve to one uniform-step absolute bound — the runner primes the NOA
         // range scan and passes the resolved abs_eb). REL is excluded: it is log-domain
         // per-value quant, not a single abs_eb, so it can't ride the fused kernel.
-        if (isLinearMode() && !config_.linear_high_precision &&
+        if ((std::is_same<TInput, float>::value || std::is_same<TInput, double>::value) &&
+            std::is_same<TCode, uint32_t>::value &&
+            isLinearMode() && !config_.linear_high_precision &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA))
             return FusedOpDecl{FusionStrategy::WarpRegister, "LinearQuant", "", {}};
+        // Chunk policies embed float32 outlier bits in 32-bit codes. A double
+        // quantizer cannot use that representation and must retain staged execution.
+        if (!std::is_same<TInput, float>::value) return {};
         // Chunk-cooperative (PFPL): inplace+zigzag ABS/NOA float quant.
         if (isInplaceMode() && config_.zigzag_codes &&
             (config_.eb_mode == ErrorBoundMode::ABS || config_.eb_mode == ErrorBoundMode::NOA)) {

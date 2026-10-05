@@ -72,6 +72,22 @@ fz_add_test(
     LABELS  pipeline gpu
 )
 
+# ─── f64 Auto specialization correctness and fallback coverage ────────────────
+fz_add_test(
+    NAME    test_fusion_f64
+    SOURCES test_fusion_f64.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
+# ─── Predictor-free fixed 1D warp specialization ──────────────────────────────
+fz_add_test(
+    NAME    test_fusion_fixed
+    SOURCES test_fusion_fixed.cpp
+    LIBS    fzgmod
+    LABELS  pipeline gpu
+)
+
 # ─── Config file load/save (TOML) ─────────────────────────────────────────────
 fz_add_test(
     NAME    test_config

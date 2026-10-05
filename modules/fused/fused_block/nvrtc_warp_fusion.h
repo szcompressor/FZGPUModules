@@ -42,6 +42,8 @@ struct WarpFusionSpec {
     /// capability declaration, not a launcher-side name whitelist.
     std::string              predictor_ti;
     std::string              coder_ti;
+    bool                     use_double     = false; ///< f64 input/output and exact double quantization.
+    bool                     validate_input = false; ///< Validate signed-int32 bins on new map/coder chains.
 };
 
 /// The CUDA source the codegen emits for `spec` (exposed for tests/inspection).
@@ -63,6 +65,15 @@ size_t launchNvrtcWarpFused(
     uint8_t* d_out, MemoryPool* pool, fz::stream_t stream,
     std::string* execution_path = nullptr);
 
+/// f64 overload. `inv2eb` is passed independently because the predictor POD ABI keeps its
+/// historical float field at offset zero; the f64 policy ignores that field. The launch
+/// validates finite, int32-representable quantized coordinates before encoding.
+size_t launchNvrtcWarpFused(
+    const WarpFusionSpec& spec, const double* d_in, size_t n_ab,
+    const uint8_t* pred_params, size_t params_bytes,
+    uint8_t* d_out, MemoryPool* pool, fz::stream_t stream,
+    double inv2eb, std::string* execution_path = nullptr);
+
 /// The inverse: NVRTC-composes a single warp-per-block decode kernel over `spec`
 /// (coder decode + reverse transforms + predictor prefix-sum + linear dequant),
 /// preceded by the per-block payload cost pass + CUB exclusive-scan. `d_archive`
@@ -82,6 +93,13 @@ size_t launchNvrtcWarpInverseFused(
     size_t n_elems, size_t n_out, float ebx2,
     const uint8_t* pred_params, size_t params_bytes,
     float* d_out, MemoryPool* pool, fz::stream_t stream);
+
+/// f64 inverse overload; `ebx2` and output remain double throughout dequantization.
+size_t launchNvrtcWarpInverseFused(
+    const WarpFusionSpec& spec, const uint8_t* d_archive, size_t archive_bytes,
+    size_t n_elems, size_t n_out, double ebx2,
+    const uint8_t* pred_params, size_t params_bytes,
+    double* d_out, MemoryPool* pool, fz::stream_t stream);
 
 std::string generateWarpInverseSource(const WarpFusionSpec& spec);
 

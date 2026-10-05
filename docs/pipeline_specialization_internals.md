@@ -50,8 +50,17 @@ composed of ops that all share one strategy:
 
 The rest of this guide works the **warp-register** path end to end. The chunk-cooperative path uses the same declaration surface with a different harness.
 The current warp harness is generic over declared predictors, transforms, and coders
-within a `float32` input / `int32` code representation; those data types are checked
-as part of strategy matching.
+within a `float32` or `float64` input / `int32` code representation; those data types
+are checked as part of strategy matching. Float64 uses the warp-cooperative path
+and retains double arithmetic through quantization and reconstruction. The
+thread-independent path remains float32-only. The opt-in `linear_high_precision`
+quantization policy remains staged for both input types.
+
+The registry also admits the two-stage `LinearQuant` → segment-coder chain and
+its inverse. `LinearQuant1DPredictor` is an internal identity policy: it emits
+quantized codes in natural order and applies no inverse prediction. The graph
+stays predictor-free; coder blocks supply the warp geometry (32/64/128 elements).
+Both f32 and f64 validate finite signed-int32 coordinates before compression.
 
 ---
 
@@ -85,6 +94,12 @@ Conventions:
 
 - **op_name is the device policy type name.** The NVRTC codegen instantiates the
   harness with exactly this identifier, so it must name a type in `include_header`.
+  For float64 warp input, the current generator selects `op_name + "F64"` for
+  the predictor. A custom predictor used with float64 must provide that alias
+  and a `fromParams` overload taking the separate double reciprocal. The shipped
+  Lorenzo and tiled predictor policies provide both precision variants. The
+  inverse harness deduces precision from the reconstruction step and output
+  pointer, preserving the existing custom float predictor interface.
 - **params is the POD's raw bytes.** The generated kernel casts the packed blob to
   the POD type; host and device layouts must match. Stateless ops leave it empty.
 - **The `inv2eb` slot convention.** Every warp predictor's `Params` begins with
@@ -93,6 +108,10 @@ Conventions:
   from the Elementwise head's `getFusedForwardQuantStep()` contract after priming. The
   quantizer is absorbed into the predictor (it quantizes inline in `delta()`), which
   is why the Elementwise quant stage declares op `"LinearQuant"` with empty params.
+  Float64 retains the same geometry POD layout but receives its double reciprocal
+  as a separate kernel argument; it never reads the float reciprocal slot. Its
+  quantized coordinates are checked for finite values and signed-int32 range
+  before encoding, matching the staged quantizer's rejection of unrepresentable bins.
 - **elems_per_lane** (= `block_size / 32`) is the harness's compile-time template
   arg; **n_ab** is the padded block-covering element count (0 = 1-D, no padding).
 

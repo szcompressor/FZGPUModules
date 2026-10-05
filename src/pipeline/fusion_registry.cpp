@@ -9,6 +9,7 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 #include "predictors/diff/diff.h"
 #include "fused/fused_block/nvrtc_warp_fusion.h"
+#include "fused/fused_block/warp_op_params.h"
 #include "fused/chunk_fusion/nvrtc_chunk_fusion.h"
 
 #include <cmath>
@@ -37,10 +38,11 @@ namespace {
 //    analogue of the chunk chain.
 bool matchesWarpRegister(const std::vector<Stage*>& g) {
     if (g.size() < 3) return false;                // Quant -> Predictor -> ... -> Coder
-    // The current warp harness loads float32 values and carries int32 codes.
+    // The warp harness loads float32/float64 values and carries int32 codes.
     // Make that strategy boundary explicit here instead of relying on concrete
     // stage classes or unchecked casts in the runner.
-    if (static_cast<DataType>(g.front()->getInputDataType(0)) != DataType::FLOAT32 ||
+    const auto input_type = static_cast<DataType>(g.front()->getInputDataType(0));
+    if ((input_type != DataType::FLOAT32 && input_type != DataType::FLOAT64) ||
         static_cast<DataType>(g.back()->getInputDataType(0))  != DataType::INT32)
         return false;
     for (Stage* s : g) {
@@ -57,6 +59,78 @@ bool matchesWarpRegister(const std::vector<Stage*>& g) {
             return false;
     }
     return true;
+}
+
+// Predictor-free linear quantization -> fixed-rate coder. This is the natural
+// two-stage graph used by cuSZp3 fixed 1-D results: the warp policy loads and
+// quantizes each input value, then the coder packs those codes without adding a
+// synthetic Predictor stage to the planned graph.
+bool matchesWarpLinearQuantCoder(const std::vector<Stage*>& g) {
+    if (g.size() != 2) return false;
+    const auto input_type = static_cast<DataType>(g.front()->getInputDataType(0));
+    if ((input_type != DataType::FLOAT32 && input_type != DataType::FLOAT64) ||
+        static_cast<DataType>(g.back()->getInputDataType(0)) != DataType::INT32)
+        return false;
+    for (Stage* s : g) {
+        const FusedOpDecl op = s->getFusedOp();
+        if (!op.valid() || op.strategy != FusionStrategy::WarpRegister) return false;
+    }
+    const FusedOpDecl quant = g.front()->getFusedOp();
+    const FusionSpec quant_spec = g.front()->getFusionSpec();
+    const FusionSpec coder_spec = g.back()->getFusionSpec();
+    return quant.op_name == "LinearQuant" &&
+           quant_spec.access == FusionAccess::Elementwise &&
+           coder_spec.access == FusionAccess::SegmentCodec &&
+           coder_spec.block_size >= 32 && coder_spec.block_size % 32u == 0 &&
+           coder_spec.block_size / 32u <= fused::warp::kMaxWarpElemsPerLane;
+}
+
+size_t runWarpLinearQuantCoder(const FusedRunContext& ctx) {
+    const auto& g = *ctx.stages;
+    Stage* quant = g.front();
+    Stage* coder = g.back();
+    const FusedPrimeContext pc{ ctx.d_input, ctx.input_bytes, ctx.pool,
+                                static_cast<fz::stream_t>(ctx.stream) };
+    for (Stage* s : g) s->primeFusedForwardState(pc);
+
+    const double quant_step = quant->getFusedForwardQuantStep();
+    if (!(quant_step > 0.0) || !std::isfinite(quant_step))
+        throw std::runtime_error("warp-register specialization requires a finite positive quantization step");
+
+    const FusedOpDecl coder_decl = coder->getFusedOp();
+    const FusionSpec coder_spec = coder->getFusionSpec();
+    fused::WarpFusionSpec spec;
+    spec.use_double = static_cast<DataType>(quant->getInputDataType(0)) == DataType::FLOAT64;
+    spec.validate_input = true;
+    spec.predictor = "LinearQuant1DPredictor";
+    spec.coder = coder_decl.op_name;
+    spec.elems_per_lane = static_cast<int>(coder_spec.block_size / 32u);
+
+    // Keep the established float POD layout. For this new f32 path, round the
+    // doubled bound in float before taking the reciprocal, matching the staged
+    // quantizer's `1.0f / (2.0f * bound)` arithmetic.
+    const float inv2eb_f32 = 1.0f / static_cast<float>(quant_step);
+    fused::warp::Lorenzo1DParams params{inv2eb_f32,
+        static_cast<uint32_t>(spec.elems_per_lane)};
+    std::vector<uint8_t> blob(sizeof(params));
+    std::memcpy(blob.data(), &params, sizeof(params));
+
+    const size_t input_element_bytes = getDataTypeSize(
+        static_cast<DataType>(quant->getInputDataType(0)));
+    const size_t n = ctx.input_bytes / input_element_bytes;
+    const size_t archive_bytes = spec.use_double ? fused::launchNvrtcWarpFused(
+        spec, static_cast<const double*>(ctx.d_input), n,
+        blob.data(), blob.size(), static_cast<uint8_t*>(ctx.d_output), ctx.pool,
+        static_cast<fz::stream_t>(ctx.stream), 1.0 / quant_step, ctx.execution_path) :
+        fused::launchNvrtcWarpFused(
+        spec, static_cast<const float*>(ctx.d_input), n,
+        blob.data(), blob.size(), static_cast<uint8_t*>(ctx.d_output), ctx.pool,
+        static_cast<fz::stream_t>(ctx.stream), ctx.execution_path);
+
+    const size_t coder_element_bytes = getDataTypeSize(
+        static_cast<DataType>(coder->getInputDataType(0)));
+    coder->setFusedArchiveResult(archive_bytes, n * coder_element_bytes);
+    return archive_bytes;
 }
 
 size_t runWarpRegister(const FusedRunContext& ctx) {
@@ -87,6 +161,7 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     const FusedOpDecl decl      = g[1]->getFusedOp();
     const FusedOpDecl coder_decl = g.back()->getFusedOp();   // swappable SegmentCodec sink
     fused::WarpFusionSpec spec;
+    spec.use_double = static_cast<DataType>(g.front()->getInputDataType(0)) == DataType::FLOAT64;
     spec.predictor      = decl.op_name;
     spec.coder          = coder_decl.op_name;
     spec.predictor_ti   = decl.ti_op_name;
@@ -102,7 +177,11 @@ size_t runWarpRegister(const FusedRunContext& ctx) {
     const size_t input_element_bytes = getDataTypeSize(
         static_cast<DataType>(g.front()->getInputDataType(0)));
     const size_t n_ab = decl.n_ab ? decl.n_ab : ctx.input_bytes / input_element_bytes;
-    const size_t archive_bytes = fused::launchNvrtcWarpFused(
+    const size_t archive_bytes = spec.use_double ? fused::launchNvrtcWarpFused(
+        spec, static_cast<const double*>(ctx.d_input), n_ab,
+        blob.data(), blob.size(),
+        static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream),
+        1.0 / quant_step, ctx.execution_path) : fused::launchNvrtcWarpFused(
         spec, static_cast<const float*>(ctx.d_input), n_ab,
         blob.data(), blob.size(),
         static_cast<uint8_t*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream),
@@ -330,6 +409,10 @@ size_t runChunkCooperativeInverse(const FusedRunContext& ctx) {
 //    exactly Coder -> Predictor -> Quant (size 3). See the CHANGELOG note.
 bool matchesWarpRegisterInverse(const std::vector<Stage*>& g) {
     if (g.size() != 3) return false;                 // CORE: coder -> predictor -> quant
+    const auto output_type = static_cast<DataType>(g.back()->getOutputDataType(0));
+    if ((output_type != DataType::FLOAT32 && output_type != DataType::FLOAT64) ||
+        static_cast<DataType>(g.front()->getOutputDataType(0)) != DataType::INT32)
+        return false;
     for (Stage* s : g) {
         if (!s->isInverse()) return false;
         const FusedOpDecl op = s->getInverseFusedOp();
@@ -343,6 +426,51 @@ bool matchesWarpRegisterInverse(const std::vector<Stage*>& g) {
     if (quant.access != FusionAccess::Elementwise)  return false;
     // Coder and predictor must agree on the warp region size (Elementwise quant carries 0).
     return coder.block_size != 0 && pred.block_size == coder.block_size;
+}
+
+bool matchesWarpLinearQuantCoderInverse(const std::vector<Stage*>& g) {
+    if (g.size() != 2) return false;
+    const auto output_type = static_cast<DataType>(g.back()->getOutputDataType(0));
+    if ((output_type != DataType::FLOAT32 && output_type != DataType::FLOAT64) ||
+        static_cast<DataType>(g.front()->getOutputDataType(0)) != DataType::INT32)
+        return false;
+    for (Stage* s : g) {
+        if (!s->isInverse()) return false;
+        const FusedOpDecl op = s->getInverseFusedOp();
+        if (!op.valid() || op.strategy != FusionStrategy::WarpRegister) return false;
+    }
+    const FusionSpec coder = g.front()->getInverseFusionSpec();
+    const FusionSpec quant = g.back()->getInverseFusionSpec();
+    const FusedOpDecl qdecl = g.back()->getInverseFusedOp();
+    return coder.access == FusionAccess::SegmentCodec &&
+           quant.access == FusionAccess::Elementwise &&
+           qdecl.op_name == "LinearDequant" && coder.block_size >= 32 &&
+           coder.block_size % 32u == 0 &&
+           coder.block_size / 32u <= fused::warp::kMaxWarpElemsPerLane;
+}
+
+size_t runWarpLinearQuantCoderInverse(const FusedRunContext& ctx) {
+    const auto& g = *ctx.stages;
+    Stage* coder = g.front();
+    Stage* quant = g.back();
+    const FusedOpDecl cdecl = coder->getInverseFusedOp();
+    fused::WarpFusionSpec spec;
+    spec.use_double = static_cast<DataType>(quant->getOutputDataType(0)) == DataType::FLOAT64;
+    spec.predictor = "LinearQuant1DPredictor";
+    spec.coder = cdecl.op_name;
+    spec.elems_per_lane = static_cast<int>(cdecl.elems_per_lane);
+
+    const size_t n_elems = coder->getFusedInverseElementCount();
+    const double ebx2 = quant->getFusedInverseDequantStep();
+    const size_t written = spec.use_double ? fused::launchNvrtcWarpInverseFused(
+        spec, static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes,
+        n_elems, 0, ebx2, nullptr, 0, static_cast<double*>(ctx.d_output), ctx.pool,
+        static_cast<fz::stream_t>(ctx.stream)) : fused::launchNvrtcWarpInverseFused(
+        spec, static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes,
+        n_elems, 0, static_cast<float>(ebx2), nullptr, 0,
+        static_cast<float*>(ctx.d_output), ctx.pool, static_cast<fz::stream_t>(ctx.stream));
+    quant->setFusedInverseResult(written);
+    return written;
 }
 
 size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
@@ -363,6 +491,7 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
     const FusedOpDecl pdecl = predictor->getInverseFusedOp();
     const FusedOpDecl cdecl = coder->getInverseFusedOp();
     fused::WarpFusionSpec spec;
+    spec.use_double = static_cast<DataType>(quant->getOutputDataType(0)) == DataType::FLOAT64;
     spec.coder          = cdecl.op_name;
     spec.predictor      = pdecl.op_name;
     spec.predictor_ti   = pdecl.ti_op_name;
@@ -375,11 +504,15 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
     // the tile→natural scatter. A 1-D predictor declares no inverse op/params.
     const size_t n_elems = coder->getFusedInverseElementCount();
     const size_t n_out   = predictor->getFusedInverseElementCount();   // 0 for 1-D
-    const float  ebx2    = static_cast<float>(quant->getFusedInverseDequantStep());
+    const double ebx2    = quant->getFusedInverseDequantStep();
 
-    const size_t written = fused::launchNvrtcWarpInverseFused(
+    const size_t written = spec.use_double ? fused::launchNvrtcWarpInverseFused(
         spec, static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes,
         n_elems, n_out, ebx2, pdecl.params.data(), pdecl.params.size(),
+        static_cast<double*>(ctx.d_output), ctx.pool,
+        static_cast<fz::stream_t>(ctx.stream)) : fused::launchNvrtcWarpInverseFused(
+        spec, static_cast<const uint8_t*>(ctx.d_input), ctx.input_bytes,
+        n_elems, n_out, static_cast<float>(ebx2), pdecl.params.data(), pdecl.params.size(),
         static_cast<float*>(ctx.d_output), ctx.pool,
         static_cast<fz::stream_t>(ctx.stream));
 
@@ -388,6 +521,8 @@ size_t runWarpRegisterInverse(const FusedRunContext& ctx) {
 }
 
 const FusedImpl kBuiltins[] = {
+    { "warp-linear-quant-coder", true, &matchesWarpLinearQuantCoder,
+                                      &runWarpLinearQuantCoder },
     { "warp-register",  true,  &matchesWarpRegister,     &runWarpRegister     },
     { "chunk-coop",     true,  &matchesChunkCooperative, &runChunkCooperative,
       /*accepts_unpadded_input=*/true },
@@ -395,6 +530,9 @@ const FusedImpl kBuiltins[] = {
                                       &runChunkCooperativeInverse },
     { "warp-register-inverse", true, &matchesWarpRegisterInverse,
                                       &runWarpRegisterInverse },
+    { "warp-linear-quant-coder-inverse", true,
+                                      &matchesWarpLinearQuantCoderInverse,
+                                      &runWarpLinearQuantCoderInverse },
 };
 
 } // namespace

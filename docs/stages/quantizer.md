@@ -153,7 +153,8 @@ an f64 range calculation is not first perturbed by a float metadata conversion;
 strict f32 bounds are rounded downward if their representation would loosen the
 TOML value.
 
-This accurate path is not eligible for the float-only warp-register fusion.
+This accurate path remains staged. Warp-register specialization supports the
+ordinary linear policy with float32 or float64 input and 32-bit codes.
 On an H100 direct-stage NOA benchmark over 67,108,864 floats, its median forward
 time was 0.3794 ms versus 0.3752 ms for float coordinates (707.5 versus
 715.4 GB/s, 1.1% slower). The maximum error changed from 1.030x to 0.992x of

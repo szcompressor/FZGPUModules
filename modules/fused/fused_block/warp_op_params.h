@@ -10,10 +10,12 @@
  * dependency-free (no device code), so both the host stage compile (g++) and the
  * device compile (nvcc / NVRTC) agree on the layout — the LC-of chunk_op_params.h.
  *
- * CONVENTION: every warp predictor's Params begins with `float inv2eb` at offset 0.
+ * ABI CONVENTION: every warp predictor's Params begins with `float inv2eb` at offset 0.
  * The predictor stage cannot know the error bound (the quantizer owns it), so it
- * packs 0 there; the generic runner overwrites those 4 bytes with `1/(2*abs_eb)`
- * resolved from the primed quantizer bound before uploading the blob.
+ * packs 0 there; the generic float runner overwrites those 4 bytes with
+ * `1/(2*abs_eb)` resolved from the primed quantizer bound. The f64 warp runner
+ * preserves this POD layout and passes its resolved double reciprocal as a
+ * separate kernel argument; f64 predictor policies ignore this float field.
  */
 
 #include <cstdint>

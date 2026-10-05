@@ -5,6 +5,7 @@
 // host-orchestrated device code nvcc must compile). See nvrtc_warp_fusion.h.
 
 #include "fused/fused_block/nvrtc_warp_fusion.h"
+#include "fused/fused_block/warp_op_params.h"
 #include "fused/common/nvrtc_jit.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_kernels.h"   // ab::configure (host)
 #include "mem/mempool.h"
@@ -17,8 +18,10 @@
 #include <cuda.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace fz {
 namespace fused {
@@ -27,13 +30,18 @@ namespace ab = fz::adaptive_bitpack;
 
 namespace {
 #define CU_CHECK(call) FZ_CU_CHECK(call, "NVRTC-warp")
+static const char* warpRealType(const WarpFusionSpec& spec) { return spec.use_double ? "double" : "float"; }
+static std::string warpPredictorType(const WarpFusionSpec& spec) {
+    return spec.use_double ? spec.predictor + "F64" : spec.predictor;
+}
 } // namespace
 
 std::string generateWarpFusionSource(const WarpFusionSpec& spec) {
     // The only things that change per chain: the predictor policy type and EPL (a
     // compile-time template arg). Both kernels reconstruct the policy from the params
     // blob + the launch-time input via the predictor's own `fromParams` factory.
-    const std::string P   = spec.predictor;
+    const std::string P   = warpPredictorType(spec);
+    const std::string R   = warpRealType(spec);
     const std::string C   = spec.coder;
     const std::string EPL = std::to_string(spec.elems_per_lane);
     // Body template args: <EPL, Coder, Pred, Transforms...>. Pred is named explicitly
@@ -42,20 +50,29 @@ std::string generateWarpFusionSource(const WarpFusionSpec& spec) {
     for (const auto& t : spec.transforms) targs += ", " + t;
 
     std::string src;
+    src += spec.use_double ? "// precision=f64\n" : "// precision=f32\n";
     src += "#include \"fused/fused_block/warp_fusion.cuh\"\n";
     src += "using namespace fz::fused::warp;\n";
     src += "extern \"C\" __global__ void fz_fused_warp_rate(\n";
-    src += "    const float* in, unsigned long long n, const unsigned char* pp,\n";
+    src += "    const " + R + "* in, unsigned long long n, const unsigned char* pp";
+    if (spec.use_double) src += ", double inv2eb";
+    src += ",\n";
     src += "    unsigned word_bytes, unsigned long long num_blocks,\n";
     src += "    unsigned char* meta, unsigned* cost) {\n";
-    src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp);\n";
+    src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp";
+    if (spec.use_double) src += ", inv2eb";
+    src += ");\n";
     src += "  fused_rate_body<" + targs + ">(pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, cost);\n";
     src += "}\n";
     src += "extern \"C\" __global__ void fz_fused_warp_pack(\n";
-    src += "    const float* in, unsigned long long n, const unsigned char* pp,\n";
+    src += "    const " + R + "* in, unsigned long long n, const unsigned char* pp";
+    if (spec.use_double) src += ", double inv2eb";
+    src += ",\n";
     src += "    unsigned word_bytes, unsigned long long num_blocks,\n";
     src += "    const unsigned char* meta, const unsigned* offset, unsigned char* payload) {\n";
-    src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp);\n";
+    src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp";
+    if (spec.use_double) src += ", inv2eb";
+    src += ");\n";
     src += "  fused_pack_body<" + targs + ">(pred, (size_t)n, word_bytes, (size_t)num_blocks, meta, offset, payload);\n";
     src += "}\n";
     return src;
@@ -65,20 +82,25 @@ std::string generateWarpFusionSource(const WarpFusionSpec& spec) {
 // no host CUB scan and no delta recompute. Emitted alongside the two-pass source so
 // the JIT caches one module; the launcher picks the entry by FZ_SINGLEPASS.
 static std::string generateWarpSinglePassSource(const WarpFusionSpec& spec, int blocks_per_warp) {
-    const std::string P = spec.predictor, C = spec.coder;
+    const std::string P = warpPredictorType(spec), C = spec.coder, R = warpRealType(spec);
     std::string targs = std::to_string(spec.elems_per_lane) + ", " +
                         std::to_string(blocks_per_warp) + ", " + C + ", " + P;
     for (const auto& t : spec.transforms) targs += ", " + t;
     std::string src;
+    src += spec.use_double ? "// precision=f64\n" : "// precision=f32\n";
     src += "#include \"fused/fused_block/warp_fusion.cuh\"\n";
     src += "using namespace fz::fused::warp;\n";
     src += "extern \"C\" __global__ void fz_fused_warp_single(\n";
-    src += "    const float* in, unsigned long long n, const unsigned char* pp,\n";
+    src += "    const " + R + "* in, unsigned long long n, const unsigned char* pp";
+    if (spec.use_double) src += ", double inv2eb";
+    src += ",\n";
     src += "    unsigned word_bytes, unsigned long long num_blocks,\n";
     src += "    unsigned char* meta, unsigned char* payload,\n";
     src += "    unsigned* g_counter, unsigned* g_state, unsigned* g_agg, unsigned* g_incl,\n";
     src += "    unsigned long long num_ctas) {\n";
-    src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp);\n";
+    src += "  " + P + " pred = " + P + "::fromParams(in, (size_t)n, pp";
+    if (spec.use_double) src += ", inv2eb";
+    src += ");\n";
     src += "  fused_single_pass_body<" + targs + ">(pred, (size_t)n, word_bytes,\n";
     src += "      (size_t)num_blocks, meta, payload, g_counter, g_state, g_agg, g_incl, (size_t)num_ctas);\n";
     src += "}\n";
@@ -249,15 +271,72 @@ static int singlePassBlocksPerWarp(size_t num_blocks) {
     return 16;   // tiny field: finest granularity for the most warps
 }
 
-size_t launchNvrtcWarpFused(
-    const WarpFusionSpec& spec, const float* d_in, size_t n_ab,
+template<class Real>
+__global__ static void validateWarpQuantKernel(const Real* in, size_t n, Real inv2eb,
+                                               uint32_t* invalid) {
+    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const Real scaled = in[i] * inv2eb;
+    if (!isfinite(scaled)) { atomicExch(invalid, 1u); return; }
+    const double rounded = nearbyint(static_cast<double>(scaled));
+    if (rounded < -2147483648.0 || rounded > 2147483647.0) atomicExch(invalid, 1u);
+}
+
+static size_t warpInputCount(const WarpFusionSpec& spec, const uint8_t* params, size_t bytes,
+                                size_t fallback) {
+    if (spec.predictor.rfind("TiledLorenzo", 0) != 0) return fallback;
+    if (spec.predictor.find("3D") != std::string::npos) {
+        if (bytes < sizeof(warp::TiledLorenzo3DParams)) throw std::invalid_argument("f64 warp predictor params are truncated");
+        warp::TiledLorenzo3DParams p{}; std::memcpy(&p, params, sizeof(p));
+        return static_cast<size_t>(p.dx) * p.dy * p.dz;
+    }
+    if (bytes < sizeof(warp::TiledLorenzo2DParams)) throw std::invalid_argument("f64 warp predictor params are truncated");
+    warp::TiledLorenzo2DParams p{}; std::memcpy(&p, params, sizeof(p));
+    return static_cast<size_t>(p.dx) * p.dy;
+}
+
+template<class Real>
+static void validateWarpQuantInput(const Real* d_in, size_t n, Real inv2eb,
+                                 MemoryPool* pool, cudaStream_t stream) {
+    if (n == 0) return;
+    auto* d_invalid = static_cast<uint32_t*>(pool->allocate(sizeof(uint32_t), stream, "warp_quant_invalid"));
+    constexpr unsigned threads = 256;
+    const unsigned blocks = static_cast<unsigned>((n + threads - 1) / threads);
+    uint32_t h_invalid = 0;
+    try {
+        FZ_CUDA_CHECK(cudaMemsetAsync(d_invalid, 0, sizeof(uint32_t), stream));
+        validateWarpQuantKernel<<<blocks, threads, 0, stream>>>(d_in, n, inv2eb, d_invalid);
+        FZ_CUDA_CHECK(cudaGetLastError());
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&h_invalid, d_invalid, sizeof(h_invalid), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+    } catch (...) {
+        pool->free(d_invalid, stream);
+        throw;
+    }
+    pool->free(d_invalid, stream);
+    if (h_invalid) throw std::runtime_error("warp quantization produced a non-finite or out-of-int32 coordinate");
+}
+
+template<class Real>
+static size_t launchNvrtcWarpFusedImpl(
+    const WarpFusionSpec& spec, const Real* d_in, size_t n_ab,
     const uint8_t* pred_params, size_t params_bytes,
     uint8_t* d_out, MemoryPool* pool, cudaStream_t stream,
-    std::string* execution_path)
+    Real inv2eb, std::string* execution_path)
 {
     if (n_ab == 0) {
         if (execution_path) *execution_path = "empty";
         return 0;
+    }
+    if (spec.use_double || spec.validate_input) {
+        const size_t n_valid = warpInputCount(spec, pred_params, params_bytes, n_ab);
+        Real resolved_inv = inv2eb;
+        if constexpr (std::is_same<Real, float>::value) {
+            if (params_bytes < sizeof(float))
+                throw std::invalid_argument("warp quantization reciprocal is missing");
+            std::memcpy(&resolved_inv, pred_params, sizeof(float));
+        }
+        validateWarpQuantInput(d_in, n_valid, resolved_inv, pool, stream);
     }
     const uint32_t block_size = 32u * static_cast<uint32_t>(spec.elems_per_lane);
     // "PlainRateCoder" emits the true 1-byte-meta plain AdaptiveBitpack format;
@@ -296,13 +375,15 @@ size_t launchNvrtcWarpFused(
     // byte-identical → pure throughput; no user action needed for the profitable choice to apply.
     const WarpFusionEnvConfig& env_cfg = WarpFusionEnvConfig::get();
     bool use_ti = false;
-    if (tiSupportedChain(spec)) {
-        if (env_cfg.force_ti) {
-            use_ti = true;
-        } else if (env_cfg.adaptive_probe) {
-            const float inv2eb  = (params_bytes >= sizeof(float)) ? *reinterpret_cast<const float*>(pred_params) : 0.0f;
-            const float avg_r   = probeAvgRate(d_in, n_ab, inv2eb, num_blocks, pool, stream);
-            use_ti = (avg_r <= env_cfg.adaptive_thresh);
+    if constexpr (std::is_same<Real, float>::value) {
+        if (!spec.use_double && tiSupportedChain(spec)) {
+            if (env_cfg.force_ti) {
+                use_ti = true;
+            } else if (env_cfg.adaptive_probe) {
+                const float inv2eb  = (params_bytes >= sizeof(float)) ? *reinterpret_cast<const float*>(pred_params) : 0.0f;
+                const float avg_r   = probeAvgRate(d_in, n_ab, inv2eb, num_blocks, pool, stream);
+                use_ti = (avg_r <= env_cfg.adaptive_thresh);
+            }
         }
     }
     if (use_ti) {
@@ -359,12 +440,16 @@ size_t launchNvrtcWarpFused(
         const std::string ssrc = generateWarpSinglePassSource(spec, BPW);
         CUfunction single = reinterpret_cast<CUfunction>(nvrtcGetKernel(ssrc, "fz_fused_warp_single"));
         unsigned long long nwarps_arg = num_warps;
-        void* single_args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+        void* single_args_f32[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+                                (void*)&wb_arg, (void*)&nb_arg, (void*)&d_meta, (void*)&d_payload,
+                                (void*)&d_counter, (void*)&d_state, (void*)&d_agg, (void*)&d_incl,
+                                (void*)&nwarps_arg };
+        void* single_args_f64[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params, (void*)&inv2eb,
                                 (void*)&wb_arg, (void*)&nb_arg, (void*)&d_meta, (void*)&d_payload,
                                 (void*)&d_counter, (void*)&d_state, (void*)&d_agg, (void*)&d_incl,
                                 (void*)&nwarps_arg };
         CU_CHECK(cuLaunchKernel(single, num_warps,1,1, 32u,1,1, 0,
-                                (CUstream)stream, single_args, nullptr));
+                                (CUstream)stream, spec.use_double ? single_args_f64 : single_args_f32, nullptr));
 
         uint32_t h_total = 0;   // g_incl[last warp] == inclusive prefix through all blocks == total payload
         FZ_CUDA_CHECK(cudaMemcpyAsync(&h_total, d_incl + num_warps-1, 4, cudaMemcpyDeviceToHost, stream));
@@ -383,21 +468,26 @@ size_t launchNvrtcWarpFused(
     CUfunction rate = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_warp_rate"));
     CUfunction pack = reinterpret_cast<CUfunction>(nvrtcGetKernel(src, "fz_fused_warp_pack"));
 
-    void* rate_args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+    void* rate_args_f32[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+                          (void*)&wb_arg, (void*)&nb_arg, (void*)&d_meta, (void*)&d_cost };
+    void* rate_args_f64[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params, (void*)&inv2eb,
                           (void*)&wb_arg, (void*)&nb_arg, (void*)&d_meta, (void*)&d_cost };
     CU_CHECK(cuLaunchKernel(rate, grid,1,1, (unsigned)THREADS,1,1, 0,
-                            (CUstream)stream, rate_args, nullptr));
+                            (CUstream)stream, spec.use_double ? rate_args_f64 : rate_args_f32, nullptr));
 
     auto d_tmp = fz::backend::withTempStorage(pool, stream, "warp_cub",
         [&](void* tmp, size_t& bytes) {
             cub::DeviceScan::ExclusiveSum(tmp, bytes, d_cost, d_offset, num_blocks, stream);
         });
 
-    void* pack_args[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+    void* pack_args_f32[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params,
+                          (void*)&wb_arg, (void*)&nb_arg, (void*)&d_meta,
+                          (void*)&d_offset, (void*)&d_payload };
+    void* pack_args_f64[] = { (void*)&d_in, (void*)&n_arg, (void*)&d_params, (void*)&inv2eb,
                           (void*)&wb_arg, (void*)&nb_arg, (void*)&d_meta,
                           (void*)&d_offset, (void*)&d_payload };
     CU_CHECK(cuLaunchKernel(pack, grid,1,1, (unsigned)THREADS,1,1, 0,
-                            (CUstream)stream, pack_args, nullptr));
+                            (CUstream)stream, spec.use_double ? pack_args_f64 : pack_args_f32, nullptr));
 
     uint32_t h_off = 0, h_cost = 0;
     FZ_CUDA_CHECK(cudaMemcpyAsync(&h_off,  d_offset + num_blocks-1, 4, cudaMemcpyDeviceToHost, stream));
@@ -411,6 +501,22 @@ size_t launchNvrtcWarpFused(
     return meta_region + static_cast<size_t>(h_off) + h_cost;
 }
 
+size_t launchNvrtcWarpFused(const WarpFusionSpec& spec, const float* d_in, size_t n_ab,
+    const uint8_t* pred_params, size_t params_bytes, uint8_t* d_out, MemoryPool* pool,
+    cudaStream_t stream, std::string* execution_path) {
+    if (spec.use_double) throw std::invalid_argument("f64 warp launch requires the double overload");
+    return launchNvrtcWarpFusedImpl(spec, d_in, n_ab, pred_params, params_bytes, d_out,
+                                    pool, stream, 0.0f, execution_path);
+}
+
+size_t launchNvrtcWarpFused(const WarpFusionSpec& spec, const double* d_in, size_t n_ab,
+    const uint8_t* pred_params, size_t params_bytes, uint8_t* d_out, MemoryPool* pool,
+    cudaStream_t stream, double inv2eb, std::string* execution_path) {
+    if (!spec.use_double) throw std::invalid_argument("double warp launch requires spec.use_double=true");
+    return launchNvrtcWarpFusedImpl(spec, d_in, n_ab, pred_params, params_bytes, d_out,
+                                    pool, stream, inv2eb, execution_path);
+}
+
 // ── Inverse (decompress) ────────────────────────────────────────────────────
 
 static bool isTiledPredictor(const WarpFusionSpec& spec) {
@@ -418,8 +524,9 @@ static bool isTiledPredictor(const WarpFusionSpec& spec) {
 }
 
 std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
-    const std::string P = spec.predictor, C = spec.coder;
+    const std::string P = warpPredictorType(spec), C = spec.coder, R = warpRealType(spec);
     std::string src;
+    src += spec.use_double ? "// precision=f64\n" : "// precision=f32\n";
     src += "#include \"fused/fused_block/warp_fusion.cuh\"\n";
     src += "using namespace fz::fused::warp;\n";
 
@@ -430,9 +537,9 @@ std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
         const std::string EPL = std::to_string(spec.elems_per_lane);
         src += "extern \"C\" __global__ void fz_fused_warp_unpack(\n";
         src += "    unsigned long long n, unsigned word_bytes, unsigned long long num_blocks,\n";
-        src += "    float ebx2, const unsigned char* meta, const unsigned* offset,\n";
-        src += "    const unsigned char* payload, float* out, const unsigned char* pp) {\n";
-        src += "  " + P + " pred = " + P + "::fromParams((const float*)0, (size_t)n, pp);\n";
+        src += "    " + R + " ebx2, const unsigned char* meta, const unsigned* offset,\n";
+        src += "    const unsigned char* payload, " + R + "* out, const unsigned char* pp) {\n";
+        src += "  " + P + " pred = " + P + "::fromParams((const " + R + "*)0, (size_t)n, pp);\n";
         src += "  fused_unpack_tiled_body<" + EPL + ", " + C + ", " + P + ">(\n";
         src += "      pred, (size_t)n, word_bytes, (size_t)num_blocks, ebx2, meta, offset, payload, out);\n";
         src += "}\n";
@@ -443,8 +550,8 @@ std::string generateWarpInverseSource(const WarpFusionSpec& spec) {
     for (const auto& t : spec.transforms) targs += ", " + t;   // reverse-transform ops (none yet)
     src += "extern \"C\" __global__ void fz_fused_warp_unpack(\n";
     src += "    unsigned long long n, unsigned word_bytes, unsigned long long num_blocks,\n";
-    src += "    float ebx2, const unsigned char* meta, const unsigned* offset,\n";
-    src += "    const unsigned char* payload, float* out) {\n";
+    src += "    " + R + " ebx2, const unsigned char* meta, const unsigned* offset,\n";
+    src += "    const unsigned char* payload, " + R + "* out) {\n";
     src += "  fused_unpack_body<" + targs + ">((size_t)n, word_bytes, (size_t)num_blocks,\n";
     src += "      ebx2, meta, offset, payload, out);\n";
     src += "}\n";
@@ -478,11 +585,12 @@ static std::string generateWarpTIInverseSource(const std::string& predictor_ti,
     return src;
 }
 
-size_t launchNvrtcWarpInverseFused(
+template<class Real>
+static size_t launchNvrtcWarpInverseFusedImpl(
     const WarpFusionSpec& spec, const uint8_t* d_archive, size_t /*archive_bytes*/,
-    size_t n_elems, size_t n_out, float ebx2,
+    size_t n_elems, size_t n_out, Real ebx2,
     const uint8_t* pred_params, size_t params_bytes,
-    float* d_out, MemoryPool* pool, cudaStream_t stream)
+    Real* d_out, MemoryPool* pool, cudaStream_t stream)
 {
     if (n_elems == 0) return 0;
     const bool tiled = isTiledPredictor(spec);
@@ -517,7 +625,7 @@ size_t launchNvrtcWarpInverseFused(
     // independent too (see reports/w2_ti_decode_design.md) — so this skips the
     // adaptive-probe machinery entirely rather than re-deriving a threshold with no
     // known counter-example yet.
-    if (tiSupportedChain(spec)) {
+    if (!spec.use_double && tiSupportedChain(spec)) {
         const WarpFusionEnvConfig& env_cfg = WarpFusionEnvConfig::get();
         const int BPT = env_cfg.ti_bpt;
         const size_t blocks_per_warp = static_cast<size_t>(BPT) * 32u;
@@ -541,7 +649,7 @@ size_t launchNvrtcWarpInverseFused(
         fz::backend::freeTempStorage(pool, d_tmp, stream);
         pool->free(d_offset, stream);
         pool->free(d_cost, stream);
-        return n_out * sizeof(float);
+        return n_out * sizeof(Real);
     }
 
     // Pass B: one warp per block. 1-D: decode + undelta + block-major dequant, all in
@@ -574,8 +682,27 @@ size_t launchNvrtcWarpInverseFused(
     fz::backend::freeTempStorage(pool, d_tmp, stream);
     pool->free(d_offset, stream);
     pool->free(d_cost, stream);
-    return n_out * sizeof(float);
+    return n_out * sizeof(Real);
 }
+
+size_t launchNvrtcWarpInverseFused(const WarpFusionSpec& spec, const uint8_t* d_archive,
+    size_t archive_bytes, size_t n_elems, size_t n_out, float ebx2,
+    const uint8_t* pred_params, size_t params_bytes, float* d_out,
+    MemoryPool* pool, cudaStream_t stream) {
+    if (spec.use_double) throw std::invalid_argument("f64 inverse launch requires the double overload");
+    return launchNvrtcWarpInverseFusedImpl(spec, d_archive, archive_bytes, n_elems, n_out,
+        ebx2, pred_params, params_bytes, d_out, pool, stream);
+}
+
+size_t launchNvrtcWarpInverseFused(const WarpFusionSpec& spec, const uint8_t* d_archive,
+    size_t archive_bytes, size_t n_elems, size_t n_out, double ebx2,
+    const uint8_t* pred_params, size_t params_bytes, double* d_out,
+    MemoryPool* pool, cudaStream_t stream) {
+    if (!spec.use_double) throw std::invalid_argument("double inverse launch requires spec.use_double=true");
+    return launchNvrtcWarpInverseFusedImpl(spec, d_archive, archive_bytes, n_elems, n_out,
+        ebx2, pred_params, params_bytes, d_out, pool, stream);
+}
+
 
 } // namespace fused
 } // namespace fz
