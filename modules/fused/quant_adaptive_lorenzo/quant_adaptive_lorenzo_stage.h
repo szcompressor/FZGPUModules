@@ -61,6 +61,8 @@ static_assert(sizeof(FusedQuantAdaptiveLorenzoConfig) <= FZM_STAGE_CONFIG_SIZE,
  * DRAM round-trip on **compress only** — decompress still runs two kernels
  * (the existing cross-warp inverse scan, then a plain elementwise dequant),
  * matching every other fusion result in this codebase (compress-side only).
+ * The forward kernel stays CTA-cooperative: thread-independent variants were
+ * byte-identical but 1.5-1.7x slower. Measurements: docs/codebase_notes.md CN-FSZTI-1
  *
  * Takes raw `float` input directly (no upstream Quantizer stage in the
  * pipeline) and owns its own error-bound resolution — `ABS`/`NOA`/`PREL`,

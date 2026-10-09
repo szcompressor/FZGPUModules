@@ -191,7 +191,7 @@ struct WarpFusionEnvConfig {
     // estimates rate with a flattened serial Lorenzo1D kernel, a poor proxy for the tiled
     // predictor, so the 1-D-fit 16.0 misroutes these chains to TI. Outlier-mode tiled chains
     // keep 16.0. FZ_ADAPTIVE_THRESH_TILED overrides; FZ_DEBUG_PROBE=1 prints each decision.
-    // Calibration and the residual EXAFEL/CLOUD ambiguity: docs/codebase_notes.md CN-WARP-PROBE-1
+    // Calibration and the residual EXAFEL/CLOUD ambiguity: docs/codebase_notes.md CN-WARPPROBE-1
     float adaptive_thresh_tiled = 1.4f;
     // Measured optimum with float4 loads (more warps + less local mem than cuSZp's 32).
     // FZ_TI_BPT overrides.

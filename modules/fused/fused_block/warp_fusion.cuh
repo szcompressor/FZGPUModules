@@ -136,7 +136,7 @@ using LinearQuant1DPredictorF64 = LinearQuant1DPredictorT<double>;
 // tiled_lorenzo_delta_kernel exactly. tile_elems == tx*ty == block_size.
 // The tile shape is a template argument on all four tiled predictors so the per-element
 // `% TX` / `/ TX` compile to mask/shift; the op_name carries it ("...Predictor<8,8>").
-// Measurements: docs/codebase_notes.md CN-WARP-TILESHAPE-1
+// Measurements: docs/codebase_notes.md CN-WARPTILE-1
 template<class Real, uint32_t TX, uint32_t TY> struct TiledLorenzo2DPredictorT {
     static constexpr bool is_identity = false;   // applies the separable delta
     static constexpr uint32_t kTx = TX, kTy = TY;   // read by fused_unpack_tiled_body

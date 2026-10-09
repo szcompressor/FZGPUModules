@@ -116,7 +116,7 @@ Only after the real-field gate passes, define an additive benchmark manifest
 covering all 330 f64 field/bound/variant coordinates and the corresponding
 decompression population (278 have existing native-valid complete cases),
 plus 36 f32 fixed 1-D coordinates if updating that coverage. See
-[CN-F64-SPECIALIZATION-2](codebase_notes.md#cn-f64-specialization-2-targeted-publication-rerun-scope)
+[CN-F64SPEC-2](codebase_notes.md)
 for the protocol and wall-time estimate. Pin source revisions, binaries, host/GPU provenance,
 and logical cell identities; retain historical manifests and results. Apply the
 usual validity, error-bound, timing, and verification gates before interpreting
@@ -217,5 +217,5 @@ fixed-mode ordinary/forced-single-pass memcheck and racecheck are clean. Full
 BROWN f64 and EXAALT f32 payload/reconstruction comparisons pass. Artifacts and
 provenance are in `build/f64-auto/fixed-validation/`; measured performance
 limitations and the targeted paper rerun scope are in
-[CN-F64-SPECIALIZATION-1/2](codebase_notes.md). The campaign and manuscript update
+[CN-F64SPEC-1/2](codebase_notes.md). The campaign and manuscript update
 remain pending.
