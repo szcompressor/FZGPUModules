@@ -201,10 +201,17 @@ struct ThreadTiledLorenzo2DPredictor {
                     if (lx == 0) prevY = cur;
                 }
                 const uint32_t gx0 = tix * tx + gx4;
-                if (gx0 + 4u <= dx) {
+                float* p4 = out + rowbase + gx4;
+                // dx need not be a multiple of 4 (arbitrary field width), so the row
+                // stride alone can misalign this float4 write even when the tile-local
+                // x group is 4-wide and fully in-bounds -- check the actual element
+                // offset (NVRTC has no <cstdint> uintptr_t; `out` is 16 B-aligned by
+                // the allocator, so offset%4==0 iff p4 is 16 B-aligned). Found via a
+                // real CUDA misaligned-address crash on a non-4-multiple dx field.
+                if (gx0 + 4u <= dx && ((p4 - out) & 3) == 0) {
                     float4 v{static_cast<float>(vals[0]) * ebx2, static_cast<float>(vals[1]) * ebx2,
                               static_cast<float>(vals[2]) * ebx2, static_cast<float>(vals[3]) * ebx2};
-                    reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                    reinterpret_cast<float4*>(p4)[0] = v;
                 } else {
                     #pragma unroll
                     for (int k = 0; k < 4; ++k)
@@ -280,10 +287,13 @@ struct ThreadTiledLorenzo3DPredictor {
                         if (lx == 0) { prevY = cur; if (ly == 0) prevZ = cur; }
                     }
                     const uint32_t gx0 = tix * tx + gx4;
-                    if (gx0 + 4u <= dx) {
+                    float* p4 = out + rowbase + gx4;
+                    // Same dx-not-a-multiple-of-4 alignment hazard as the 2-D delta
+                    // predictor's identical comment.
+                    if (gx0 + 4u <= dx && ((p4 - out) & 3) == 0) {
                         float4 v{static_cast<float>(vals[0]) * ebx2, static_cast<float>(vals[1]) * ebx2,
                                   static_cast<float>(vals[2]) * ebx2, static_cast<float>(vals[3]) * ebx2};
-                        reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                        reinterpret_cast<float4*>(p4)[0] = v;
                     } else {
                         #pragma unroll
                         for (int k = 0; k < 4; ++k)
@@ -334,10 +344,20 @@ struct ThreadTiledLorenzoIdentity2DPredictor {
             for (uint32_t gx4 = 0; gx4 < tx; gx4 += 4) {
                 const uint32_t gx0 = tix * tx + gx4;
                 const uint32_t local0 = ly * tx + gx4;
-                if (gx0 + 4u <= dx) {
+                float* p4 = out + rowbase + gx4;
+                // dx need not be a multiple of 4 (arbitrary field width), so the row
+                // stride alone can misalign this float4 write even when the tile-local
+                // x group is 4-wide and fully in-bounds -- check the actual element
+                // offset (NVRTC has no <cstdint> uintptr_t; `out` is 16 B-aligned by
+                // the allocator, so offset%4==0 iff p4 is 16 B-aligned). Found via a
+                // real CUDA misaligned-address crash on a non-4-multiple dx field --
+                // this identity decode path is in active production use, so this was a
+                // latent crash risk on any field whose dimension isn't a multiple of 4
+                // (e.g. EXAFEL, dx=130).
+                if (gx0 + 4u <= dx && ((p4 - out) & 3) == 0) {
                     float4 v{static_cast<float>(d[local0])   * ebx2, static_cast<float>(d[local0+1]) * ebx2,
                               static_cast<float>(d[local0+2]) * ebx2, static_cast<float>(d[local0+3]) * ebx2};
-                    reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                    reinterpret_cast<float4*>(p4)[0] = v;
                 } else {
                     #pragma unroll
                     for (int k = 0; k < 4; ++k)
@@ -391,10 +411,13 @@ struct ThreadTiledLorenzoIdentity3DPredictor {
                 for (uint32_t gx4 = 0; gx4 < tx; gx4 += 4) {
                     const uint32_t gx0 = tix * tx + gx4;
                     const uint32_t local0 = (lz * ty + ly) * tx + gx4;
-                    if (gx0 + 4u <= dx) {
+                    float* p4 = out + rowbase + gx4;
+                    // Same dx-not-a-multiple-of-4 alignment hazard as the 2-D identity
+                    // predictor's identical comment -- also in active production use.
+                    if (gx0 + 4u <= dx && ((p4 - out) & 3) == 0) {
                         float4 v{static_cast<float>(d[local0])   * ebx2, static_cast<float>(d[local0+1]) * ebx2,
                                   static_cast<float>(d[local0+2]) * ebx2, static_cast<float>(d[local0+3]) * ebx2};
-                        reinterpret_cast<float4*>(out + rowbase + gx4)[0] = v;
+                        reinterpret_cast<float4*>(p4)[0] = v;
                     } else {
                         #pragma unroll
                         for (int k = 0; k < 4; ++k)
