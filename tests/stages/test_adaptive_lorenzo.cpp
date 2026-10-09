@@ -25,8 +25,8 @@
  *   AL19 OutlierOracleNeverWorseThanFixed — exact second-policy end-to-end gate
  *
  * FusedQuantAdaptiveLorenzoStage<T> — AdaptiveLorenzo with the upstream linear
- * Quantizer fused into its forward kernel ("M1" partial fusion, promoted from
- * examples/fsz_fusion_probe.cu — see memory/quant_al_partial_fusion_probe.md):
+ * Quantizer fused into its forward kernel ("M1" partial fusion; see
+ * memory/quant_al_partial_fusion_probe.md):
  *
  *   FQAL1 ForwardRoundTrip           — 2-stage pipeline (no separate Quantizer), ABS
  *   FQAL2 MatchesStagedByteIdentical — identical reconstruction to Quantizer->AdaptiveLorenzo->AdaptiveBitpack
@@ -446,9 +446,8 @@ TEST(AdaptiveLorenzoStage, CompactionSurvivesTileCountNotMultipleOfFour) {
 }
 
 // ── FusedQuantAdaptiveLorenzoStage — "M1" partial fusion (upstream linear
-// Quantizer folded into AdaptiveLorenzo's forward kernel), promoted from the
-// probe in examples/fsz_fusion_probe.cu. See
-// FZGPUModules/memory/quant_al_partial_fusion_probe.md for the design.
+// Quantizer folded into AdaptiveLorenzo's forward kernel). See
+// FZGPUModules/memory/quant_al_partial_fusion_probe.md for its evidence.
 //
 //   FQAL1  ForwardRoundTrip        — 2-stage pipeline (no separate Quantizer), ABS
 //   FQAL2  MatchesStagedByteIdentical — same archive as Quantizer->AdaptiveLorenzo->AdaptiveBitpack
