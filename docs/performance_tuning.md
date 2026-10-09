@@ -256,15 +256,41 @@ user-chosen), all byte-identical to each other and to staged:
 
 | Path | When it's used | How it works |
 |---|---|---|
-| Thread-independent (TI) | Only `Lorenzo1DPredictor + AdaptiveBitpackCoder`, block=32 chains. Forced via `FZ_TI=1`, or selected by `FZ_ADAPTIVE`'s runtime rate probe (average fixed-rate ≤ threshold, default 16.0 — favors compressible data, this regime's measured winning case). | Each thread owns a fixed number of blocks (`FZ_TI_BPT`, default 8) with **no cross-thread dependency at all** — no lookback, no scan. The fastest path when applicable, but chain-shape-limited. |
-| Single-pass decoupled-lookback | Default, when `elems_per_lane ≤ 2` and the field is large enough (≥ 2²⁰ blocks, or forced smaller via `FZ_SP_BPW`). | One kernel: each warp owns a block of consecutive chunks (`BlocksPerWarp`, auto-picked to keep ~32k warps in flight) and propagates a running prefix sum to the next warp via a lock-free decoupled-lookback protocol — poll a per-warp state flag, no host round-trip, no second kernel launch. |
+| Thread-independent (TI) | Any chain where both the predictor and coder declare a TI policy (`Lorenzo1DPredictor` **and** `TiledLorenzo{2,3}DPredictor`, paired with `AdaptiveBitpackCoder`/`PlainRateCoder`) — not 1-D-only, despite an older assumption to the contrary. Forced via `FZ_TI=1`, or selected by `FZ_ADAPTIVE`'s runtime rate probe (average fixed-rate ≤ threshold — favors compressible data). | Each thread owns a fixed number of blocks (`FZ_TI_BPT`, default 8) with **no cross-thread dependency at all** — no lookback, no scan. The fastest path when applicable, and (as of 2026-09-08) the path most real-world large fields actually land on at representative error bounds. |
+| Single-pass decoupled-lookback | Default fallback when the probe doesn't pick TI, when `elems_per_lane ≤ 2` and the field is large enough (≥ 2²⁰ blocks, or forced smaller via `FZ_SP_BPW`). | One kernel: each warp owns a block of consecutive chunks (`BlocksPerWarp`, auto-picked to keep ~32k warps in flight) and propagates a running prefix sum to the next warp via a lock-free decoupled-lookback protocol — poll a per-warp state flag, no host round-trip, no second kernel launch. |
 | Two-pass (CUB scan) | Fallback for small fields, or `elems_per_lane > 2` (the single-pass body holds `BlocksPerWarp × elems_per_lane` deltas per lane in local memory across the look-back, which spills registers badly past EPL 2). | Classic two-kernel structure: a "rate" kernel computes each block's byte count, a host-orchestrated CUB exclusive scan turns that into offsets, then a "pack" kernel writes the final bitstream using those offsets. |
 
-All three are tuned via `FZ_*` environment variables (`FZ_TI`, `FZ_ADAPTIVE`,
-`FZ_ADAPTIVE_THRESH`, `FZ_TI_BPT`, `FZ_SINGLEPASS`, `FZ_SP_BPW`) — see
-`WarpFusionEnvConfig` in `modules/fused/fused_block/nvrtc_warp_fusion.cu` for the
-full list, defaults, and parsing rules. These are tuning/diagnostic knobs for
-experiments, not something a normal caller needs to set.
+**The TI/warp-cooperative threshold is chain-aware, not a single global constant.**
+The probe (`ti_rate_probe_kernel`) always estimates rate via a flattened serial-Lorenzo1D
+model, which is an accurate proxy for 1-D chains (threshold 16.0, `FZ_ADAPTIVE_THRESH`)
+but a poor one for the tiled 2-D/3-D **non-outlier** chain — a separate, lower threshold
+applies there (1.4, `FZ_ADAPTIVE_THRESH_TILED`), calibrated against measured throughput
+on the large-data corpus after the 16.0 default was found to misroute ~half those fields
+to TI at up to 2x slower than single-pass would give. Even the chain-aware threshold is
+an approximation — the real per-field data isn't perfectly separable by any single cut in
+`avg_r` for that chain, so a small residual misroute (~5% on one field) is an accepted
+trade-off, not a bug. Set `FZ_DEBUG_PROBE=1` to print `predictor/coder/avg_r/threshold/decision`
+to stderr for any compress call — use this before trusting a profile or re-tuning either
+threshold. Full derivation, the raw `avg_r` measurements, and the corpus-wide before/after
+numbers: `paper_organizer/papers/FZGM/reports/fused_execution_paths_map.md` (external to
+this repo, on the same host).
+
+**Before profiling or optimizing anything in this dispatch path, check which kernel
+actually ran** (the `execution_path` field in `--report-json` output / the harness's
+`fusion_groups`), not which one you intended to force. Two gotchas already cost a full
+day of misdirected profiling here: (1) static pipeline TOMLs under `configs/pipelines/`
+hardcode an absolute error bound independent of `-m`/`-e`, so testing at your intended
+relative bound requires either driving it through a harness that resolves relative bounds
+itself, or hand-computing the equivalent absolute value; (2) `FZ_TI`/`FZ_ADAPTIVE`/
+`FZ_SINGLEPASS` are silent no-ops unless `FZ_SPECIALIZE=auto` (or `FZ_FUSION=auto`) is
+*also* set, since specialization's programmatic default is `Off`.
+
+All these knobs are tuned via `FZ_*` environment variables (`FZ_TI`, `FZ_ADAPTIVE`,
+`FZ_ADAPTIVE_THRESH`, `FZ_ADAPTIVE_THRESH_TILED`, `FZ_TI_BPT`, `FZ_SINGLEPASS`,
+`FZ_SP_BPW`, `FZ_DEBUG_PROBE`) — see `WarpFusionEnvConfig` in
+`modules/fused/fused_block/nvrtc_warp_fusion.cu` for the full list, defaults, and parsing
+rules. These are tuning/diagnostic knobs for experiments, not something a normal caller
+needs to set.
 
 **chunk-cooperative's chunk size is a per-pipeline choice among {4096, 8192,
 16384} bytes** (default 16384) — not a single hardcoded constant. The supported
