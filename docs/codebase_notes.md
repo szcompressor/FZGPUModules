@@ -1,5 +1,152 @@
 # Codebase notes
 
+## CN-FSZ-TI-1: thread-independent AdaptiveLorenzo forward kernels (negative result)
+
+2026-09-09, H100. Two attempts to make `FusedQuantAdaptiveLorenzoStage`'s forward
+kernel thread-independent (TI), mirroring native FSZ's execution shape. Both were
+byte-identical to the shipped CTA-cooperative kernel and both were 1.5-1.7x slower,
+so neither was merged. The branches (`ti_predictor_wp1` at `f2e9919`,
+`ti_predictor_arrays` at `c1a8b26`) were deleted on 2026-10-09; this entry is the
+record.
+
+**Motivation.** Native FSZ's compress kernel uses one-warp CTAs
+(`FSZ_TBLOCK_SZ=32`) in which each thread serially owns 4 whole 256-element tiles in
+local registers, with no shuffles and no shared memory beyond one per-CTA offset
+counter. FZGM's kernel is CTA-cooperative: 256 threads per tile, warp shuffles,
+`__syncthreads()`, 9 shared arrays, and a single-threaded final 4-variant cost
+selection. ncu showed ours compute-bound (77% SM, 96% occupancy), so native wins by
+doing less total work. The remaining FZGM-vs-native FSZ gap was ~3.7x after M1
+(`FusedQuantAdaptiveLorenzo`) shipped.
+
+**Common scaffolding.** A new kernel sat alongside the CTA kernel and wrote the same
+dense per-tile buffers (`modes_dense`, `means_dense`, `flags`, `residuals`), so the
+downstream CUB scan, compaction and AdaptiveBitpack needed no change and the archive
+format was untouched. Dispatch was gated by `FZ_AL_TI=1` (default off) with
+`FZ_AL_TI_TPT` for tiles per thread, parsed once in a magic-static env config. A
+non-serialized `Config::TIDispatch {Auto, ForceCTA, ForceTI}` and
+`ti_tiles_per_thread` let one gtest binary compare both kernels without racing the
+env cache. Tests (`MatchesCTAByteIdentical`, `MatchesCTAAcrossTilesPerThread`,
+`TIForwardRoundTrip`) swept `blocks_per_tile` in {1,2,4,8} x order-2 on/off x
+centering on/off x TPT {2,4,8}. `blocks_per_tile = 16` is excluded because the CTA
+kernel's `__launch_bounds__(256,8)` already forbids 512-thread tiles. The kernels were
+derived from this file's own CTA kernel; no FSZ kernel body was copied (only the
+thread mapping idea).
+
+**WP1: scalar-state, three-pass TI kernel**
+(`fused_quant_adaptive_lorenzo_forward_kernel_ti<T, TILES_PER_THREAD>`). Per-block
+`CoderStats` (`all`/`rest`/`first` for LZ1 and LZ2) were kept as scalars, costed with
+`blockCost()` and reset at each 32-element block, so register use did not scale with
+`blocks_per_tile`. The cost was three passes per tile: (1) a full-tile scan for
+per-block stats and the mean sum, (2) a 32-element reread of block 0 to cost the
+centered variants once the mean was known, (3) a full-tile pass to emit the chosen
+residuals.
+
+| NYX/temperature, ncu `--set full` | CTA | TI TPT=2 | TI TPT=4 | TI TPT=8 |
+|---|---:|---:|---:|---:|
+| Duration | 1.84 ms | 3.67 ms | 3.45 ms | 3.43 ms |
+| Compute (SM) | 77.40% | 9.86% | 10.26% | 10.26% |
+| Memory throughput | 64.45% | 63.57% | 66.07% | 64.85% |
+| DRAM throughput | 17.23% | 17.69% | 18.03% | 17.59% |
+| Registers/thread | 32 | 48 | 52 | 53 |
+| Achieved occupancy | 95.99% | 52.45% | 46.30% | 24.36% |
+
+End to end (`fzgmod-cli -b --report-json`, `device_ms.min`, 20 reps x 3 invocations,
+`fsz_fused_quant.toml`): NYX/temperature CTA 2.906-2.908 ms vs TI 4.585-4.604 ms
+(1.58x slower); HACC/vx 6.545-6.550 ms vs 9.925-9.994 ms (1.52x slower). Compressed
+sizes were identical (NYX 24,421,280 B, CR 21.98).
+
+**WP1b: register-array TI kernel**
+(`fused_quant_adaptive_lorenzo_forward_kernel_ti_arrays<T, TPT, BPT>`, one-warp CTAs,
+`BPT` = `blocks_per_tile` in {1,2,4,8} as a compile-time argument). Both predictors'
+`CoderStats` were held in `CoderStats[BPT]` arrays (block loop fully unrolled so they
+scalarize; tile loop `#pragma unroll 1` so the arrays are reused, not multiplied by
+TPT). WP1's block-0 reread was removed algebraically, because centering changes only
+residual 0 (LZ1) or residuals 0 and 1 (LZ2):
+
+- quantized value `q0`, mean `mu`, `c0 = q0 - mu`, `cm0 = |c0|`;
+- centered LZ1 block 0 = `{rest1 | cm0, rest1, cm0}`;
+- keep `d1[1]` and the OR of LZ2 magnitudes over elements 2..31 (`tail2`); with
+  `cm1 = |d1[1] - c0|`, centered LZ2 block 0 = `{tail2 | cm1 | cm0, tail2 | cm1, cm0}`;
+- centered variant cost = uncentered total - block-0 cost + centered block-0 cost +
+  `sizeof(T)` for the mean; the minimum of the four variants picks the mode.
+
+Prediction and mode analysis then read each input once; a second traversal emits the
+selected residual stream (the modular stage must materialize it for the separate
+AdaptiveBitpack launch).
+
+| NYX, TPT=8, ncu | WP1 scalar TI | WP1b array TI | CTA |
+|---|---:|---:|---:|
+| Kernel duration | 3.43 ms | 3.24 ms | 1.84 ms |
+| Compute (SM) | 10.26% | 8.66% | 77.40% |
+| Memory throughput | 64.85% | 68.50% | 64.45% |
+| DRAM throughput | 17.59% | 17.85% | 17.23% |
+| Registers/thread | 53 | 76 | 32 |
+| Local load/store | n/a | 0 / 0 | n/a |
+| Achieved occupancy | 24.36% | 23.83% | 95.99% |
+
+End to end: NYX 2.904-2.910 ms (CTA) vs 4.420-4.440 ms (1.53x slower); HACC
+6.546-6.549 ms vs 10.705 ms (1.64x slower). NYX TPT sweep: 4.670 ms (2), 4.975-5.020
+ms (4), 4.420-4.440 ms (8). `cuobjdump` confirmed 76 registers and zero local bytes,
+which rules out spilling. Two variants were also tried and reverted, both
+byte-identical: `float4` loads (NYX 4.548 ms, 78 registers) and a one-raw-input-pass
+hybrid that stored LZ1 residuals during analysis and transformed them in place for LZ2
+(NYX 4.778 ms).
+
+**Root cause.** Both TI kernels are latency-bound on uncoalesced per-thread global
+access: each thread walks its own contiguous tile, so a warp touches 32 different
+tiles per instruction. Loads issued 8,388,608 requests for 268,435,456 sectors, i.e.
+32 sectors per request with 4 useful bytes per 32-byte sector. Native FSZ has the
+same uncoalesced pattern (19 sectors/request measured) but tolerates it, because its
+single-pass, 67-register kernel does enough arithmetic per load to hide the latency
+and fuses prediction, selection and final coding in one kernel. FZGM's modular
+boundary forces a dense residual stream between AdaptiveLorenzo and AdaptiveBitpack,
+which adds traffic without adding compute. Removing WP1's block-0 reread gained only
+~5.5% of kernel time.
+
+**What a future attempt would need.** More TPT or register tuning will not help.
+Either (a) a coalescing-aware thread-to-data mapping that is no longer "thread owns
+a contiguous tile", or (b) predictor+coder fusion that consumes thread-local predictor
+state directly instead of materializing residuals. Either must keep byte identity with
+the CTA kernel and pass the same ncu checks (sectors/request, local memory, SM%).
+The same lesson appears in AdaptiveBitpack's scalar-coder experiment
+(`FZ_AB_FORCE_SCALAR`, removed): matching native's thread independence without its
+coalescing and predictor-coder locality loses.
+
+## CN-WARP-PROBE-1: tiled plain-chain adaptive-probe threshold
+
+2026-09-09, H100, large-data corpus at rel_range 1e-3. The TI-vs-warp-cooperative
+probe threshold `adaptive_thresh = 16.0` was a 2-point fit on 1-D cuSZp2 HACC data
+(xx r~14: TI wins 393 vs 236 GB/s; vx r~17.6: warp-cooperative wins). The probe always
+estimates rate with a flattened serial Lorenzo1D kernel (`ti_rate_probe_kernel`), so for
+tiled 2-D/3-D plain (non-outlier) chains it sent CESMATM-3D/T and SCALE-LETKF/T to TI at
+about half the single-pass throughput (25-26% of native cuSZp3 instead of 48-50%).
+
+`adaptive_thresh_tiled = 1.4` was calibrated from `FZ_DEBUG_PROBE=1` avg_r on the 10 tiled
+corpus fields. The data are not separable by one global cut: CESMATM-3D/CLOUD wants
+single-pass at avg_r = 1.749, below EXAFEL/data, which wants TI at avg_r = 3.641. 1.4
+routes 9/10 fields correctly, costs EXAFEL/data ~5% (331.9 -> 315.6 GB/s), and fixes
+CESMATM-3D/{T,U,CLOUD} and SCALE-LETKF/{T,U,QV} (+15-96%). Corpus-wide (24 cells, cuSZp2 +
+cuSZp3 plain/outlier vs native): compress throughput range 25.0-84.2% -> 45.7-80.5% of
+native, geomean 0.558 -> 0.601; output byte-identical (dispatch only). Resolving the
+EXAFEL/CLOUD ambiguity needs a dimension-aware or tile-shape-aware probe, not a constant.
+Full analysis: paper_organizer `projects/FZGM/investigations/fusion/fused_execution_paths_map.md`.
+
+## CN-WARP-TILESHAPE-1: compile-time tile shape in the tiled warp predictors
+
+2026-09-08, H100, cuSZp3 2-D/3-D warp-cooperative path. Native-vs-FZGM instruction
+profiling showed the fused path executing 10.8x more instructions per element than native
+(14.53 vs 1.35), ALU-bound (65.9% ALU pipe) where native is memory-bound (68% DRAM).
+`lx = local % tx` and `ly = local / tx` are per-element and were runtime divisions against
+a `uint32_t` field. Making the tile shape a template argument (both shipped shapes are
+powers of two: 8x8 2-D, 4x4x4 3-D) turns them into mask/shift: 1.95B -> 1.73B executed
+instructions (-11%), NYX/temperature 177.7 -> 191.6 GB/s (+7.8%), byte-identical.
+Corpus-wide (95 cells vs native, geomean): cuszp3_plain compress unchanged at 0.45x,
+decompress 0.28x -> 0.39x; cuszp3_outlier 0.64x/0.46x -> 0.66x/0.56x compress/decompress.
+A per-tile `tile_ctx()` hoist of the tile-index divisions was measured separately and had
+no effect (<0.1% instructions; the compiler already CSEs it), so it was not kept. These
+numbers predate f64 specialization (`2f5fe00`); the port onto the `Real`-templated
+predictors (2026-10-09) was re-verified for correctness, not re-timed.
+
 ## CN-F64-SPECIALIZATION-1: f64 and predictor-free fixed-mode diagnostics
 
 2026-10-05, H100. These are local performance diagnostics, not publication

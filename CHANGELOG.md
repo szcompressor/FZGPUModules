@@ -10,6 +10,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Tiled warp predictors (`TiledLorenzo{2,3}D[Identity]Predictor`, f32 and f64) take the tile shape as template arguments, so per-element tile indexing compiles to mask/shift; fused op names now carry the shape (e.g. `TiledLorenzo2DPredictor<8,8>`). Byte-identical output; measurements in `docs/codebase_notes.md` CN-WARP-TILESHAPE-1.
+- Tiled 2-D/3-D plain (non-outlier) warp chains use a separate adaptive-probe threshold (`FZ_ADAPTIVE_THRESH_TILED`, default 1.4) instead of the 1-D-fit 16.0, which routed several 3-D fields to the slower thread-independent path; `FZ_DEBUG_PROBE=1` prints each decision. Dispatch only, byte-identical (CN-WARP-PROBE-1).
+- `AdaptiveBitpackCoder`'s warp ballot-result stores are vectorized (measured neutral).
 - `GInterpStage` auto-tuning (modes 3/4) now sums its probe errors without atomics: each thread accumulates its own partial, partials are added in thread order, and per-block sums in block order, at the same float precision as before. Upstream's float `atomicAdd` sums depended on arrival order, and some probed variants tie exactly (native64 2-D level 1 measures the `use_natural` triplet twice), so repeated compressions of one field could pick different parameters: up to ~7% archive-size jitter on CESM-2D. Compression is now byte-reproducible run to run (`GInterpStage.GI56_Native64_AutoTuneMode3_2D_Deterministic`). An interim 64-bit fixed-point sum in units of eb/256 was also deterministic but rounded the small errors of smooth fields at loose bounds to zero, so every variant tied and the first was chosen.
 - Chunk-cooperative fused compress writes each chunk straight into the archive via decoupled look-back instead of a full input-size scratch buffer plus scan and pack; archives are byte-identical (`FZ_CHUNK_SCRATCH=1` restores the scratch path). 1x input less device memory; compress time -15%..+9% by field (see pipeline_specialization_internals.md).
 - In-process `decompress()` no longer preallocates the inverse DAG's result buffer, which every call replaced with its own output; once coloring had placed it in a shared region it stayed resident, adding 1x output-size to every later `compress()` peak.
@@ -80,6 +83,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - Removed Huffman's experimental `Fine` encode mode, its public API and diagnostics, TOML/card option, documentation, profiling selection, and mode-specific tests; `HuffmanStage` now exposes only the supported cuSZ coarse-grained encoder.
 
 ### Fixed
+- Thread-independent tiled Lorenzo decode (`ThreadTiledLorenzo{2,3}D[Identity]Predictor::unpredict_and_write`) no longer issues misaligned `float4` accesses when the field's row length is not a multiple of 4 (e.g. EXAFEL, dx=130); it falls back to scalar access.
 
 - Reset the linear quantizer's staged overflow flag during fused priming, preventing post-compression validation from reading uninitialized or stale state when specialization bypasses the staged kernel.
 - `decompress()` rebuilds its cached inverse DAG when any stage's stream size changed since it was built, not only the source size. A reused DAG decoded a grown internal stream (cuSZ-Hi's RZE side stream between compresses) into a too-small preallocated buffer, an out-of-bounds write that intermittently corrupted pool memory (pre-existing on main, ~3% of cuSZ-Hi CR round trips).
