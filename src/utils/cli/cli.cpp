@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cctype>
 #include <cstdint>
 #include <fstream>
@@ -1331,21 +1332,45 @@ static int run_benchmark(CliSettings s) {
         FZ_CUDA_CHECK(cudaDeviceSynchronize());
 
         TimingSummary compress_stats, decompress_stats;
+        const char* host_resident_env = std::getenv("FZ_BENCH_HOST_RESIDENT");
+        const bool host_resident = host_resident_env && std::string(host_resident_env) == "1";
+        std::vector<double> host_resident_compress_ms, host_resident_decompress_ms;
+        // Experimental pageable-host-buffer benchmark; allocation/setup are outside timing.
+        std::vector<uint8_t> host_archive(host_resident ? compressed_size : 0);
+        std::vector<uint8_t> host_metadata;
+        std::vector<uint8_t> host_reconstruction(host_resident ? payload_bytes : 0);
         std::vector<uint8_t> final_recon;
         PipelinePerfResult last_compress_perf, last_decompress_perf;
 
         for (int i = 0; i < s.benchmark_runs; ++i) {
             const bool is_last = (i == s.benchmark_runs - 1);
 
+            const auto hr_c0 = std::chrono::high_resolution_clock::now();
+            if (host_resident) {
+                FZ_CUDA_CHECK(cudaMemcpy(d_input, input_bytes.data(), payload_bytes, cudaMemcpyHostToDevice));
+            }
             const auto t0 = std::chrono::high_resolution_clock::now();
             pipeline->compress(d_input, payload_bytes, &d_compressed, &compressed_size, bench_stream);
             FZ_CUDA_CHECK(cudaDeviceSynchronize());
             const auto t1 = std::chrono::high_resolution_clock::now();
             compress_stats.add(std::chrono::duration<double, std::milli>(t1 - t0).count(), pipeline->getLastPerfResult().dag_elapsed_ms);
             if (is_last) last_compress_perf = pipeline->getLastPerfResult();
+            if (host_resident) {
+                if (compressed_size != host_archive.size())
+                    throw std::runtime_error("Experimental host-resident archive changed size after warmup");
+                FZ_CUDA_CHECK(cudaMemcpy(host_archive.data(), d_compressed, compressed_size, cudaMemcpyDeviceToHost));
+                host_metadata = pipeline->serializeHeaderToMemory();
+                const auto hr_c1 = std::chrono::high_resolution_clock::now();
+                host_resident_compress_ms.push_back(std::chrono::duration<double, std::milli>(hr_c1 - hr_c0).count());
+            }
 
             void* d_recon = nullptr;
             size_t recon_size = 0;
+            const auto hr_d0 = std::chrono::high_resolution_clock::now();
+            if (host_resident) {
+                FZ_CUDA_CHECK(cudaMemcpy(d_compressed, host_archive.data(), compressed_size, cudaMemcpyHostToDevice));
+                pipeline->primeInverseFromHeader(host_metadata.data(), host_metadata.size());
+            }
             const auto t2 = std::chrono::high_resolution_clock::now();
             pipeline->decompress(d_compressed, compressed_size, &d_recon, &recon_size, bench_stream);
             FZ_CUDA_CHECK(cudaDeviceSynchronize());
@@ -1357,6 +1382,11 @@ static int run_benchmark(CliSettings s) {
             }
             decompress_stats.add(std::chrono::duration<double, std::milli>(t3 - t2).count(), pipeline->getLastPerfResult().dag_elapsed_ms);
             if (is_last) last_decompress_perf = pipeline->getLastPerfResult();
+            if (host_resident) {
+                FZ_CUDA_CHECK(cudaMemcpy(host_reconstruction.data(), d_recon, recon_size, cudaMemcpyDeviceToHost));
+                const auto hr_d1 = std::chrono::high_resolution_clock::now();
+                host_resident_decompress_ms.push_back(std::chrono::duration<double, std::milli>(hr_d1 - hr_d0).count());
+            }
 
             if ((s.report || !s.original_path.empty() || want_json) && is_last) {
                 final_recon.resize(recon_size);
@@ -1417,12 +1447,15 @@ static int run_benchmark(CliSettings s) {
             d.compressed_bytes  = compressed_size;
             d.has_memory        = true;
             d.peak_device_bytes = pipeline->getPeakMemoryUsage();
+            if (host_resident) d.host_archive_bytes = compressed_size + host_metadata.size();
             d.n_runs            = s.benchmark_runs;
             d.compress.present      = true;
             d.compress.host_wall_ms = compress_stats.host_ms;
+            d.compress.host_resident_ms = host_resident_compress_ms;
             d.compress.device_ms.assign(compress_stats.dag_ms.begin(), compress_stats.dag_ms.end());
             d.decompress.present      = true;
             d.decompress.host_wall_ms = decompress_stats.host_ms;
+            d.decompress.host_resident_ms = host_resident_decompress_ms;
             d.decompress.device_ms.assign(decompress_stats.dag_ms.begin(), decompress_stats.dag_ms.end());
             append_stages(d.stages, last_compress_perf, "compress");
             append_stages(d.stages, last_decompress_perf, "decompress");

@@ -88,6 +88,10 @@ void write_phase(std::ostream& o, const std::string& key, const PhaseTimingJson&
     write_metric_block(o, "        ", p.device_ms);
     o << ",\n        \"host_wall_ms\": ";
     write_metric_block(o, "        ", p.host_wall_ms);
+    if (!p.host_resident_ms.empty()) {
+        o << ",\n        \"host_resident_ms\": ";
+        write_metric_block(o, "        ", p.host_resident_ms);
+    }
     o << "\n      }";
 }
 
@@ -150,6 +154,8 @@ void write_report_json(const std::string& path, const ReportData& d) {
         o << "    \"bitrate_bits_per_elem\": " << num(bitrate) << "\n";
         o << "  },\n";
     }
+
+    if (d.host_archive_bytes) o << "  \"host_archive_bytes\": " << d.host_archive_bytes << ",\n";
 
     // timing
     o << "  \"timing\": {\n";

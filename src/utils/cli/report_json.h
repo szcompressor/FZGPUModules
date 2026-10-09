@@ -42,6 +42,7 @@ struct PhaseTimingJson {
     bool                present = false;
     std::vector<double> device_ms;      ///< per-rep device wall time (ms)
     std::vector<double> host_wall_ms;   ///< per-rep host wall time (ms)
+    std::vector<double> host_resident_ms; ///< experimental input/output-transfer-inclusive wall time
 };
 
 struct FusionGroupJson {
@@ -83,6 +84,7 @@ struct ReportData {
     bool   has_size = false;
     size_t original_bytes = 0;           ///< uncompressed byte count
     size_t compressed_bytes = 0;
+    size_t host_archive_bytes = 0; ///< optional complete in-memory FZM archive
 
     // ── timing ──
     std::string     timing_method = "cuda_events_dag";
