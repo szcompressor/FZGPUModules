@@ -96,14 +96,15 @@ size_t launchFusedCuszp3Compress(
     uint8_t* d_out, MemoryPool* pool, cudaStream_t stream)
 {
     const uint32_t tile_elems = tx * ty;
-    if (dx == 0 || dy == 0 || tile_elems != 64u) return 0;   // block-64 2-D driver only
+    // block-64 2-D driver only; the predictor's tile shape is a template arg, so only 8x8.
+    if (dx == 0 || dy == 0 || tile_elems != 64u || tx != 8u || ty != 8u) return 0;
     const uint32_t ntx = static_cast<uint32_t>((dx + tx - 1) / tx);
     const uint32_t nty = static_cast<uint32_t>((dy + ty - 1) / ty);
     const size_t num_tiles = static_cast<size_t>(ntx) * nty;
     const size_t n_ab = num_tiles * tile_elems;              // tile-major padded count
     ab::Config cfg = ab::configure(n_ab, tile_elems, /*outlier=*/true);
-    TiledLorenzo2DPredictor pred{d_in, 1.0f / (2.0f * abs_eb),
-                                 static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), tx, ty, ntx};
+    TiledLorenzo2DPredictor<8, 8> pred{d_in, 1.0f / (2.0f * abs_eb),
+                                       static_cast<uint32_t>(dx), static_cast<uint32_t>(dy), ntx};
     return launchFusedBlockCore<2>(pred, n_ab, cfg.word_bytes, cfg.num_blocks, d_out, pool, stream);
 }
 

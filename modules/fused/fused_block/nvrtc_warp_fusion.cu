@@ -32,7 +32,11 @@ namespace {
 #define CU_CHECK(call) FZ_CU_CHECK(call, "NVRTC-warp")
 static const char* warpRealType(const WarpFusionSpec& spec) { return spec.use_double ? "double" : "float"; }
 static std::string warpPredictorType(const WarpFusionSpec& spec) {
-    return spec.use_double ? spec.predictor + "F64" : spec.predictor;
+    if (!spec.use_double) return spec.predictor;
+    // Templated op names ("TiledLorenzo2DPredictor<8,8>") take the suffix before the args.
+    const size_t lt = spec.predictor.find('<');
+    if (lt == std::string::npos) return spec.predictor + "F64";
+    return spec.predictor.substr(0, lt) + "F64" + spec.predictor.substr(lt);
 }
 } // namespace
 
@@ -184,19 +188,10 @@ struct WarpFusionEnvConfig {
     // FZ_ADAPTIVE_THRESH overrides. Applies to Lorenzo1D (EPL==1) chains.
     float adaptive_thresh = 16.0f;
     // Separate, lower threshold for the tiled 2-D/3-D + PLAIN (non-outlier) chain: the probe
-    // always measures rate via a flattened serial Lorenzo1D estimate (ti_rate_probe_kernel),
-    // which is a poor proxy for the tiled predictor's actual achieved rate — the 16.0 threshold
-    // above, fit on 1-D data, misrouted CESMATM-3D/T and SCALE-LETKF/T to TI at ~2x slower than
-    // single-pass (2026-09-08).
-    // Calibrated 2026-09-09 from FZ_DEBUG_PROBE=1 avg_r on the 10 tiled fields in the large-data
-    // corpus: NOT cleanly separable by any single threshold (CESMATM-3D/CLOUD wants SP at
-    // avg_r=1.749, sitting BELOW EXAFEL/data which wants TI at avg_r=3.641) — 1.4 is the best
-    // single-cut compromise, correctly routing 9/10 fields and costing EXAFEL/data only ~5%
-    // (331.9->315.6 GB/s) while fixing CESMATM-3D/{T,U,CLOUD} and SCALE-LETKF/{T,U,QV} (15-96%
-    // gains). A real fix for the EXAFEL/CLOUD ambiguity needs a per-field or dimension-aware
-    // signal, not a single global constant.
-    // FZ_ADAPTIVE_THRESH_TILED overrides. Outlier-mode tiled chains still use the 16.0 default
-    // above — that combination routes correctly.
+    // estimates rate with a flattened serial Lorenzo1D kernel, a poor proxy for the tiled
+    // predictor, so the 1-D-fit 16.0 misroutes these chains to TI. Outlier-mode tiled chains
+    // keep 16.0. FZ_ADAPTIVE_THRESH_TILED overrides; FZ_DEBUG_PROBE=1 prints each decision.
+    // Calibration and the residual EXAFEL/CLOUD ambiguity: docs/codebase_notes.md CN-WARP-PROBE-1
     float adaptive_thresh_tiled = 1.4f;
     // Measured optimum with float4 loads (more warps + less local mem than cuSZp's 32).
     // FZ_TI_BPT overrides.

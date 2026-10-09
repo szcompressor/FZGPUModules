@@ -201,13 +201,15 @@ public:
         d.include_header = "fused/fused_block/warp_fusion.cuh";
         d.elems_per_lane = 2;
         if (tz == 1u && dz == 1u) {   // 2-D (single slice; a stack of 2-D-tiled slices takes the 3-D op with tz == 1)
-            d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo2DPredictor<" : "TiledLorenzoIdentity2DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + ">";   // tile shape is a template arg
             d.ti_op_name = predict_ ? "ThreadTiledLorenzo2DPredictor" : "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D (PROTOTYPE)
-            d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo3DPredictor<" : "TiledLorenzoIdentity3DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + "," + std::to_string(tz) + ">";
             d.ti_op_name = predict_ ? "ThreadTiledLorenzo3DPredictor" : "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};
@@ -264,13 +266,15 @@ public:
         // (compress) ti_op_name is unaffected: it is set for BOTH modes above and
         // both measured real wins there.
         if (tz == 1u && dz == 1u) {   // 2-D (single slice; a stack of 2-D-tiled slices takes the 3-D op with tz == 1)
-            d.op_name = predict_ ? "TiledLorenzo2DPredictor" : "TiledLorenzoIdentity2DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo2DPredictor<" : "TiledLorenzoIdentity2DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + ">";   // tile shape is a template arg
             if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity2DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * tx * ty;
             fused::warp::TiledLorenzo2DParams p{0.0f, dx, dy, tx, ty, ntx};  // inv2eb unused on decode
             d.params.resize(sizeof(p)); std::memcpy(d.params.data(), &p, sizeof(p));
         } else {          // 3-D
-            d.op_name = predict_ ? "TiledLorenzo3DPredictor" : "TiledLorenzoIdentity3DPredictor";
+            d.op_name = (predict_ ? "TiledLorenzo3DPredictor<" : "TiledLorenzoIdentity3DPredictor<")
+                        + std::to_string(tx) + "," + std::to_string(ty) + "," + std::to_string(tz) + ">";
             if (!predict_) d.ti_op_name = "ThreadTiledLorenzoIdentity3DPredictor";
             d.n_ab    = static_cast<size_t>(ntx) * nty * ntz * tx * ty * tz;
             fused::warp::TiledLorenzo3DParams p{0.0f, dx, dy, dz, tx, ty, tz, ntx, nty};

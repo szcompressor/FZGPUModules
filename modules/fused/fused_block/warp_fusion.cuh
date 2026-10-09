@@ -134,27 +134,31 @@ using LinearQuant1DPredictorF64 = LinearQuant1DPredictorT<double>;
 // re-quantises its own left/up predecessor from the float field (a pure map, so the
 // neighbour code equals what the staged quantizer produced). Mirrors
 // tiled_lorenzo_delta_kernel exactly. tile_elems == tx*ty == block_size.
-template<class Real> struct TiledLorenzo2DPredictorT {
+// The tile shape is a template argument on all four tiled predictors so the per-element
+// `% TX` / `/ TX` compile to mask/shift; the op_name carries it ("...Predictor<8,8>").
+// Measurements: docs/codebase_notes.md CN-WARP-TILESHAPE-1
+template<class Real, uint32_t TX, uint32_t TY> struct TiledLorenzo2DPredictorT {
     static constexpr bool is_identity = false;   // applies the separable delta
+    static constexpr uint32_t kTx = TX, kTy = TY;   // read by fused_unpack_tiled_body
     const Real* in;
     Real inv2eb;
-    uint32_t dx, dy, tx, ty, ntx;
+    uint32_t dx, dy, ntx;
     __device__ static TiledLorenzo2DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
-        return TiledLorenzo2DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.tx, p.ty, p.ntx};
+        return TiledLorenzo2DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.ntx};
     }
     __device__ static TiledLorenzo2DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp, Real inv) {
         const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
-        return TiledLorenzo2DPredictorT{in, inv, p.dx, p.dy, p.tx, p.ty, p.ntx};
+        return TiledLorenzo2DPredictorT{in, inv, p.dx, p.dy, p.ntx};
     }
     __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);   // element within tile
-        const uint32_t lx = local % tx;
-        const uint32_t ly = local / tx;                                 // tz==1 ⇒ ly < ty
+        const uint32_t lx = local % TX;
+        const uint32_t ly = local / TX;                                 // TZ==1 ⇒ ly < TY
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
         if (gx >= dx || gy >= dy) return 0;                             // padding
         const size_t gidx = static_cast<size_t>(gy) * dx + gx;
         const int cur = quantizeValue(in[gidx], inv2eb);
@@ -165,20 +169,20 @@ template<class Real> struct TiledLorenzo2DPredictorT {
         return cur - pred;
     }
     // INVERSE: natural row-major index for tile-major local element `local` of tile
-    // `b`; ~0 marks a padding element (no write). tz == 1 for the 2-D predictor.
+    // `b`; ~0 marks a padding element (no write). TZ == 1 for the 2-D predictor.
     __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
         if (gx >= dx || gy >= dy) return ~static_cast<size_t>(0);
         return static_cast<size_t>(gy) * dx + gx;
     }
 };
-using TiledLorenzo2DPredictor = TiledLorenzo2DPredictorT<float>;
-using TiledLorenzo2DPredictorF64 = TiledLorenzo2DPredictorT<double>;
+template<uint32_t TX, uint32_t TY> using TiledLorenzo2DPredictor = TiledLorenzo2DPredictorT<float, TX, TY>;
+template<uint32_t TX, uint32_t TY> using TiledLorenzo2DPredictorF64 = TiledLorenzo2DPredictorT<double, TX, TY>;
 
 // ── Transform ops (optional, between predictor and coder) ────────────────────
 // A warp transform is a size-preserving register→register map on the per-lane delta
@@ -208,36 +212,37 @@ __device__ __forceinline__ void applyTransforms(int (&d)[EPL], uint32_t lane) {
     applyTransforms<EPL, R...>(d, lane);
 }
 
-// cuSZp3 3-D (PROTOTYPE): linear-ABS quant + 3-D separable tiled Lorenzo (tz > 1).
+// cuSZp3 3-D (PROTOTYPE): linear-ABS quant + 3-D separable tiled Lorenzo (TZ > 1).
 // Mirrors tiled_lorenzo_delta_kernel's 3-D path exactly (X-delta if lx>0, else Y if
 // ly>0, else Z if lz>0, else tile origin), re-quantising each neighbour from the float
 // field so the delta equals the staged code delta (byte-identical). tile_elems==64 ⇒
 // local ∈ [0,64). NOTE: like the 2-D predictor this re-reads neighbours from GLOBAL and
 // the fused kernel recomputes it in BOTH the rate and pack passes.
-template<class Real> struct TiledLorenzo3DPredictorT {
+template<class Real, uint32_t TX, uint32_t TY, uint32_t TZ> struct TiledLorenzo3DPredictorT {
     static constexpr bool is_identity = false;   // applies the separable delta
+    static constexpr uint32_t kTx = TX, kTy = TY, kTz = TZ;   // read by fused_unpack_tiled_body
     const Real* in;
     Real inv2eb;
-    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    uint32_t dx, dy, dz, ntx, nty;
     __device__ static TiledLorenzo3DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
-        return TiledLorenzo3DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+        return TiledLorenzo3DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.dz, p.ntx, p.nty};
     }
     __device__ static TiledLorenzo3DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp, Real inv) {
         const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
-        return TiledLorenzo3DPredictorT{in, inv, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+        return TiledLorenzo3DPredictorT{in, inv, p.dx, p.dy, p.dz, p.ntx, p.nty};
     }
     __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);   // element within tile
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
         const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
+        const uint32_t gz = tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return 0;                 // padding
         const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
         const int cur = quantizeValue(in[gidx], inv2eb);
@@ -251,21 +256,21 @@ template<class Real> struct TiledLorenzo3DPredictorT {
     // INVERSE: natural row-major index for tile-major local element `local` of tile `b`;
     // ~0 marks a padding element (no write).
     __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
         const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
+        const uint32_t gz = tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return ~static_cast<size_t>(0);
         return (static_cast<size_t>(gz) * dy + gy) * dx + gx;
     }
 };
-using TiledLorenzo3DPredictor = TiledLorenzo3DPredictorT<float>;
-using TiledLorenzo3DPredictorF64 = TiledLorenzo3DPredictorT<double>;
+template<uint32_t TX, uint32_t TY, uint32_t TZ> using TiledLorenzo3DPredictor = TiledLorenzo3DPredictorT<float, TX, TY, TZ>;
+template<uint32_t TX, uint32_t TY, uint32_t TZ> using TiledLorenzo3DPredictorF64 = TiledLorenzo3DPredictorT<double, TX, TY, TZ>;
 
 // ── Identity tiled predictors (cuSZp3 FIXED mode) ────────────────────────────
 // Same tile geometry as TiledLorenzo{2D,3D}Predictor, but with NO delta: delta()
@@ -275,89 +280,91 @@ using TiledLorenzo3DPredictorF64 = TiledLorenzo3DPredictorT<double>;
 // predictor reads only in[gidx] — 1 read/elem, like native. The inverse needs no
 // prefix sum (is_identity gates it in fused_unpack_tiled_body): the stored tile-major
 // values ARE the codes, so the inverse just scatters them via inv_gidx.
-template<class Real> struct TiledLorenzoIdentity2DPredictorT {
+template<class Real, uint32_t TX, uint32_t TY> struct TiledLorenzoIdentity2DPredictorT {
     static constexpr bool is_identity = true;
+    static constexpr uint32_t kTx = TX, kTy = TY;   // read by fused_unpack_tiled_body
     const Real* in;
     Real inv2eb;
-    uint32_t dx, dy, tx, ty, ntx;
+    uint32_t dx, dy, ntx;
     __device__ static TiledLorenzoIdentity2DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
-        return TiledLorenzoIdentity2DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.tx, p.ty, p.ntx};
+        return TiledLorenzoIdentity2DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.ntx};
     }
     __device__ static TiledLorenzoIdentity2DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp, Real inv) {
         const TiledLorenzo2DParams p = *static_cast<const TiledLorenzo2DParams*>(pp);
-        return TiledLorenzoIdentity2DPredictorT{in, inv, p.dx, p.dy, p.tx, p.ty, p.ntx};
+        return TiledLorenzoIdentity2DPredictorT{in, inv, p.dx, p.dy, p.ntx};
     }
     __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
-        const uint32_t lx = local % tx;
-        const uint32_t ly = local / tx;                                 // tz==1 ⇒ ly < ty
+        const uint32_t lx = local % TX;
+        const uint32_t ly = local / TX;                                 // TZ==1 ⇒ ly < TY
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
         if (gx >= dx || gy >= dy) return 0;                             // padding
         const size_t gidx = static_cast<size_t>(gy) * dx + gx;
         return quantizeValue(in[gidx], inv2eb);                       // NO delta (load-once)
     }
     __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>(b / ntx);
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
         if (gx >= dx || gy >= dy) return ~static_cast<size_t>(0);
         return static_cast<size_t>(gy) * dx + gx;
     }
 };
-using TiledLorenzoIdentity2DPredictor = TiledLorenzoIdentity2DPredictorT<float>;
-using TiledLorenzoIdentity2DPredictorF64 = TiledLorenzoIdentity2DPredictorT<double>;
+template<uint32_t TX, uint32_t TY> using TiledLorenzoIdentity2DPredictor = TiledLorenzoIdentity2DPredictorT<float, TX, TY>;
+template<uint32_t TX, uint32_t TY> using TiledLorenzoIdentity2DPredictorF64 = TiledLorenzoIdentity2DPredictorT<double, TX, TY>;
 
-template<class Real> struct TiledLorenzoIdentity3DPredictorT {
+template<class Real, uint32_t TX, uint32_t TY, uint32_t TZ> struct TiledLorenzoIdentity3DPredictorT {
     static constexpr bool is_identity = true;
+    static constexpr uint32_t kTx = TX, kTy = TY, kTz = TZ;   // read by fused_unpack_tiled_body
     const Real* in;
     Real inv2eb;
-    uint32_t dx, dy, dz, tx, ty, tz, ntx, nty;
+    uint32_t dx, dy, dz, ntx, nty;
     __device__ static TiledLorenzoIdentity3DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp) {
         const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
-        return TiledLorenzoIdentity3DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+        return TiledLorenzoIdentity3DPredictorT{in, static_cast<Real>(p.inv2eb), p.dx, p.dy, p.dz, p.ntx, p.nty};
     }
     __device__ static TiledLorenzoIdentity3DPredictorT fromParams(const Real* in, size_t /*n*/, const void* pp, Real inv) {
         const TiledLorenzo3DParams p = *static_cast<const TiledLorenzo3DParams*>(pp);
-        return TiledLorenzoIdentity3DPredictorT{in, inv, p.dx, p.dy, p.dz, p.tx, p.ty, p.tz, p.ntx, p.nty};
+        return TiledLorenzoIdentity3DPredictorT{in, inv, p.dx, p.dy, p.dz, p.ntx, p.nty};
     }
     __device__ __forceinline__ int delta(uint32_t lane, size_t b, int m) const {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
         const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
+        const uint32_t gz = tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return 0;                 // padding
         const size_t gidx = (static_cast<size_t>(gz) * dy + gy) * dx + gx;
         return quantizeValue(in[gidx], inv2eb);                       // NO delta (load-once)
     }
     __device__ __forceinline__ size_t inv_gidx(size_t b, uint32_t local) const {
-        const uint32_t lx = local % tx;
-        const uint32_t ly = (local / tx) % ty;
-        const uint32_t lz = local / (tx * ty);
+        const uint32_t lx = local % TX;
+        const uint32_t ly = (local / TX) % TY;
+        const uint32_t lz = local / (TX * TY);
         const uint32_t tix = static_cast<uint32_t>(b % ntx);
         const uint32_t tiy = static_cast<uint32_t>((b / ntx) % nty);
         const uint32_t tiz = static_cast<uint32_t>(b / (static_cast<size_t>(ntx) * nty));
-        const uint32_t gx = tix * tx + lx;
-        const uint32_t gy = tiy * ty + ly;
-        const uint32_t gz = tiz * tz + lz;
+        const uint32_t gx = tix * TX + lx;
+        const uint32_t gy = tiy * TY + ly;
+        const uint32_t gz = tiz * TZ + lz;
         if (gx >= dx || gy >= dy || gz >= dz) return ~static_cast<size_t>(0);
         return (static_cast<size_t>(gz) * dy + gy) * dx + gx;
     }
 };
-using TiledLorenzoIdentity3DPredictor = TiledLorenzoIdentity3DPredictorT<float>;
-using TiledLorenzoIdentity3DPredictorF64 = TiledLorenzoIdentity3DPredictorT<double>;
+template<uint32_t TX, uint32_t TY, uint32_t TZ> using TiledLorenzoIdentity3DPredictor = TiledLorenzoIdentity3DPredictorT<float, TX, TY, TZ>;
+template<uint32_t TX, uint32_t TY, uint32_t TZ> using TiledLorenzoIdentity3DPredictorF64 = TiledLorenzoIdentity3DPredictorT<double, TX, TY, TZ>;
 
 // ── Coder policies (the swappable SegmentCodec sink) ──────────────────────────
 // A warp coder is the variable-length tail of the register chain. Its two halves
@@ -935,7 +942,7 @@ __device__ __forceinline__ void fused_unpack_tiled_body(
     for (int m = 0; m < ElemsPerLane; ++m) s[lane + 32u * static_cast<uint32_t>(m)] = d[m];
     __syncwarp();
 
-    const uint32_t tx = pred.tx, ty = pred.ty;
+    constexpr uint32_t tx = Pred::kTx, ty = Pred::kTy;   // compile-time: mask/shift, not division
     #pragma unroll
     for (int m = 0; m < ElemsPerLane; ++m) {
         const uint32_t local = lane + 32u * static_cast<uint32_t>(m);
