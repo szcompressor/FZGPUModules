@@ -1,10 +1,11 @@
 // Shared NVRTC compile/cache for the runtime-generated fusion kernels. Factored out
 // of nvrtc_chunk_fusion.cpp so the warp-register path reuses the exact same machinery
 // (compile straight to a CUBIN for the device SM, load via the driver API, cache the
-// module by (arch, source), return device functions by name). See nvrtc_jit.h.
+// module by (arch, source) in one retained primary context). See nvrtc_jit.h.
 
 #include "fused/common/nvrtc_jit.h"
 #include "log.h"
+#include "fz_nvrtc_headers.h"
 
 #include <nvrtc.h>
 #include <cuda.h>
@@ -86,39 +87,61 @@ template<class T> using make_signed_t = typename make_signed<T>::type;
 
 constexpr const char* kCassert = "#pragma once\n";  // assert() is NVRTC-builtin
 
-// One thread's current context, or the device's primary context if none is set.
+// Modules and function handles belong to one retained primary context. Never
+// unload at static destruction: the CUDA driver may already have shut down.
+std::mutex g_mtx;
+CUcontext g_ownerContext = nullptr;
+
 CUcontext ensureContext() {
+    CU_CHECK(cuInit(0));
     CUcontext ctx = nullptr;
-    if (cuCtxGetCurrent(&ctx) == CUDA_SUCCESS && ctx) return ctx;
-    cudaFree(nullptr);                      // force the runtime to init a primary ctx
-    if (cuCtxGetCurrent(&ctx) == CUDA_SUCCESS && ctx) return ctx;
-    CUdevice dev; CU_CHECK(cuDeviceGet(&dev, 0));
-    CU_CHECK(cuDevicePrimaryCtxRetain(&ctx, dev));
-    CU_CHECK(cuCtxSetCurrent(ctx));
+    CU_CHECK(cuCtxGetCurrent(&ctx));
+    if (!ctx) {
+        const cudaError_t result = cudaFree(nullptr);
+        if (result != cudaSuccess)
+            throw std::runtime_error(std::string("NVRTC-JIT: initialize CUDA context: ") +
+                                     cudaGetErrorString(result));
+        CU_CHECK(cuCtxGetCurrent(&ctx));
+    }
+    if (!ctx) throw std::runtime_error("NVRTC-JIT: no current CUDA context");
+
+    std::lock_guard<std::mutex> lk(g_mtx);
+    if (g_ownerContext) {
+        if (ctx != g_ownerContext)
+            throw std::runtime_error("NVRTC-JIT: specialization requires the original "
+                                     "CUDA primary context; context/device switching "
+                                     "and context reset are unsupported");
+        return ctx;
+    }
+    CUdevice device;
+    CU_CHECK(cuCtxGetDevice(&device));
+    CUcontext primary = nullptr;
+    CU_CHECK(cuDevicePrimaryCtxRetain(&primary, device));
+    if (ctx != primary) {
+        CU_CHECK(cuDevicePrimaryCtxRelease(device));
+        throw std::runtime_error("NVRTC-JIT: specialization requires a CUDA primary "
+                                 "context; custom CUDA contexts are unsupported");
+    }
+    g_ownerContext = primary;  // Retain until process exit; cudaDeviceReset is unsupported.
     return ctx;
 }
 
-// Real device arch (sm_XX, not compute_XX) so we compile straight to a CUBIN for the
-// running GPU. Loading a cubin needs no driver-side PTX JIT — which is what failed as
-// CUDA_ERROR_UNSUPPORTED_PTX_VERSION when the runner's driver was older than the
-// toolkit's NVRTC. SASS for the device's own SM always loads on that driver.
+// Query the current driver's device, which also owns the loaded module.
 std::string deviceArch() {
-    int dev = 0; cudaGetDevice(&dev);
-    int major = 9, minor = 0;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+    CUdevice dev;
+    CU_CHECK(cuCtxGetDevice(&dev));
+    int major = 0, minor = 0;
+    CU_CHECK(cuDeviceGetAttribute(&major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev));
+    CU_CHECK(cuDeviceGetAttribute(&minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev));
     return "sm_" + std::to_string(major) + std::to_string(minor);
 }
 
-// A compiled+loaded module and its resolved functions. CUmodule is context-bound; the
-// prototype assumes one context for the process lifetime.
 struct CachedModule {
     CUmodule module = nullptr;
     std::unordered_map<std::string, CUfunction> funcs;
 };
 
-std::mutex                                    g_mtx;
-std::unordered_map<std::string, CachedModule> g_cache;   // key: arch + "\n" + src
+std::unordered_map<std::string, CachedModule> g_cache;  // key: arch + "\n" + src
 
 // Compile `src` to a module for `arch` (or return the cached one). Caller holds no
 // lock; this takes g_mtx around the cache reads/writes.
@@ -130,20 +153,21 @@ CachedModule& moduleFor(const std::string& src, const std::string& arch) {
         if (it != g_cache.end()) return it->second;
     }
 
-    const char* hdrSrc[]  = { kCstdint,   kTypeTraits,   kCassert };
-    const char* hdrName[] = { "cstdint",  "type_traits", "cassert" };
+    std::vector<const char*> hdrSrc = { kCstdint, kTypeTraits, kCassert };
+    std::vector<const char*> hdrName = { "cstdint", "type_traits", "cassert" };
+    for (const auto& header : detail::kNvrtcHeaders) {
+        hdrName.push_back(header.name);
+        hdrSrc.push_back(header.source);
+    }
 
     nvrtcProgram prog = nullptr;
-    if (nvrtcCreateProgram(&prog, src.c_str(), "fz_fused.cu", 3, hdrSrc, hdrName)
+    if (nvrtcCreateProgram(&prog, src.c_str(), "fz_fused.cu",
+                           static_cast<int>(hdrSrc.size()), hdrSrc.data(), hdrName.data())
             != NVRTC_SUCCESS)
         throw std::runtime_error("NVRTC-JIT: nvrtcCreateProgram failed");
 
     const std::string archOpt = "--gpu-architecture=" + arch;
-    std::vector<std::string> optStore = {
-        "--std=c++17", archOpt,
-        std::string("-I") + FZGMOD_NVRTC_INC_INCLUDE,
-        std::string("-I") + FZGMOD_NVRTC_INC_MODULES,
-    };
+    std::vector<std::string> optStore = { "--std=c++17", archOpt };
     std::vector<const char*> opts;
     for (auto& s : optStore) opts.push_back(s.c_str());
 
@@ -160,7 +184,6 @@ CachedModule& moduleFor(const std::string& src, const std::string& arch) {
     std::string cubin(cubinSize, '\0'); nvrtcGetCUBIN(prog, &cubin[0]);
     nvrtcDestroyProgram(&prog);
 
-    ensureContext();
     CUmodule module = nullptr;
     CU_CHECK(cuModuleLoadData(&module, cubin.data()));
 
@@ -181,6 +204,7 @@ bool nvrtcAvailable() {
 }
 
 void* nvrtcGetKernel(const std::string& src, const char* entry) {
+    ensureContext();  // Guard cache hits as well as newly compiled modules.
     CachedModule& mod = moduleFor(src, deviceArch());
     std::lock_guard<std::mutex> lk(g_mtx);
     auto it = mod.funcs.find(entry);

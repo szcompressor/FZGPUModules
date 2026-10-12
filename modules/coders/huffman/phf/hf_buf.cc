@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <stdexcept>
 
 #include "hf.h"
 #include "hf_buf.h"
@@ -166,13 +167,19 @@ Buf<E>::~Buf()
 template <typename E>
 void Buf<E>::memcpy_merge(Header& header, phf_stream_t stream)
 {
+    if (header.pardeg < 0 || static_cast<size_t>(header.pardeg) > pardeg ||
+        header.total_ncell > bitstream_max_len) {
+        throw std::runtime_error("Huffman archive assembly exceeds buffer capacity");
+    }
     auto memcpy_start           = d_encoded;
     auto memcpy_adjust_to_start = 0;
 
     memcpy_helper _revbk{     d_revbk4,    revbk4_bytes,                   header.entry[PHFHEADER_REVBK]};
-    memcpy_helper _par_nbit{  d_par_nbit,  pardeg * sizeof(M),             header.entry[PHFHEADER_PAR_NBIT]};
-    memcpy_helper _par_entry{ d_par_entry, pardeg * sizeof(M),             header.entry[PHFHEADER_PAR_ENTRY]};
-    memcpy_helper _bitstream{ d_bitstream4, bitstream_max_len * sizeof(H4), header.entry[PHFHEADER_BITSTREAM]};
+    // Copy populated prefixes; see docs/codebase_notes.md CN-HFINIT-1.
+    const size_t partition_bytes = static_cast<size_t>(header.pardeg) * sizeof(M);
+    memcpy_helper _par_nbit{  d_par_nbit,  partition_bytes, header.entry[PHFHEADER_PAR_NBIT]};
+    memcpy_helper _par_entry{ d_par_entry, partition_bytes, header.entry[PHFHEADER_PAR_ENTRY]};
+    memcpy_helper _bitstream{ d_bitstream4, header.total_ncell * sizeof(H4), header.entry[PHFHEADER_BITSTREAM]};
 
     auto start = ((uint8_t*)memcpy_start + memcpy_adjust_to_start);
 

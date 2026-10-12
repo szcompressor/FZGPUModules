@@ -61,6 +61,10 @@ profiling binaries to `build/release/bin/profiling/`. Full option/preset list:
 
 ## Testing
 
+Run local documentation and integration checks with `python3 scripts/check_docs.py`
+(`--verbose` for details); CI uses the same command. Note references may use numeric
+or established uppercase symbolic IDs; malformed IDs and missing notes are errors.
+
 ```bash
 ctest --preset default            # all tests, release build
 ctest --preset stages             # stage unit tests only
@@ -98,6 +102,12 @@ tests/               test suite (-DBUILD_TESTING=ON)
 docs/                doxygen-driven documentation site (mainpage, architecture, stages/, api_reference)
 scripts/             helper scripts
 ```
+
+Module build declarations live in each module's `CMakeLists.txt`; the explicit
+catalog is `modules/CMakeLists.txt`. Use `scripts/new_stage.sh` to scaffold and
+register a new module, then complete its public API/TOML integration. Validate with
+`python3 scripts/check_stage_integration.py`. Keep sources explicit and put
+module-specific backend restrictions in the local declaration.
 
 ## Key rules
 

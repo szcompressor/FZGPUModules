@@ -48,6 +48,130 @@ Rules that keep this from rotting:
 
 ---
 
+## CN-BUILD-1 — HIP toolchain and source-language boundaries
+
+**Source:** `CMakeLists.txt`, `include/backend/`, `modules/coders/ans/CMakeLists.txt`
+
+CMake enables the HIP language for GPU sources while keeping ordinary `.cpp`
+sources in C++. The runtime target is `hip::host`: `hip::device` carries an
+interface `-x hip` flag that would also reach plain C++ sources, where GCC rejects
+it as an unknown language. CMake supplies the HIP compilation flags to sources
+explicitly tagged `LANGUAGE HIP`. Existing `.cu` filenames are retained and
+retagged rather than renamed; this path was exercised with ROCm 6.4 on MI100.
+
+hipCUB, rocPRIM and rocThrust are header-only, but their imported targets can
+transitively link `hip::device`. The build therefore takes their include directories
+without linking those targets and marks the headers as system dependencies.
+The ROCm root must be discoverable through `CMAKE_PREFIX_PATH`. Explicit
+`GPU_TARGETS` avoids reliance on GPU autodetection when configuring on a build node.
+
+The backend define selects the shared API/type/algorithm facades. HIP's sync warp
+intrinsics require `HIP_ENABLE_WARP_SYNC_BUILTINS`; teardown paths also intentionally
+ignore some runtime status results, whose HIP declarations are `[[nodiscard]]`.
+
+The vendored dietgpu ANS implementation uses inline NVPTX and a fixed 32-lane
+mapping. Its sources are excluded from HIP builds. `ANSStage::isSupportedOnBackend()`
+and the compile-time guard in `Pipeline::addStage()` reject that unavailable stage
+without instantiating references to its excluded constructor. Earlier CMake comments
+describing this guard as unfinished were stale.
+
+## CN-BUILD-2 — NVRTC headers and driver-link propagation
+
+**Source:** `modules/fused/common/CMakeLists.txt`, `modules/fused/common/nvrtc_jit.cpp`,
+`scripts/gen_nvrtc_headers.py`
+
+The build embeds the shipped device harnesses and their transitive project headers
+for in-memory NVRTC compilation. This keeps installed specialization independent
+of its source checkout and pins the device source to the library build. The
+generator runs every build to pick up edits anywhere in that include closure,
+but leaves its output timestamp unchanged when the contents match. See the
+`CN-NVRTC-FUSE` note for the implementation history and runtime compiler constraints.
+
+`CUDA::cuda_driver` is a public dependency of `fzgmod_modules`. Its shared library
+references driver functions such as `cuModuleLoadData` and `cuLaunchKernel`, and
+consumers must resolve those references even in GPU-less build containers using
+the driver stub. Keeping this dependency private previously caused executable
+link failures. NVRTC itself stays private because its library resolves at build time.
+
+## CN-BUILD-3 — stage fingerprints and build provenance
+
+**Source:** `CMakeLists.txt`, `scripts/gen_stage_fingerprints.py`
+
+Stage fingerprints hash each registered stage's sources and their transitive
+project includes. The registry's source directories define the stage population.
+Consumers can use these fingerprints to distinguish changed stage implementations
+between builds rather than relying only on pipeline configuration hashes.
+
+Generation runs on every build, because configure-time generation would miss a
+kernel edit followed by an ordinary rebuild. The generator rewrites the header
+only when the fingerprints change, avoiding unnecessary recompilation.
+The CLI's version and Git revision identify the build separately; shared-library
+`SOVERSION` follows the major release for ABI compatibility, while `VERSION`
+records the full release. The private monolithic SZp reference implementation
+remains linked to retain its factory for decoding existing FZM archives.
+
+## CN-ARCHIVE-1 — logical archive lengths versus padded execution
+
+**Source:** `src/pipeline/compressor_exec.cpp`, `src/pipeline/compressor_io.cpp`
+
+2026-10-12. A partial PFPL field exposed a mismatch between in-memory and file
+decode: execution padded the source and serialization recorded that physical
+length, while only the live pipeline retained the caller's original length.
+The fix writes logical lengths into existing core/per-source header fields.
+Stage configurations and compressed streams still drive physical inverse sizing;
+the file reader trims the copied result rather than reducing decode storage.
+Header-primed decode restores logical lengths for every source and clears stale
+trimming state when explicitly prepared for a different input.
+
+No layout/version change is required. Legacy headers retain their stored padded
+lengths; a generic reader cannot reliably recover information those writers omitted.
+Direct caller-owned decode still requires physical capacity and refuses smaller
+buffers before launching. This does not solve runtime-size propagation through
+interior graph edges, which is a separate execution-planning project.
+
+Regression coverage includes Off/Auto partial chunks, aligned reuse after a partial
+input, old padded metadata, header priming, a second primary source, and graph
+replay below captured capacity. The original malformed fixture padding assumption
+was corrected by reading the physical count from serialized stage metadata.
+
+## CN-JIT-1 — supported ownership of loaded specialization modules
+
+**Source:** `modules/fused/common/nvrtc_jit.cpp`, `tests/pipeline/test_jit_cache.cpp`
+
+2026-10-12. Loaded CUDA modules/functions are context-bound, but the original
+cache key held only architecture and generated source. The bounded fix retains
+the first device's primary context for process lifetime and validates ownership
+before every lookup, including cache hits. Architecture is read from that driver's
+current context. Custom contexts and switching devices/contexts are rejected.
+
+Modules are deliberately retained until process exit instead of unloading during
+static destruction after the driver may have shut down. Context reset/destruction
+is unsupported: raw-handle equality cannot reliably identify a recreated context.
+Supporting arbitrary context lifetimes would require a separate lifecycle design.
+
+Concurrent misses can compile duplicate modules; the cache retains one winner and
+unloads the losers in the same supported context. This establishes correctness,
+not a guarantee of one compilation under simultaneous first use. Regressions cover
+cold concurrent lookups, independent specialized pipelines, repeated round-trips,
+initial/custom-context rejection and reuse after restoring the owning context.
+
+## CN-OWN-1 — steady-state owned-buffer reclamation test
+
+**Source:** `tests/pipeline/test_device_buffer.cpp`
+
+2026-10-12, H100. Two merged-suite runs failed the existing global free-memory
+assertion while focused runs passed. An observed 160 MiB shift was not reproduced
+in subsequent probes, so its cause is unproven. The decoder builds its inverse
+DAG lazily and retains pool allocations; the test now warms and synchronizes that
+state before measuring repeated owned output allocation/destruction.
+
+Root Release probes reported 84,431,536,128 free bytes before decode, after a
+synchronized first decode, and after 128 cycles. A temporary negative control
+retaining 128 one-MiB outputs reduced free bytes by exactly 128 MiB and failed the
+unchanged eight-MiB tolerance. The probe and retained-output code were removed.
+The warmup improves baseline hygiene; it does not establish the cause of the
+earlier fluctuation or prove that global free-memory accounting is noise-free.
+
 ## CN-CONCAT-1 — concat gather kernel grid shape
 
 **Source:** `src/pipeline/concat_kernel.cu`, `src/pipeline/concat_kernel.h`
@@ -1137,9 +1261,16 @@ one canonical `chunk_fused_body` still backs both the template and NVRTC paths (
 drift). Interim: `launchFusedChunkPfpl` hardcodes PFPL's quant `Params` when packing;
 the generic runner (Phase C) assembles the blob from each stage's `getFusedOp().params`.
 
-**Prototype constraints (future work).** NVRTC resolves the op headers from the source
-tree via `-I` paths baked in at configure time (`FZGMOD_NVRTC_INC_*`); a shipped build
-would embed the headers instead. The registry `matchesPfpl` still hardcodes the 4-stage
+**Historical prototype constraints.** The original implementation resolved op headers
+through source-tree `-I` paths. As of 2026-10-12, the build embeds the warp, TI and
+chunk harnesses plus their quoted project-header closure into the library;
+`nvrtcCreateProgram` receives them in memory without source include paths.
+`scripts/gen_nvrtc_headers.py` reads the original headers on every build and rewrites
+its generated header only when content changes, so there is no second maintained
+copy of the device code. The installed-package regression removes its isolated
+source/build trees and relocates the installation before compiling kernels.
+
+At the prototype stage, the registry `matchesPfpl` still hardcoded the 4-stage
 shape — the codegen dissolves the *kernel* per-shape glue, not yet the *matcher*
 (Phase C: route by declared `FusionStrategy`, assemble the chain from `getFusedOp()`).
 
@@ -1407,3 +1538,116 @@ range_precomputed_spec.yaml`; FZGM sessions are
 `specialization_native_performance_full_corpus.json`. Native cuSZp2/3 evidence
 comes from Sep. 9 with dimension-matched fixed-mode native additions on Sep. 28;
 those bounds were resolved outside timing and reconciled in the merged session.
+
+## CN-INIT-1 — Defined bytes in materialized outlier capacities
+
+During forward execution, LorenzoQuant reports the maximum capacities of its
+outlier-error and outlier-index ports. The actual count becomes available at
+`postStreamSync()`, after downstream stages have run. A Merge stage can therefore
+copy the full capacities into its payload while only the outlier prefixes have
+been written. Compute Sanitizer initcheck exposed this in
+`MergeStage.PipelineReversal` during the October 2026 release preparation.
+
+The producer now clears both outlier capacities on its execution stream before
+launching its forward kernels. The kernels overwrite the valid prefixes; their
+unused tails remain zero. Empty capacities and absent pointers skip the clears.
+This preserves stream ordering, graph capture, segment geometry, and serialized
+counts. The previously undefined tail bytes may change a merged archive's bytes
+or downstream compressed size; decoder values still depend only on the valid
+prefixes recorded by the outlier count.
+
+The additional writes per execution total
+`max_outliers * (sizeof(TInput) + sizeof(uint32_t))` bytes. This is a bounded
+initialization fix, not a measured performance improvement. Propagating actual
+interior stream lengths before downstream execution would avoid copying and
+coding these tails, but requires a separate runtime and graph-capture contract.
+
+The staged Quantizer forward path has the same delayed outlier count and now
+applies the same initialization to its value and index ports. Inplace and linear
+modes have no separate outlier arrays and skip these writes. Fused split-outlier
+execution already reports the populated side-output sizes before its downstream
+consumers run; this change targets staged execution only. Quantizer sanitizer
+validation is tracked separately from the observed LorenzoQuant failure.
+
+## CN-HFINIT-1 — Huffman assembly copies populated prefixes
+
+Compute Sanitizer initcheck exposed a device-to-device read of uninitialized
+bitstream capacity in `CLI.BenchmarkGraphModeFallsBackOnIncompatibleStage`
+during the October 2026 release preparation. The compatibility Huffman encoder
+concatenates only its populated codeword cells, but `phf::Buf::memcpy_merge()`
+copied `bitstream_max_len` cells into its archive scratch buffer. That upper
+bound is an allocation capacity, not the encoded length. In the observed call,
+the copy spanned 15,552 bytes and the first undefined source bytes were at
+offset 512. Memcheck passed because the source remained inside its allocation.
+
+Assembly now copies `header.total_ncell` bitstream cells and `header.pardeg`
+entries from each partition metadata array. Counts are checked against their
+allocated capacities before copying. Header and reverse-codebook copying retain
+the existing offsets and lengths. This fixes a specific over-copy rather than
+zeroing the entire scratch allocation or changing runtime stream propagation.
+Archive round-trips, identity, and sanitizer results must be verified separately;
+no throughput improvement is claimed.
+
+## CN-SZXINIT-1 — Initialize packed bytes before modifying bits
+
+SZx writes residual codes one bit at a time using byte-wide read-modify-write
+operations. A fresh payload allocation has no defined initial byte contents.
+Compute Sanitizer initcheck exposed these reads in `SZxStage.SmoothRoundTrip_F32`
+and other SZx tests during the October 2026 release preparation. Reconstructing
+valid values can still succeed because every valid code bit is eventually
+overwritten; unused high bits in the final packed byte remained undefined.
+
+The bit writer now assigns zero when entering a new byte, before setting or
+clearing its first code bit. The bit position is continuous across elements of
+a block, and each block owns a separate byte-aligned payload slice. This defines
+both the bytes read by the bit writer and the unused padding bits without
+clearing an allocation-sized upper bound or adding another kernel launch.
+Archive metadata, code widths, offsets, and decoder behavior are unchanged by
+this source change. Existing archive bytes can differ in previously undefined
+padding bits; byte identity and performance are not claimed. Sanitizer results
+are tracked separately from this diagnosis.
+
+## CN-ANSINIT-1 — Defined ANS coalesced padding
+
+October 2026 release initcheck identified three undefined-byte paths in the
+vendored ANS coalescer: reserved header fields (and upper option bits preserved
+by `setProbBits()`), the extra metadata slot needed for an odd block count, and
+the last 16-byte payload vector of a block whose encoded word count is not a
+multiple of eight. The encoder writes only the valid 16-bit words in that final
+vector. Copying the whole vector read unwritten scratch bytes and propagated
+them into archive copies and checksums.
+
+The coalescer now value-initializes its header, zeroes unused metadata slots,
+and assembles a partial final vector from guarded valid-word reads plus zero
+padding. Full vectors retain their vectorized copy. Header size, block offsets,
+compressed sizes, and valid encoded words are unchanged; previously undefined
+reserved and padding bytes become zero. The decoder consumes the existing valid
+word counts, so these changes do not alter reconstruction or require a new
+archive format.
+
+The fix writes only the padding already present in the coalesced representation.
+Clearing all uncoalesced scratch instead would add writes proportional to the
+full encoder scratch capacity. This bounded fix avoids that extra bandwidth;
+its runtime impact has not been benchmarked. The ANS round-trip, partial-block,
+reuse, and file tests exercise the relevant layouts under Compute Sanitizer.
+
+## CN-GIRACE-1 — Mode-2 profiling orders reset before sample loading
+
+Compute Sanitizer racecheck reported shared-memory write/write warnings in
+GInterp mode-2 profiling during the October 2026 release preparation: the reset
+helper wrote zero to sample centers while the following loader wrote actual
+sample values. The affected cases were `GI36_AutoTuneMode2_3D`,
+`GI37_AutoTuneMode2_2D`, and `GI38_AutoTuneMode2_FileRoundTrip`. All 62 functional
+GInterp cases passed in that run; racecheck reported three warning groups and
+zero error groups. This does not establish that the phase overlap is harmless.
+
+An unconditional block barrier now separates shared-memory reset from sample
+loading. All threads enter this sequence, and the reset helper has no early
+return; threads that have no reset items still reach the barrier. Existing
+geometry, neighbor writers, and the loader-end barrier are preserved. This
+change targets the mode-2 probe rather than the interpolation kernels or other
+tuning modes. The profiling launcher uses one CUDA block.
+
+The change must be checked with racecheck and synccheck along with the existing
+mode-2 correctness and file-round-trip tests. Reconstruction failures or a
+performance improvement were not demonstrated by the diagnostic run.

@@ -36,7 +36,8 @@ kernels and the TOML support:
 | `modules/<category>/<name>/<name>_stage.h` | Stage class declaration | |
 | `modules/<category>/<name>/<name>_stage.cu` | CUDA kernels + `execute()`, plus one `FZ_REGISTER_SIMPLE_STAGE` / `FZ_REGISTER_STAGE_FACTORY` line that self-registers FZM-header reconstruction | *(script emits the line)* |
 | `include/fzm_format.h` | Add `StageType` enum value + `stageTypeToString()` case | *(script)* |
-| `CMakeLists.txt` (root) | Add `.cu` to `fzgmod_modules` library target | *(script)* |
+| `modules/<category>/<name>/CMakeLists.txt` | Declare the module's sources on `fzgmod_modules` | *(script)* |
+| `modules/CMakeLists.txt` | Add the module directory to `FZGMOD_STAGE_MODULES` | *(script)* |
 | `tests/stages/test_<name>.cpp` + `tests/stages/CMakeLists.txt` | Standard test set, registered | *(script)* |
 | `src/pipeline/config.cpp` | `#include`, `addXxxStage` + `saveXxxStage` helpers, one `kStageRegistry[]` entry — TOML load/save, the only shared file still edited by hand | |
 | `include/fzgpumodules.h` | Add the stage header include (public API export) | |
@@ -408,8 +409,9 @@ and OR-writes the same flag).
 - **Static shared memory.** gfx908 has 64 KB LDS per workgroup vs. CUDA's 48 KB static
   limit, so CUDA-sized kernels fit — but a kernel that used `cudaFuncSetAttribute(...,
   MaxDynamicSharedMemorySize, ...)` to exceed 48 KB on NVIDIA may not fit on AMD.
-- Add the `.cu` to the **unconditional** source list in `CMakeLists.txt` (Step 6) — the
-  only per-backend exclusion today is dietgpu ANS, and it is a documented stopgap.
+- Add the module to the stage catalog and declare its `.cu` sources locally (Step 6).
+  Backend restrictions belong in the module's `CMakeLists.txt`; dietgpu ANS is excluded
+  from HIP because its kernels use CUDA-only intrinsics.
 
 Before submitting, search the stage for raw CUDA runtime types and intrinsics,
 cross-check every device primitive against `backend/api.h`, and validate with the
@@ -483,16 +485,23 @@ asserts every shipped `StageType` has a registered factory.
 
 ---
 
-## Step 6 — Add to CMakeLists.txt
+## Step 6 — Declare module sources and register the directory
 
-All stage `.cu` files belong to the `fzgmod_modules` target in the root `CMakeLists.txt`:
+Create `modules/<category>/<name>/CMakeLists.txt` with an explicit source list:
 
 ```cmake
-add_library(fzgmod_modules
-    ...
-    modules/<category>/<name>/<name>_stage.cu   # add here
+target_sources(fzgmod_modules PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/<name>_stage.cu
 )
 ```
+
+Add `<category>/<name>` to `FZGMOD_STAGE_MODULES` in `modules/CMakeLists.txt`.
+The catalog calls `add_subdirectory()` for each entry; the root build file needs
+no edits. `scripts/new_stage.sh` performs both steps automatically.
+
+Keep extra source files, dependencies, and backend restrictions in the module's
+own build declaration. Do not glob source files: experimental files should not
+become shipped implementations simply because they were added to a directory.
 
 ---
 
@@ -679,7 +688,7 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 - [ ] `StageType` enum value added (unique integer, never reuse old values)
 - [ ] `stageTypeToString()` case added
 - [ ] FZM-header factory self-registered in the `.cu` (`FZ_REGISTER_SIMPLE_STAGE` or `FZ_REGISTER_STAGE_FACTORY`)
-- [ ] `.cu` file added to `fzgmod_modules` in root `CMakeLists.txt`
+- [ ] Module-local `CMakeLists.txt` declares sources on `fzgmod_modules`; directory added to `FZGMOD_STAGE_MODULES` in `modules/CMakeLists.txt`
 - [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
 - [ ] `config.cpp` — `#include` header, `addXxxStage` / `saveXxxStage` helpers, one entry in `kStageRegistry[]`
 - [ ] `cli.cpp` — `--stages` name + help text *(if applicable)*

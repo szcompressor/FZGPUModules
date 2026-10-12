@@ -695,7 +695,10 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         if (scan_N == 0 || scan_N > num_elements) scan_N = num_elements;
 
         if (num_elements == 0) {
-            // Empty input
+            // postStreamSync still reads cached scratch after an empty execution.
+            if (d_outlier_count_scratch_ != nullptr)
+                FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
+                                              sizeof(uint32_t), stream));
             for (size_t i = 0; i < actual_output_sizes_.size(); i++) {
                 actual_output_sizes_[i] = 0;
             }
@@ -708,6 +711,17 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         initOutlierCountScratch(pool);
         FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
                                        sizeof(uint32_t), stream));
+
+        // Consumers can materialize full capacities before outlier counts are read back.
+        // Initialize the unused tails too; rationale: docs/codebase_notes.md CN-INIT-1.
+        if (max_outliers > 0) {
+            if (outputs[1] != nullptr)
+                FZ_CUDA_CHECK(cudaMemsetAsync(outputs[1], 0,
+                                              max_outliers * sizeof(TInput), stream));
+            if (outputs[2] != nullptr)
+                FZ_CUDA_CHECK(cudaMemsetAsync(outputs[2], 0,
+                                              max_outliers * sizeof(uint32_t), stream));
+        }
 
         // ── Resolve absolute error bound ──────────────────────────────────────
         // For ABS mode: abs_eb = config_.error_bound (no scan needed).

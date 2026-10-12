@@ -10,6 +10,7 @@
  *   MG4  MergeStage/PortCounts                  — N→1 forward, 1→N inverse
  *   MG5  MergeStage/IsGraphCompatible           — true in both directions
  *   MG6  MergeStage/PipelineReversal            — LorenzoQuant(1→3) → Merge(3→1) float round-trip
+ *   MG7  MergeStage/QuantizerMaterializedTails   — unused outlier capacities stay defined across reuse
  */
 
 #include <gtest/gtest.h>
@@ -19,6 +20,8 @@
 #include "fzgpumodules.h"
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <vector>
 #include <random>
@@ -165,4 +168,66 @@ TEST(MergeStage, PipelineReversal) {
     auto res = pipeline_round_trip<float>(p, h_in, cs.stream);
     ASSERT_EQ(res.data.size(), h_in.size());
     EXPECT_LE(res.max_error, 1e-3f * 1.01f) << "Lorenzo→Merge round-trip exceeded error bound";
+}
+
+TEST(MergeStage, QuantizerMaterializedTails) {
+    constexpr size_t count = 4096;
+    constexpr float bound = 1e-3f;
+    for (auto strategy : {MemoryStrategy::PREALLOCATE, MemoryStrategy::MINIMAL}) {
+        SCOPED_TRACE(strategy == MemoryStrategy::PREALLOCATE ? "PREALLOCATE" : "MINIMAL");
+        CudaStream stream;
+        Pipeline p(count * sizeof(float), strategy, 4.0f);
+        p.setSpecializationPolicy(SpecializationPolicy::Off);
+        auto* q = p.addStage<QuantizerStage<float, uint16_t>>();
+        q->setErrorBound(bound);
+        q->setErrorBoundMode(ErrorBoundMode::ABS);
+        q->setQuantRadius(512);
+        q->setOutlierCapacity(0.10f);
+        auto* merge = p.addStage<MergeStage>();
+        merge->setSegmentNames({"codes", "outlier_vals", "outlier_idxs"});
+        p.connect(merge, q, "codes");
+        p.connect(merge, q, "outlier_vals");
+        p.connect(merge, q, "outlier_idxs");
+        p.finalize();
+        const size_t capacity = static_cast<size_t>(std::ceil(count * q->getOutlierCapacity()));
+        const size_t values_offset = count * sizeof(uint16_t);
+        const size_t indices_offset = values_offset + capacity * sizeof(float);
+        const size_t expected_size = indices_offset + capacity * sizeof(uint32_t);
+
+        // A sparse-outlier block followed by an outlier-free block exercises both
+        // initial unused capacity and stale valid prefixes from a previous call.
+        for (bool outliers : {true, false}) {
+            std::vector<float> input(count, 0.125f);
+            if (outliers)
+                for (size_t i = 0; i < count; i += 97) input[i] = 50.0f;
+            CudaBuffer<float> device_input(count);
+            device_input.upload(input, stream);
+            void* compressed = nullptr;
+            size_t compressed_bytes = 0;
+            p.compress(device_input.void_ptr(), count * sizeof(float),
+                       &compressed, &compressed_bytes, stream);
+            ASSERT_EQ(compressed_bytes, expected_size);
+            const size_t actual = q->getActualOutlierCount();
+            if (outliers) EXPECT_GT(actual, 0u);
+            else EXPECT_EQ(actual, 0u);
+            ASSERT_LT(actual, capacity);
+            std::vector<uint8_t> payload(compressed_bytes);
+            FZ_TEST_CUDA(cudaMemcpy(payload.data(), compressed, compressed_bytes,
+                                   cudaMemcpyDeviceToHost));
+            auto zero = [](uint8_t byte) { return byte == 0; };
+            EXPECT_TRUE(std::all_of(payload.begin() + values_offset + actual * sizeof(float),
+                                    payload.begin() + indices_offset, zero));
+            EXPECT_TRUE(std::all_of(payload.begin() + indices_offset + actual * sizeof(uint32_t),
+                                    payload.end(), zero));
+            void* reconstructed = nullptr;
+            size_t reconstructed_bytes = 0;
+            p.decompress(compressed, compressed_bytes, &reconstructed,
+                         &reconstructed_bytes, stream);
+            ASSERT_EQ(reconstructed_bytes, count * sizeof(float));
+            std::vector<float> output(count);
+            FZ_TEST_CUDA(cudaMemcpy(output.data(), reconstructed, reconstructed_bytes,
+                                   cudaMemcpyDeviceToHost));
+            EXPECT_LE(max_abs_error(input, output), bound * 1.01f);
+        }
+    }
 }

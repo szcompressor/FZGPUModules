@@ -39,6 +39,8 @@ __device__ __forceinline__ void putBits(uint8_t* buf, unsigned long long& bitpos
     for (int b = 0; b < width; ++b) {
         const unsigned long long byte_i = bitpos >> 3;
         const uint8_t mask = static_cast<uint8_t>(1u << (bitpos & 7));
+        // Each block owns its bytes; initialize before the first bit update.
+        if ((bitpos & 7) == 0) buf[byte_i] = 0;
         if ((u >> b) & 1ull) buf[byte_i] |= mask;
         else                 buf[byte_i] &= static_cast<uint8_t>(~mask);
         ++bitpos;

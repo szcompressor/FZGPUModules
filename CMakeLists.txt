@@ -1,26 +1,11 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 
-# GPU backend selection. Exactly one backend is compiled into any given build
-# (a compile-time choice, not a runtime switch) — see include/backend/types.h
-# for the corresponding C++-side type aliases. CUDA is supported, HIP is
-# experimental, and SYCL is planned.
+
 set(FZGMOD_BACKEND "CUDA" CACHE STRING "GPU backend to build against: CUDA, HIP, or SYCL")
 set_property(CACHE FZGMOD_BACKEND PROPERTY STRINGS CUDA HIP SYCL)
 
-# The GPU language belongs in project()'s language list, so the backend has to be
-# resolved before project() runs. HIP is the exception: its language is enabled
-# after project() instead, because CMAKE_HIP_ARCHITECTURES has to be set first
-# (HIP's compiler probe otherwise tries to autodetect the installed GPU, which
-# fails on a GPU-less login/build node).
 if(FZGMOD_BACKEND STREQUAL "CUDA")
   set(FZGMOD_PROJECT_LANGUAGES CUDA CXX)
-  # Must precede project(): CMake's own CUDA architecture autodetection runs
-  # during project()'s enable_language(CUDA) and, on a GPU-less build host
-  # (e.g. a Docker builder with no GPU passed through), falls back to the
-  # oldest architecture it knows (sm_52) rather than our intended default —
-  # sm_52 predates block-scoped atomics (atomicAdd_block/atomicOr_block,
-  # compute capability 6.0+) used by the RARE/RAZE stages, so that fallback
-  # fails to compile.
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
   endif()
@@ -37,16 +22,13 @@ endif()
 
 project(FZGPUModules LANGUAGES ${FZGMOD_PROJECT_LANGUAGES} VERSION 2.0.0)
 
-########################
-### GENERAL SETTINGS ###
-########################
+# General settings
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_SHARED_LIBS "prefer shared libraries" ON)
 include(GNUInstallDirs)
 
 # RPATH: installed binaries find the installed shared libraries without LD_LIBRARY_PATH.
-# $ORIGIN-relative so the install tree is relocatable (works with Spack, Docker, etc.)
 if(APPLE)
   set(CMAKE_INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
 else()
@@ -68,13 +50,8 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-###############################
-### GPU BACKEND TOOLCHAIN   ###
-###############################
-#
-# FZGMOD_GPU_RUNTIME holds the imported target(s) carrying the GPU runtime's
-# headers, defines, and link libraries for the selected backend. Everything
-# downstream links this rather than naming CUDA::cudart directly.
+# GPU backend toolchain
+# Link the selected runtime through FZGMOD_GPU_RUNTIME.
 
 if(FZGMOD_BACKEND STREQUAL "CUDA")
   find_package(CUDAToolkit REQUIRED)
@@ -85,17 +62,14 @@ if(FZGMOD_BACKEND STREQUAL "CUDA")
       "  Detected: ${CUDAToolkit_VERSION}")
   endif()
 
-  # CMAKE_CUDA_ARCHITECTURES default is set above, before project(), which is
-  # where CUDA actually gets enabled (see the note there).
+  # Set CUDA architectures before project() enables the language.
   enable_language(CUDA)
 
   set(FZGMOD_GPU_RUNTIME CUDA::cudart)
 
 else() # HIP — SYCL and unknown values already rejected above
 
-  # Must precede enable_language(HIP); see the note by the backend selection.
-  # gfx908 = MI100 (CDNA1). Override for other targets, e.g.
-  #   cmake --preset hip -DCMAKE_HIP_ARCHITECTURES=gfx90a  (MI200 / CDNA2)
+  # Set HIP architectures before enabling the language; default to MI100.
   if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
     set(CMAKE_HIP_ARCHITECTURES "gfx908" CACHE STRING
         "AMD GPU architectures to compile for (gfx908=MI100, gfx90a=MI200, gfx942=MI300)")
@@ -103,30 +77,19 @@ else() # HIP — SYCL and unknown values already rejected above
 
   enable_language(HIP)
 
-  # Tells hip-config which arch to bake into its own imported targets, and
-  # suppresses its "system GPU detection was unsuccessful" warning — autodetect
-  # (amdgpu-arch) necessarily fails when configuring on a GPU-less build node.
+  # Pass explicit targets to hip-config, including on GPU-less build nodes.
   set(GPU_TARGETS "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "AMD GPU targets for hip-config" FORCE)
 
-  # These are CONFIG-mode packages living under the ROCm install root, so
-  # CMAKE_PREFIX_PATH (not just PATH) has to include it — e.g.
-  #   export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH
+  # Put the ROCm root on CMAKE_PREFIX_PATH for CONFIG-mode discovery.
   find_package(hip       CONFIG REQUIRED)
   find_package(hipcub    CONFIG REQUIRED)  # cub facade — mirrors cub's API
   find_package(rocthrust CONFIG REQUIRED)  # thrust facade, used by chunk_fusion/rze/golomb_rice
 
-  # hip::host, not hip::device. hip::device exists for the "compile .cpp as HIP
-  # via hipcc" workflow and carries `-x hip` as an INTERFACE compile option,
-  # which CMake would then apply to every plain C++ source in the project
-  # (g++: "language hip not recognized"). We use enable_language(HIP) instead,
-  # so CMake already drives -x hip / --offload-arch for exactly the sources
-  # tagged LANGUAGE HIP; hip::host supplies just the runtime headers,
-  # __HIP_PLATFORM_AMD__, and libamdhip64.
+  # Use hip::host: hip::device would apply -x hip to plain C++ sources.
+  # Details: docs/codebase_notes.md CN-BUILD-1.
   set(FZGMOD_GPU_RUNTIME hip::host)
 
-  # hipCUB / rocPRIM / rocThrust are header-only, but their imported targets all
-  # link roc::rocprim_hip → hip::device, so linking them would drag `-x hip` back
-  # in. Take their include paths directly instead.
+  # Use header-only include paths to avoid transitively linking hip::device.
   set(FZGMOD_HIP_HEADER_ONLY_INCLUDES "")
   foreach(_hdr_tgt hip::hipcub roc::rocprim roc::rocthrust)
     if(TARGET ${_hdr_tgt})
@@ -140,12 +103,8 @@ else() # HIP — SYCL and unknown values already rejected above
 
 endif()
 
-# hipcc/amdclang++ compiles the existing .cu sources as-is (verified against
-# ROCm 6.4 on gfx908), so the HIP build keeps the current file names rather than
-# renaming ~38 files to .hip. CMake still maps the .cu extension to the CUDA
-# language by default, though, so each .cu source is retagged LANGUAGE HIP
-# explicitly. No-op under the CUDA backend. Defined here (before any
-# add_subdirectory() call) so subdirectories such as tests/ can use it too.
+# Retag .cu sources as HIP; define this before subdirectories use it.
+# Backend rationale: docs/codebase_notes.md CN-BUILD-1.
 function(fzgmod_set_gpu_source_language target)
   if(NOT FZGMOD_BACKEND STREQUAL "HIP")
     return()
@@ -160,9 +119,7 @@ function(fzgmod_set_gpu_source_language target)
   endforeach()
 endfunction()
 
-#####################
-### WSL DETECTION ###
-#####################
+# WSL detection
 
 execute_process(
   COMMAND systemd-detect-virt
@@ -180,9 +137,7 @@ else()
   set(IS_WSL FALSE)
 endif()
 
-############################
-### BUILD CONFIGURATIONS ###
-############################
+# Build configurations
 
 set(default_build_type "Release")
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -204,35 +159,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 option(BUILD_TESTING "Build tests" OFF)
-if(BUILD_TESTING)
-    add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
-    enable_testing()
-    add_subdirectory(tests)
 
-    # generate_golden_files target 
-    # Builds and runs the golden-file generator
-    # EXCLUDE_FROM_ALL keeps cluster/head-node default builds GPU-free
-    add_executable(generate_golden_files EXCLUDE_FROM_ALL
-        tests/golden/regenerate.cpp
-    )
-    target_link_libraries(generate_golden_files PRIVATE fzgmod)
-    target_include_directories(generate_golden_files PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests
-    )
-    add_custom_command(TARGET generate_golden_files POST_BUILD
-      COMMAND $<TARGET_FILE:generate_golden_files>
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
-        COMMENT "Generating golden reference FZM files in tests/golden/"
-        VERBATIM
-    )
-endif()
 
 option(BUILD_EXAMPLES "Build example executables" OFF)
 option(BUILD_PROFILING "Build profiling target with NVTX3/nsys instrumentation" OFF)
 
-################################
-### SANITIZERS CONFIGURATION ###
-################################
+# Sanitizers
 
 if(NOT USE_SANITIZER)
   set(USE_SANITIZER "" CACHE STRING "use a build sanitizer" FORCE)
@@ -250,6 +182,9 @@ if (USE_SANITIZER STREQUAL "ASanUbsan")
   message(STATUS "Compiling with Address+Undefined Sanitizers")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address,undefined -fno-omit-frame-pointer")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address,undefined -fno-omit-frame-pointer")
+  if(FZGMOD_BACKEND STREQUAL "CUDA")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-fsanitize=address -Xcompiler=-fsanitize=undefined -Xcompiler=-fno-omit-frame-pointer")
+  endif()
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address,undefined")
   set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address,undefined")
 elseif (USE_SANITIZER STREQUAL "TSan")
@@ -276,9 +211,7 @@ elseif (USE_SANITIZER STREQUAL "Compute")
   endif()
 endif()
 
-#########################
-### COMPILER SETTINGS ###
-#########################
+# Compiler settings
 
 add_library(fzgmod_compile_settings INTERFACE)
 target_compile_options(
@@ -303,49 +236,29 @@ else()
   set(CMAKE_HIP_STANDARD 17)
   set(CMAKE_HIP_STANDARD_REQUIRED True)
 
-  # HIP declares the runtime API [[nodiscard]]; CUDA does not. Call sites that
-  # intentionally drop the status (destructors, teardown paths, and everything
-  # wrapped in FZ_CUDA_CHECK_WARN) would otherwise emit hundreds of warnings
-  # that are a header-convention difference, not a defect in this code.
+  # HIP teardown paths intentionally ignore [[nodiscard]] runtime status.
   target_compile_options(fzgmod_compile_settings INTERFACE
     $<$<COMPILE_LANGUAGE:CXX,HIP>:-Wno-unused-result>)
 
-  # __shfl_*_sync/__ballot_sync/__any_sync are declared only behind this flag
-  # (see include/backend/warp.h) — ROCm gates them because their emulated
-  # convergence semantics differ from CUDA's native ones.
+  # ROCm requires this flag for the sync warp intrinsics.
   target_compile_definitions(fzgmod_compile_settings INTERFACE
     HIP_ENABLE_WARP_SYNC_BUILTINS)
 endif()
 
 target_link_libraries(fzgmod_compile_settings INTERFACE ${FZGMOD_GPU_RUNTIME})
 
-# Selects the backend branch in include/backend/{types,api,algorithms}.h.
-# Those headers fall back to CUDA when nothing is defined, so this is what
-# actually switches the C++ side over to HIP.
+# Select the backend in the shared runtime headers.
 target_compile_definitions(fzgmod_compile_settings INTERFACE
     FZGMOD_BACKEND_${FZGMOD_BACKEND})
 
-# ── Logging level
-# Controls which FZ_LOG() call sites are compiled into the binary.
-# Calls below the threshold are compiled out entirely — arguments are never
-# evaluated, giving zero overhead even for expensive log expressions.
-#
-#   0 = TRACE  — everything (use for deep debugging)
-#   1 = DEBUG  — construction, allocation, data stats
-#   2 = INFO   — high-level milestones only  ← default
-#   3 = WARN   — warnings only
-#  255 = SILENT — all logging compiled out (embedded / production)
-#
-# Override: cmake -DFZ_LOG_MIN_LEVEL=0 ..
+# Logging: calls below the configured threshold are compiled out.
 set(FZ_LOG_MIN_LEVEL "2" CACHE STRING
     "Minimum log level compiled in: 0=TRACE 1=DEBUG 2=INFO 3=WARN 255=SILENT")
 set_property(CACHE FZ_LOG_MIN_LEVEL PROPERTY STRINGS "0" "1" "2" "3" "255")
 target_compile_definitions(fzgmod_compile_settings INTERFACE
     FZ_LOG_MIN_LEVEL=${FZ_LOG_MIN_LEVEL})
 
-###########################
-### INCLUDE DIRECTORIES ###
-###########################
+# Include directories
 
 target_include_directories(fzgmod_compile_settings INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -355,18 +268,15 @@ target_include_directories(fzgmod_compile_settings INTERFACE
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fzgmod>
 )
 
-# hipCUB / rocPRIM / rocThrust headers (HIP backend only; empty under CUDA).
-# SYSTEM so their warnings don't surface as ours.
+# Treat HIP dependency headers as system headers.
 if(FZGMOD_HIP_HEADER_ONLY_INCLUDES)
   target_include_directories(fzgmod_compile_settings SYSTEM INTERFACE
     ${FZGMOD_HIP_HEADER_ONLY_INCLUDES})
 endif()
 
-#################
-### LIBRARIES ###
-#################
+# Libraries
 
-#### Memory Management
+# Memory management
 add_library(fzgmod_mem
   src/mem/mempool.cpp
 )
@@ -375,80 +285,17 @@ target_link_libraries(fzgmod_mem
   fzgmod_compile_settings
 )
 
-#### Internal Utilities (shared helpers not part of the public API)
-add_library(fzgmod_utils STATIC
-  modules/util/histogram/histogram.cu
-)
+# Internal utilities
+add_library(fzgmod_utils STATIC)
 set_target_properties(fzgmod_utils PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(fzgmod_utils
   PUBLIC
     fzgmod_compile_settings
 )
-fzgmod_set_gpu_source_language(fzgmod_utils)
 add_library(FZGMOD::utils ALIAS fzgmod_utils)
 
-#### Modules (predictors, transforms, quantizers, coders, shufflers, fused)
-add_library(fzgmod_modules
-  modules/stage_registry.cpp
-  modules/fused/fused_block/fused_block.cu
-  modules/fused/fused_block/nvrtc_warp_fusion.cu
-  modules/fused/chunk_fusion/chunk_fusion.cu
-  modules/fused/chunk_fusion/nvrtc_chunk_fusion.cpp
-  modules/fused/common/nvrtc_jit.cpp
-  modules/predictors/diff/diff.cu
-  modules/predictors/lorenzo/lorenzo_stage.cu
-  modules/predictors/tiled_lorenzo/tiled_lorenzo_stage.cu
-  modules/transforms/zigzag/zigzag_stage.cu
-  modules/transforms/log_transform/log_transform_stage.cu
-  modules/transforms/cdf97/cdf97_stage.cu
-  modules/coders/speck2d/speck2d_stage.cu
-  modules/coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.cu
-  modules/transforms/negabinary/negabinary_stage.cu
-  modules/quantizers/quantizer/quantizer.cu
-  modules/coders/rle/rle.cu
-  modules/coders/rze/rze_stage.cu
-  modules/coders/golomb_rice/golomb_rice_stage.cu
-  modules/coders/rre/rre_stage.cu
-  modules/coders/rare/rare_stage.cu
-  modules/coders/raze/raze_stage.cu
-  modules/coders/clog/clog_stage.cu
-  modules/coders/hclog/hclog_stage.cu
-  modules/structural/merge/merge_stage.cu
-  modules/structural/roibin_split/roibin_split_stage.cu
-  modules/coders/bitpack/bitpack_stage.cu
-  modules/coders/adaptive_bitpack/adaptive_bitpack_kernels.cu
-  modules/coders/adaptive_bitpack/adaptive_bitpack_stage.cu
-  modules/shufflers/bitshuffle/bitshuffle_stage.cu
-  modules/structural/tupl/tupl_stage.cu
-  modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.cu
-  modules/fused/quant_adaptive_lorenzo/quant_adaptive_lorenzo_stage.cu
-    modules/fused/lorenzo_quant/lorenzo_quant.cu
-  modules/fused/lorenzo_quant/lorenzo_quant_nd.cu
-  modules/fused/szx/szx_stage.cu
-  # Quarantined: monolithic SZp reference compressor. Compiled ONLY so its
-  # StageType::SZP FZM header factory stays linked (pre-existing archives must
-  # still decode). Not a public module — see
-  # modules/experimental/reference_compressors/szp.
-  modules/experimental/reference_compressors/szp/szp_stage.cu
-  # Huffman (PHF CPU layer + GPU kernels + stage wrapper)
-  modules/coders/huffman/phf/hf_buf.cc
-  modules/coders/huffman/phf/hf_hl.cc
-  modules/coders/huffman/phf/hf_bk.cc
-  modules/coders/huffman/phf/hf_bk_impl1.cc
-  modules/coders/huffman/phf/hf_bk_internal.cc
-  modules/coders/huffman/phf/hf_canon.cc
-  modules/coders/huffman/phf/hf_kernels.cu
-  modules/coders/huffman/huffman_stage.cu
-  modules/coders/ans/ans_stage.cu
-  modules/coders/ans/dietgpu/GpuANS.cu
-  # GInterp (cuSZ-Hi spline interpolation predictor + quantizer — fused)
-  modules/fused/ginterp/ginterp_kernels.cu
-  modules/fused/ginterp/ginterp_stage.cu
-  # BitplaneRZE (FZ-GPU fused bitplane transpose + zero-group RZE)
-  modules/fused/bitplane_rze/bitplane_rze_kernels.cu
-  modules/fused/bitplane_rze/bitplane_rze_stage.cu
-  modules/coders/gpulz/gpulz_stage.cu
-)
+# Compression modules
+add_library(fzgmod_modules modules/stage_registry.cpp)
 
 target_link_libraries(fzgmod_modules
   PUBLIC
@@ -457,59 +304,14 @@ target_link_libraries(fzgmod_modules
   PRIVATE
     fzgmod_utils
 )
-target_include_directories(fzgmod_modules
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/modules/coders/ans/dietgpu
-)
+add_subdirectory(modules)
+fzgmod_set_gpu_source_language(fzgmod_utils)
 fzgmod_set_gpu_source_language(fzgmod_modules)
-
-# NVRTC chunk-fusion codegen (CUDA backend only): links NVRTC + the CUDA driver
-# API, and needs the source-tree include roots so NVRTC can resolve the op
-# headers at runtime (a prototype constraint — see CN-NVRTC-FUSE).
-# CUDA::cuda_driver is PUBLIC (not PRIVATE): fzgmod_modules is a shared lib, so its
-# driver-API symbols (cuModuleLoadData, cuLaunchKernel, ...) stay undefined in the
-# .so and must be resolved on each consumer's link line. Propagating the driver
-# (the stub libcuda in a GPU-less build container) lets fzgmod-cli / tests link;
-# PRIVATE left them unresolved (undefined reference to cuModuleLoadData). NVRTC is
-# a real library present at build time, so it resolves fine as PRIVATE.
-if(NOT FZGMOD_BACKEND STREQUAL "HIP")
-  target_link_libraries(fzgmod_modules PRIVATE CUDA::nvrtc PUBLIC CUDA::cuda_driver)
-  # Only nvrtc_jit.cpp bakes in the source-tree include paths (it invokes NVRTC); the
-  # chunk/warp codegen files just emit source strings and launch.
-  set_source_files_properties(
-    modules/fused/common/nvrtc_jit.cpp
-    TARGET_DIRECTORY fzgmod_modules
-    PROPERTIES COMPILE_DEFINITIONS
-      "FZGMOD_NVRTC_INC_INCLUDE=\"${CMAKE_CURRENT_SOURCE_DIR}/include\";FZGMOD_NVRTC_INC_MODULES=\"${CMAKE_CURRENT_SOURCE_DIR}/modules\"")
-endif()
-
-# The vendored dietgpu ANS tree uses inline NVPTX lanemask assembly and a
-# hardcoded 32-lane warp model with no HIP translation, so it is excluded from compilation
-# entirely on HIP rather than ported. This is a build-level stopgap:
-# ANSStage's symbols are simply absent from the HIP library. The intended
-# runtime mechanism (Stage::isSupportedOnBackend() + a clear error from
-# Pipeline::addStage<ANSStage>() instead of an undefined-symbol link failure)
-# is not yet wired up -- TODO before Phase 1 is considered complete.
-if(FZGMOD_BACKEND STREQUAL "HIP")
-  set_source_files_properties(
-    modules/coders/ans/ans_stage.cu
-    modules/coders/ans/dietgpu/GpuANS.cu
-    TARGET_DIRECTORY fzgmod_modules
-    PROPERTIES HEADER_FILE_ONLY TRUE
-  )
-endif()
 
 add_library(FZGMOD::modules ALIAS fzgmod_modules)
 
-#### Generated per-stage source fingerprints
-#
-# Hashes each stage's sources plus their transitive local includes, so a consumer
-# can tell whether a stage's code changed between two builds (config.cpp's
-# kStageRegistry supplies the directories). Runs on every build rather than only at
-# configure time: the whole point is to track source edits, and a configure-time-only
-# hash would go stale the moment someone edits a kernel and rebuilds. The generator
-# rewrites the header only when a fingerprint actually changes, so this does not
-# retrigger compilation on every build.
+# Refresh fingerprints every build without rewriting unchanged output.
+# Details: docs/codebase_notes.md CN-BUILD-3.
 set(FZGMOD_STAGE_FP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/fz_stage_fingerprints.h")
 add_custom_target(fzgmod_stage_fingerprints ALL
   COMMAND ${CMAKE_COMMAND} -E env python3
@@ -548,7 +350,7 @@ add_dependencies(fzgmod_pipeline fzgmod_stage_fingerprints)
 target_include_directories(fzgmod_pipeline PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_library(FZGMOD::pipeline ALIAS fzgmod_pipeline)
 
-#### Combined Library
+# Combined library
 add_library(fzgmod
   src/utils/cli/cli.cpp
   src/utils/cli/report_json.cpp
@@ -576,9 +378,7 @@ if(FZGMOD_GIT_SHA)
 endif()
 add_library(FZGMOD::fzgmod ALIAS fzgmod)
 
-# Shared library versioning — creates libfzgmod.so.2 → libfzgmod.so.2.0.0
-# SOVERSION (ABI version) = major only; bump on any breaking API/ABI change.
-# VERSION   (full version) = PROJECT_VERSION, updated every release.
+# Use the major version for ABI compatibility and the full release for VERSION.
 foreach(_lib fzgmod fzgmod_mem fzgmod_modules fzgmod_pipeline)
   set_target_properties(${_lib} PROPERTIES
     VERSION   ${PROJECT_VERSION}
@@ -586,9 +386,7 @@ foreach(_lib fzgmod fzgmod_mem fzgmod_modules fzgmod_pipeline)
   )
 endforeach()
 
-###################
-### EXECUTABLES ###
-###################
+# Executables
 
 option(BUILD_CLI "Build command-line executable" ON)
 
@@ -599,20 +397,40 @@ if(BUILD_CLI)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
-##########################
-### Examples/Profiling ###
-##########################
+# Tests inherit the configured compiler and sanitizer flags.
+
+if(BUILD_TESTING)
+    add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
+    enable_testing()
+    add_subdirectory(tests)
+
+    # Run the golden-file generator only when explicitly requested.
+    add_executable(generate_golden_files EXCLUDE_FROM_ALL
+        tests/golden/regenerate.cpp
+    )
+    target_link_libraries(generate_golden_files PRIVATE fzgmod)
+    target_include_directories(generate_golden_files PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+    add_custom_command(TARGET generate_golden_files POST_BUILD
+      COMMAND $<TARGET_FILE:generate_golden_files>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/golden"
+        COMMENT "Generating golden reference FZM files in tests/golden/"
+        VERBATIM
+    )
+endif()
+
+# Examples/profiling
 
 add_subdirectory(examples)
 add_subdirectory(profiling)
 
-####################
-### INSTALLATION ###
-####################
+# Installation
 
 install(TARGETS fzgmod_compile_settings EXPORT FZGPUModulesTargets)
 install(TARGETS
   fzgmod_mem
+  fzgmod_utils
   fzgmod_modules
   fzgmod_pipeline
   fzgmod
@@ -656,17 +474,14 @@ install(FILES
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/FZGPUModules
 )
 
-# Ship both the project's own license and the notices required by incorporated
-# third-party code.  Keeping THIRD_PARTY.md only in the source tree is
-# insufficient for binary/install-tree redistribution.
+# Include project and third-party notices in installed packages.
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
   "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY.md"
   DESTINATION ${CMAKE_INSTALL_DOCDIR}
 )
 
-# Export build-tree targets so find_package(FZGPUModules) works without installing
-# by pointing FZGPUModules_DIR at the build directory.
+# Export targets for find_package() consumers using the build directory.
 export(
   EXPORT FZGPUModulesTargets
   NAMESPACE FZGMOD::
@@ -692,9 +507,7 @@ install(DIRECTORY
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hh"
 )
 
-#---------------------------------------------------------------------------
-# Documentation (Doxygen)  — build with: cmake --build <builddir> --target docs
-#---------------------------------------------------------------------------
+# Documentation (cmake --build <builddir> --target docs)
 find_package(Doxygen OPTIONAL_COMPONENTS dot)
 if(DOXYGEN_FOUND)
     add_custom_target(docs
@@ -713,9 +526,7 @@ else()
     message(STATUS "Doxygen not found — 'docs' target not available (install doxygen to enable)")
 endif()
 
-###############
-### WRAP UP ###
-###############
+# Wrap up
 
 message(STATUS "FZGPUModules configuration complete")
 message(STATUS "  Backend: ${FZGMOD_BACKEND}")

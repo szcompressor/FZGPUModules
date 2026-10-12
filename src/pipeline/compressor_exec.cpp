@@ -22,9 +22,7 @@ std::pair<const void*, size_t> Pipeline::prepareInputSource(
     original_input_size_ = 0;
 
     if (graph_captured_) {
-        original_input_size_ = (input_alignment_bytes_ > 1 &&
-                                 input_size % input_alignment_bytes_ != 0)
-                               ? input_size : 0;
+        original_input_size_ = input_size < d_graph_input_size_ ? input_size : 0;
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_graph_input_.ptr, d_input, input_size,
                                       cudaMemcpyDeviceToDevice, stream));
         if (input_size < d_graph_input_size_) {
@@ -303,6 +301,7 @@ void Pipeline::prepareInverse(size_t uncompressed_size) {
     buildStaticBufferMetadata();
     source_input_sizes_.assign(1, uncompressed_size);
     input_size_ = uncompressed_size;
+    original_input_size_ = 0;
     FZ_LOG(DEBUG, "prepareInverse: pipeline ready for external-blob decompress "
                   "(%zu output buffer(s), uncompressed=%zu bytes)",
            buffer_metadata_.size(), uncompressed_size);
@@ -427,11 +426,11 @@ void* Pipeline::allocateDecompressOutput(
     if (caller_output != nullptr) {
         if (actual_size > caller_capacity) {
             throw std::runtime_error(
-                "decompress() user-owned output: actual decompressed size (" +
+                "decompress() user-owned output: required inverse output capacity (" +
                 std::to_string(actual_size) + " bytes) exceeds the provided buffer "
-                "capacity (" + std::to_string(caller_capacity) + " bytes). Allocate a "
-                "larger buffer (the original uncompressed size is available from the "
-                "file header or your compress() call).");
+                "capacity (" + std::to_string(caller_capacity) + " bytes). Allocate "
+                "at least the reported size, including execution padding; the "
+                "logical input length in the file header may be smaller.");
         }
         d_final = caller_output;
     } else if (pool_managed_decomp_) {

@@ -49,7 +49,7 @@ sections as authoritative.
 ## 4. Connections & the DAG
 
 - [ ] How a stage's ports become DAG edges; the `connect(down, up, port)` model.
-- [ ] Buffer lifetime, coloring/aliasing, and why fused stages disable coloring.
+- [ ] Buffer lifetime, coloring/aliasing, and fusion-aware liveness planning.
 - [ ] External input binding (`bindExternalInput`, multi-source pipelines).
 - [ ] Inverse DAG construction: how forward ports map to inverse edges; what a stage
       must expose so its inverse can be rebuilt from the FZM header alone.

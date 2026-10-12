@@ -9,6 +9,10 @@ This directory contains committed reference FZM files used by
 |---|---|---|---|---|
 | `ref_lorenzo_bitshuffle.fzm` | Lorenzo(float,uint16) → Bitshuffle | 4096 | 1e-2 | single-source, v3.1 |
 
+The reference was seeded during 2.0.0 release preparation on an H100 with CUDA
+12.9. It establishes a baseline for subsequent changes; it does not validate
+archives from the historical 1.0 release.
+
 ## What the golden tests check
 
 1. **Version currency** — the committed file's `FZM_VERSION` field matches the

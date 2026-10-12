@@ -43,6 +43,7 @@
 
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -1272,4 +1273,187 @@ TEST(FileIO, DecompressIntoRequiresPrealloc) {
     EXPECT_THROW(p.decompressInto(d_comp, comp_sz, d_out.void_ptr(), in_bytes, &actual, stream),
                  std::runtime_error);
     cudaDeviceSynchronize();
+}
+
+// Partial chunk payloads retain physical execution sizes in stage metadata,
+// while both file and header-primed decoders report the caller's logical length.
+TEST(FileIO, PartialChunkLogicalLengthRoundTrip) {
+    {
+    CudaStream stream;
+    constexpr size_t chunk = 16384;
+    constexpr size_t max_count = 2 * chunk + 3;
+    constexpr float bound = 1e-3f;
+    auto build = [&](Pipeline& p) {
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(bound);
+        q->setErrorBoundMode(ErrorBoundMode::ABS);
+        q->setQuantRadius(1 << 22);
+        q->setZigzagCodes(true);
+        q->setInplaceOutliers(true);
+        auto* d = p.addStage<DifferenceStage<int32_t, uint32_t>>();
+        d->setChunkSize(chunk);
+        p.connect(d, q, "codes");
+        auto* b = p.addStage<BitshuffleStage>();
+        b->setElementWidth(4);
+        b->setBlockSize(chunk);
+        p.connect(b, d);
+        auto* r = p.addStage<RZEStage>();
+        r->setWordSize(1);
+        r->setChunkSize(chunk);
+        p.connect(r, b);
+        p.finalize();
+    };
+    for (auto policy : {SpecializationPolicy::Off, SpecializationPolicy::Auto}) {
+        Pipeline producer(max_count * sizeof(float), MemoryStrategy::PREALLOCATE);
+        Pipeline consumer(max_count * sizeof(float), MemoryStrategy::PREALLOCATE);
+        producer.setSpecializationPolicy(policy);
+        consumer.setSpecializationPolicy(policy);
+        build(producer);
+        build(consumer);
+        // Reuse across a partial chunk and then aligned data: trimming must refresh.
+        for (size_t count : {max_count, 2 * chunk}) {
+            const size_t bytes = count * sizeof(float);
+            auto input = make_smooth_data<float>(count);
+            CudaBuffer<float> device_input(count);
+            device_input.upload(input, stream);
+            void* compressed = nullptr;
+            size_t compressed_bytes = 0;
+            producer.compress(device_input.void_ptr(), bytes, &compressed, &compressed_bytes, stream);
+            auto header = producer.buildHeader();
+            EXPECT_EQ(header.core.uncompressed_size, bytes);
+            ASSERT_EQ(header.core.num_sources, 1u);
+            EXPECT_EQ(header.core.source_uncompressed_sizes[0], bytes);
+            QuantizerConfig quantizer_config;
+            std::memcpy(&quantizer_config, header.stages[0].stage_config,
+                        sizeof(quantizer_config));
+            const size_t physical_bytes = quantizer_config.num_elements * sizeof(float);
+            EXPECT_GE(physical_bytes, bytes);
+            const std::string path = "/tmp/fzgmod_partial_chunk.fzm";
+            producer.writeToFile(path, stream);
+            void* decoded = nullptr;
+            size_t decoded_bytes = 0;
+            Pipeline::decompressFromFile(path, &decoded, &decoded_bytes, stream);
+            ASSERT_EQ(decoded_bytes, bytes);
+            std::vector<float> file_output(count);
+            FZ_TEST_CUDA(cudaMemcpy(file_output.data(), decoded, bytes, cudaMemcpyDeviceToHost));
+            FZ_TEST_CUDA(cudaFree(decoded));
+            EXPECT_LE(max_abs_error(input, file_output), bound * 1.01f);
+            if (count == max_count) {
+                auto legacy_core = Pipeline::readHeader(path).core;
+                legacy_core.uncompressed_size = physical_bytes;
+                legacy_core.source_uncompressed_sizes[0] = legacy_core.uncompressed_size;
+                legacy_core.flags &= ~FZM_FLAG_HAS_HEADER_CHECKSUM;
+                {
+                    std::fstream archive(path, std::ios::in | std::ios::out | std::ios::binary);
+                    archive.write(reinterpret_cast<const char*>(&legacy_core), sizeof(legacy_core));
+                    ASSERT_TRUE(archive.good());
+                }
+                Pipeline::decompressFromFile(path, &decoded, &decoded_bytes, stream);
+                EXPECT_EQ(decoded_bytes, legacy_core.uncompressed_size);
+                std::vector<float> prefix(count);
+                FZ_TEST_CUDA(cudaMemcpy(prefix.data(), decoded, bytes, cudaMemcpyDeviceToHost));
+                FZ_TEST_CUDA(cudaFree(decoded));
+                EXPECT_EQ(file_output, prefix);
+                legacy_core.num_sources = FZM_MAX_SOURCES + 1;
+                {
+                    std::fstream archive(path, std::ios::in | std::ios::out | std::ios::binary);
+                    archive.write(reinterpret_cast<const char*>(&legacy_core), sizeof(legacy_core));
+                    ASSERT_TRUE(archive.good());
+                }
+                EXPECT_THROW(Pipeline::readHeader(path), std::runtime_error);
+            }
+            std::remove(path.c_str());
+            auto serialized = producer.serializeHeaderToMemory();
+            if (count == max_count) {
+                // Older writers stored padded lengths. Those remain readable;
+                // their lost original length cannot be recovered by a decoder.
+                auto legacy = serialized;
+                FZMHeaderCore core;
+                std::memcpy(&core, legacy.data(), sizeof(core));
+                core.uncompressed_size = physical_bytes;
+                core.source_uncompressed_sizes[0] = core.uncompressed_size;
+                core.flags &= ~FZM_FLAG_HAS_HEADER_CHECKSUM;
+                std::memcpy(legacy.data(), &core, sizeof(core));
+                consumer.primeInverseFromHeader(legacy.data(), legacy.size());
+                consumer.decompress(compressed, compressed_bytes, &decoded, &decoded_bytes, stream);
+                EXPECT_EQ(decoded_bytes, core.uncompressed_size);
+                std::vector<float> legacy_prefix(count);
+                FZ_TEST_CUDA(cudaMemcpy(legacy_prefix.data(), decoded, bytes, cudaMemcpyDeviceToHost));
+                EXPECT_EQ(file_output, legacy_prefix);
+                core.num_sources = FZM_MAX_SOURCES + 1;
+                std::memcpy(legacy.data(), &core, sizeof(core));
+                EXPECT_THROW(consumer.primeInverseFromHeader(legacy.data(), legacy.size()),
+                             std::runtime_error);
+            }
+            consumer.primeInverseFromHeader(serialized.data(), serialized.size());
+            EXPECT_EQ(consumer.getLastUncompressedSize(), bytes);
+            if (count == max_count) {
+                CudaBuffer<float> short_output(count);
+                EXPECT_THROW(consumer.decompress(compressed, compressed_bytes,
+                                 short_output.void_ptr(), bytes, &decoded_bytes, stream),
+                             std::runtime_error);
+                CudaBuffer<float> padded_output(physical_bytes / sizeof(float));
+                consumer.decompress(compressed, compressed_bytes, padded_output.void_ptr(),
+                                    physical_bytes, &decoded_bytes, stream);
+                EXPECT_EQ(decoded_bytes, bytes);
+                std::vector<float> prefix(count);
+                FZ_TEST_CUDA(cudaMemcpy(prefix.data(), padded_output.void_ptr(), bytes,
+                                       cudaMemcpyDeviceToHost));
+                EXPECT_EQ(file_output, prefix);
+                consumer.decompressInto(compressed, compressed_bytes, padded_output.void_ptr(),
+                                        physical_bytes, &decoded_bytes, stream);
+                stream.sync();
+                EXPECT_EQ(decoded_bytes, bytes);
+            }
+            for (int repeat = 0; repeat < 2; ++repeat) {
+                consumer.decompress(compressed, compressed_bytes, &decoded, &decoded_bytes, stream);
+                ASSERT_EQ(decoded_bytes, bytes);
+                std::vector<float> memory_output(count);
+                FZ_TEST_CUDA(cudaMemcpy(memory_output.data(), decoded, bytes, cudaMemcpyDeviceToHost));
+                EXPECT_EQ(file_output, memory_output);
+            }
+        }
+    }
+    }
+    FZ_TEST_CUDA(cudaDeviceSynchronize());
+}
+
+TEST(FileIO, GraphReplaySmallerAlignedInputKeepsLogicalLength) {
+    if (MemoryPool(MemoryPoolConfig(1024 * 1024, 1.0f)).isFallbackMode())
+        GTEST_SKIP() << "Graph mode requires stream-ordered allocation";
+    {
+    CudaStream stream;
+    constexpr size_t capacity = 1024;
+    constexpr size_t count = 512;
+    constexpr float bound = 1e-3f;
+    auto input = make_smooth_data<float>(count);
+    CudaBuffer<float> device_input(count);
+    device_input.upload(input, stream);
+    Pipeline p(capacity * sizeof(float), MemoryStrategy::PREALLOCATE);
+    p.setSpecializationPolicy(SpecializationPolicy::Off);
+    p.enableGraphMode(true);
+    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+    q->setLinearMode(true);
+    q->setErrorBound(bound);
+    q->setErrorBoundMode(ErrorBoundMode::ABS);
+    p.finalize();
+    p.captureGraph(stream);
+    void* compressed = nullptr;
+    size_t compressed_bytes = 0;
+    p.compress(device_input.void_ptr(), count * sizeof(float), &compressed, &compressed_bytes, stream);
+    EXPECT_EQ(p.getLastUncompressedSize(), count * sizeof(float));
+    EXPECT_EQ(p.buildHeader().core.uncompressed_size, count * sizeof(float));
+    const std::string path = "/tmp/fzgmod_graph_logical_length.fzm";
+    p.writeToFile(path, stream);
+    void* decoded = nullptr;
+    size_t decoded_bytes = 0;
+    Pipeline::decompressFromFile(path, &decoded, &decoded_bytes, stream);
+    EXPECT_EQ(decoded_bytes, count * sizeof(float));
+    std::vector<float> output(count);
+    FZ_TEST_CUDA(cudaMemcpy(output.data(), decoded, count * sizeof(float), cudaMemcpyDeviceToHost));
+    FZ_TEST_CUDA(cudaFree(decoded));
+    EXPECT_LE(max_abs_error(input, output), bound * 1.01f);
+    std::remove(path.c_str());
+    }
+    FZ_TEST_CUDA(cudaDeviceSynchronize());
 }

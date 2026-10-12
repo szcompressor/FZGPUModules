@@ -206,7 +206,7 @@ void ANSStage::executeForward(
         //   must be 0 so those speculative loads don't contribute to the prefix sum.
         //
         // The remaining buffers (out, d_table_, d_compressed_blocks_, d_comp_words_prefix_)
-        // are fully overwritten by their respective kernels; zeroing them here serves only
+        // have initialized live data; the coalescer defines serialized padding. Clearing them serves only
         // as a vGPU pre-touch so the driver maps pages before the encode kernels run, keeping
         // all page faults inside cheaper memset kernels rather than the complex encoders.
         const size_t safe_comp_words = static_cast<size_t>(
@@ -221,7 +221,7 @@ void ANSStage::executeForward(
             d_compressed_words_, 0,
             safe_comp_words * sizeof(uint32_t), stream));
         if (vgpu_fallback) {
-            // Pre-touch buffers fully overwritten by encode kernels.
+            // Pre-touch buffers on vGPU; normal padding handling is in the coalescer.
             // estimateOutputSizes() guarantees the caller allocated at least byte_size*2+8192.
             FZ_CUDA_CHECK(cudaMemsetAsync(out, 0, byte_size * 2 + 8192, stream));
             FZ_CUDA_CHECK(cudaMemsetAsync(
@@ -293,9 +293,11 @@ void ANSStage::executeForward(
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
         if (vgpu_fallback) sched_yield();
 
-        const auto* h =
-            reinterpret_cast<const fz::ans::ANSCoalescedHeader*>(last_header_bytes_);
-        actual_output_size_ = h->getTotalCompressedSize();
+        // Byte readback storage need not have the header's 32-byte alignment.
+        fz::ans::ANSCoalescedHeader header;
+        static_assert(sizeof(header) == sizeof(last_header_bytes_));
+        std::memcpy(&header, last_header_bytes_, sizeof(header));
+        actual_output_size_ = header.getTotalCompressedSize();
         if (vgpu_fallback) sched_yield();
         original_bytes_     = byte_size;
         if (vgpu_fallback) sched_yield();
@@ -317,13 +319,14 @@ void ANSStage::executeInverse(
             last_header_bytes_, in, 32, cudaMemcpyDeviceToHost, stream));
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
 
-        const auto* h =
-            reinterpret_cast<const fz::ans::ANSCoalescedHeader*>(last_header_bytes_);
-        h->checkMagicAndVersion();
+        fz::ans::ANSCoalescedHeader header;
+        static_assert(sizeof(header) == sizeof(last_header_bytes_));
+        std::memcpy(&header, last_header_bytes_, sizeof(header));
+        header.checkMagicAndVersion();
 
-        const uint32_t hdr_prob_bits = h->getProbBits();
-        const uint32_t uncomp_words  = h->getTotalUncompressedWords();
-        const uint32_t num_blocks    = h->getNumBlocks();
+        const uint32_t hdr_prob_bits = header.getProbBits();
+        const uint32_t uncomp_words  = header.getTotalUncompressedWords();
+        const uint32_t num_blocks    = header.getNumBlocks();
 
         if (hdr_prob_bits != static_cast<uint32_t>(fz::ans::kANSDefaultProbBits))
             throw std::runtime_error(

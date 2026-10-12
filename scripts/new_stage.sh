@@ -24,9 +24,10 @@
 #   modules/<category>/<lower>/
 #     <lower>_stage.h
 #     <lower>_stage.cu
+#     CMakeLists.txt
 #   tests/stages/test_<lower>.cpp
 #   include/fzm_format.h         — StageType enum entry + stageTypeToString() case
-#   CMakeLists.txt               — .cu added to fzgmod_modules target
+#   modules/CMakeLists.txt       — module directory added to the stage catalog
 #   tests/stages/CMakeLists.txt  — fz_add_test() entry
 #
 # What still needs manual attention (printed at the end):
@@ -85,7 +86,7 @@ fi
 MODULE_DIR="${REPO_ROOT}/modules/${CATEGORY}/${LOWER}"
 TEST_FILE="${REPO_ROOT}/tests/stages/test_${LOWER}.cpp"
 FZM_FORMAT_H="${REPO_ROOT}/include/fzm_format.h"
-CMAKELISTS="${REPO_ROOT}/CMakeLists.txt"
+MODULES_CMAKELISTS="${REPO_ROOT}/modules/CMakeLists.txt"
 TESTS_CMAKELISTS="${REPO_ROOT}/tests/stages/CMakeLists.txt"
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────
@@ -101,14 +102,20 @@ if [[ -d "$MODULE_DIR" ]]; then
 fi
 
 # Check StageTypeId is not already in use
-if grep -q "= ${TYPE_ID}," "$FZM_FORMAT_H" || grep -q "= ${TYPE_ID}$" "$FZM_FORMAT_H"; then
+if awk '/enum class StageType/,/\};/' "$FZM_FORMAT_H" \
+    | grep -qE "=[[:space:]]*${TYPE_ID}[[:space:]]*(,|$)"; then
     echo "Error: StageTypeId ${TYPE_ID} is already used in include/fzm_format.h"
     echo "  Check existing values and pick a different ID."
     exit 1
 fi
 
-# ── Determine which CMake library target to add the .cu to ────────────────────
-CMAKE_TARGET="fzgmod_modules"
+# Check the catalog before creating files.
+python3 - "$MODULES_CMAKELISTS" << 'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+if not path.is_file() or not re.search(r'set\(FZGMOD_STAGE_MODULES\s*\n[^)]*\)', path.read_text()):
+    sys.exit(f"Error: stage module catalog not found in {path}")
+PYEOF
 
 # ── Create module directory ────────────────────────────────────────────────────
 mkdir -p "$MODULE_DIR"
@@ -457,37 +464,29 @@ else:
 PYEOF
 fi
 
-# ── CMakeLists.txt: add .cu to library target ─────────────────────────────────
-CU_ENTRY="  modules/${CATEGORY}/${LOWER}/${LOWER}_stage.cu"
-if grep -qF "modules/${CATEGORY}/${LOWER}/${LOWER}_stage.cu" "$CMAKELISTS"; then
-    echo "  (CMakeLists.txt entry already present — skipping)"
-else
-    python3 - "$CMAKELISTS" "$CU_ENTRY" "$CMAKE_TARGET" << 'PYEOF'
-import sys
+# ── Module build declaration and catalog entry ──────────────────────────────
+cat > "${MODULE_DIR}/CMakeLists.txt" << CMAKE
+target_sources(fzgmod_modules PRIVATE
+    \${CMAKE_CURRENT_LIST_DIR}/${LOWER}_stage.cu
+)
+CMAKE
 
-path      = sys.argv[1]
-cu_entry  = sys.argv[2]
-target    = sys.argv[3]
-
-text = open(path).read()
-
-# Find the add_library(fzgmod_modules ...) block and insert the .cu before the closing paren.
-# We look for the last existing modules/ line inside that block and insert after it.
-import re
-
-# Match the block: add_library(<target>\n  ...sources...\n)
-block_pattern = rf'(add_library\({re.escape(target)}\n(?:  [^\n]+\n)*?)(  modules/[^\n]+\n)(\))'
-def inserter(m):
-    return m.group(1) + m.group(2) + cu_entry + '\n' + m.group(3)
-
-new_text, n = re.subn(block_pattern, inserter, text, count=1)
-if n == 0:
-    print(f"Warning: could not find {target} add_library block — add .cu manually.")
+python3 - "$MODULES_CMAKELISTS" "${CATEGORY}/${LOWER}" << 'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+module = sys.argv[2]
+text = path.read_text()
+pattern = r'(set\(FZGMOD_STAGE_MODULES\s*\n)([^)]*)(\))'
+match = re.search(pattern, text)
+if match is None:
+    sys.exit(f"Error: stage module catalog not found in {path}")
+if module in match.group(2).split():
+    print("  (stage module catalog entry already present — skipping)")
 else:
-    open(path, 'w').write(new_text)
-    print(f"  + {cu_entry.strip()} added to {target}")
+    insertion = match.group(2) + f"    {module}\n"
+    path.write_text(text[:match.start(2)] + insertion + text[match.end(2):])
+    print(f"  + {module} added to stage module catalog")
 PYEOF
-fi
 
 # ── tests/stages/CMakeLists.txt: fz_add_test entry ───────────────────────────
 if grep -q "test_${LOWER}" "$TESTS_CMAKELISTS"; then
@@ -513,7 +512,8 @@ echo "    ${MODULE_DIR}/${LOWER}_stage.h"
 echo "    ${MODULE_DIR}/${LOWER}_stage.cu"
 echo "    ${TEST_FILE}"
 echo "    ${FZM_FORMAT_H}  (StageType enum + stageTypeToString)"
-echo "    ${CMAKELISTS}    (.cu added to ${CMAKE_TARGET})"
+echo "    ${MODULE_DIR}/CMakeLists.txt  (module source declaration)"
+echo "    ${MODULES_CMAKELISTS}  (stage module catalog entry)"
 echo "    ${TESTS_CMAKELISTS}  (fz_add_test entry)"
 echo "    ${MODULE_DIR}/${LOWER}_stage.cu  (self-registers its FZM-header factory)"
 echo ""

@@ -44,6 +44,9 @@ __device__ __forceinline__ void putBits(uint8_t* buf, unsigned long long& bitpos
                                          unsigned long long u, int width) {
     for (int b = 0; b < width; ++b) {
         const unsigned long long byte_i = bitpos >> 3;
+        // Define each byte before its first RMW, including final padding bits.
+        // Each block owns its slice; see docs/codebase_notes.md CN-SZXINIT-1.
+        if ((bitpos & 7) == 0) buf[byte_i] = 0;
         const uint8_t mask = static_cast<uint8_t>(1u << (bitpos & 7));
         if ((u >> b) & 1ull) buf[byte_i] |= mask;
         else                 buf[byte_i] &= static_cast<uint8_t>(~mask);

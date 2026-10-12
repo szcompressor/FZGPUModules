@@ -224,7 +224,7 @@ __global__ void ansEncodeCoalesceBatch(
                 kBlockAlignment / sizeof(ANSEncodedT));
       }
 
-      ANSCoalescedHeader header;
+      ANSCoalescedHeader header{};
       header.setMagicAndVersion();
       header.setNumBlocks(numBlocks);
       header.setTotalUncompressedWords(uncompressedWords);
@@ -264,9 +264,16 @@ __global__ void ansEncodeCoalesceBatch(
 
   auto blockWordsOut = headerOut->getBlockWords(numBlocks);
 
-  // Write out per-block word length
-  for (int i = blockIdx.x * Threads + tid; i < numBlocks;
+  // Define alignment slots too; rationale: docs/codebase_notes.md CN-ANSINIT-1.
+  constexpr uint32_t kBlockWordAlignment = kBlockAlignment / sizeof(uint2);
+  const uint32_t numBlockWordSlots =
+      roundUp(static_cast<uint32_t>(numBlocks), kBlockWordAlignment);
+  for (int i = blockIdx.x * Threads + tid; i < numBlockWordSlots;
        i += gridDim.x * Threads) {
+    if (i >= numBlocks) {
+      blockWordsOut[i] = uint2{0, 0};
+      continue;
+    }
     uint32_t lastBlockWords = uncompressedWords % kDefaultBlockSize;
     lastBlockWords = lastBlockWords == 0 ? kDefaultBlockSize : lastBlockWords;
 
@@ -281,6 +288,8 @@ __global__ void ansEncodeCoalesceBatch(
   uint32_t numWords = compressedWords_dev[block];
 
   using LoadT = uint4;
+  constexpr uint32_t kWordsPerVector = sizeof(LoadT) / sizeof(ANSEncodedT);
+  static_assert(sizeof(LoadT) == kBlockAlignment, "ANS payload vector alignment");
 
   uint32_t limitEnd = divUp(numWords, kBlockAlignment / sizeof(ANSEncodedT));
 
@@ -289,7 +298,24 @@ __global__ void ansEncodeCoalesceBatch(
       (LoadT*)(headerOut->getBlockDataStart(numBlocks) + compressedWordsPrefix_dev[block]);
 
   for (uint32_t i = tid; i < limitEnd; i += Threads) {
-    outT[i] = inT[i];
+    const uint32_t firstWord = i * kWordsPerVector;
+    if (firstWord + kWordsPerVector <= numWords) {
+      outT[i] = inT[i];
+    } else {
+      // Read only encoded words; the final vector's unused words were never written.
+      ANSEncodedT tail[kWordsPerVector] = {};
+      const auto* inWords =
+          reinterpret_cast<const ANSEncodedT*>(uncoalescedBlock + sizeof(ANSWarpState));
+      #pragma unroll
+      for (uint32_t j = 0; j < kWordsPerVector; ++j) {
+        if (firstWord + j < numWords) tail[j] = inWords[firstWord + j];
+      }
+      outT[i] = make_uint4(
+          uint32_t(tail[0]) | (uint32_t(tail[1]) << 16),
+          uint32_t(tail[2]) | (uint32_t(tail[3]) << 16),
+          uint32_t(tail[4]) | (uint32_t(tail[5]) << 16),
+          uint32_t(tail[6]) | (uint32_t(tail[7]) << 16));
+    }
   }
 }
 

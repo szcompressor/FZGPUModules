@@ -38,6 +38,7 @@
       "displayName": "ASan + UBSan",
       "description": "Debug build with AddressSanitizer and UndefinedBehaviorSanitizer compiled in.",
       "cacheVariables": {
+        "BUILD_TESTING": "ON",
         "CMAKE_BUILD_TYPE":  "Debug",
         "USE_SANITIZER":     "ASanUbsan"
       }
@@ -58,7 +59,7 @@
       "name": "cuda-h200",
       "inherits": "base",
       "displayName": "CUDA (H200 / Hopper, sm_90)",
-      "description": "Release build against the CUDA backend for compute capability 9.0 (H100/H200). The project default (86, A100) does not cover Hopper, so this preset overrides CMAKE_CUDA_ARCHITECTURES explicitly.",
+      "description": "Release build against the CUDA backend for compute capability 9.0 (H100/H200). The project default (86, Ampere) does not cover Hopper, so this preset overrides CMAKE_CUDA_ARCHITECTURES explicitly.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE":          "Release",
         "FZGMOD_BACKEND":            "CUDA",
@@ -72,6 +73,7 @@
       "displayName": "Compute Sanitizer",
       "description": "Release build with -lineinfo; ctest wraps every test executable with compute-sanitizer --tool memcheck.",
       "cacheVariables": {
+        "BUILD_TESTING": "ON",
         "CMAKE_BUILD_TYPE":                  "Release",
         "USE_SANITIZER":                     "Compute",
         "FZGMOD_COMPUTE_SANITIZER_WRAPPER":  "ON"
@@ -118,6 +120,7 @@
       "configurePreset": "release",
       "displayName": "All tests (Release)",
       "description": "Run the full test suite against the Release build.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true }
     },
 
@@ -126,6 +129,7 @@
       "configurePreset": "release",
       "displayName": "Stage unit tests",
       "description": "Run only tests labelled 'stages'.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true },
       "filter": { "include": { "label": "stages" } }
     },
@@ -135,6 +139,7 @@
       "configurePreset": "release",
       "displayName": "Pipeline integration tests",
       "description": "Run only tests labelled 'pipeline'.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true },
       "filter": { "include": { "label": "pipeline" } }
     },
@@ -144,6 +149,7 @@
       "configurePreset": "hip",
       "displayName": "All tests (HIP, experimental)",
       "description": "Run the full test suite against the experimental HIP build. ANSStage is excluded on HIP (see Stage::isSupportedOnBackend).",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true }
     },
 
@@ -152,6 +158,7 @@
       "configurePreset": "cuda-h200",
       "displayName": "All tests (CUDA H200)",
       "description": "Run the full test suite against the CUDA sm_90 (H200/Hopper) build.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true }
     },
 
@@ -160,6 +167,7 @@
       "configurePreset": "asan",
       "displayName": "All tests (ASan + UBSan)",
       "description": "Run the full test suite against the ASan+UBSan build. Requires LD_PRELOAD=$(gcc -print-file-name=libasan.so) and ASAN_OPTIONS=protect_shadow_gap=0:detect_leaks=0 to run correctly with CUDA without false positives.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true }
     },
 
@@ -168,6 +176,7 @@
       "configurePreset": "compute-san",
       "displayName": "All tests (Compute Sanitizer)",
       "description": "Run the full test suite under 'compute-sanitizer --tool memcheck'.  Requires compute-sanitizer on PATH.  Each test executable is prefixed via CROSSCOMPILING_EMULATOR.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true }
     },
 
@@ -176,6 +185,7 @@
       "configurePreset": "compute-san",
       "displayName": "Stage tests (Compute Sanitizer)",
       "description": "Stage unit tests only, under compute-sanitizer memcheck.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true },
       "filter": { "include": { "label": "stages" } }
     },
@@ -185,6 +195,7 @@
       "configurePreset": "compute-san",
       "displayName": "Pipeline tests (Compute Sanitizer)",
       "description": "Pipeline integration tests only, under compute-sanitizer memcheck.",
+      "execution": { "noTestsAction": "error" },
       "output": { "outputOnFailure": true },
       "filter": { "include": { "label": "pipeline" } }
     }

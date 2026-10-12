@@ -1,259 +1,257 @@
 #!/usr/bin/env bash
-# scripts/run_sanitizers.sh
-#
-# Run the FZGPUModules test suite under sanitizers.
-#
-# Modes:
-#   compute  — CUDA Compute Sanitizer (memcheck / initcheck / racecheck / synccheck)
-#   asan     — Host AddressSanitizer + UndefinedBehaviorSanitizer
-#   all      — both compute and asan (default)
-#
-# Usage examples:
-#   ./scripts/run_sanitizers.sh                          # full matrix, build if needed
-#   ./scripts/run_sanitizers.sh --mode compute           # compute only
-#   ./scripts/run_sanitizers.sh --mode asan              # asan only
-#   ./scripts/run_sanitizers.sh --tool memcheck          # one compute tool
-#   ./scripts/run_sanitizers.sh --binary test_rle        # one binary only
-#   ./scripts/run_sanitizers.sh --filter "RLE*"          # gtest filter
-#   ./scripts/run_sanitizers.sh --build                  # force rebuild first
-#   ./scripts/run_sanitizers.sh --mode compute --build --tool initcheck --binary test_rze_stage
-
+# Run registered tests serially under Compute Sanitizer or host ASan+UBSan.
 set -euo pipefail
 
-# ── paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_COMPUTE="$ROOT/build-compute"
 BUILD_ASAN="$ROOT/build-asan"
 JOBS="$(nproc)"
-
-# ── colours ───────────────────────────────────────────────────────────────────
-if [[ -t 1 ]]; then
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-    CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
-else
-    RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; RESET=''
-fi
-
-# ── defaults ──────────────────────────────────────────────────────────────────
-MODE="all"
-COMPUTE_TOOLS=("memcheck" "initcheck" "racecheck" "synccheck")
+MODE=all
+COMPUTE_TOOLS=(memcheck initcheck racecheck synccheck)
 SELECTED_TOOL=""
 FORCE_BUILD=0
-GTEST_FILTER=""
+CASE_FILTER="${GTEST_FILTER:-*}"
 ONLY_BINARY=""
+TIMEOUT_SECONDS=300
 
-# ── argument parsing ──────────────────────────────────────────────────────────
 usage() {
-    cat <<EOF
+    cat <<HELP
 Usage: $(basename "$0") [OPTIONS]
-
-Options:
-  --mode compute|asan|all    Sanitizer mode to run (default: all)
-  --tool TOOL                Compute-sanitizer tool: memcheck|initcheck|racecheck|synccheck
+  --mode compute|asan|all    Sanitizer mode (default: all)
+  --tool TOOL                memcheck|initcheck|racecheck|synccheck
                              (default: all four; ignored for asan mode)
-  --binary NAME              Run only this test binary (e.g. test_rle)
-  --filter PATTERN           Pass --gtest_filter=PATTERN to every test binary
-  --build                    Force reconfigure + rebuild before running
-  --jobs N                   Parallel jobs for cmake build (default: nproc = $JOBS)
+  --binary NAME              Run only this registered test binary
+  --filter PATTERN           Google Test filter; an empty selection fails
+  --build                    Force reconfigure and rebuild before running
+  --jobs N                   Build jobs (default: $JOBS); tests remain serial
+  --timeout-seconds N        Per-test/listing timeout (default: 300); kill after 10s
   -h, --help                 Show this help
-EOF
+HELP
 }
+log() { printf '[sanitizers] %s\n' "$*"; }
+error() { printf '[sanitizers] ERROR: %s\n' "$*" >&2; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --mode)    MODE="$2";         shift 2 ;;
-        --tool)    SELECTED_TOOL="$2"; shift 2 ;;
-        --binary)  ONLY_BINARY="$2";  shift 2 ;;
-        --filter)  GTEST_FILTER="$2"; shift 2 ;;
-        --build)   FORCE_BUILD=1;     shift   ;;
-        --jobs)    JOBS="$2";         shift 2 ;;
-        -h|--help) usage; exit 0             ;;
-        *) echo "Unknown option: $1"; usage; exit 1 ;;
+        --mode|--tool|--binary|--filter|--jobs|--timeout-seconds)
+            [[ $# -ge 2 ]] || { error "$1 requires a value"; exit 1; }
+            case "$1" in
+                --mode) MODE="$2" ;;
+                --tool) SELECTED_TOOL="$2" ;;
+                --binary) ONLY_BINARY="$2" ;;
+                --filter) CASE_FILTER="$2" ;;
+                --jobs) JOBS="$2" ;;
+                --timeout-seconds) TIMEOUT_SECONDS="$2" ;;
+            esac
+            shift 2 ;;
+        --build) FORCE_BUILD=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) error "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
-
-if [[ -n "$SELECTED_TOOL" ]]; then
-    COMPUTE_TOOLS=("$SELECTED_TOOL")
+case "$MODE" in compute|asan|all) ;; *) error "Unknown mode: $MODE"; exit 1 ;; esac
+case "$SELECTED_TOOL" in
+    "") ;;
+    memcheck|initcheck|racecheck|synccheck) COMPUTE_TOOLS=("$SELECTED_TOOL") ;;
+    *) error "Unknown compute tool: $SELECTED_TOOL"; exit 1 ;;
+esac
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { error '--jobs must be a positive integer'; exit 1; }
+[[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+    error '--timeout-seconds must be a positive integer'; exit 1;
+}
+for dependency in cmake ctest python3 timeout; do
+    command -v "$dependency" >/dev/null || { error "$dependency is required"; exit 1; }
+done
+timeout --version | grep -q 'GNU coreutils' || { error 'GNU timeout is required'; exit 1; }
+if [[ "$MODE" != asan ]]; then
+    command -v compute-sanitizer >/dev/null || { error 'compute-sanitizer is required'; exit 1; }
 fi
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-log()    { echo -e "${BOLD}[sanitizers]${RESET} $*"; }
-ok()     { echo -e "  ${GREEN}PASS${RESET}  $*"; }
-fail()   { echo -e "  ${RED}FAIL${RESET}  $*"; }
-warn()   { echo -e "  ${YELLOW}WARN${RESET}  $*"; }
-header() { echo -e "\n${CYAN}${BOLD}── $* ──────────────────────────────────────────${RESET}"; }
-
-# Collect test binaries from a build directory (flat layout under tests/)
-collect_binaries() {
-    local build_dir="$1"
-    local bins=()
-    while IFS= read -r -d '' f; do
-        bins+=("$f")
-    done < <(find "$build_dir/tests" -maxdepth 1 -type f -executable -name 'test_*' -print0 | sort -z)
-    echo "${bins[@]}"
-}
-
-# ── build helpers ─────────────────────────────────────────────────────────────
-build_compute() {
-    header "Building compute-sanitizer configuration"
-    cmake -S "$ROOT" -B "$BUILD_COMPUTE" \
-        -DUSE_SANITIZER=Compute \
-        -DCOMPUTE_SANITIZER_DEVICE_DEBUG=OFF \
-        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCUDA_MODULE_LOADING=EAGER \
-        2>&1 | grep -E "^--|error:|warning:" || true
-    cmake --build "$BUILD_COMPUTE" -j"$JOBS"
-}
-
-build_asan() {
-    header "Building ASan+UBSan configuration"
-    cmake -S "$ROOT" -B "$BUILD_ASAN" \
-        -DUSE_SANITIZER=ASanUbsan \
-        -DCMAKE_BUILD_TYPE=Debug \
-        -DCUDA_MODULE_LOADING=EAGER \
-        2>&1 | grep -E "^--|error:|warning:" || true
-    cmake --build "$BUILD_ASAN" -j"$JOBS"
+build_config() {
+    local build_dir="$1" sanitizer="$2" build_type="$3"
+    log "Configuring $sanitizer at $build_dir"
+    # Direct compute invocations supply their own wrapper; never wrap ASan tests.
+    cmake -S "$ROOT" -B "$build_dir" \
+        -DFZGMOD_BACKEND=CUDA -DBUILD_TESTING=ON \
+        -DFZGMOD_COMPUTE_SANITIZER_WRAPPER=OFF \
+        -DUSE_SANITIZER="$sanitizer" -DCMAKE_BUILD_TYPE="$build_type" \
+        -DCOMPUTE_SANITIZER_DEVICE_DEBUG=OFF -DCUDA_MODULE_LOADING=EAGER || return $?
+    cmake --build "$build_dir" -j"$JOBS" || return $?
 }
 
 need_build() {
-    local build_dir="$1"
+    local build_dir="$1" sanitizer="$2"
     [[ "$FORCE_BUILD" -eq 1 ]] && return 0
-    [[ ! -d "$build_dir" ]] && return 0
-    # No test binaries present → need build
-    local count
-    count=$(find "$build_dir/tests" -maxdepth 1 -type f -executable -name 'test_*' 2>/dev/null | wc -l)
-    [[ "$count" -eq 0 ]] && return 0
+    local cache="$build_dir/CMakeCache.txt"
+    [[ -f "$cache" && -f "$build_dir/CTestTestfile.cmake" ]] || return 0
+    # Reject cached configurations that would silently omit tests or double-wrap.
+    grep -qx 'BUILD_TESTING:BOOL=ON' "$cache" || return 0
+    grep -qEx "USE_SANITIZER:[^=]+=$sanitizer" "$cache" || return 0
+    grep -qEx 'FZGMOD_BACKEND:[^=]+=CUDA' "$cache" || return 0
+    grep -qx 'FZGMOD_COMPUTE_SANITIZER_WRAPPER:BOOL=OFF' "$cache" || return 0
     return 1
 }
 
-# ── compute sanitizer runner ──────────────────────────────────────────────────
-run_compute() {
-    if need_build "$BUILD_COMPUTE"; then
-        build_compute
-    else
-        log "Using existing compute build at $BUILD_COMPUTE  (pass --build to force rebuild)"
-    fi
+# CTest is the source of truth, including binaries in nested directories.
+# Store paths in the caller's `binaries` array; reject absent/unbuilt selections.
+collect_binaries() {
+    local build_dir="$1" json paths
+    json=$(ctest --test-dir "$build_dir" --show-only=json-v1) || return $?
+    paths=$(python3 -c '
+import json, os, sys
+try:
+    tests = json.load(sys.stdin)["tests"]
+    if sys.argv[1]:
+        tests = [t for t in tests if t["name"] == sys.argv[1]]
+    if not tests:
+        raise ValueError("no registered tests match the requested selection")
+    for test in tests:
+        command = test.get("command", [])
+        if len(command) != 1 or not os.access(command[0], os.X_OK):
+            raise ValueError("test is missing, unbuilt, or unexpectedly wrapped: " + test["name"])
+        properties = {p["name"]: p["value"] for p in test.get("properties", [])}
+        working_dir = properties.get("WORKING_DIRECTORY", os.path.dirname(command[0]))
+        if not os.path.isdir(working_dir):
+            raise ValueError("test working directory is missing: " + test["name"])
+        print(command[0])
+        print(working_dir)
+except (KeyError, ValueError) as error:
+    print("[sanitizers] ERROR: " + str(error), file=sys.stderr)
+    sys.exit(1)
+' "$ONLY_BINARY" <<<"$json") || return $?
+    local fields=() index
+    mapfile -t fields <<<"$paths"
+    for ((index = 0; index < ${#fields[@]}; index += 2)); do
+        binaries+=("${fields[index]}")
+        working_dirs["${fields[index]}"]="${fields[index + 1]}"
+    done
+}
 
-    local all_pass=1
-    # results[tool][binary] = PASS|FAIL
-    declare -A results
-
-    for tool in "${COMPUTE_TOOLS[@]}"; do
-        header "compute-sanitizer --tool $tool"
-        local tool_pass=1
-
-        readarray -d '' binaries < <(find "$BUILD_COMPUTE/tests" -maxdepth 1 \
-            -type f -executable -name 'test_*' -print0 | sort -z)
-
-        for bin in "${binaries[@]}"; do
-            local name; name="$(basename "$bin")"
-            [[ -n "$ONLY_BINARY" && "$name" != "$ONLY_BINARY" ]] && continue
-
-            local cmd=(compute-sanitizer --tool "$tool" --error-exitcode=1)
-            [[ "$tool" == "memcheck" ]] && cmd+=(--show-backtrace=yes)
-            cmd+=("$bin")
-            [[ -n "$GTEST_FILTER" ]] && cmd+=("--gtest_filter=$GTEST_FILTER")
-
-            local out; out=$("${cmd[@]}" 2>&1) && rc=0 || rc=$?
-            if [[ $rc -eq 0 ]]; then
-                ok "$tool / $name"
-                results["$tool/$name"]="PASS"
-            else
-                fail "$tool / $name"
-                results["$tool/$name"]="FAIL"
-                tool_pass=0
-                all_pass=0
-                # Print first ERROR SUMMARY line for context
-                echo "$out" | grep -m5 "ERROR SUMMARY\|error\|warning" | sed 's/^/    /' || true
-            fi
-        done
-
-        if [[ $tool_pass -eq 1 ]]; then
-            log "${GREEN}$tool: all PASS${RESET}"
-        else
-            log "${RED}$tool: FAILURES detected${RESET}"
+# Validate Google Test filtering before a zero-case binary can report success.
+# Disabled cases do not count toward the selection.
+filter_binaries() {
+    [[ -n "$CASE_FILTER" ]] || { error '--filter must not be empty'; return 1; }
+    [[ "$CASE_FILTER" != '*' ]] || return 0
+    local selected=() bin listing
+    for bin in "${binaries[@]}"; do
+        listing=$(cd "${working_dirs["$bin"]}" && timeout --kill-after=10s "${TIMEOUT_SECONDS}s" \
+            "${test_environment[@]}" "$bin" \
+            --gtest_list_tests "--gtest_filter=$CASE_FILTER" 2>&1) || {
+            printf '%s\n' "$listing" >&2
+            error "Cannot enumerate filtered cases in $bin"
+            return 1
+        }
+        if awk '
+            /^[^[:space:]]+\./ { disabled = ($1 ~ /(^|\/)DISABLED_/) }
+            /^  [^[:space:]]/ && !disabled && $0 !~ /^  (.*\/)?DISABLED_/ { found = 1 }
+            END { exit !found }
+        ' <<<"$listing"; then
+            selected+=("$bin")
         fi
     done
-
-    return $(( 1 - all_pass ))
+    [[ ${#selected[@]} -gt 0 ]] || { error "No enabled cases match --filter $CASE_FILTER"; return 1; }
+    binaries=("${selected[@]}")
 }
 
-# ── asan runner ───────────────────────────────────────────────────────────────
+run_compute() {
+    if need_build "$BUILD_COMPUTE" Compute; then
+        build_config "$BUILD_COMPUTE" Compute RelWithDebInfo || return $?
+    else
+        log "Using existing compute build (pass --build to refresh)"
+    fi
+    local binaries=() test_environment=(env CUDA_MODULE_LOADING=EAGER "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}")
+    local -A working_dirs=()
+    collect_binaries "$BUILD_COMPUTE" || return $?
+    filter_binaries || return $?
+    local tool bin rc status=0 logfile
+    local log_dir="$BUILD_COMPUTE/sanitizer-logs/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mkdir -p "$log_dir" || return $?
+    log "Selected ${#binaries[@]} registered compute test binaries; logs: $log_dir"
+    for tool in "${COMPUTE_TOOLS[@]}"; do
+        for bin in "${binaries[@]}"; do
+            local cmd=(timeout --kill-after=10s "${TIMEOUT_SECONDS}s"
+                "${test_environment[@]}" compute-sanitizer --tool "$tool"
+                --error-exitcode=1 --require-cuda-init=no)
+            [[ "$tool" != memcheck ]] || cmd+=(--show-backtrace=yes)
+            cmd+=("$bin" --gtest_fail_if_no_test_linked)
+            cmd+=("--gtest_filter=$CASE_FILTER")
+            logfile="$log_dir/$tool-$(basename "$bin").log"
+            printf '%q ' "${cmd[@]}" >"$logfile" || return $?
+            printf '\n' >>"$logfile" || return $?
+            if (cd "${working_dirs["$bin"]}" && "${cmd[@]}") >>"$logfile" 2>&1; then
+                log "PASS $tool / $(basename "$bin")"
+            else
+                rc=$?
+                log "FAIL $tool / $(basename "$bin") (exit $rc)"
+                if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+                    printf '[sanitizers] Timed out after %ss (10s kill grace)\n' \
+                        "$TIMEOUT_SECONDS" >>"$logfile"
+                fi
+                cat "$logfile" >&2
+                status=1
+            fi
+        done
+    done
+    return "$status"
+}
+
 run_asan() {
-    if need_build "$BUILD_ASAN"; then
-        build_asan
+    if need_build "$BUILD_ASAN" ASanUbsan; then
+        build_config "$BUILD_ASAN" ASanUbsan Debug || return $?
     else
-        log "Using existing asan build at $BUILD_ASAN  (pass --build to force rebuild)"
+        log "Using existing ASan build (pass --build to refresh)"
     fi
-
-    header "ASan + UBSan"
-
-    # Locate the ASan shared library
-    local libasan; libasan=$(gcc --print-file-name=libasan.so 2>/dev/null || true)
-    if [[ -z "$libasan" || ! -f "$libasan" ]]; then
-        warn "Could not locate libasan.so via gcc --print-file-name; trying ldconfig"
-        libasan=$(ldconfig -p 2>/dev/null | awk '/libasan\.so\./{print $NF; exit}')
-    fi
-    if [[ -z "$libasan" || ! -f "$libasan" ]]; then
-        echo -e "${RED}ERROR: libasan.so not found. Install gcc with ASan support.${RESET}"
-        return 1
-    fi
-    log "Using libasan: $libasan"
-
-    local extra_args=()
-    [[ -n "$GTEST_FILTER" ]] && extra_args+=(--gtest-filter "$GTEST_FILTER")
-    [[ -n "$ONLY_BINARY"  ]] && extra_args+=(-R "$ONLY_BINARY")
-
-    local rc=0
-    LD_PRELOAD="$libasan" \
-    ASAN_OPTIONS="detect_leaks=0:abort_on_error=0:protect_shadow_gap=0" \
-    UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=0" \
-        ctest --test-dir "$BUILD_ASAN" --output-on-failure -j1 "${extra_args[@]}" \
-        && rc=0 || rc=$?
-
-    if [[ $rc -eq 0 ]]; then
-        log "${GREEN}ASan+UBSan: all PASS${RESET}"
-    else
-        log "${RED}ASan+UBSan: FAILURES detected${RESET}"
-    fi
-    return $rc
+    local compiler libasan
+    compiler=$(sed -n 's/^CMAKE_CXX_COMPILER:FILEPATH=//p' "$BUILD_ASAN/CMakeCache.txt")
+    [[ -n "$compiler" ]] || { error 'Cannot determine ASan build compiler'; return 1; }
+    libasan=$("$compiler" --print-file-name=libasan.so) || return $?
+    [[ -f "$libasan" ]] || { error "ASan runtime not found: $libasan"; return 1; }
+    local binaries=() test_environment=(env "LD_PRELOAD=$libasan"
+        ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1:protect_shadow_gap=0
+        UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+        CUDA_MODULE_LOADING=EAGER "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}")
+    local -A working_dirs=()
+    collect_binaries "$BUILD_ASAN" || return $?
+    filter_binaries || return $?
+    local bin rc status=0 logfile
+    local log_dir="$BUILD_ASAN/sanitizer-logs/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mkdir -p "$log_dir" || return $?
+    log "Selected ${#binaries[@]} registered ASan+UBSan test binaries; logs: $log_dir"
+    # Run binaries directly, so the runtime is preloaded only into test processes
+    # and filtering cannot accidentally select an unrelated CTest name.
+    for bin in "${binaries[@]}"; do
+        local cmd=(timeout --kill-after=10s "${TIMEOUT_SECONDS}s"
+            "${test_environment[@]}" "$bin" --gtest_fail_if_no_test_linked)
+        cmd+=("--gtest_filter=$CASE_FILTER")
+        logfile="$log_dir/asan-ubsan-$(basename "$bin").log"
+        printf '%q ' "${cmd[@]}" >"$logfile" || return $?
+        printf '\n' >>"$logfile" || return $?
+        if (cd "${working_dirs["$bin"]}" && "${cmd[@]}") >>"$logfile" 2>&1; then
+            log "PASS ASan+UBSan / $(basename "$bin")"
+        else
+            rc=$?
+            log "FAIL ASan+UBSan / $(basename "$bin") (exit $rc)"
+            if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+                printf '[sanitizers] Timed out after %ss (10s kill grace)\n' \
+                    "$TIMEOUT_SECONDS" >>"$logfile"
+            fi
+            cat "$logfile" >&2
+            status=1
+        fi
+    done
+    return "$status"
 }
 
-# ── summary ───────────────────────────────────────────────────────────────────
 COMPUTE_RC=0
 ASAN_RC=0
-
 START=$(date +%s)
-
 case "$MODE" in
     compute) run_compute || COMPUTE_RC=$? ;;
-    asan)    run_asan    || ASAN_RC=$?    ;;
-    all)     run_compute || COMPUTE_RC=$?
-             run_asan    || ASAN_RC=$?    ;;
-    *)       echo "Unknown mode: $MODE"; usage; exit 1 ;;
+    asan) run_asan || ASAN_RC=$? ;;
+    all) run_compute || COMPUTE_RC=$?; run_asan || ASAN_RC=$? ;;
 esac
-
-END=$(date +%s)
-ELAPSED=$(( END - START ))
-
-header "Summary"
-if [[ "$MODE" == "compute" || "$MODE" == "all" ]]; then
-    if [[ $COMPUTE_RC -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${RESET}  CUDA Compute Sanitizer (${COMPUTE_TOOLS[*]})"
-    else
-        echo -e "  ${RED}FAIL${RESET}  CUDA Compute Sanitizer (${COMPUTE_TOOLS[*]})"
-    fi
-fi
-if [[ "$MODE" == "asan" || "$MODE" == "all" ]]; then
-    if [[ $ASAN_RC -eq 0 ]]; then
-        echo -e "  ${GREEN}PASS${RESET}  ASan + UBSan"
-    else
-        echo -e "  ${RED}FAIL${RESET}  ASan + UBSan"
-    fi
-fi
-echo ""
-log "Total time: ${ELAPSED}s"
-
-OVERALL_RC=$(( COMPUTE_RC | ASAN_RC ))
-exit $OVERALL_RC
+if [[ "$MODE" != asan ]]; then log "Compute Sanitizer status: $COMPUTE_RC"; fi
+if [[ "$MODE" != compute ]]; then log "ASan+UBSan status: $ASAN_RC"; fi
+log "Total time: $(($(date +%s) - START))s"
+[[ "$COMPUTE_RC" -eq 0 && "$ASAN_RC" -eq 0 ]]

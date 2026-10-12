@@ -34,12 +34,13 @@ FZGPUModules is a CUDA library for building composable, high-throughput compress
 
 ## Requirements
 
-| Requirement | Minimum | Notes |
+| Requirement | Requirement or scope | Notes |
 |---|---|---|
-| CUDA Toolkit | 11.2+ | |
-| Host Compiler | GCC 7+ or Clang 5+ | Upper bound set by CUDA version — see [NVIDIA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/); NVHPC 23.11 tested in CI |
+| CUDA Toolkit | 11.2+ | Configure-time API floor; older toolkits are not a validated compatibility matrix |
+| Host Compiler | C++17 compiler and standard library | Must be supported by the selected CUDA toolkit or ROCm toolchain; see [build requirements](docs/building.md#prerequisites) |
 | C++ Standard | C++17 | |
 | CMake | 3.24+ | |
+| Python | Python 3 | Required at build time for embedded JIT headers and source fingerprints |
 | Host byte order | Little-endian | |
 
 ---

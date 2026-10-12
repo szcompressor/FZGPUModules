@@ -10,6 +10,8 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Modules own their CMake source lists and backend settings; an explicit module catalog, stage scaffolding, and integration checks replace root-level source-list edits.
+- Runtime specialization embeds its device-header dependencies in the library, allowing JIT compilation from relocated installations without the original source checkout.
 - Tiled warp predictors (`TiledLorenzo{2,3}D[Identity]Predictor`, f32 and f64) take the tile shape as template arguments, so per-element tile indexing compiles to mask/shift; fused op names now carry the shape (e.g. `TiledLorenzo2DPredictor<8,8>`). Byte-identical output; measurements in `docs/codebase_notes.md` CN-WARPTILE-1.
 - Tiled 2-D/3-D plain (non-outlier) warp chains use a separate adaptive-probe threshold (`FZ_ADAPTIVE_THRESH_TILED`, default 1.4) instead of the 1-D-fit 16.0, which routed several 3-D fields to the slower thread-independent path; `FZ_DEBUG_PROBE=1` prints each decision. Dispatch only, byte-identical (CN-WARPPROBE-1).
 - `AdaptiveBitpackCoder`'s warp ballot-result stores are vectorized (measured neutral).
@@ -32,6 +34,8 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - **Renamed the automatic-fusion feature to "Pipeline Specialization"** to reflect that it does more than fuse kernels (single-pass decoupled-lookback, NVRTC codegen, evidence-gated registry admission, both compress and decompress). Public API renamed with back-compat aliases: `FusionPolicy` → `SpecializationPolicy`, `FusionInfo` → `SpecializationInfo`, `FusionGroupInfo` → `SpecializationGroupInfo`; `setFusionPolicy`/`getFusionInfo`/`getFusedGroupCount` → `setSpecializationPolicy`/`getSpecializationInfo`/`getSpecializedGroupCount` (old names kept as deprecated forwarders/aliases — existing code compiles unchanged). Env var `FZ_FUSION` → `FZ_SPECIALIZE` (`FZ_FUSION` still honored as a deprecated alias). CLI `--report-json` now emits a `specialization` block; the legacy `fusion` block is retained byte-identical so existing benchmark parsers keep working. Internal planner/registry vocabulary (kernel *fusion* — the specialization strategy) is unchanged. New docs: `docs/pipeline_specialization.md` (user guide), `docs/pipeline_specialization_internals.md` (stage-author declaration contract), `docs/developing_stages_deep_dive.md` (WIP outline). Pipeline Specialization replaces CUDA Graph capture in the mainpage/README core-feature lists (graph capture remains documented, as a mutually-exclusive lever). Docs now also describe the specialization-aware buffer coloring (fused-internal buffers elided from preallocation, each group one liveness point) as a peak-memory benefit of `Auto`, not just a throughput one — `architecture.md`, `performance_tuning.md`, `mainpage.md`, and both new pages.
 
 ### Added
+- Ship the small FZM 3.1 archive fixture so golden-file compatibility checks run on fresh checkouts.
+- One local/CI command for documentation and integration checks, with host-only failure-path regression fixtures.
 
 - Added forward/inverse Auto specialization for predictor-free linear Quantizer→AdaptiveBitpack chains (cuSZp3 fixed 1-D), preserving the two-stage graph and staged payloads for f32/f64 with block sizes 32/64/128.
 - Added float64 input and reconstruction support to the existing warp-register Auto specializations for linear quantization, 1-D/tiled Lorenzo and tile reordering, and plain/outlier adaptive bitpacking; double arithmetic and signed-code overflow checks preserve staged semantics, while unsupported shapes retain staged fallback.
@@ -83,6 +87,29 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - Removed Huffman's experimental `Fine` encode mode, its public API and diagnostics, TOML/card option, documentation, profiling selection, and mode-specific tests; `HuffmanStage` now exposes only the supported cuSZ coarse-grained encoder.
 
 ### Fixed
+- Bound each sanitizer test and filtered listing with a configurable timeout (default 300 seconds); timed-out tests fail and retain their logs.
+- GInterp mode-2 profiling synchronizes shared-memory reset before loading real samples.
+- Reset cached LorenzoQuant outlier counters on empty input before post-execution readback.
+- Prime standalone warp inverse test decoders from producer metadata and validate decoded lengths and reconstruction; clarify metadata requirements for `prepareInverse()`.
+- Define ANS reserved header fields and metadata/payload padding without reading unwritten encoder words.
+- Initialize payload bytes before bit updates in the quarantined reference SZp encoder, eliminating uninitialized reads and undefined trailing bits without changing the archive layout.
+- SZx bit packing initializes each output byte before read-modify-write and defines unused final-byte padding bits.
+- Cover Quantizer-to-Merge materialized outlier tails and repeated round trips under both memory strategies.
+- Staged Quantizer initializes materialized outlier capacities before downstream consumers can read their unused tails.
+- Huffman archive assembly copies populated partition metadata and bitstream prefixes instead of uninitialized allocation tails.
+- Initialize LorenzoQuant outlier capacities before downstream stages materialize unused tails.
+- Quantizer test fixtures skip zero-length outlier-index copies when vectors have null data pointers, avoiding UBSan failures.
+- Read ANS host headers through aligned typed objects instead of casting unaligned byte storage.
+- Sanitizer runner explicitly enables tests, uses registered CTest binaries, fails on build/tool/selection errors, and treats ASan/UBSan findings as failures.
+- Instrument CUDA host code and configure test targets after sanitizer flags so ASan/UBSan covers both library and test host code.
+- Install and export the utility archive required by static library consumers.
+- Sanitizer presets build tests on fresh checkouts, and test presets fail when no tests are registered.
+- Partial-chunk archives and in-memory metadata preserve logical input lengths while retaining padded inverse storage; graph replay also trims inputs smaller than captured capacity.
+- File and in-memory archive readers reject source counts above the format limit.
+- Specialization checks ownership on every JIT lookup and rejects custom or switched CUDA contexts instead of reusing context-bound kernel handles.
+- Codebase-note validation rejects malformed or duplicate IDs, missing notes, and dangling numeric or symbolic references.
+- Owned-buffer reclamation tests warm lazy decoder state before measuring steady-state growth, retaining the existing leak threshold.
+- Stage scaffolding checks ID collisions within `StageType`, avoiding false collisions with `DataType` values during automatic ID selection.
 - Thread-independent tiled Lorenzo decode (`ThreadTiledLorenzo{2,3}D[Identity]Predictor::unpredict_and_write`) no longer issues misaligned `float4` accesses when the field's row length is not a multiple of 4 (e.g. EXAFEL, dx=130); it falls back to scalar access.
 
 - Reset the linear quantizer's staged overflow flag during fused priming, preventing post-compression validation from reading uninitialized or stale state when specialization bypasses the staged kernel.
@@ -678,5 +705,5 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 Initial tagged release. cuSZ based compressor with modular design and experimental CUDASTF support.
 
-[Unreleased]: https://github.com/szcompressor/FZGPUModules/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/szcompressor/FZGPUModules/releases/tag/release
+[Unreleased]: https://github.com/szcompressor/FZGPUModules/compare/release...HEAD
+[1.0.0]: https://github.com/szcompressor/FZGPUModules/releases/tag/release

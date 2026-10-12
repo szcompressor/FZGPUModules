@@ -545,7 +545,8 @@ TEST(QuantizerREL, SmoothRoundTrip) {
 
     // Build a set of outlier indices for exact-match checking.
     std::vector<uint32_t> outlier_idxs;
-    if (fwd_result.idxs_raw.size() >= outlier_count * sizeof(uint32_t)) {
+    if (outlier_count != 0 &&
+        fwd_result.idxs_raw.size() >= outlier_count * sizeof(uint32_t)) {
         outlier_idxs.resize(outlier_count);
         std::memcpy(outlier_idxs.data(), fwd_result.idxs_raw.data(),
                     outlier_count * sizeof(uint32_t));
@@ -1397,8 +1398,10 @@ TEST(QuantizerThreshold, RELForcesOutliersAboveThreshold) {
     // Outlier elements must be exact; non-outlier relative error must be <= EPS.
     std::vector<uint32_t> outlier_idxs;
     outlier_idxs.resize(outlier_count);
-    std::memcpy(outlier_idxs.data(), fwd_result.idxs_raw.data(),
-                outlier_count * sizeof(uint32_t));
+    if (outlier_count != 0) {
+        std::memcpy(outlier_idxs.data(), fwd_result.idxs_raw.data(),
+                    outlier_count * sizeof(uint32_t));
+    }
     std::sort(outlier_idxs.begin(), outlier_idxs.end());
 
     for (size_t i = 0; i < N; i++) {
@@ -2108,7 +2111,8 @@ TEST(DitherREL, RoundTripWithinBound) {
     ASSERT_EQ(h_recon.size(), N);
     uint32_t outlier_count = fwd_result.outlier_count;
     std::vector<uint32_t> outlier_idxs;
-    if (fwd_result.idxs_raw.size() >= outlier_count * sizeof(uint32_t)) {
+    if (outlier_count != 0 &&
+        fwd_result.idxs_raw.size() >= outlier_count * sizeof(uint32_t)) {
         outlier_idxs.resize(outlier_count);
         std::memcpy(outlier_idxs.data(), fwd_result.idxs_raw.data(),
                     outlier_count * sizeof(uint32_t));

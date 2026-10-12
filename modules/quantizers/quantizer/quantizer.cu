@@ -1063,6 +1063,16 @@ void QuantizerStage<TInput, TCode>::execute(
         initOutlierCountScratch(pool);
         FZ_CUDA_CHECK(cudaMemsetAsync(d_outlier_count_scratch_, 0,
                                        sizeof(uint32_t), stream));
+        // Downstream stages can read the full capacities before count readback.
+        // Define their unused tails; see docs/codebase_notes.md CN-INIT-1.
+        if (max_outliers > 0) {
+            if (outputs[1] != nullptr)
+                FZ_CUDA_CHECK(cudaMemsetAsync(outputs[1], 0,
+                    max_outliers * sizeof(TInput), stream));
+            if (outputs[2] != nullptr)
+                FZ_CUDA_CHECK(cudaMemsetAsync(outputs[2], 0,
+                    max_outliers * sizeof(uint32_t), stream));
+        }
     }
     if (isLinearMode()) {
         initLinearOverflowScratch(pool);

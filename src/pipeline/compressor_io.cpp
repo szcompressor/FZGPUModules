@@ -98,7 +98,8 @@ Pipeline::FZMFileHeader Pipeline::buildHeader() const {
     }
 
     FZMFileHeader fh;
-    fh.core.uncompressed_size = input_size_;
+    // Archive lengths describe caller data; stage configs retain padded execution sizes.
+    fh.core.uncompressed_size = getLastUncompressedSize();
 
     // Per-source uncompressed sizes (v3+).
     // Recorded by compress() in input_nodes_ order (= source discovery order).
@@ -106,6 +107,7 @@ Pipeline::FZMFileHeader Pipeline::buildHeader() const {
         std::min(input_nodes_.size(), FZM_MAX_SOURCES));
     for (uint16_t i = 0; i < fh.core.num_sources; i++) {
         size_t sz = (i < source_input_sizes_.size()) ? source_input_sizes_[i] : 0;
+        if (original_input_size_ > 0) sz = original_input_size_;
         fh.core.source_uncompressed_sizes[i] = static_cast<uint64_t>(sz);
     }
 
@@ -348,6 +350,9 @@ Pipeline::FZMFileHeader Pipeline::readHeader(const std::string& filename) {
 
     if (fh.core.num_stages > FZM_MAX_BUFFERS || fh.core.num_buffers > FZM_MAX_BUFFERS) {
         throw std::runtime_error("FZM header has too many stages/buffers");
+    }
+    if (fh.core.num_sources > FZM_MAX_SOURCES) {
+        throw std::runtime_error("FZM header has too many sources");
     }
 
     // ── Step 3: read stage and buffer arrays ──────────────────────────────────
@@ -696,6 +701,8 @@ void Pipeline::decompressFromFile(
                 actual_size = post_sizes.at(post_names[0]);
             }
         }
+        // Keep padded inverse buffers through execution; return only the logical prefix.
+        actual_size = std::min(actual_size, source_sizes.at(fwd_source));
 
         void* d_final = nullptr;
         cudaError_t err = cudaMalloc(&d_final, actual_size);
@@ -882,6 +889,9 @@ Pipeline::FZMFileHeader Pipeline::parseHeaderFromMemory(const void* data, size_t
     if (fh.core.num_stages > FZM_MAX_BUFFERS || fh.core.num_buffers > FZM_MAX_BUFFERS) {
         throw std::runtime_error("parseHeaderFromMemory: header has too many stages/buffers");
     }
+    if (fh.core.num_sources > FZM_MAX_SOURCES) {
+        throw std::runtime_error("parseHeaderFromMemory: header has too many sources");
+    }
 
     const size_t stages_bytes  = static_cast<size_t>(fh.core.num_stages)  * sizeof(FZMStageInfo);
     const size_t buffers_bytes = static_cast<size_t>(fh.core.num_buffers) * sizeof(FZMBufferEntry);
@@ -947,11 +957,16 @@ void Pipeline::primeInverseFromHeader(const void* header_bytes, size_t header_si
     size_t src_sz = (fh.core.num_sources > 0 && fh.core.source_uncompressed_sizes[0] > 0)
                     ? static_cast<size_t>(fh.core.source_uncompressed_sizes[0])
                     : static_cast<size_t>(fh.core.uncompressed_size);
-    if (src_sz == 0) {
+    if (src_sz == 0 || fh.core.uncompressed_size == 0) {
         throw std::runtime_error("primeInverseFromHeader: header reports zero uncompressed size");
     }
-    source_input_sizes_.assign(1, src_sz);
-    input_size_ = src_sz;
+    source_input_sizes_.assign(input_nodes_.size(), src_sz);
+    for (size_t i = 0; i < source_input_sizes_.size() && i < fh.core.num_sources; ++i) {
+        if (fh.core.source_uncompressed_sizes[i] > 0)
+            source_input_sizes_[i] = static_cast<size_t>(fh.core.source_uncompressed_sizes[i]);
+    }
+    input_size_ = static_cast<size_t>(fh.core.uncompressed_size);
+    original_input_size_ = input_size_;
 
     // Pipeline-output buffer list (ids + producers) from the finalized topology;
     // per-segment compressed sizes are read from the blob at decompress() time.

@@ -148,6 +148,15 @@ TEST(DeviceBuffer, OwnedBufferFreesOnDestruction) {
     // granularity / context reservation vary by machine), but a destructor that
     // failed to free would accumulate kIters * in_bytes and show clearly.
     constexpr int kIters = 128;   // a leak here would be ~128 MB, far above noise
+    // Build the lazy inverse DAG and settle decoder/pool initialization before
+    // measuring repeated owned allocations. The warmup output must also free.
+    // Baseline evidence: docs/codebase_notes.md CN-OWN-1.
+    {
+        OwnedDeviceBuffer warmup = p->decompressOwned(comp.cspan(), stream);
+        ASSERT_NE(warmup.data(), nullptr);
+        ASSERT_EQ(warmup.bytes(), in_bytes);
+    }
+    FZ_TEST_CUDA(cudaDeviceSynchronize());
     const size_t before = free_device_bytes();
     for (int i = 0; i < kIters; ++i) {
         OwnedDeviceBuffer dec = p->decompressOwned(comp.cspan(), stream);

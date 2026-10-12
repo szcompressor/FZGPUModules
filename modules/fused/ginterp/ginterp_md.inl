@@ -1879,6 +1879,9 @@ __global__ void fz::ginterp::c_spline_profiling_data_2(
 
 
         c_reset_scratch_profiling_data_2<T, SPLINE_DIM, PROFILE_NUM_BLOCK_X, PROFILE_NUM_BLOCK_Y, PROFILE_NUM_BLOCK_Z, LINEAR_BLOCK_SIZE>(shmem_data, shmem_neighbor_x, shmem_neighbor_y, shmem_neighbor_z,0.0);
+        // Every block thread completes reset before samples overwrite it.
+        // Mode-2 phase ordering: docs/codebase_notes.md CN-GIRACE-1.
+        __syncthreads();
         global2shmem_profiling_data_2<T, T, SPLINE_DIM, PROFILE_NUM_BLOCK_X, PROFILE_NUM_BLOCK_Y, PROFILE_NUM_BLOCK_Z, LINEAR_BLOCK_SIZE>(data, data_size, data_leap,shmem_data, shmem_neighbor_x, shmem_neighbor_y, shmem_neighbor_z);
 
         if (TIX < 6 and BIX==0 and BIY==0 and BIZ==0) errors[TIX] = 0.0;//risky

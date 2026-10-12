@@ -58,15 +58,24 @@ Each entry's `byte_offset` field gives the segment's start position **relative t
 | 0  | 4 | `magic`            | Must equal `0x464D5A32` ("FZM2" LE) |
 | 4  | 2 | `version`          | high byte = major, low byte = minor; current = `0x0301` |
 | 6  | 2 | `num_buffers`      | Number of `FZMBufferEntry` records |
-| 8  | 8 | `uncompressed_size`| Total uncompressed input size (bytes) |
+| 8  | 8 | `uncompressed_size`| Logical input size before execution padding (bytes) |
 | 16 | 8 | `compressed_size`  | Total compressed payload size (bytes) |
 | 24 | 8 | `header_size`      | Byte offset where the compressed payload begins |
 | 32 | 4 | `num_stages`       | Number of `FZMStageInfo` records |
-| 36 | 2 | `num_sources`      | Number of pipeline source stages (currently always 1) |
+| 36 | 2 | `num_sources`      | Number of pipeline source stages (up to 4) |
 | 38 | 2 | `flags`            | Feature flags (see below) |
-| 40 | 32| `source_uncompressed_sizes[4]` | Per-source uncompressed size (8 bytes × 4 slots); only index 0 is used |
+| 40 | 32| `source_uncompressed_sizes[4]` | Per-source logical input lengths (8 bytes × 4 slots) |
 | 72 | 4 | `data_checksum`    | CRC32 (IEEE 802.3) of payload; 0 if flag not set |
 | 76 | 4 | `header_checksum`  | CRC32 of full header with this field zeroed; 0 if flag not set |
+
+Logical lengths describe the caller's data. Serialized stage configurations and
+compressed streams retain the information needed to allocate and decode padded
+intermediates; file output is trimmed to the selected source's logical length.
+The in-memory metadata header uses these same lengths. This changes no field
+layout or format version. Older archives that stored padded source lengths remain
+readable and return those stored lengths; their missing original lengths cannot be
+recovered reliably.
+Implementation rationale: `docs/codebase_notes.md`, `CN-ARCHIVE-1`.
 
 **Flags:**
 
@@ -340,5 +349,8 @@ Parsed OK.
 
 | Library version | FZM versions supported |
 |----------------|------------------------|
-| `v1.x`         | v3.0, v3.1             |
 | `v2.x` (current) | v3.1 (reads v3.0 with warning) |
+
+Compatibility also depends on the serialized stage type and configuration. This
+table describes the current reader; it does not promise compatibility with
+archives from the historical 1.0 library release.

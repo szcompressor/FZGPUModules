@@ -8,6 +8,7 @@ to review. Run from any directory; no GPU, compiler, or configured build is requ
 
 import pathlib
 import re
+import shlex
 import sys
 
 
@@ -16,7 +17,7 @@ FORMAT = ROOT / "include" / "fzm_format.h"
 MODULES = ROOT / "modules"
 CONFIG = ROOT / "src" / "pipeline" / "config.cpp"
 UMBRELLA = ROOT / "include" / "fzgpumodules.h"
-CMAKE = ROOT / "CMakeLists.txt"
+CMAKE = MODULES / "CMakeLists.txt"
 
 # Historical/reserved IDs that intentionally have no shipped implementation.
 RESERVED = {"UNKNOWN", "SCALE", "PASSTHROUGH", "SPLIT"}
@@ -24,7 +25,7 @@ RESERVED = {"UNKNOWN", "SCALE", "PASSTHROUGH", "SPLIT"}
 # Quarantined experimental/reference compressors: their StageType ID and FZM
 # header factory stay compiled (so pre-existing archives decode), but they are
 # deliberately NOT public modules — absent from kStageRegistry, the umbrella
-# header, and the module catalogs. Their factory lives under
+# header, and the public stage catalog. Their factory lives under
 # modules/experimental/, not the ordinary modules/<category>/ tree. Keep the ID
 # here forever once quarantined; never reuse it.
 EXPERIMENTAL = {"SZP"}
@@ -41,6 +42,86 @@ def require_match(pattern, text, label, flags=0):
 def duplicates(items):
     seen = set()
     return sorted({item for item in items if item in seen or seen.add(item)})
+
+
+def cmake_commands(text, command):
+    # Module declarations use literal paths; do not interpret arbitrary CMake.
+    text = re.sub(r"#[^\n]*", "", text)
+    return re.findall(rf"\b{command}\s*\(([^()]*)\)", text, re.I | re.S)
+
+
+def module_build_errors(cmake, registry_dirs):
+    errors = []
+    catalogs = {}
+    sets = [shlex.split(body) for body in cmake_commands(cmake, "set")]
+    for name in ("FZGMOD_STAGE_MODULES", "FZGMOD_INTERNAL_MODULES", "FZGMOD_LEGACY_MODULES"):
+        matches = [tokens for tokens in sets if tokens and tokens[0] == name]
+        if len(matches) != 1:
+            errors.append(f"modules/CMakeLists.txt must declare {name} exactly once")
+        catalogs[name] = matches[0][1:] if matches else []
+
+    entries = [entry for values in catalogs.values() for entry in values]
+    for entry in duplicates(entries):
+        errors.append(f'duplicate module catalog entry "{entry}"')
+    registered = {path.removeprefix("modules/") for path in registry_dirs}
+    stages = set(catalogs["FZGMOD_STAGE_MODULES"])
+    for entry in sorted(registered - stages):
+        errors.append(f'registered stage "modules/{entry}" is missing from FZGMOD_STAGE_MODULES')
+    for entry in sorted(stages - registered):
+        errors.append(f'public module "modules/{entry}" has no kStageRegistry entry')
+
+    all_sources = []
+    for entry in sorted(set(entries)):
+        relative = pathlib.PurePosixPath(entry)
+        if (relative.is_absolute() or ".." in relative.parts or
+                str(relative) != entry or not re.fullmatch(r"[A-Za-z0-9_/-]+", entry)):
+            errors.append(f'malformed module catalog path "{entry}"')
+            continue
+        local_cmake = MODULES / entry / "CMakeLists.txt"
+        if not local_cmake.is_file():
+            errors.append(f'module "{entry}" has no local CMakeLists.txt')
+            continue
+        declarations = cmake_commands(local_cmake.read_text(encoding="utf-8"), "target_sources")
+        sources = []
+        target = "fzgmod_utils" if entry == "util/histogram" else "fzgmod_modules"
+        for body in declarations:
+            tokens = shlex.split(body)
+            if tokens[:2] != [target, "PRIVATE"]:
+                errors.append(f'{entry}: target_sources must declare {target} PRIVATE')
+                continue
+            sources.extend(tokens[2:])
+        if not sources:
+            errors.append(f'{entry}: no module-local source declarations')
+        for source in sources:
+            prefix = "${CMAKE_CURRENT_LIST_DIR}/"
+            path = source.removeprefix(prefix)
+            relative = pathlib.PurePosixPath(path)
+            if (not source.startswith(prefix) or relative.is_absolute() or
+                    ".." in relative.parts or str(relative) != path or
+                    not re.fullmatch(r"[A-Za-z0-9_./-]+", path) or
+                    relative.suffix not in {".cu", ".cpp", ".c", ".cc", ".cxx"}):
+                errors.append(f'{entry}: malformed source declaration "{source}"')
+                continue
+            source_path = local_cmake.parent / path
+            if not source_path.is_file():
+                errors.append(f'{entry}: declared source "{path}" does not exist')
+            all_sources.append(str(source_path.relative_to(MODULES)))
+    registrar = re.compile(r"FZ_REGISTER_(?:SIMPLE_STAGE|STAGE_FACTORY)\s*\(")
+    for source_path in MODULES.rglob("*.cu"):
+        if registrar.search(source_path.read_text(encoding="utf-8")):
+            source = str(source_path.relative_to(MODULES))
+            if source not in all_sources:
+                errors.append(f'factory source "{source}" is not declared by a module')
+    for source in duplicates(all_sources):
+        errors.append(f'duplicate module source declaration "{source}"')
+
+    # A new local build file must be explicitly classified, including internal
+    # infrastructure and archive-compatibility implementations.
+    for local_cmake in MODULES.rglob("CMakeLists.txt"):
+        entry = str(local_cmake.parent.relative_to(MODULES))
+        if entry != "." and entry not in entries:
+            errors.append(f'module "{entry}" has a local CMakeLists.txt but no catalog entry')
+    return errors
 
 
 def main():
@@ -98,7 +179,7 @@ def main():
     implemented_enums = set(enum_names) - RESERVED - EXPERIMENTAL
     registered_enums = set(registry_enums)
 
-    errors = []
+    errors = module_build_errors(cmake, registry_dirs)
     for name in sorted(EXPERIMENTAL):
         if name not in factory_cases and name not in experimental_factories:
             errors.append(
@@ -135,8 +216,6 @@ def main():
         if not source_path.is_dir():
             errors.append(f'{public_name}: source directory "{source_dir}" does not exist')
             continue
-        if source_dir not in cmake:
-            errors.append(f'{public_name}: source directory "{source_dir}" is absent from CMakeLists.txt')
 
         include_prefix = source_dir.removeprefix("modules/") + "/"
         if include_prefix not in umbrella:
@@ -167,6 +246,6 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"FAIL {exc}")
         sys.exit(1)

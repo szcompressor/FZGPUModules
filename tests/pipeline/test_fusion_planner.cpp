@@ -1913,6 +1913,7 @@ TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
             const std::string tag =
                 "block=" + std::to_string(block) + " outlier=" + std::to_string(outlier);
 
+            std::vector<uint8_t> staged_header;
             auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) -> size_t {
                 Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
                 p.setFusionPolicy(pol);
@@ -1935,6 +1936,8 @@ TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
                 }
                 out.resize(sz);
                 EXPECT_EQ(cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost), cudaSuccess);
+                if (pol == FusionPolicy::Off)
+                    staged_header = p.serializeHeaderToMemory();
                 return sz;
             };
             std::vector<uint8_t> staged, fused;
@@ -1953,24 +1956,29 @@ TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
                 void* d_decomp = nullptr; size_t dsz = 0;
                 p.decompress(d_comp, sz, &d_decomp, &dsz, 0);
                 cudaDeviceSynchronize();
+                ASSERT_EQ(dsz, bytes) << tag;
                 recon.assign(n, 0.0f);
-                cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+                ASSERT_EQ(cudaMemcpy(recon.data(), d_decomp, bytes,
+                                     cudaMemcpyDeviceToHost), cudaSuccess);
             };
             std::vector<float> rs, rf;
             roundtrip(FusionPolicy::Off, rs);
             roundtrip(FusionPolicy::Auto, rf);
+            ASSERT_EQ(rs.size(), n) << tag;
+            ASSERT_EQ(rf.size(), n) << tag;
             EXPECT_LE(maxErr(rs), eb * 1.001) << "staged exceeds bound: " << tag;
             EXPECT_LE(maxErr(rf), eb * 1.001) << "fused exceeds bound: " << tag;
             EXPECT_EQ(rs, rf) << "fused reconstruction differs from staged: " << tag;
 
             // Isolate the INVERSE: decompress the identical (staged) archive with
-            // fusion off vs auto (warp-register-inverse). Must be byte-exact.
+            // fusion off vs auto (warp-register-inverse), restoring its stage
+            // metadata in each fresh decoder. Must be byte-exact.
             auto decompressCopy = [&](FusionPolicy pol, std::vector<float>& recon) {
                 Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f);
                 p.setFusionPolicy(pol);
                 buildWarp1D(p, n, block, outlier);
                 p.finalize();
-                p.prepareInverse(bytes);
+                p.primeInverseFromHeader(staged_header.data(), staged_header.size());
                 void* d_comp = nullptr;
                 ASSERT_EQ(cudaMalloc(&d_comp, staged.size()), cudaSuccess);
                 ASSERT_EQ(cudaMemcpy(d_comp, staged.data(), staged.size(),
@@ -1978,6 +1986,7 @@ TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
                 void* d_decomp = nullptr; size_t dsz = 0;
                 p.decompress(d_comp, staged.size(), &d_decomp, &dsz, 0);
                 cudaDeviceSynchronize();
+                ASSERT_EQ(dsz, bytes) << tag;
                 if (pol == FusionPolicy::Auto) {
                     ASSERT_EQ(p.getFusionInfo().installed_inverse_groups.size(), 1u) << tag;
                     EXPECT_EQ(p.getFusionInfo().installed_inverse_groups[0].implementation,
@@ -1986,12 +1995,19 @@ TEST(FusionPlanner, Warp1DGeneralEplFusesMatchesStaged) {
                     EXPECT_TRUE(p.getFusionInfo().installed_inverse_groups.empty()) << tag;
                 }
                 recon.assign(n, 0.0f);
-                cudaMemcpy(recon.data(), d_decomp, bytes, cudaMemcpyDeviceToHost);
+                ASSERT_EQ(cudaMemcpy(recon.data(), d_decomp, bytes,
+                                     cudaMemcpyDeviceToHost), cudaSuccess);
                 cudaFree(d_comp);
             };
             std::vector<float> ds, df;
             decompressCopy(FusionPolicy::Off, ds);
             decompressCopy(FusionPolicy::Auto, df);
+            ASSERT_EQ(ds.size(), n) << tag;
+            ASSERT_EQ(df.size(), n) << tag;
+            EXPECT_LE(maxErr(ds), eb * 1.001) << "isolated staged inverse exceeds bound: " << tag;
+            EXPECT_LE(maxErr(df), eb * 1.001) << "isolated fused inverse exceeds bound: " << tag;
+            EXPECT_EQ(ds, rs) << "isolated staged inverse differs from roundtrip: " << tag;
+            EXPECT_EQ(df, rf) << "isolated fused inverse differs from roundtrip: " << tag;
             EXPECT_EQ(ds, df) << "fused inverse differs from staged inverse: " << tag;
         }
     }

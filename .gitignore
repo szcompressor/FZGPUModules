@@ -57,6 +57,7 @@ a.out
 
 # Project artifacts
 *.fzm
+!tests/golden/ref_lorenzo_bitshuffle.fzm
 *.tmp
 *.fzmodules
 *.nsys-rep

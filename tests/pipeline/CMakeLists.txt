@@ -207,3 +207,14 @@ fz_add_test(
 target_compile_definitions(test_lc_presets PRIVATE
     FZ_PRESETS_DIR="${CMAKE_SOURCE_DIR}/examples/presets"
 )
+
+# CUDA specialization cache ownership and concurrent first use.
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+    fz_add_test(
+        NAME    test_jit_cache
+        SOURCES test_jit_cache.cpp
+        LIBS    fzgmod CUDA::cuda_driver Threads::Threads
+        LABELS  pipeline gpu
+    )
+    target_include_directories(test_jit_cache PRIVATE "${PROJECT_SOURCE_DIR}/modules")
+endif()

@@ -7,14 +7,24 @@ configuring with CMake, running tests, installing, and integrating into your own
 
 ## Prerequisites
 
-| Requirement | Minimum |
+| Requirement | Requirement or scope |
 |---|---|
-| CUDA Toolkit | 11.2+ (stream-ordered allocator) |
-| AMD backend (experimental) | ROCm 6.4 tested; HIP, hipCUB, and rocThrust packages required |
+| CUDA Toolkit | 11.2+ configure-time API floor (stream-ordered allocator) |
+| AMD backend (experimental) | HIP, hipCUB, and rocThrust packages required; backend coverage remains experimental |
 | C++ Standard | C++17 |
 | CMake | 3.24+ |
-| Compiler | GCC 9+ or Clang 10+ |
+| Python | Python 3 (build-time header embedding and source fingerprints) |
+| Compiler | C++17 compiler and standard library supported by the selected GPU toolkit |
 | Host byte order | Little-endian |
+
+The compiler must provide C++17 language and library facilities, including
+`<charconv>` used by the vendored TOML parser. Select a host compiler supported by
+your CUDA toolkit; a compiler's C++17 support alone does not establish CUDA
+compatibility. For HIP, use ROCm's supported compiler toolchain. The repository
+does not establish a tested minimum GCC or Clang version, and the CUDA 11.2
+configure-time floor is not a guarantee that every older toolkit builds current
+sources. The build-check container specifies CUDA 12.6; the GPU CI workflow loads
+the NVHPC 23.11 CUDA 12 toolchain when available.
 
 ---
 
@@ -44,11 +54,32 @@ cmake --build build/release -j$(nproc)
 This builds the library (`libfzgmod.so`) and the `fzgmod-cli` command-line tool.
 Each preset gets its own build directory under `build/<preset>/`, so presets coexist.
 
+CUDA specialization embeds the shipped device harnesses and their transitive
+project headers into the library at build time. Installed libraries can compile
+generated kernels after the source checkout is removed or the installation is
+relocated; no source-path setting is required. CUDA/NVRTC and driver runtime
+dependencies are still required. Header changes are picked up on the next build.
+
 To build with tests:
 ```bash
 cmake --preset release -DBUILD_TESTING=ON
 cmake --build build/release -j$(nproc)
 ```
+
+To validate source-independent installed specialization on a CUDA machine:
+
+```bash
+python3 scripts/check_installed_specialization.py --jobs 2
+# Also instrument the generated kernels with Compute Sanitizer:
+python3 scripts/check_installed_specialization.py --jobs 2 --compute-sanitizer
+```
+
+This check builds a temporary source snapshot, installs it, builds an external
+consumer, removes the snapshot/build directories, and relocates the installation.
+It then checks warp and chunk forward/inverse specialization, staged-versus-Auto
+payload and reconstruction identity, aligned and partial inputs, error bounds,
+repeated decode, and archive reload in a fresh process. The temporary files are
+cleaned up afterward.
 
 ---
 
@@ -86,6 +117,20 @@ cmake --build --preset <preset> -j$(nproc)
 | `COMPUTE_SANITIZER_DEVICE_DEBUG` | `OFF` | Add `-G` to CUDA builds for source-level Compute Sanitizer (much slower) |
 | `CMAKE_CUDA_ARCHITECTURES` | — | CUDA compute capability (e.g., `75`, `80`, `90`); comma-separated for multiple |
 | `CMAKE_INSTALL_PREFIX` | `/usr/local` | Installation prefix for `cmake --install` |
+
+## Module source declarations
+
+`modules/CMakeLists.txt` explicitly catalogs public stages, shared infrastructure,
+and legacy archive implementations. Each directory has a local `CMakeLists.txt`
+declaring its sources with `target_sources()`. Backend exclusions and private
+dependencies belong in the affected module's file. The root creates and links the
+library targets, then loads this catalog.
+
+`scripts/new_stage.sh` creates the local declaration and registers its directory;
+adding a stage does not require editing the root source list. Run
+`python3 scripts/check_stage_integration.py` to check catalog membership, source
+paths, factories and the public registration surfaces. See
+[Adding a Stage](how_to_add_a_stage.md) for the remaining stage contracts.
 
 ---
 
@@ -157,6 +202,19 @@ cmake --install build
 ---
 
 ## Testing
+
+Run the documentation and stage integration checks with the same entry point as CI:
+
+```bash
+python3 scripts/check_docs.py
+# Include per-check detail:
+python3 scripts/check_docs.py --verbose
+```
+
+These checks do not run GPU code. C++ snippet checking needs a host compiler and
+CUDA headers; its existing skip behavior is retained when those are unavailable.
+Host-only checker regression fixtures run with
+`python3 -m unittest discover -s scripts/tests -p 'test_check_*.py'`.
 
 Build tests with `-DBUILD_TESTING=ON`:
 

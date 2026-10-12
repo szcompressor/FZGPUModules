@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.24)
+project(installed_specialization LANGUAGES CXX)
+find_package(FZGPUModules CONFIG REQUIRED)
+add_executable(installed_specialization main.cpp)
+target_link_libraries(installed_specialization PRIVATE FZGMOD::fzgmod)

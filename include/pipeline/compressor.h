@@ -265,20 +265,13 @@ public:
     size_t getMaxCompressedSize(size_t input_bytes) const;
 
     /**
-     * Return the uncompressed byte count from the most recent compress() call.
+     * Return the logical byte count from the most recent compress() or inverse setup.
      *
      * Returns the original (pre-padding) input size so the value always matches
      * what the caller passed in, even when the pipeline transparently padded the
-     * input for alignment. Returns 0 if compress() has never been called.
-     *
-     * Useful for pre-allocating a decompression output buffer without needing
-     * out-of-band metadata:
-     * @code
-     *   pipeline.compress(d_in, in_bytes, &d_comp, &comp_sz, stream);
-     *   size_t decomp_bytes = pipeline.getLastUncompressedSize();
-     *   // allocate d_out of size decomp_bytes, then:
-     *   pipeline.decompress(d_comp, comp_sz, d_out, decomp_bytes, &actual, stream);
-     * @endcode
+     * input for alignment. Returns 0 before compress() or inverse setup.
+     * Caller-owned decompression buffers may require additional execution padding;
+     * see the capacity contract on decompress().
      *
      * The value persists across reset() — reset() invalidates the compressed
      * output pointer but the size remains meaningful for planning the next call.
@@ -371,18 +364,17 @@ public:
      * The decompressed data is written directly into d_output_buf. No cudaMalloc
      * or pool allocation is performed — the caller owns the buffer entirely.
      *
-     * The buffer just needs to be large enough for the actual decompressed output
-     * of this call. If it is too small a `std::runtime_error` is thrown with the
-     * actual size so the caller can retry. Typically the uncompressed size is
-     * known from the file header (`FZMHeaderCore::uncompressed_size`) or from
-     * the original compress() call.
+     * Capacity must include inverse execution padding, which can exceed the logical
+     * byte count in the file header or original compress() call. A smaller buffer
+     * throws before execution with the required capacity so the caller can retry.
+     * The reported output size excludes padding.
      *
      * @param d_input              See decompress() above.
      * @param input_size           See decompress() above.
      * @param d_output_buf         Caller-allocated device buffer to receive
      *                             decompressed data.
      * @param output_buf_capacity  Capacity of d_output_buf in bytes.
-     * @param actual_output_size   Receives the exact bytes written.
+     * @param actual_output_size   Receives the logical output size, excluding padding.
      * @param stream               CUDA stream for all GPU operations.
      */
     void decompress(
@@ -508,6 +500,13 @@ public:
      * next decompress() works straight away. It launches no kernels and touches no
      * device memory; the inverse DAG is still built lazily on the first decompress()
      * exactly as it is after a real compress().
+     *
+     * This does NOT restore per-stage inverse metadata. Use it only when every
+     * stage can decode from its configured parameters and the raw blob alone.
+     * Metadata-bearing coders, including lossless AdaptiveBitpack and Huffman,
+     * need their element counts restored with primeInverseFromHeader() using
+     * the producer's serializeHeaderToMemory(), or a prior compress(). A linear
+     * quantizer does not make an attached metadata-bearing coder self-describing.
      *
      * Per-segment compressed sizes are NOT needed here — decompress() reads them
      * from the blob's own self-describing concat header, so blobs of differing

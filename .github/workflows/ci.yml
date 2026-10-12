@@ -93,7 +93,17 @@ jobs:
             module purge
             module load nvhpc/23.11/nvhpc-hpcx-cuda12
           fi
-          ctest --output-on-failure
+          ctest --output-on-failure --no-tests=error
+
+      - name: Relocated installed specialization
+        shell: bash
+        run: |
+          if [[ -f /etc/profile.d/lmod.sh ]]; then source /etc/profile.d/lmod.sh; fi
+          if command -v module >/dev/null 2>&1; then
+            module purge
+            module load nvhpc/23.11/nvhpc-hpcx-cuda12
+          fi
+          python3 scripts/check_installed_specialization.py --jobs 2
 
       - name: Upload test results
         if: failure()
@@ -163,7 +173,8 @@ jobs:
           
           # CUDA memory pools conflict with ASan's huge shadow memory mapping (OOM error).
           # protect_shadow_gap=0 fixes this on Linux.
-          export ASAN_OPTIONS="protect_shadow_gap=0"
+          export ASAN_OPTIONS="protect_shadow_gap=0:halt_on_error=1:abort_on_error=1"
+          export UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1"
           
           # Ignore known memory leaks in the NVIDIA driver
           echo -e "leak:libcuda\nleak:libnv" > lsan.supp

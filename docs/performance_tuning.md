@@ -238,6 +238,19 @@ via NVRTC. The first use of a new generated shape pays the one-time JIT cost; us
 warmup call before measuring repeated-use performance. The performance results in
 this guide concern warm, cached execution unless stated otherwise.
 
+The device headers used by the shipped strategies are embedded in the library at
+build time and supplied to NVRTC in memory. Installed specialization does not need
+the original source checkout or a configured source-header search path.
+
+JIT specialization supports independent pipelines using one CUDA primary context
+on one device per process. The first lookup retains that primary context until
+process exit; concurrent lookups share its cache. Use the standard CUDA runtime
+and keep the owning context current when launching specialized kernels. Custom
+contexts and context/device switching are rejected at lookup, including cache hits.
+Destroying or resetting the owning context (`cudaDeviceReset`) is unsupported;
+reuse of the same raw context handle after reset cannot be reliably detected.
+Ownership rationale and regression scope: `docs/codebase_notes.md`, `CN-JIT-1`.
+
 | Strategy | Execution model | Pipelines it covers |
 |---|---|---|
 | **warp-register** | One warp owns a small block (`block_size = 32·EPL`, EPL ≤ 4), intermediates in registers + warp shuffles, no barriers. | The cuSZp / SZp family: `Quantizer(linear) → Lorenzo (or TiledLorenzo) → AdaptiveBitpack`, any block 32–128, plain or outlier. Compress **and** decompress. |
@@ -338,10 +351,13 @@ lever removes framework-level overhead, not stage-internal syncs.
 
 ### prepareInverse() for Decode-Only Pipelines
 
-`compressor.h:339` — caches the inverse DAG across calls and builds output-buffer
-metadata directly from a known uncompressed size, avoiding a throwaway warmup
-`compress()` call when a pipeline is only ever used for decoding (e.g. a reader
-that never compresses).
+`prepareInverse(uncompressed_size)` builds output-buffer metadata from a known
+source size without a warmup `compress()`. It does not restore per-stage inverse
+metadata. Use it only if every stage can decode from its configured parameters
+and the raw blob alone; metadata-bearing coders, including lossless
+AdaptiveBitpack and Huffman, require `primeInverseFromHeader()` with the producer's
+`serializeHeaderToMemory()` instead. Both paths build and cache the inverse DAG
+on first decode.
 
 ### Diagnostics Toggles
 

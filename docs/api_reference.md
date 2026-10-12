@@ -181,6 +181,13 @@ built against (never a hard-coded `cudaFree`) and on the right device.
 The types live in `include/pipeline/device_buffer.h` and allocate nothing
 themselves; `DeviceSpan` / `ConstDeviceSpan` are plain non-owning views.
 
+For pipelines that pad their input, direct caller-supplied decode buffers must
+accommodate the padded inverse result, although the returned length describes
+only the logical data. A too-small buffer is rejected before execution and the
+error reports the required capacity. Borrowed/owned decode forms allocate that
+storage internally. Static file decompression copies only the logical prefix into
+its returned allocation; archive logical lengths do not prescribe scratch capacity.
+
 ---
 
 ## Memory Ownership Summary {#memory_ownership_summary}
@@ -260,9 +267,12 @@ slot.decompressFromMemory(header.data(), header.size(),
   ownership follows `setPoolManagedDecompOutput()` exactly as `decompress()` does.
 - The two steps are also available separately (`primeInverseFromHeader(header...)`
   then `decompress(blob...)`).
-- For fully **self-describing** pipelines (pure lossless chains, linear-mode
-  quantizer — no Huffman, no outliers) the lighter `prepareInverse(uncompressed_size)`
-  needs no header at all.
+- The lighter `prepareInverse(uncompressed_size)` needs no header only when
+  **every stage** can decode from its configured parameters and the raw blob
+  alone. It records source sizes and output-buffer metadata, but does not restore
+  stage configuration or inverse element counts. Lossless coders such as
+  AdaptiveBitpack and Huffman still require `primeInverseFromHeader()`; attaching
+  a linear-mode quantizer does not remove that requirement.
 - Worked example: `examples/decode_only_slots.cpp`.
 
 ---
