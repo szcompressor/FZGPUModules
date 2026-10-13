@@ -90,6 +90,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - Removed Huffman's experimental `Fine` encode mode, its public API and diagnostics, TOML/card option, documentation, profiling selection, and mode-specific tests; `HuffmanStage` now exposes only the supported cuSZ coarse-grained encoder.
 
 ### Fixed
+- ASan CI targets its runner GPU explicitly instead of inheriting the default CUDA architecture 86.
 - File decompression leaves inverse results under DAG ownership, avoids repeated pool cleanup, and guards caller output until successful completion.
 - Bound each sanitizer test and filtered listing with a configurable timeout (default 300 seconds); timed-out tests fail and retain their logs.
 - GInterp mode-2 profiling synchronizes shared-memory reset before loading real samples.
