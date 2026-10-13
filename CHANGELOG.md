@@ -10,6 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Libpressio examples and Python demo use `fzgpumodules:specialization`; the local adapter replaces the former `fusion` option without an alias.
 - Modules own their CMake source lists and backend settings; an explicit module catalog, stage scaffolding, and integration checks replace root-level source-list edits.
 - Runtime specialization embeds its device-header dependencies in the library, allowing JIT compilation from relocated installations without the original source checkout.
 - Tiled warp predictors (`TiledLorenzo{2,3}D[Identity]Predictor`, f32 and f64) take the tile shape as template arguments, so per-element tile indexing compiles to mask/shift; fused op names now carry the shape (e.g. `TiledLorenzo2DPredictor<8,8>`). Byte-identical output; measurements in `docs/codebase_notes.md` CN-WARPTILE-1.
@@ -34,6 +35,8 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - **Renamed the automatic-fusion feature to "Pipeline Specialization"** to reflect that it does more than fuse kernels (single-pass decoupled-lookback, NVRTC codegen, evidence-gated registry admission, both compress and decompress). Public API renamed with back-compat aliases: `FusionPolicy` → `SpecializationPolicy`, `FusionInfo` → `SpecializationInfo`, `FusionGroupInfo` → `SpecializationGroupInfo`; `setFusionPolicy`/`getFusionInfo`/`getFusedGroupCount` → `setSpecializationPolicy`/`getSpecializationInfo`/`getSpecializedGroupCount` (old names kept as deprecated forwarders/aliases — existing code compiles unchanged). Env var `FZ_FUSION` → `FZ_SPECIALIZE` (`FZ_FUSION` still honored as a deprecated alias). CLI `--report-json` now emits a `specialization` block; the legacy `fusion` block is retained byte-identical so existing benchmark parsers keep working. Internal planner/registry vocabulary (kernel *fusion* — the specialization strategy) is unchanged. New docs: `docs/pipeline_specialization.md` (user guide), `docs/pipeline_specialization_internals.md` (stage-author declaration contract), `docs/developing_stages_deep_dive.md` (WIP outline). Pipeline Specialization replaces CUDA Graph capture in the mainpage/README core-feature lists (graph capture remains documented, as a mutually-exclusive lever). Docs now also describe the specialization-aware buffer coloring (fused-internal buffers elided from preallocation, each group one liveness point) as a peak-memory benefit of `Auto`, not just a throughput one — `architecture.md`, `performance_tuning.md`, `mainpage.md`, and both new pages.
 
 ### Added
+- Installed Python demo preflight verifies package/library origins, CUDA availability, and the specialization option.
+- Python libpressio demo compares staged and specialized execution, verifies forward/inverse installation, and checks reconstruction bounds.
 - Ship the small FZM 3.1 archive fixture so golden-file compatibility checks run on fresh checkouts.
 - One local/CI command for documentation and integration checks, with host-only failure-path regression fixtures.
 
@@ -87,6 +90,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - Removed Huffman's experimental `Fine` encode mode, its public API and diagnostics, TOML/card option, documentation, profiling selection, and mode-specific tests; `HuffmanStage` now exposes only the supported cuSZ coarse-grained encoder.
 
 ### Fixed
+- File decompression leaves inverse results under DAG ownership, avoids repeated pool cleanup, and guards caller output until successful completion.
 - Bound each sanitizer test and filtered listing with a configurable timeout (default 300 seconds); timed-out tests fail and retain their logs.
 - GInterp mode-2 profiling synchronizes shared-memory reset before loading real samples.
 - Reset cached LorenzoQuant outlier counters on empty input before post-execution readback.

@@ -4,6 +4,7 @@
 **Kernels:** `modules/coders/speck2d/speck2d_kernels.cuh`
 **Class:** `fz::Speck2DStage`
 **Category:** Coder (lossless, variable-length output)
+**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
 
 ---
 
@@ -137,18 +138,14 @@ estimate that overstated a potential arithmetic-coding win, corrected by a
 zstd measurement that found none), and the phase-by-phase build log are in
 `memory/speck_gpu_design.md`.
 
-**These throughput numbers are unaffected by, and are a separate concern
-from, the pipeline's error-bound guarantee:** feeding this stage from
-`Cdf97Stage` through a plain (non-subband-scaled) `QuantizerStage` does
-**not**, by itself, reproduce SPERR's error-BOUND guarantee — only its
-pipeline structure. `examples/presets/sperr_gpu.toml` closes that gap with
-[`Cdf97OutlierCorrectStage`](outlier_correct.md) between `Quantizer` and this
-stage: a sparse, exact correction pass verified end to end (16/16
-`eb_ok=True` across real fields and bounds `1e-2`..`1e-5`, see
-`memory/speck_gpu_design.md` sec.9). This stage itself was never the
-cause — `Speck2DStage` codes exactly the coefficients it's handed, correctly
-— the gap was in the naive coefficient-domain quantization step upstream,
-and it's now fixed at that layer, not here.
+These integer-coder measurements are separate from reconstructed-field
+accuracy. A plain `Cdf97Stage -> QuantizerStage -> Speck2DStage` chain does not
+guarantee a pointwise field bound. The experimental `sperr_gpu.toml` preset
+adds [`Cdf97OutlierCorrectStage`](outlier_correct.md), which stores floating-point
+residual corrections. Historical measurements report bound satisfaction for
+16 field/bound combinations at `1e-2` through `1e-5`; that subset does not
+establish a guarantee for every input or bound. Residual rounding and the lack
+of final verification remain limitations of the complete composition.
 
 ---
 

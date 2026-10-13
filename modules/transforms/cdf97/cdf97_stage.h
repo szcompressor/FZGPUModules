@@ -9,7 +9,7 @@
  * @file cdf97_stage.h
  * @brief CDF 9/7 biorthogonal wavelet transform stage (SPERR's DWT front-half).
  *
- * A dimension-aware, size-preserving, lossless, invertible floating-point basis
+ * A dimension-aware, size-preserving, numerically reversible floating-point basis
  * change: it replaces a field with its multi-level CDF 9/7 wavelet coefficients
  * (same element type, same element count). It is the decorrelating transform of
  * the SPERR compressor (CDF 9/7 DWT -> SPECK); this stage is the DWT only.
@@ -17,15 +17,15 @@
  * @note **Prior work.** The transform, its lifting constants, the symmetric
  *       boundary handling, the dyadic level count, and the 3-D dyadic vs
  *       wavelet-packet selection are ported from NCAR/SPERR
- *       (https://github.com/NCAR/SPERR). The `double` path is validated
- *       bit-exact against `sperr::CDF97`. See `THIRD_PARTY.md` and the kernel
+ *       (https://github.com/NCAR/SPERR). Native coefficient parity is not a
+ *       universal release guarantee. See `THIRD_PARTY.md` and the kernel
  *       headers (`cdf97_lifting.cuh`, `cdf97_kernels.cuh`).
  *
  * ### Precision
  *
- * `TInput = double` reproduces SPERR's coefficients bit-for-bit (SPERR does the
- * whole transform in double). `TInput = float` is a faster, deliberately NOT
- * bit-exact variant (constants derived in double, arithmetic in float).
+ * Experimental in v2.0. `double` follows SPERR's double-precision lifting
+ * arithmetic; `float` uses float arithmetic. Neither promises a bitwise-lossless
+ * field round trip. Scope: docs/stages/cdf97.md.
  *
  * ### Ports & shape
  *
@@ -73,10 +73,9 @@ static_assert(sizeof(Cdf97Config) <= FZM_STAGE_CONFIG_SIZE,
               "Cdf97Config must fit in FZM_STAGE_CONFIG_SIZE");
 
 /**
- * CDF 9/7 wavelet transform stage. Lossless, invertible, size-preserving.
+ * Experimental CDF 9/7 transform; numerically reversible and size-preserving.
  *
- * @tparam TInput Floating-point element type (`float` or `double`). `double` is
- *         bit-exact with SPERR; `float` is a faster non-bit-exact variant.
+ * @tparam TInput Floating-point element type (`float` or `double`).
  */
 template <typename TInput = double>
 class Cdf97Stage : public Stage {

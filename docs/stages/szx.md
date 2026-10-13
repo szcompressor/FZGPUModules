@@ -3,6 +3,7 @@
 **Header:** `modules/fused/szx/szx_stage.h`
 **Class:** `fz::SZxStage<TData>` — `TData` is `float` or `double`
 **Category:** Fused (lossy, whole compressor)
+**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
 
 **Common instantiation:**
 ```cpp
@@ -22,13 +23,12 @@ cuSZ-style chain (`Lorenzo → Quantizer → coder`), SZx has **no prediction st
 and no entropy coder** — that is what makes it fast.
 
 - **Forward:** `float[]`/`double[]` → opaque SZx archive (`uint8_t[]`)
-- **Inverse:** archive → reconstructed values, error-bounded per element
+- **Inverse:** archive → reconstructed values (accuracy limitations below)
 
 Per block of `block_size` elements the forward pass:
 
 1. scans block min/max;
-2. **classifies** the block as *constant* when `max − min ≤ 2·eb` (the whole
-   block is representable by one value within the bound) or *non-constant*
+2. **classifies** the block as *constant* when `max − min ≤ 2·eb` (the real-valued midpoint lies within the bound; rounding can violate it) or *non-constant*
    otherwise — a per-block type code;
 3. **constant** blocks emit only a block reference value (the midpoint),
    broadcast on decode;
@@ -49,7 +49,7 @@ therefore composable).
 
 ## Archive layout
 
-The 40-byte `SZxConfig` (dtype, block size, resolved absolute bound, value base)
+The 32-byte `SZxConfig` (dtype, block size, resolved absolute bound, value base)
 travels in the FZM stage-config slot, not the output buffer. The output buffer
 is:
 
@@ -73,8 +73,12 @@ format port.
 | `ABS` (default) | abs(x − x̂) ≤ eb per element | yes |
 | `NOA` | value-range relative: `abs_eb = eb · (max − min)` | no |
 
-The **ROI branch invariant** holds in both: reconstruction error is bounded per
-element by the resolved absolute bound. `NOA` first reduces the data range on the
+These modes express the intended bound, but the current implementation does
+not guarantee it for all finite inputs. An adjacent-float block at half an ULP
+can round its midpoint to an endpoint and exceed the bound; equal large finite
+doubles can overflow the midpoint calculation. Quantization and payload-offset
+overflow also lack explicit guards. SZx remains experimental pending numeric
+guards and stricter accuracy validation. `NOA` first reduces the data range on the
 device and reads it back on the host inside `execute()`, so the forward path is
 not CUDA-graph-capturable under `NOA` (`isGraphCompatible()` reports this);
 `ABS` defers its only host read (the compressed-size readback) to

@@ -2,34 +2,13 @@
 
 /**
  * @file outlier_correct_stage.h
- * @brief OutlierCorrectStage<Reconstructor> — transform-agnostic sparse
- *        outlier correction that turns a coefficient-domain quantization
- *        bound into an actually GUARANTEED reconstructed-domain pointwise
- *        error bound, for any reversible transform.
+ * @brief Experimental transform-agnostic sparse floating-point residual correction.
  *
- * ## The problem this fixes
- *
- * `Transform -> QuantizerStage(linear/ABS) -> Coder` quantizes transform
- * COEFFICIENTS directly. For transforms whose synthesis gain varies (CDF 9/7
- * is the motivating case: gain differs by decomposition level), a uniform
- * coefficient-domain threshold does NOT translate to a uniform bound on the
- * RECONSTRUCTED FIELD's pointwise error -- measured misses up to 2.7x the
- * requested bound on real CDF 9/7 data (see `memory/speck_gpu_design.md`
- * sec.9). A candidate fix -- scale each coefficient's quantization step by
- * its level's synthesis-filter gain -- was tried and REJECTED for CDF 9/7:
- * it makes the max error WORSE, because many coefficients across levels
- * jointly influence any given pixel, so bounding each one's isolated worst
- * case does not bound their sum. That reasoning is transform-shape-dependent
- * in general, so this stage does not assume a scaling fix exists for
- * whatever transform it's paired with either.
- *
- * The fix that actually works, matching what native SPERR's own
- * `Outlier_Coder` does for CDF 9/7 (and generalizes to any reversible
- * transform): quantize normally; separately compute what the reconstruction
- * WOULD be (dequantize + inverse-transform a copy); every pixel whose error
- * exceeds the bound gets an EXACT correction value in a sparse (index,
- * value) list, applied as the final step of decompress. This gives a
- * mathematically exact guarantee, not a calibrated approximation.
+ * Quantized transform coefficients need not bound reconstructed-field error.
+ * This stage computes a trial reconstruction and stores float residuals for
+ * values exceeding the requested ABS bound, then adds them during decode.
+ * Residual rounding/cancellation and the lack of final verification prevent an
+ * unrestricted strict guarantee. See docs/stages/outlier_correct.md for scope.
  *
  * ## Genericity: the `Reconstructor` policy
  *
@@ -55,7 +34,7 @@
  *
  * `Cdf97Reconstructor` (`modules/coders/cdf97_outlier_correct/`) is the one
  * instantiation that ships today; adding another reversible transform's
- * bound-guarantee pipeline is writing one small policy struct like it, not a
+ * correction pipeline requires a reconstruction policy and accuracy validation, not a
  * new stage. This is the split found while pushing back on `TeeStage` +
  * `Cdf97OutlierCorrectStage` as too SPERR-specific to justify as Pipeline
  * primitives (see `memory/speck_gpu_design.md` sec.9's design-flaw

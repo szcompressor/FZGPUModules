@@ -41,7 +41,7 @@ class Chain:
         return self
 
     def configure(self, **top_level_options):
-        """Set top-level fzgpumodules:* options, e.g. fusion="auto", error_bound_mode="prel"."""
+        """Set top-level fzgpumodules:* options, e.g. specialization="auto", error_bound_mode="prel"."""
         for key, value in top_level_options.items():
             self._top[f"fzgpumodules:{key}"] = value
         return self

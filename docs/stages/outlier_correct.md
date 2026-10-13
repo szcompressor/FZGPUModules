@@ -3,8 +3,8 @@
 **Header:** `modules/coders/outlier_correct/outlier_correct_stage.h`
 **Class:** `fz::OutlierCorrectStage<Reconstructor>`
 **Shipped instantiation:** `fz::Cdf97OutlierCorrectStage` (`modules/coders/cdf97_outlier_correct/`)
-**Category:** Coder (lossless w.r.t. the codes it's paired with; turns a
-reported error bound into a guaranteed one)
+**Category:** Coder (sparse reconstructed-domain residual correction)
+**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
 
 ---
 
@@ -22,15 +22,18 @@ quantization step by its level's synthesis-filter gain — was tried and
 across levels jointly influence any given pixel, so bounding each one's
 isolated worst case does not bound their sum.
 
-The fix that actually works, matching what native SPERR's own `Outlier_Coder`
-does for CDF 9/7 (and generalizes to any reversible transform): quantize
-normally; separately compute what the reconstruction WOULD be (dequantize +
-inverse-transform a copy); every pixel whose error exceeds the bound gets an
-EXACT correction value in a sparse (index, value) list, applied as the final
-step of decompress. This gives a mathematically exact guarantee, not a
-calibrated approximation. See [THIRD_PARTY.md](../../THIRD_PARTY.md) for the
-port relationship to NCAR/SPERR (algorithmic attribution only — no SPERR code
-was used).
+The correction approach computes a trial reconstruction (dequantize and
+inverse-transform a copy), then stores a sparse list of indices and `float`
+residuals for pixels whose error exceeds the requested bound. Decompression
+adds those residuals to the trial values. This follows the reconstructed-domain
+correction idea used by SPERR; see [THIRD_PARTY.md](../../THIRD_PARTY.md) for
+algorithmic attribution.
+
+Floating-point residual storage and addition can lose low bits through
+cancellation. The implementation has no final error verification or fallback,
+and nonfinite values are not covered by a supported accuracy contract. Current
+tests therefore do not establish a mathematically exact or unrestricted strict
+pointwise guarantee. The complete wavelet composition remains experimental.
 
 ---
 
@@ -53,7 +56,7 @@ struct MyReconstructor {
 ```
 
 `Cdf97Reconstructor` (wrapping [`Cdf97Stage`](cdf97.md)'s existing inverse-DWT
-kernel) is the one instantiation that ships. Adding a bound-guarantee
+kernel) is the one instantiation that ships. Adding a correction
 pipeline for another reversible transform — a Lorenzo or interpolation
 predictor, for instance — is writing one small policy struct like it, not a
 new stage. See **When to use this in a different pipeline** below.
@@ -132,26 +135,10 @@ reconstruction depends on an *already-approximated* neighbor rather than
 directly on the original signal, per-coefficient error can compound in a way
 a flat quantizer threshold doesn't capture.
 
-`GInterpStage` (multi-level spline interpolation prediction, the codebase's
-cuSZ-Hi-style predictor) has exactly this shape: coarse-level points are
-reconstructed first and used to predict finer-level points, so a finer
-level's prediction error is relative to an *already-reconstructed*
-(imperfect) coarse value, not the untouched original — the same "errors
-propagate through multiple levels" property that makes CDF 9/7 need this
-mechanism, for a structurally different reason (auto-regressive prediction
-vs. wavelet synthesis-filter gain). A `GInterpReconstructor` policy
-(dequantize the codes and re-run `GInterpStage`'s own multi-level
-reconstruction pass) would give that pipeline the same kind of exact,
-worst-case guarantee this page describes for CDF 9/7 — genuinely useful
-whenever a paper claims a bound but the actual multi-level pipeline can only
-report one after the fact.
-
-By contrast, a plain single-order `LorenzoStage`/`LorenzoQuantStage` predicts
-every point directly from ALREADY-DECODED (not approximated) neighbors within
-one pass — its coefficient-domain quantization step already bounds pointwise
-error exactly, by construction, with no compounding across levels. This
-mechanism would add cost there for no correctness benefit; it's specifically
-for pipelines whose reconstruction is genuinely multi-pass/hierarchical.
+A different reconstruction policy is possible, but requires a separate accuracy
+contract and validation of its quantization, trial reconstruction, and correction
+arithmetic. Structural similarity to a wavelet or predictive pipeline alone does
+not establish an exact bound or justify adding this correction stage.
 
 ---
 

@@ -704,16 +704,18 @@ void Pipeline::decompressFromFile(
         // Keep padded inverse buffers through execution; return only the logical prefix.
         actual_size = std::min(actual_size, source_sizes.at(fwd_source));
 
+        int device = 0;
+        FZ_CUDA_CHECK(cudaGetDevice(&device));
         void* d_final = nullptr;
         cudaError_t err = cudaMalloc(&d_final, actual_size);
         if (err != cudaSuccess) {
             inv_dag->reset(stream);
-            local_pool.free(d_inv_result, stream);
             throw std::runtime_error(
                 "cudaMalloc for decompressed output failed (" +
                 std::to_string(actual_size) + " bytes): " +
                 cudaGetErrorString(err));
         }
+        OwnedDeviceBuffer final_output(d_final, actual_size, device);
         FZ_CUDA_CHECK(cudaMemcpyAsync(d_final, d_inv_result, actual_size,
                                       cudaMemcpyDeviceToDevice, stream));
         FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -723,12 +725,10 @@ void Pipeline::decompressFromFile(
             t_compute_end - t_compute_start).count();
 
         // ── Cleanup ───────────────────────────────────────────────────────────
+        // The inverse DAG owns its persistent result until destruction (CN-FILEIO-1).
         inv_dag->reset(/*stream=*/0);
-        local_pool.free(d_inv_result, /*stream=*/0);
         local_pool.free(d_compressed, /*stream=*/0);
-
-        *d_output    = d_final;
-        *output_size = actual_size;
+        d_compressed = nullptr;
 
         // ── Perf result ───────────────────────────────────────────────────────
         if (perf_out) {
@@ -756,6 +756,9 @@ void Pipeline::decompressFromFile(
                fh.core.compressed_size / (1024.0 * 1024.0), actual_size,
                compute_ms, dag_tput, pipe_tput);
 
+        // Publish only after all copying and performance bookkeeping succeeded.
+        *d_output = final_output.release();
+        *output_size = actual_size;
     } catch (...) {
         // Ensure all in-flight GPU ops complete before freeing pool memory.
         cudaStreamSynchronize(stream);

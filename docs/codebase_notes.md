@@ -1651,3 +1651,24 @@ tuning modes. The profiling launcher uses one CUDA block.
 The change must be checked with racecheck and synccheck along with the existing
 mode-2 correctness and file-round-trip tests. Reconstruction failures or a
 performance improvement were not demonstrated by the diagnostic run.
+
+## CN-FILEIO-1 — File decode result has one owner
+
+`buildInverseDAG()` marks each inverse sink result persistent, so MINIMAL
+`reset()` releases transient intermediates but keeps the result until DAG
+destruction. The static `Pipeline::decompressFromFile()` helper previously freed
+that result directly while its DAG still recorded ownership. The DAG destructor
+then retried the release. `MemoryPool::free()` rejected the untracked pointer
+and emitted a warning instead of issuing a second CUDA free, explaining why
+memcheck could pass while the CLI still warned.
+
+The helper now leaves the result under DAG ownership. Its separately allocated
+caller output is guarded by `OwnedDeviceBuffer` until all copying and performance
+bookkeeping succeeds, then ownership is published. The compressed input blob is
+external to the inverse DAG; the helper frees it and clears its pointer so later
+exception cleanup does not retry that release.
+
+The CLI/file regression failed before the change with the exact warning on all
+three decodes (CLI with performance output, then two static calls without it).
+It checks reconstruction and warnings through function return, including DAG
+destruction. This catches the ownership error that device sanitizers alone miss.

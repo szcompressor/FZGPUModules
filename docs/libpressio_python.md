@@ -5,15 +5,31 @@ that lets you build and run GPU compression pipelines from Python (or C++) throu
 The plugin translates libpressio's generic compressor interface into FZGPUModules pipeline
 calls, handles GPU memory management, and surfaces metrics after each compress.
 
+The v2 release-preparation check builds the adapter against the relocated
+installed SDK. The local compatibility patch removes unavailable ADM/legacy
+SZp registrations and passes the C++/Python and targeted memcheck checks; see
+the [validation report](releases/v2.0.0-validation.md#libpressio-compatibility).
+The unpatched fork is not v2-compatible. Apply/publish that adapter patch before
+using the installation instructions below as a v2 integration recipe.
+
+The adapter currently requires a prior `compress()` on the same compressor
+instance before `decompress()`. Its raw compressed output does not independently
+restore a fresh decoder's pipeline and stage metadata. This is an existing
+adapter limitation, separate from the library's self-describing FZM file API.
+
 ---
 
 ## Setup
 
 ### Prerequisites
 
-- CUDA toolkit and drivers (11.7 or later)
-- C++ compiler supported by your CUDA version (GCC 7+ or Clang 5+)
-- CMake 3.18+
+- CUDA toolkit, compatible drivers, and a C++17 compiler/standard library supported by that toolkit
+- CMake 3.24+ and Python 3 for building FZGPUModules
+- Python bindings, NumPy, and numcodecs for the Python interface
+
+See [build requirements](building.md#prerequisites) for the toolkit API floor and
+validated scope. The libpressio adapter must be rebuilt against the v2 headers
+and libraries.
 
 ### Install spack
 
@@ -119,7 +135,7 @@ data = np.random.rand(256, 256).astype(np.float32)
 comp = (Chain()
     .add("lorenzo:float:uint16", quant_radius=999, outlier_capacity=0.25)
     .add("rze", from_port="codes", chunk_size=8192)
-    .configure(fusion="auto")
+    .configure(specialization="auto")
     .compressor(eb=1e-3))
 
 compressed   = comp.encode(data)
@@ -249,7 +265,7 @@ decompressed = comp.decode(compressed, out)
 | `fzgpumodules:memory_multiplier` | float | 3.0 | GPU pool size multiplier |
 | `fzgpumodules:num_streams` | int | 1 | Parallel CUDA streams |
 | `fzgpumodules:graph_mode` | bool | False | CUDA graph capture (see below) |
-| `fzgpumodules:fusion` | str | `"off"` | `"off"` or `"auto"` — kernel fusion (see below) |
+| `fzgpumodules:specialization` | str | `"off"` | `"off"` or `"auto"` — Pipeline Specialization (see below) |
 | `fzgpumodules:config_file` | str | `""` | Path to TOML pipeline config file (see below) |
 | `fzgpumodules:expose_stage_outputs` | bool | False | Expose terminal stage outputs as metrics after `encode` |
 
@@ -334,6 +350,50 @@ Full metrics reference:
 
 ---
 
+## Specialization demo
+
+The [installed demo runbook](demos/python-specialization.md) records the verified
+environment, dependency pins, setup commands, live presentation sequence, and
+rehearsal checks.
+
+The adapter's `fzgpumodules:specialization` option enables Pipeline
+Specialization. The former `fzgpumodules:fusion` key was removed and is rejected
+with a migration message. `off` selects staged execution and `auto` installs admitted
+implementations where supported. Auto can fall back; selecting the policy alone
+does not establish that a specialization was installed. CUDA Graph mode is
+mutually exclusive with specialization, and this demo leaves graph mode disabled.
+
+The Python demo builds a cuSZp-style linear Quantizer → integer Lorenzo →
+AdaptiveBitpack pipeline with matching 32-element blocks. The local adapter patch
+adds the previously missing integer Lorenzo `block_size` option and exposes
+installation diagnostics. With a patched adapter installed:
+
+```bash
+python3 scripts/libpressio_specialization_demo.py
+```
+
+For a build-tree adapter, pass `--python-path /path/to/libpressio-build/tools/swig`.
+The script checks exact logical shape, finite reconstruction, maximum absolute
+error against the requested bound, zero installed groups for Off, and positive
+forward/inverse counts for Auto. It warms both directions before repeated timing.
+Timing includes Python and host/device transfers; it is not kernel-only throughput
+or a claim that Auto always wins. An optional flat f32 field can be supplied with
+`--input field.f32 --error-bound 1e-3`.
+
+After `encode()`, `get_metrics()` exposes these additional diagnostics:
+
+| Key suffix after `fzgpumodules:` | Meaning |
+|---|---|
+| `specialization_forward_groups` | Installed forward group count |
+| `specialization_inverse_groups` | Installed inverse count; available after first `decode()` |
+| `specialization_forward_implementations` | Forward implementation names |
+| `specialization_inverse_implementations` | Inverse implementation names |
+| `specialization_fallback_reason` | Empty on a forward installation; otherwise the library fallback reason |
+
+These metrics require the local adapter patch described in the validation report.
+Use the same compressor instance for encode and decode. This demo does not provide
+standalone decoder restoration or independently portable archive files.
+
 ## Common Recipes
 
 ### Lorenzo + RZE
@@ -366,7 +426,7 @@ comp = lp.PressioCompressor.from_config({
 })
 ```
 
-### Fusion-Enabled Pipeline
+### Specialized Pipeline
 
 ```python
 comp = lp.PressioCompressor.from_config({
@@ -374,7 +434,7 @@ comp = lp.PressioCompressor.from_config({
     "early_config": {
         "fzgpumodules:stages":      ["lorenzo:float:uint16", "rze"],
         "fzgpumodules:connections": ["s1 <- s0:codes"],
-        "fzgpumodules:fusion":      "auto",
+        "fzgpumodules:specialization":      "auto",
     },
     "compressor_config": {"pressio:abs": 1e-4},
 })

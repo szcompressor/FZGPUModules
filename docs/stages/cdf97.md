@@ -2,7 +2,8 @@
 
 **Header:** `modules/transforms/cdf97/cdf97_stage.h`
 **Class:** `fz::Cdf97Stage<TInput>`
-**Category:** Transform (lossless, invertible, size-preserving)
+**Category:** Transform (numerically reversible, size-preserving)
+**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
 
 ---
 
@@ -10,7 +11,7 @@
 
 The CDF 9/7 biorthogonal wavelet transform — the DWT front-half of the SPERR
 compressor (CDF 9/7 DWT -> SPECK bit-plane coding). A dimension-aware,
-size-preserving, lossless, invertible float -> float basis change: it replaces
+size-preserving float -> float basis change: it replaces
 a field with its multi-level wavelet coefficients (same element type, same
 element count), separable per axis with dyadic (Mallat) recursion (3-D also
 supports wavelet-packet decomposition for anisotropic volumes, selected
@@ -24,10 +25,10 @@ Feeds a quantizer, then (optionally) `Speck2DStage` — see
 SPERR-style pipeline. Quantizing this stage's coefficients directly does
 **not** guarantee a pointwise bound on the reconstructed field — CDF 9/7's
 synthesis-filter gain differs by level, so a uniform coefficient threshold
-doesn't translate to a uniform reconstructed-domain error. For an actual
-guarantee, pair with [`Cdf97OutlierCorrectStage`](outlier_correct.md) — see
+doesn't translate to a uniform reconstructed-domain error. To correct reconstructed-domain outliers, pair with [`Cdf97OutlierCorrectStage`](outlier_correct.md) — see
 that page and `examples/presets/sperr_gpu.toml` for the complete,
-bound-guaranteed pipeline.
+experimental correction pipeline. Floating-point residual corrections do not
+establish an unrestricted strict error-bound guarantee.
 
 ---
 
@@ -37,10 +38,14 @@ bound-guaranteed pipeline.
 |---|---|
 | `TInput` | `float` or `double` |
 
-`double` reproduces SPERR's coefficients **bit-for-bit** (`sperr::CDF97` runs
-entirely in double). `float` is a faster, deliberately non-bit-exact variant
+`double` follows SPERR's double-precision lifting arithmetic. Native coefficient
+parity requires a comparison for the relevant geometry and execution path; the
+release regression suite does not establish universal bitwise parity. `float` is a faster, deliberately non-bit-exact variant
 (lifting constants are derived in double, but the arithmetic itself is
 `float`).
+
+The forward/inverse pair uses floating-point arithmetic and is tested with
+reconstruction tolerances; it is not generally a bitwise-lossless round trip.
 
 ---
 
@@ -91,10 +96,9 @@ be used:
    (doesn't overlap) the persistent kernel — measured 2048² 265->350 GB/s
    (+32%), 4096² 320->345 GB/s (+8%).
 
-Still ~6-9x behind a single-launch elementwise stage even where both
-optimizations engage — this is the normal throughput range for a "heavy"
-per-line transform, faster than `GInterpStage`, ~2.6-5x behind
-`TiledLorenzoStage`.
+Historical H100 measurements placed this transform roughly 6–9x behind a
+single-launch elementwise stage where both optimizations engaged. These are
+scoped observations, not a general performance ranking across pipelines or GPUs.
 
 ---
 

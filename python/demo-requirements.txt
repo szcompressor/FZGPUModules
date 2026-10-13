@@ -1,0 +1,4 @@
+# Verified demo environment: CPython 3.12 on Linux x86_64.
+numpy==2.5.2
+numcodecs==0.16.5
+typing_extensions==4.16.0

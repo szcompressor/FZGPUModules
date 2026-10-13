@@ -151,12 +151,16 @@ TEST(CLI, DecompressCommandRoundTripsKnownGoodFile) {
         pipeline.writeToFile(compressed_path.string(), stream);
     }
 
+    testing::internal::CaptureStderr();
     const int decompress_rc = run_cli({
         "fzgmod-cli",
         "-x",
         "-i", compressed_path.string(),
         "-o", output_path.string()
     });
+    const std::string diagnostics = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(diagnostics.find("pointer not found in allocations"), std::string::npos)
+        << diagnostics;
     ASSERT_EQ(decompress_rc, 0);
     ASSERT_TRUE(std::filesystem::exists(output_path));
 
@@ -165,6 +169,25 @@ TEST(CLI, DecompressCommandRoundTripsKnownGoodFile) {
 
     const float max_err = fz_test::max_abs_error(input, recon);
     EXPECT_LE(max_err, kEb * 1.05f);
+
+    // Exercise static decoding without perf output as well as the CLI's profiled path.
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        void* decoded = nullptr;
+        size_t decoded_bytes = 0;
+        testing::internal::CaptureStderr();
+        EXPECT_NO_THROW(Pipeline::decompressFromFile(
+            compressed_path.string(), &decoded, &decoded_bytes, 0));
+        const std::string static_diagnostics = testing::internal::GetCapturedStderr();
+        int device = 0;
+        FZ_TEST_CUDA(cudaGetDevice(&device));
+        OwnedDeviceBuffer owned(decoded, decoded_bytes, device);
+        EXPECT_EQ(static_diagnostics.find("pointer not found in allocations"), std::string::npos)
+            << static_diagnostics;
+        ASSERT_EQ(decoded_bytes, in_bytes);
+        std::vector<float> static_recon(kN);
+        FZ_TEST_CUDA(cudaMemcpy(static_recon.data(), decoded, in_bytes, cudaMemcpyDeviceToHost));
+        EXPECT_LE(fz_test::max_abs_error(input, static_recon), kEb * 1.05f);
+    }
 }
 
 TEST(CLI, PipelineFromConfigWorksWithOverride) {

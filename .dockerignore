@@ -11,9 +11,10 @@ third_party/googletest/
 docs/
 memory/
 
-# Scripts not needed for build (gen_stage_fingerprints.py is required by CMake)
+# Scripts not needed for build (gen_stage_fingerprints.py and gen_nvrtc_headers.py are required by CMake)
 scripts/
 !scripts/gen_stage_fingerprints.py
+!scripts/gen_nvrtc_headers.py
 
 # Misc
 *.md

@@ -95,6 +95,10 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 
 ## Available Stages
 
+CDF97, SPECK2D, wavelet outlier correction, and SZx are **experimental** in v2.0.
+Their availability does not establish a strict numerical guarantee for every
+input. See the [release scope](docs/releases/v2.0.0.md#experimental-modules).
+
 | Stage | Description |
 |---|---|
 | `LorenzoQuantStage<TInput, TCode>` | Fused float predictor + quantizer (lossy, 1D/2D/3D) |

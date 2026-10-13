@@ -5,10 +5,8 @@ pool_multiplier = 8.0
 # (uncorrected) inverse -- see Pipeline::setPrimarySource()'s doc comment.
 primary_source = "correct"
 
-# GPU SPERR: CDF 9/7 DWT -> Quantizer -> sparse outlier correction -> SPECK2D.
-# Cdf97OutlierCorrectStage guarantees the reconstructed-domain pointwise error
-# bound (quantizing DWT coefficients alone does not -- see
-# modules/coders/outlier_correct/outlier_correct_stage.h's doc comment).
+# Experimental SPERR-style composition: DWT -> Quantizer -> correction -> SPECK2D.
+# Float residual corrections lack final bound verification; see docs/stages/outlier_correct.md.
 #
 # Both "dwt" and "correct" read the pipeline's raw input directly
 # (Pipeline::bindExternalInput() -- the "__external__" sentinel below), no
