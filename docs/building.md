@@ -46,9 +46,13 @@ and requires no extra steps.
 The fastest path to a working build uses the `release` preset:
 
 ```bash
-cmake --preset release
+cmake --preset release -DCMAKE_CUDA_ARCHITECTURES=native
 cmake --build build/release -j$(nproc)
 ```
+
+`native` targets the visible GPU. For a build host without a GPU, specify the
+target architectures explicitly, for example `-DCMAKE_CUDA_ARCHITECTURES="80;90"`
+for A100 and H100. The project fallback is SM 86 when no architecture is specified.
 
 This builds the library (`libfzgmod.so`) and the `fzgmod-cli` command-line tool.
 Each preset gets its own build directory under `build/<preset>/`, so presets coexist.
@@ -113,7 +117,7 @@ cmake --build --preset <preset> -j$(nproc)
 | `FZGMOD_BACKEND` | `CUDA` | Stable main supports `CUDA` only; backend work is on `development` |
 | `USE_SANITIZER` | — | Sanitizer mode: `ASanUbsan`, `TSan`, or `Compute` |
 | `COMPUTE_SANITIZER_DEVICE_DEBUG` | `OFF` | Add `-G` to CUDA builds for source-level Compute Sanitizer (much slower) |
-| `CMAKE_CUDA_ARCHITECTURES` | — | CUDA compute capability (e.g., `75`, `80`, `90`); comma-separated for multiple |
+| `CMAKE_CUDA_ARCHITECTURES` | `86` | Use `native` for the visible GPU, or a quoted semicolon-separated list such as `"80;90"` |
 | `CMAKE_INSTALL_PREFIX` | `/usr/local` | Installation prefix for `cmake --install` |
 
 ## Module source declarations
