@@ -22,80 +22,113 @@ adapter limitation, separate from the library's self-describing FZM file API.
 
 ## Setup
 
-### Prerequisites
+### Verified v2 installation
 
-- CUDA toolkit, compatible drivers, and a C++17 compiler/standard library supported by that toolkit
-- CMake 3.24+ and Python 3 for building FZGPUModules
-- Python bindings, NumPy, and numcodecs for the Python interface
+The tested path uses an installed FZGPUModules SDK plus a separately built
+libpressio adapter in a dedicated Python virtual environment. Spack supplied the
+host `std_compat` dependency in our validation; it did not build the SDK or adapter.
 
-See [build requirements](building.md#prerequisites) for the toolkit API floor and
-validated scope. The libpressio adapter must be rebuilt against the v2 headers
-and libraries.
+Use FZGPUModules `v2.0.0` (`01f40d5`) and the compatible adapter snapshot
+`b330cbe7a125fcf79194068b823b51323335b7d7`. The prepared adapter source archive includes the Python Chain helper and
+optional stage probes. As checked on 2026-10-14, the public v2.0.0 release only
+attaches the library source archive, and the fork's remote `master` does not
+contain the tested adapter revision. The verified local adapter archive is
+`/home/exouser/release_candidates/fzgpumodules-2.0.0/libpressio-fzgmod-2.0.0-source.tar.gz`.
+Public installation requires making that adapter snapshot available through
+the fork or a source archive; do not substitute an unpinned `master` checkout.
+Retain the source pins and archive provenance when rebuilding.
 
-### Install spack
+Prerequisites are a CUDA toolkit/driver, a supported C++17 compiler, CMake 3.24+,
+Python with development headers and venv support, SWIG, and an installed
+`std_compat` CMake package. The validated host uses Python 3.12.3, CUDA 12.9,
+GCC 13.3, SWIG 4.2.0, and std_compat 0.0.22. These are tested versions, not a
+claim that all older combinations are supported. See [build requirements](building.md#prerequisites).
 
-```bash
-git clone --depth=2 https://github.com/spack/spack.git ~/spack
-. ~/spack/share/spack/setup-env.sh   # add to ~/.bashrc to persist
-```
-
-### Add the spack package repos
-
-The libpressio `fzgpumodules` plugin itself, and the spack package
-definitions that build it, are not yet merged into upstream `robertu94/libpressio` or
-`robertu94/spack_packages`. Until those two land, use the fork which contains the package
-definitions for both `fzgpumodules` and the updated `libpressio`:
-
-```bash
-# Provides fzgpumodules package + libpressio with +fzgpumodules variant support.
-# Once the upstream PR is merged, replace with: robertu94/spack_packages
-spack repo add --name robert_pkgs https://github.com/skyler-ruiter/spack_packages.git
-spack repo list   # should show robert_pkgs → spack_repo/robertu94
-```
-
-### Create and activate a spack environment
+Set local paths to the stable library source and compatible adapter snapshot:
 
 ```bash
-spack env create fzgm-env
-spack env activate fzgm-env
+export FZGM_PY_ROOT="$HOME/fzgm-python-v2"
+export FZGM_SOURCE=/path/to/FZGPUModules-2.0.0
+export LIBPRESSIO_SOURCE=/path/to/libpressio-fzgmod-2.0.0
+export STD_COMPAT_CONFIG=/path/to/libstdcompat/share/std_compat/cmake
+export CUDA_ROOT=/usr/local/cuda-12.9
+
+python3 -m venv "$FZGM_PY_ROOT/venv"
+"$FZGM_PY_ROOT/venv/bin/python" -m pip install \
+  numpy==2.5.2 numcodecs==0.16.5 typing_extensions==4.16.0
 ```
 
-### Point spack at the libpressio source fork
+These Python pins were validated on CPython 3.12, Linux x86_64. For offline
+reproduction, use the matching retained wheels with `--no-index --find-links`.
+Do not use `pip install libpressio` as a substitute for building this adapter.
 
-The plugin code lives in a fork of libpressio (PR not yet merged upstream). Use
-`spack develop` so spack builds directly from the fork source:
+Build and install the SDK, or point the adapter at an existing compatible install:
 
 ```bash
-git clone https://github.com/skyler-ruiter/libpressio ~/libpressio-fork
-spack develop --path ~/libpressio-fork libpressio@master
+cmake -S "$FZGM_SOURCE" -B "$FZGM_PY_ROOT/build-fzgm" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=native -DBUILD_TESTING=OFF \
+  -DCMAKE_INSTALL_PREFIX="$FZGM_PY_ROOT/fzgpumodules"
+cmake --build "$FZGM_PY_ROOT/build-fzgm" --parallel 4
+cmake --install "$FZGM_PY_ROOT/build-fzgm"
 ```
 
-### Install
+`native` targets the visible GPU. For a GPU-less build host, set the target
+explicitly: `80` for A100 or `90` for H100. The prepared H100 demo SDK targets
+SM 90 and must be rebuilt for an A100 host.
+
+Install the adapter's native libraries and Python modules into explicit destinations:
 
 ```bash
-spack add libpressio +cuda +python +fzgpumodules cuda_arch=<your_arch>
-spack concretize
-spack install
+FZGM_PYTHON_SITE=$("$FZGM_PY_ROOT/venv/bin/python" -c \
+  'import sysconfig; print(sysconfig.get_path("purelib"))')
+cmake -S "$LIBPRESSIO_SOURCE" -B "$FZGM_PY_ROOT/build-libpressio" \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+  -DLIBPRESSIO_BUILD_MODE=CORE -DBUILD_PYTHON_WRAPPER=ON \
+  -DLIBPRESSIO_HAS_FZGPUMODULES=ON \
+  -DLIBPRESSIO_HAS_SIZE=ON -DLIBPRESSIO_HAS_TIME=ON \
+  -DCMAKE_INSTALL_PREFIX="$FZGM_PY_ROOT/libpressio" \
+  -DPython3_EXECUTABLE="$FZGM_PY_ROOT/venv/bin/python" \
+  -DLIBPRESSIO_PYTHON_SITELIB="$FZGM_PYTHON_SITE" \
+  -DFZGPUModules_DIR="$FZGM_PY_ROOT/fzgpumodules/lib/cmake/FZGPUModules" \
+  -Dstd_compat_DIR="$STD_COMPAT_CONFIG"
+cmake --build "$FZGM_PY_ROOT/build-libpressio" --parallel 4
+cmake --install "$FZGM_PY_ROOT/build-libpressio"
 ```
 
-Replace `<your_arch>` with your GPU's compute capability (e.g. `80` for A100, `86` for RTX 3090,
-`90` for H100).
+`LIBPRESSIO_PYTHON_SITELIB` is separate from `CMAKE_INSTALL_PREFIX`; setting only
+the native prefix does not select the venv's Python installation directory.
+The plugin-enabled Python install includes `fzgm_helper.Chain` automatically.
 
-**Gotcha:** if spack resolves `swig@4.1` or newer, the build fails inside
-`pressioPYTHON_wrap.cxx` with `too few arguments to function 'SWIG_Python_AppendOutput'` —
-libpressio's vendored `numpy.i` calls the pre-4.1 2-argument form, and SWIG 4.1 added a
-required third argument to that runtime function. Pin swig in the environment before
-concretizing:
+### Use the installed bindings
+
+Run in a dedicated shell:
 
 ```bash
-spack config add "packages:swig:require:@=4.0.2"
+export CUDA_VISIBLE_DEVICES=0
+export LD_LIBRARY_PATH="$FZGM_PY_ROOT/libpressio/lib:$FZGM_PY_ROOT/fzgpumodules/lib:$CUDA_ROOT/lib64:${LD_LIBRARY_PATH:-}"
+unset PYTHONPATH FZ_SPECIALIZE FZ_FUSION
+"$FZGM_PY_ROOT/venv/bin/python" -I -c \
+  'import libpressio; from fzgm_helper import Chain; print(libpressio.__file__)'
 ```
 
-### Activate in Python
+Select `fzgpumodules:specialization` with `off` or `auto`; the plugin has no
+`fusion` alias. The ready demo environment's `env.sh` also sets these paths and
+clears policy overrides. Its preflight checks the installed import/library origins,
+visible GPU, helper availability, and stable catalog before presentation.
 
-```bash
-spack env activate fzgm-env   # run in each new shell
-```
+### Spack and SWIG compatibility
+
+The earlier Spack recipe is an alternative requiring validation against the same
+SDK and adapter revisions. `spack develop ... libpressio@master` alone does not
+pin the v2-compatible adapter. Verify the custom package's feature variants and
+selected sources before using it as a v2 installation recipe.
+
+Our snapshot built with SWIG 4.2.0. The older blanket warning that every SWIG
+version from 4.1 onward fails is too broad. If an older source/recipe fails with
+`SWIG_Python_AppendOutput` argument errors, check its vendored NumPy interface
+against the selected SWIG version; the former 4.0.2 workaround is not required
+by this verified 4.2.0 setup.
 
 ---
 
