@@ -2,24 +2,29 @@
 
 This runbook covers the verified Linux/H100 Python demo of the patched
 `fzgpumodules` libpressio plugin. The library candidate is v2.0.0; publication
-is still pending. The adapter remains experimental, with a tested demo path.
+is still pending. The adapter is maintained separately, with a tested installed demo path.
 
 ## Ready environment on this host
 
-The installed environment is `/home/exouser/demo_environments/fzgm-python-v2`.
+The installed environment is `/home/exouser/demo_environments/fzgm-python-v2-stable`.
+The SDK was freshly built at `66fd9ea`; the final candidate `01f40d5` differs
+only in README/building documentation. The adapter is pinned at `b330cbe`.
+The prior frozen environment remains available separately.
+
 It contains its own virtual environment, FZGPUModules SDK, installed libpressio,
 copied scripts, CLDHGH input, offline Python wheels, logs, and provenance files.
 It imports neither the benchmark virtual environment nor the libpressio build
 folder. Source the environment file in a dedicated rehearsal shell:
 
 ```bash
-source /home/exouser/demo_environments/fzgm-python-v2/env.sh
+source /home/exouser/demo_environments/fzgm-python-v2-stable/env.sh
 "$FZGM_DEMO_ROOT/venv/bin/python" -I \
   "$FZGM_DEMO_ROOT/run/libpressio_demo_preflight.py" \
   --environment-root "$FZGM_DEMO_ROOT"
 ```
 
-Expect `status: ready`, one visible CUDA device, and import/library paths under
+Expect `status: ready`, one visible CUDA device, no experimental optional-stage
+wrappers, an installed `fzgm_helper.Chain`, and import/library paths under
 that environment root. `-I` isolates Python from user packages, `PYTHONPATH`,
 and the current working directory. The environment file selects GPU 0 and
 sets installed library paths plus CUDA 12.9's runtime directory.
@@ -88,7 +93,11 @@ stable-core demonstration.
 
 ## Rebuild the environment
 
-Use a dedicated directory outside source checkouts. The verified versions are
+Use a dedicated directory outside source checkouts. Set `FZGM_SOURCE` to the
+stable library source snapshot, `LIBPRESSIO_SOURCE` to the pinned adapter, and
+`FZGM_DEVELOPMENT_SOURCE` to the development checkout containing demo scripts.
+The ready environment also includes `rebuild.sh`, captured source snapshots,
+and offline wheels for reproduction. The verified versions are
 Python 3.12.3, NumPy 2.5.2, numcodecs 0.16.5, typing_extensions 4.16.0, SWIG 4.2.0,
 CUDA 12.9, GCC 13.3, and CMake 3.28.3. Exact local versions and patches are recorded
 in `manifest.json`. Numcodecs is required by libpressio's high-level wrapper;
@@ -116,12 +125,13 @@ Python/platform using `pip install --no-index --find-links /path/to/wheels -r
 /path/to/requirements.txt`.
 
 Build/install the SDK if a reviewed installed candidate is not already available.
-The architecture below is for H100; choose the target architecture on another GPU:
+The architecture below targets the visible GPU. On a GPU-less build host,
+specify the target architecture explicitly (`80` for A100, `90` for H100):
 
 ```bash
 cmake -S "$FZGM_SOURCE" -B "$FZGM_DEMO_ROOT/build-fzgm" \
   -DCMAKE_BUILD_TYPE=Release -DFZGMOD_BACKEND=CUDA \
-  -DCMAKE_CUDA_ARCHITECTURES=90 -DBUILD_TESTING=OFF \
+  -DCMAKE_CUDA_ARCHITECTURES=native -DBUILD_TESTING=OFF \
   -DCMAKE_INSTALL_PREFIX="$FZGM_DEMO_ROOT/fzgpumodules"
 cmake --build "$FZGM_DEMO_ROOT/build-fzgm" -j4
 cmake --install "$FZGM_DEMO_ROOT/build-fzgm"
@@ -146,8 +156,8 @@ cmake --build "$FZGM_DEMO_ROOT/build-libpressio" -j4
 cmake --install "$FZGM_DEMO_ROOT/build-libpressio"
 
 mkdir -p "$FZGM_DEMO_ROOT/run" "$FZGM_DEMO_ROOT/data" "$FZGM_DEMO_ROOT/logs"
-cp "$FZGM_SOURCE/scripts/libpressio_specialization_demo.py" \
-   "$FZGM_SOURCE/scripts/libpressio_demo_preflight.py" "$FZGM_DEMO_ROOT/run/"
+cp "$FZGM_DEVELOPMENT_SOURCE/scripts/libpressio_specialization_demo.py" \
+   "$FZGM_DEVELOPMENT_SOURCE/scripts/libpressio_demo_preflight.py" "$FZGM_DEMO_ROOT/run/"
 cp "$FZGM_SOURCE/data/CLDHGH.f32" "$FZGM_DEMO_ROOT/data/"
 export CUDA_VISIBLE_DEVICES=0
 export LD_LIBRARY_PATH="$FZGM_DEMO_ROOT/libpressio/lib:$FZGM_DEMO_ROOT/fzgpumodules/lib:$CUDA_ROOT/lib64"
@@ -184,9 +194,11 @@ recorded fallback results. They support explaining the workflow if the GPU is
 unavailable, without presenting recorded output as a live run.
 
 Validation of the retained installation used isolated Python from the neutral
-`run/` directory with the adapter build directory hidden. The full installed
-Python suite passed 37 assertions, including CUDA-resident outputs, and memcheck
-reported zero errors. Import and loaded-library provenance passed preflight.
+`run/` directory with the adapter build directory hidden. The installed
+Python suite passed 36 checks with one explicit SZx skip, including CUDA-resident
+outputs and specialization built through the installed Chain helper. The same
+suite and the synthetic demo passed memcheck with zero errors. The configured
+source/build paths were hidden throughout the six validation processes. Import and loaded-library provenance passed preflight.
 No tag or release was created by this verification.
 
 ## Recorded rehearsal
@@ -194,7 +206,7 @@ No tag or release was created by this verification.
 The documented sequence was rehearsed from a fresh shell using the installed
 environment: preflight, the synthetic field, then complete CLDHGH. All expected
 length, bound, ratio, and installation checks passed. Logs are retained as
-`logs/rehearsal-preflight.json`, `logs/rehearsal-synthetic.log`, and
-`logs/rehearsal-cldhgh.log`. CLDHGH Off and Auto wall times were close in this
-rehearsal, confirming that this demonstration should establish the workflow and
-actual specialization rather than promise a speedup on the host-inclusive path.
+`logs/preflight.json`, `logs/synthetic-demo.log`, and
+`logs/cldhgh-demo.log`. The recorded CLDHGH median Python round trips were 45.32 ms Off and 42.54 ms
+Auto. These host-inclusive timings accompany the workflow and installation
+checks; this single rehearsal does not establish a general speedup.

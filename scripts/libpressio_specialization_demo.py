@@ -21,6 +21,7 @@ def main():
         sys.path.insert(0, str(args.python_path.resolve()))
     import numpy as np
     lp = importlib.import_module('libpressio')
+    Chain = importlib.import_module('fzgm_helper').Chain
     if args.elements <= 0 or args.repeats <= 0 or not np.isfinite(args.error_bound) or args.error_bound <= 0:
         parser.error('elements, repeats, and a finite error bound must be positive')
     data = (np.fromfile(args.input, dtype=np.float32) if args.input else
@@ -31,19 +32,12 @@ def main():
 
     results = []
     for policy in ('off', 'auto'):
-        compressor = lp.PressioCompressor.from_config({
-            'compressor_id': 'fzgpumodules',
-            'early_config': {
-                'fzgpumodules:stages': ['quantizer:float:uint32', 'lorenzo:int32', 'adaptive_bitpack:int32'],
-                'fzgpumodules:connections': ['s1 <- s0:codes', 's2 <- s1'],
-                'fzgpumodules:s0:linear_mode': True,
-                'fzgpumodules:s1:block_size': 32,
-                'fzgpumodules:s2:block_size': 32,
-                'fzgpumodules:memory_strategy': 'preallocate',
-                'fzgpumodules:specialization': policy,
-            },
-            'compressor_config': {'pressio:abs': args.error_bound, 'pressio:metric': 'size'},
-        })
+        compressor = (Chain()
+            .add('quantizer:float:uint32', linear_mode=True)
+            .add('lorenzo:int32', from_port='codes', block_size=32)
+            .add('adaptive_bitpack:int32', block_size=32)
+            .configure(memory_strategy='preallocate', specialization=policy)
+            .compressor(eb=args.error_bound))
         elapsed = []
         max_error = 0.0
         # First iteration includes pipeline construction and JIT; exclude it from timing.

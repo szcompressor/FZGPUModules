@@ -14,9 +14,11 @@ root = args.environment_root.resolve()
 import numpy as np
 import libpressio as lp
 import _pressio
+import fzgm_helper
 
 origins = {'python_prefix': sys.prefix, 'numpy': np.__file__,
-           'libpressio_python': lp.__file__, 'libpressio_extension': _pressio.__file__}
+           'libpressio_python': lp.__file__, 'libpressio_extension': _pressio.__file__,
+           'chain_helper': fzgm_helper.__file__}
 for label, origin in origins.items():
     if not Path(origin).resolve().is_relative_to(root):
         raise RuntimeError(f'{label} loaded outside demo environment: {origin}')
@@ -40,6 +42,10 @@ comp = lp.PressioCompressor.from_config({'compressor_id': 'fzgpumodules'})
 options = comp.get_options()
 if 'fzgpumodules:specialization' not in options or 'fzgpumodules:fusion' in options:
     raise RuntimeError('Plugin lacks the current specialization option')
+optional_stages = comp.get_configuration()['fzgpumodules:optional_stages']
+if optional_stages:
+    raise RuntimeError(f'Stable demo SDK unexpectedly exposes experimental stages: {optional_stages}')
 print(json.dumps({'status': 'ready', 'python': sys.version.split()[0],
                   'numpy_version': np.__version__, 'visible_cuda_devices': count.value,
-                  'imports': origins, 'libraries': libraries}, indent=2))
+                  'imports': origins, 'libraries': libraries,
+                  'optional_stages': optional_stages, 'chain_helper_owner': 'libpressio_adapter'}, indent=2))
