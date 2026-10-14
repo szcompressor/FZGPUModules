@@ -124,7 +124,8 @@ decompressed = comp.decode(compressed, data.copy())
 print(f"max error: {float(abs(data - decompressed).max()):.3e}")  # <= 1e-3
 ```
 
-For linear pipelines, `python/fzgm_helper.py`'s `Chain` builder avoids hand-writing
+For linear pipelines, the plugin's Python bindings install `fzgm_helper.Chain`,
+which avoids hand-writing
 `"sN <- sM:port"` connection strings and `"fzgpumodules:sN:<option>"` keys:
 
 ```python
@@ -143,7 +144,7 @@ compressed   = comp.encode(data)
 decompressed = comp.decode(compressed, data.copy())
 ```
 
-It's a thin builder, not a libpressio feature — for non-linear graphs (multiple
+The builder supports linear pipelines. For non-linear graphs (multiple
 branches into one stage, direction-dependent stages, config-file mode) build
 `early_config` by hand as above.
 

@@ -10,6 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- The optional Python `Chain` builder is owned and installed by the libpressio adapter rather than the core library source tree.
 - Stable `main` contains the supported CUDA catalog. Experimental wavelet/SPECK, SZx, monolithic SZp, combined quantizer/AdaptiveLorenzo modules, research artifacts, profiling programs, cards, and demo materials are preserved on `development`; their archive stage IDs remain reserved.
 - Active HIP/SYCL build configurations move to `development` pending backend validation.
 - Libpressio examples and Python demo use `fzgpumodules:specialization`; the local adapter replaces the former `fusion` option without an alias.
