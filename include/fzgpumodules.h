@@ -36,17 +36,13 @@
 #include "coders/hclog/hclog_stage.h"
 #include "coders/golomb_rice/golomb_rice_stage.h"
 #include "coders/gpulz/gpulz_stage.h"
-#include "coders/speck2d/speck2d_stage.h"
-#include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
 #include "structural/tupl/tupl_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
-#include "fused/quant_adaptive_lorenzo/quant_adaptive_lorenzo_stage.h"
 #include "fused/lorenzo_quant/lorenzo_quant.h"
 #include "quantizers/quantizer/quantizer.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/log_transform/log_transform_stage.h"
-#include "transforms/cdf97/cdf97_stage.h"
 #include "transforms/negabinary/negabinary.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
@@ -55,10 +51,3 @@
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
-#include "fused/szx/szx_stage.h"
-// SZpStage is quarantined as an experimental/reference compressor and is
-// intentionally NOT part of this umbrella header. Existing FZM archives still
-// decode (its StageType::SZP factory stays linked); the supported expression of
-// the SZp algorithm is examples/presets/szp_composed.toml. To use the reference
-// implementation directly, include
-// "experimental/reference_compressors/szp/szp_stage.h" explicitly.

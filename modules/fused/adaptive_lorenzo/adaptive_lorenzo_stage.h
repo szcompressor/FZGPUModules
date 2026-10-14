@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include "fused/common/data_type_of.h"
-#include "fused/lorenzo_quant/lorenzo_quant.h"  // ErrorBoundMode, resolveApproxRelMode — FusedQuantAdaptiveLorenzoStage
+#include "fused/lorenzo_quant/lorenzo_quant.h"
 
 #include <stdexcept>
 #include <string>

@@ -22,14 +22,9 @@ CMAKE = MODULES / "CMakeLists.txt"
 # Historical/reserved IDs that intentionally have no shipped implementation.
 RESERVED = {"UNKNOWN", "SCALE", "PASSTHROUGH", "SPLIT"}
 
-# Quarantined experimental/reference compressors: their StageType ID and FZM
-# header factory stay compiled (so pre-existing archives decode), but they are
-# deliberately NOT public modules — absent from kStageRegistry, the umbrella
-# header, and the public stage catalog. Their factory lives under
-# modules/experimental/, not the ordinary modules/<category>/ tree. Keep the ID
-# here forever once quarantined; never reuse it.
-EXPERIMENTAL = {"SZP"}
-EXPERIMENTAL_DIR = ROOT / "modules" / "experimental"
+# Development stage IDs stay reserved without implementations or archive factories.
+DEVELOPMENT = {"SZX", "SZP", "CDF97", "SPECK2D", "CDF97_OUTLIER_CORRECT",
+               "FUSED_QUANT_ADAPTIVE_LORENZO"}
 
 
 def require_match(pattern, text, label, flags=0):
@@ -137,21 +132,9 @@ def main():
     registrar_pattern = re.compile(
         r"FZ_REGISTER_(?:SIMPLE_STAGE|STAGE_FACTORY)\s*\(\s*(?:fz::)?StageType::([A-Z0-9_]+)"
     )
-    # modules/experimental/ is quarantined stages, not public modules — scanned
-    # separately below so its factories never count toward the public
-    # implemented_enums comparison.
     factory_cases = set()
     for cu_path in MODULES.rglob("*.cu"):
-        if EXPERIMENTAL_DIR in cu_path.parents:
-            continue
         factory_cases.update(registrar_pattern.findall(cu_path.read_text(encoding="utf-8")))
-
-    experimental_factories = set()
-    if EXPERIMENTAL_DIR.is_dir():
-        for cu_path in EXPERIMENTAL_DIR.rglob("*.cu"):
-            experimental_factories.update(
-                registrar_pattern.findall(cu_path.read_text(encoding="utf-8"))
-            )
 
     enum_body = require_match(
         r"enum\s+class\s+StageType[^\{]*\{(.*?)\};", fmt, "StageType", re.S
@@ -176,18 +159,13 @@ def main():
     registry_dirs = [row[4] for row in registry_rows]
 
     string_cases = set(re.findall(r"case\s+StageType::([A-Z0-9_]+)", fmt))
-    implemented_enums = set(enum_names) - RESERVED - EXPERIMENTAL
+    implemented_enums = set(enum_names) - RESERVED - DEVELOPMENT
     registered_enums = set(registry_enums)
 
     errors = module_build_errors(cmake, registry_dirs)
-    for name in sorted(EXPERIMENTAL):
-        if name not in factory_cases and name not in experimental_factories:
-            errors.append(
-                f"quarantined StageType::{name} has no FZ_REGISTER factory under "
-                f"modules/experimental/ — pre-existing archives would fail to decode"
-            )
-        if name in registered_enums:
-            errors.append(f"quarantined StageType::{name} must not be in the public kStageRegistry")
+    for name in sorted(DEVELOPMENT):
+        if name in factory_cases or name in registered_enums:
+            errors.append(f"development StageType::{name} must not ship on main")
     for value in duplicates(enum_names):
         errors.append(f"duplicate StageType token {value}")
     for value in duplicates(enum_ids):

@@ -24,7 +24,7 @@
 
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
 #include "coders/adaptive_bitpack/adaptive_bitpack_oracle.cuh"
-#include "predictors/predictor_utils.cuh"  // computeValueBase — FusedQuantAdaptiveLorenzoStage
+#include "predictors/predictor_utils.cuh"
 #include "stage/stage_registry.h"
 #include <cstring>
 #include <algorithm>

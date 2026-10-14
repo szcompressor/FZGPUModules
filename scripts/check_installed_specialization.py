@@ -39,7 +39,7 @@ def main() -> None:
         source.mkdir()
         # Explicit source directories avoid copying datasets, results and local builds.
         for name in ("include", "modules", "src", "cmake", "scripts", "third_party",
-                     "examples", "profiling"):
+                     "examples"):
             shutil.copytree(REPO / name, source / name,
                             ignore=shutil.ignore_patterns(".git", "__pycache__"))
         for name in ("CMakeLists.txt", "LICENSE", "THIRD_PARTY.md"):
@@ -48,7 +48,7 @@ def main() -> None:
         shutil.copytree(REPO / "tests" / "installed_specialization", fixture)
         run(["cmake", "-S", str(source), "-B", str(build),
              "-DCMAKE_BUILD_TYPE=Release", "-DFZGMOD_BACKEND=CUDA",
-             "-DBUILD_TESTING=OFF", "-DBUILD_EXAMPLES=OFF", "-DBUILD_PROFILING=OFF",
+             "-DBUILD_TESTING=OFF", "-DBUILD_EXAMPLES=OFF", "-DENABLE_NVTX=OFF",
              "-DBUILD_CLI=OFF", "-DCMAKE_CUDA_ARCHITECTURES=" + args.cuda_architectures])
         run(["cmake", "--build", str(build), "--parallel", str(args.jobs)])
         run(["cmake", "--install", str(build), "--prefix", str(prefix)])

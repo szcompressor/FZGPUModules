@@ -10,20 +10,9 @@ Everything involved in adding a new stage.
   against an installed FZGPUModules, without patching the library. Use this while
   a stage is unpublished or private; fold it back into
   [How to Add a New Stage](\ref how_to_add_a_stage) when it lands upstream.
-- \subpage developing_stages_deep_dive — the judgment the checklists do not
-  cover: is it a stage at all, what shape, what access pattern, how it connects
-  to and is optimized by the rest of the pipeline.
 
 ## Specialization
 
 - \subpage pipeline_specialization_internals — the declaration contract a stage
   implements to become eligible for [Pipeline Specialization](\ref pipeline_specialization)
   (fusion + finalize-time optimization).
-
-<!-- ## Design notes
-
-Working notes for stages whose representation is not a plain linear chain. These
-are specifications and scoping documents, not user-facing stage references.
-
-- \subpage experimental_szp — `SZpStage`, the quarantined GPU reference
-  compressor, and the supported `szp_composed.toml` chain that replaces it. -->

@@ -10,6 +10,8 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- Stable `main` contains the supported CUDA catalog. Experimental wavelet/SPECK, SZx, monolithic SZp, combined quantizer/AdaptiveLorenzo modules, research artifacts, profiling programs, cards, and demo materials are preserved on `development`; their archive stage IDs remain reserved.
+- Active HIP/SYCL build configurations move to `development` pending backend validation.
 - Libpressio examples and Python demo use `fzgpumodules:specialization`; the local adapter replaces the former `fusion` option without an alias.
 - Modules own their CMake source lists and backend settings; an explicit module catalog, stage scaffolding, and integration checks replace root-level source-list edits.
 - Runtime specialization embeds its device-header dependencies in the library, allowing JIT compilation from relocated installations without the original source checkout.

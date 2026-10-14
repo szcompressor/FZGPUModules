@@ -18,15 +18,13 @@ see \ref third_party_notices "Third-party notices".
 | \ref ack_fzgpu "FZ-GPU" | BSD-3-Clause | Direct port of fused kernels | `BitplaneRZEStage` |
 | \ref ack_cusz_hi "cuSZ-Hi" | BSD-3-Clause | Adapted spline kernels | `GInterpStage` |
 | \ref ack_cuszp "cuSZp / cuSZp2 / cuSZp3" | BSD-3-Clause | Direct kernel port (`AdaptiveBitpackStage`, `TiledLorenzoStage`) + algorithmic reimpl (`LorenzoStage` block, `QuantizerStage` linear) | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
-| \ref ack_sperr "SPERR" | Apache License 2.0 | Direct port (lifting constants, boundary handling) + algorithmic attribution only (`Speck2DStage`, `OutlierCorrectStage`) | `Cdf97Stage`, `Speck2DStage`, `OutlierCorrectStage`/`Cdf97OutlierCorrectStage` |
 | \ref ack_dietgpu "dietGPU" | MIT | Vendored headers | `ANSStage` |
 | \ref ack_gpulz "GPULZ" | **None declared upstream** | Substantially rewritten derivative | `GPULZStage` |
 | \ref ack_aiz "AIZ_VLDB26" | **None declared upstream** | Adapted optimization | `GPULZStage` all-zero-chunk fast path |
 | \ref ack_fsz "FSZ" | BSD-3-Clause | **Algorithmic attribution only; no code used** (written from the paper before FSZ 1.0.0 was released) | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | \ref ack_log_transform "Point-wise relative transform" | n/a — paper only | **Algorithmic attribution only; no code used** | `LogTransformStage` |
 | \ref ack_roibin "ROIBIN-SZ" | SZ2 BSD-style license; no code copied | **Algorithmic attribution only; independent GPU/DAG implementation** | `ROIBinSplitStage` |
-| \ref ack_szp "SZp / fZ-light" | MIT | GPU reimplementation; no source copied | `SZpStage` |
-| \ref ack_szx "SZx" | Argonne BSD-style license; no code copied | **Algorithmic attribution only; paper-derived** | `SZxStage` |
+| \ref ack_szp "SZp / fZ-light" | MIT | GPU reimplementation; no source copied | `szp_composed.toml` |
 
 ---
 
@@ -210,49 +208,6 @@ SC '25. https://doi.org/10.1145/3712285.3759817
 
 ---
 
-## SPERR {#ack_sperr}
-
-**Repository:** https://github.com/NCAR/SPERR
-**License:** Apache License 2.0
-**Authors:** Shaomeng Li, Peter Lindstrom, John Clyne (NCAR)
-**Citation:** Li, S., Lindstrom, P., Clyne, J. *Lossy Scientific Data Compression With
-SPERR*. IPDPS 2023.
-
-**Stages:**
-
-- **Cdf97Stage** (`modules/transforms/cdf97/`) — direct port of the numerically
-  load-bearing constants and rules from `sperr::CDF97` (`include/CDF97.h`,
-  `src/CDF97.cpp`): the lifting constants (computed from the filter bank
-  coefficients, not the commented QccPack literal values), the symmetric
-  boundary-extension rule, the level-count rule, and the 3-D dyadic/wavelet-packet
-  selection rule. Validated **bit-exact** against `sperr::CDF97` in double
-  precision. GPU kernels (the axis kernel, coalesced-tile kernel, persistent
-  cooperative-groups level fusion) are FZGPUModules' own — none of that exists in
-  SPERR, which runs single-threaded CPU.
-
-- **Speck2DStage** (`modules/coders/speck2d/`) — **algorithmic attribution only,
-  no SPERR code used.** Codes the same kind of information SPERR's `SPECK2D_INT`
-  bit-plane coder does, but the bitstream, data structures, and encode/decode
-  algorithms are an independent, from-scratch, GPU-parallel-decodable design.
-  SPERR's `SPECK_INT`/`SPECK2D_INT` use linked LIP/LIS/LSP lists and a DFS-serial
-  traversal; none of that structure appears here. See
-  `memory/speck_algorithm_writeup.md` for the full derivation and novelty
-  statement.
-
-- **OutlierCorrectStage<Reconstructor> / Cdf97OutlierCorrectStage**
-  (modules/coders/outlier_correct/, modules/coders/cdf97_outlier_correct/) —
-  **algorithmic attribution only, no SPERR code used.** Implements the same
-  *mechanism* as SPERR's `Outlier_Coder` (dequantize + inverse-transform a trial
-  reconstruction, diff against the original, exact-correct every point over
-  bound), arrived at independently from `Outlier_Coder.h`/`.cpp` and
-  `SPECK_FLT.cpp`'s call site — not by porting SPERR's code. Generalized beyond
-  SPERR's own design via a transform-agnostic `Reconstructor` policy.
-
-See [`THIRD_PARTY.md`](../THIRD_PARTY.md) for the full Apache License 2.0 text
-required by upstream and the complete relationship writeup for each stage.
-
----
-
 ## dietGPU {#ack_dietgpu}
 
 **Repository:** https://github.com/facebookresearch/dietgpu  
@@ -416,7 +371,7 @@ three-port layout, and inverse scatter are FZGPUModules code.
 
 **License:** MIT
 
-**Relationship:** `SZpStage` and `szp_composed.toml` are GPU adaptations of the
+**Relationship:** `szp_composed.toml` are GPU adaptations of the
 published predict-quantize-pack structure. No upstream source is copied. FZGM
 uses different quantization and predictor-partition conventions, and its archive
 is not byte-compatible with the upstream container.
@@ -425,16 +380,3 @@ Jiajun Huang, Sheng Di, et al. *hZCCL: Accelerating Collective Communication
 with Co-Designed Homomorphic Compression*, SC '24.
 
 ---
-
-## SZx {#ack_szx}
-
-**Repository:** https://github.com/szcompressor/SZx
-
-**License:** Argonne OPEN SOURCE LICENSE SF-16-105 (four-condition BSD style)
-
-**Relationship:** `SZxStage` was implemented from the paper; no SZx source was
-copied and the FZGM archive is not byte-compatible with the upstream format.
-
-Xiaodong Yu, Sheng Di, Kai Zhao, Jiannan Tian, Dingwen Tao, Xin Liang, and
-Franck Cappello. *Ultrafast Error-bounded Lossy Compression for Scientific
-Datasets*, HPDC '22.

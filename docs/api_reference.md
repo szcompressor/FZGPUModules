@@ -334,11 +334,9 @@ The public headers are organized into three tiers by how stable they are:
 | **Extension** | For custom-stage authors | `stage/stage.h`, `stage/stage_registry.h`, `stage/fusion.h`, `mem/mempool.h` (the `MemoryPool` interface a stage's `execute()` uses) | may grow at minor versions via backward-compatible defaults |
 | **Advanced** (`include/advanced/`) | Pipeline internals exposed for experimentation | `advanced/dag.h` (`CompressionDAG` / `DAGNode` / `BufferInfo`), `advanced/fusion_planner.h`, `advanced/fusion_registry.h` | **no** source-compatibility promise; may change any release |
 
-Experimental stage headers (CDF97, SPECK2D, OutlierCorrect/Cdf97OutlierCorrect,
-and SZx), and the legacy SZp reference, are excluded from the stable source-API
-promise. Their availability does not establish an unrestricted numerical
-accuracy contract. See the [v2 experimental scope](releases/v2.0.0.md#experimental-modules).
-Stage IDs and available archive readers are retained.
+Experimental modules and their headers are preserved on `development`; they
+are unavailable in the stable-main package. Only the shipped stage catalog falls
+within this source-API policy.
 
 The umbrella `fzgpumodules.h` no longer advertises the Advanced headers. `Pipeline`
 still depends on `CompressionDAG` internally, so those types remain reachable

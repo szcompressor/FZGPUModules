@@ -6,10 +6,9 @@
 
 GPU-accelerated graph composable compression pipeline builder for analytical workflows.
 
-The CUDA backend is supported. The AMD HIP/ROCm backend is currently
-**experimental**: most stages build and run, but backend coverage, CI, and
-installed-package compatibility are still being completed, and unsupported stages
-are rejected explicitly.
+Stable main supports CUDA. Experimental modules, AMD backend work, paper artifacts,
+and demonstration material are preserved on the `development` branch. See the
+[branch policy](docs/branch_policy.md).
 
 ## Overview
 
@@ -37,7 +36,7 @@ FZGPUModules is a CUDA library for building composable, high-throughput compress
 | Requirement | Requirement or scope | Notes |
 |---|---|---|
 | CUDA Toolkit | 11.2+ | Configure-time API floor; older toolkits are not a validated compatibility matrix |
-| Host Compiler | C++17 compiler and standard library | Must be supported by the selected CUDA toolkit or ROCm toolchain; see [build requirements](docs/building.md#prerequisites) |
+| Host Compiler | C++17 compiler and standard library | Must be supported by the selected CUDA toolkit; see [build requirements](docs/building.md#prerequisites) |
 | C++ Standard | C++17 | |
 | CMake | 3.24+ | |
 | Python | Python 3 | Required at build time for embedded JIT headers and source fingerprints |
@@ -95,9 +94,8 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 
 ## Available Stages
 
-CDF97, SPECK2D, wavelet outlier correction, and SZx are **experimental** in v2.0.
-Their availability does not establish a strict numerical guarantee for every
-input. See the [release scope](docs/releases/v2.0.0.md#experimental-modules).
+The table lists the stable main catalog. Experimental modules remain on
+`development` and are unavailable in this build.
 
 | Stage | Description |
 |---|---|
@@ -109,9 +107,6 @@ input. See the [release scope](docs/releases/v2.0.0.md#experimental-modules).
 | `QuantizerStage<TInput, TCode>` | Direct-value quantizer (ABS/REL/NOA error modes) |
 | `DifferenceStage<T, TOut>` | First-order difference / cumulative-sum coding |
 | `LogTransformStage<TInput>` | Log transform — turns a point-wise relative bound into an absolute one for a downstream ABS quantizer (Liang et al., CLUSTER'18) |
-| `Cdf97Stage<TInput>` | CDF 9/7 biorthogonal wavelet transform — SPERR's DWT front-half (lifting constants/boundary handling ported; GPU kernels FZGPUModules' own) |
-| `Speck2DStage` | GPU-parallel "wavefront" SPECK-like bit-plane coder, 2-D — codes the same information as SPERR's `SPECK2D_INT`, independent decode-parallel design |
-| `OutlierCorrectStage<Reconstructor>` / `Cdf97OutlierCorrectStage` | Sparse exact outlier correction — turns a coefficient-domain quantization bound into a GUARANTEED reconstructed-domain pointwise bound (SPERR `Outlier_Coder` mechanism, transform-agnostic via the `Reconstructor` policy) |
 | `RLEStage<T>` | Run-length encoding |
 | `BitshuffleStage` | GPU bit-matrix transpose |
 | `TUPLStage` | AoS <-> SoA tuple transpose — regroups interleaved `dim`-field records by field (LC `TUPLk` port) |
@@ -129,7 +124,6 @@ input. See the [release scope](docs/releases/v2.0.0.md#experimental-modules).
 | `HuffmanStage<T>` | GPU Huffman entropy coding (cuSZ port) |
 | `ANSStage` | GPU rANS entropy coding (dietGPU port) |
 | `BitplaneRZEStage` | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |
-| `SZxStage<T>` | SZx constant-block classification + fixed-length residual whole compressor |
 | `MergeStage` | Concatenate N producer ports into one buffer / split back (structural) |
 | `ROIBinSplitStage<T>` | Split detector fields into full-resolution ROI, binned background, and peak-table branches |
 
@@ -187,7 +181,7 @@ fzgmod-cli -z -i data.f32 -c examples/presets/pfpl.toml -o compressed.fzm --repo
 
 ## Acknowledgements
 
-FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), SPERR (Apache License 2.0), and GPULZ and AIZ_VLDB26 (no license declared upstream).
+FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented from the following projects. Most are BSD-3-Clause licensed; the exceptions are dietGPU (MIT), and GPULZ and AIZ_VLDB26 (no license declared upstream).
 
 | Project | Stages |
 |---|---|
@@ -196,15 +190,13 @@ FZGPUModules incorporates algorithms and GPU kernels ported or reimplemented fro
 | [FZ-GPU](https://github.com/szcompressor/cuSZ) — Zhang, Tian et al. (via cuSZ repo) | `BitplaneRZEStage` |
 | [cuSZ-Hi](https://github.com/shixun404/cuSZ-Hi) — Indiana U, Argonne NL | `GInterpStage` |
 | [cuSZp / cuSZp2 / cuSZp3](https://github.com/szcompressor/cuSZp) — Huang, Di et al., Argonne NL | `AdaptiveBitpackStage`, `TiledLorenzoStage` |
-| [SPERR](https://github.com/NCAR/SPERR) — Li, Lindstrom, Clyne, NCAR (Apache License 2.0) | `Cdf97Stage` (direct port: lifting constants, boundary handling); `Speck2DStage`, `OutlierCorrectStage`/`Cdf97OutlierCorrectStage` (algorithmic attribution only, no code ported — see THIRD_PARTY.md) |
 | [dietGPU](https://github.com/facebookresearch/dietgpu) — Meta Platforms (MIT) | `ANSStage` |
 | [GPULZ](https://github.com/hpdps-group/ICS23-GPULZ) — Zhang, Tian, Di et al. (ICS '23; *no license declared upstream*) | `GPULZStage` |
 | [AIZ_VLDB26](https://github.com/boyuanzhang62/AIZ_VLDB26) — Boyuan Zhang (*no license declared upstream*) | `GPULZStage` all-zero-chunk fast path |
 | [FSZ](https://github.com/JiajunHuang1999/FSZ) — Jiajun Huang, SC '26 (arXiv:2607.15413) — *algorithmic attribution only; written from the paper, before FSZ 1.0.0 was released* | `AdaptiveLorenzoStage`, `LorenzoStage` centering / order-2, `LorenzoQuantStage` centering |
 | Liang, Di, Tao, Chen, Cappello — IEEE CLUSTER 2018 — *algorithmic attribution only* | `LogTransformStage` |
 | [ROIBIN-SZ](https://arxiv.org/abs/2206.11297) — Underwood, Yoon, Gok, Di, Cappello — *independent GPU/DAG implementation of the published design* | `ROIBinSplitStage` |
-| [SZp / fZ-light](https://github.com/szcompressor/SZp) — Huang, Di et al. (MIT) | `szp_composed.toml` (`Quantizer → Lorenzo → AdaptiveBitpack`); `modules/experimental/reference_compressors/szp` (quarantined reference impl) |
-| [SZx](https://github.com/szcompressor/SZx) — Yu, Di et al. — *algorithmic attribution only; no source copied* | `SZxStage` |
+| [SZp / fZ-light](https://github.com/szcompressor/SZp) — Huang, Di et al. (MIT) | `szp_composed.toml` (`Quantizer → Lorenzo → AdaptiveBitpack`) |
 
 For per-stage attribution details, copyright notices, relationship types (direct port, algorithmic reimplementation, or vendored), and paper citations, see [`docs/acknowledgements.md`](docs/acknowledgements.md) and [`THIRD_PARTY.md`](THIRD_PARTY.md).
 

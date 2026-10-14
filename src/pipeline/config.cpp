@@ -49,15 +49,8 @@
 #include "coders/hclog/hclog_stage.h"
 #include "structural/tupl/tupl_stage.h"
 #include "transforms/log_transform/log_transform_stage.h"
-#include "transforms/cdf97/cdf97_stage.h"
-#include "coders/speck2d/speck2d_stage.h"
-#include "coders/cdf97_outlier_correct/cdf97_outlier_correct_stage.h"
 #include "structural/merge/merge_stage.h"
 #include "structural/roibin_split/roibin_split_stage.h"
-#include "fused/szx/szx_stage.h"
-// Quarantined experimental reference compressor — kept here only for the legacy
-// `type = "SZp"` TOML constructor (kLegacyStageRegistry, not the public catalog).
-#include "experimental/reference_compressors/szp/szp_stage.h"
 #include "transforms/zigzag/zigzag_stage.h"
 #include "transforms/negabinary/negabinary_stage.h"
 #include "coders/bitpack/bitpack_stage.h"
@@ -69,7 +62,6 @@
 #include "fused/ginterp/ginterp_stage.h"
 #include "fused/bitplane_rze/bitplane_rze_stage.h"
 #include "fused/adaptive_lorenzo/adaptive_lorenzo_stage.h"
-#include "fused/quant_adaptive_lorenzo/quant_adaptive_lorenzo_stage.h"
 
 #include <algorithm>
 #include <cstring>
@@ -283,36 +275,6 @@ static void saveAdaptiveLorenzoStage(Stage* s, std::ostringstream& out) {
         out << "blocks_per_tile = " << static_cast<int>(c.blocks_per_tile) << "\n";
         out << "enable_order2 = " << (c.enable_order2 ? "true" : "false") << "\n";
         out << "enable_centering = " << (c.enable_centering ? "true" : "false") << "\n";
-    }
-}
-
-// Add a FusedQuantAdaptiveLorenzo stage — AdaptiveLorenzo with the upstream
-// linear Quantizer fused into its forward kernel ("M1" partial fusion). Takes
-// raw float32 input directly: no separate Quantizer stage in the pipeline.
-// TCode is fixed at int32_t for now (matching FSZ's real usage) — see
-// modules/fused/adaptive_lorenzo/adaptive_lorenzo_stage.h.
-static Stage* addFusedQuantAdaptiveLorenzoStage(Pipeline& p, const toml::table& t) {
-    FusedQuantAdaptiveLorenzoStage<int32_t>::Config c;
-    c.coder_block_size = static_cast<uint32_t>(optInt(t, "coder_block_size", 32));
-    c.blocks_per_tile  = static_cast<uint32_t>(optInt(t, "blocks_per_tile", 8));
-    c.enable_order2    = optBool(t, "enable_order2", true);
-    c.enable_centering = optBool(t, "enable_centering", true);
-    c.error_bound      = optDbl(t, "error_bound", 1e-3);
-    c.eb_mode          = ebModeFromString(optStr(t, "error_bound_mode", "ABS"));
-    c.precomputed_value_base = static_cast<float>(optDbl(t, "value_base", 0.0));
-    return p.addStage<FusedQuantAdaptiveLorenzoStage<int32_t>>(c);
-}
-
-static void saveFusedQuantAdaptiveLorenzoStage(Stage* s, std::ostringstream& out) {
-    uint8_t buf[sizeof(FusedQuantAdaptiveLorenzoConfig)] = {};
-    if (s->serializeHeader(0, buf, sizeof(buf)) >= sizeof(FusedQuantAdaptiveLorenzoConfig)) {
-        FusedQuantAdaptiveLorenzoConfig c;
-        std::memcpy(&c, buf, sizeof(c));
-        out << "blocks_per_tile = " << static_cast<int>(c.blocks_per_tile) << "\n";
-        out << "enable_order2 = " << (c.enable_order2 ? "true" : "false") << "\n";
-        out << "enable_centering = " << (c.enable_centering ? "true" : "false") << "\n";
-        out << "error_bound = " << c.user_error_bound << "\n";
-        out << "error_bound_mode = \"" << ebModeToString(static_cast<ErrorBoundMode>(c.eb_mode)) << "\"\n";
     }
 }
 
@@ -689,75 +651,6 @@ static Stage* addAdaptiveBitpackStage(Pipeline& p, const toml::table& t) {
     throw std::runtime_error("loadConfig: unsupported AdaptiveBitpack input_type");
 }
 
-// SZx / SZp accept float32/float64 input and error_bound / error_bound_mode
-// (ABS or NOA — these whole-compressor stages have no exact per-element REL).
-// Every optStr/optInt/optDbl read is kept inline in the add function body so the
-// doc/TOML key checker, which parses that body, sees the full accepted-key set.
-static bool szIsNoa(const std::string& m) {
-    return m == "NOA" || m == "noa" || m == "REL" || m == "rel";
-}
-
-static Stage* addSZxStage(Pipeline& p, const toml::table& t) {
-    DataType dt = dataTypeFromString(optStr(t, "data_type", "float32"));
-    uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 128));
-    double eb = optDbl(t, "error_bound", 1e-3);
-    SZxErrorMode mode = szIsNoa(optStr(t, "error_bound_mode", "ABS"))
-        ? SZxErrorMode::NOA : SZxErrorMode::ABS;
-    auto configure = [&](auto* s) {
-        s->setBlockSize(block_size);
-        s->setErrorBound(eb);
-        s->setErrorMode(mode);
-        return s;
-    };
-    if (dt == DataType::FLOAT32) return configure(p.addStage<SZxStage<float>>());
-    if (dt == DataType::FLOAT64) return configure(p.addStage<SZxStage<double>>());
-    throw std::runtime_error("loadConfig: unsupported SZx data_type (use float32/float64)");
-}
-
-// LEGACY / EXPERIMENTAL — the monolithic SZp reference compressor is quarantined
-// (modules/experimental/reference_compressors/szp). This constructor is reachable only
-// through kLegacyStageRegistry, NOT the public kStageRegistry catalog, and exists
-// purely so pre-existing `type = "SZp"` configs and saved archives still load.
-// New pipelines should use examples/presets/szp_composed.toml instead.
-static Stage* addSZpStage(Pipeline& p, const toml::table& t) {
-    DataType dt = dataTypeFromString(optStr(t, "data_type", "float32"));
-    uint32_t block_size = static_cast<uint32_t>(optInt(t, "block_size", 128));
-    double eb = optDbl(t, "error_bound", 1e-3);
-    SZpErrorMode mode = szIsNoa(optStr(t, "error_bound_mode", "ABS"))
-        ? SZpErrorMode::NOA : SZpErrorMode::ABS;
-    auto configure = [&](auto* s) {
-        s->setBlockSize(block_size);
-        s->setErrorBound(eb);
-        s->setErrorMode(mode);
-        return s;
-    };
-    if (dt == DataType::FLOAT32) return configure(p.addStage<SZpStage<float>>());
-    if (dt == DataType::FLOAT64) return configure(p.addStage<SZpStage<double>>());
-    throw std::runtime_error("loadConfig: unsupported SZp data_type (use float32/float64)");
-}
-
-static void saveSZxStage(Stage* s, std::ostringstream& out) {
-    uint8_t buf[sizeof(SZxConfig)] = {};
-    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
-    SZxConfig cfg;
-    if (sz >= sizeof(cfg)) std::memcpy(&cfg, buf, sizeof(cfg));
-    out << "data_type = \""       << dataTypeToString(cfg.data_type) << "\"\n";
-    out << "block_size = "        << static_cast<int64_t>(cfg.block_size) << "\n";
-    out << "error_bound = "       << cfg.error_bound << "\n";
-    out << "error_bound_mode = \"" << (cfg.eb_mode == 2 ? "NOA" : "ABS") << "\"\n";
-}
-
-static void saveSZpStage(Stage* s, std::ostringstream& out) {
-    uint8_t buf[sizeof(SZpConfig)] = {};
-    size_t sz = s->serializeHeader(0, buf, sizeof(buf));
-    SZpConfig cfg;
-    if (sz >= sizeof(cfg)) std::memcpy(&cfg, buf, sizeof(cfg));
-    out << "data_type = \""       << dataTypeToString(cfg.data_type) << "\"\n";
-    out << "block_size = "        << static_cast<int64_t>(cfg.block_size) << "\n";
-    out << "error_bound = "       << cfg.error_bound << "\n";
-    out << "error_bound_mode = \"" << (cfg.eb_mode == 2 ? "NOA" : "ABS") << "\"\n";
-}
-
 static Stage* addTiledLorenzoStage(Pipeline& p, const toml::table& t) {
     DataType dt = dataTypeFromString(optStr(t, "data_type", "int32"));
     uint32_t tx = static_cast<uint32_t>(optInt(t, "tile_x", 0));
@@ -1017,37 +910,6 @@ static void saveROIBinSplitStage(Stage* s, std::ostringstream& out) {
         out << "roi_half_width = " << d->getRoiHalfWidth() << "\n";
         out << "bin_factor = "     << d->getBinFactor()    << "\n";
     }
-}
-
-static Stage* addCdf97Stage(Pipeline& p, const toml::table& t) {
-    // double is SPERR-bit-exact; float32 is a faster non-bit-exact variant.
-    DataType dt = dataTypeFromString(optStr(t, "data_type", "float64"));
-    if (dt == DataType::FLOAT32) return p.addStage<Cdf97Stage<float>>();
-    return p.addStage<Cdf97Stage<double>>();
-}
-
-static void saveCdf97Stage(Stage* s, std::ostringstream& out) {
-    out << "data_type = \"" << dataTypeToString(static_cast<DataType>(s->getOutputDataType(0))) << "\"\n";
-}
-
-static Stage* addSpeck2DStage(Pipeline& p, const toml::table& /*t*/) {
-    return p.addStage<Speck2DStage>();
-}
-static void saveSpeck2DStage(Stage* /*s*/, std::ostringstream& /*out*/) {
-    // No user-facing config: dims/threshold/nbitsA are pipeline/data-derived
-    // and round-trip via the stage's own serializeHeader(), not the TOML file.
-}
-
-static Stage* addCdf97OutlierCorrectStage(Pipeline& p, const toml::table& t) {
-    auto* s = p.addStage<Cdf97OutlierCorrectStage>();
-    // MUST match the paired QuantizerStage's own error_bound (ABS mode) —
-    // see the stage header's doc comment.
-    s->setErrorBound(static_cast<float>(optDbl(t, "error_bound", 1e-4)));
-    return s;
-}
-static void saveCdf97OutlierCorrectStage(Stage* s, std::ostringstream& out) {
-    auto* oc = static_cast<Cdf97OutlierCorrectStage*>(s);
-    out << "error_bound = " << oc->getErrorBound() << "\n";
 }
 
 static void saveMergeStage(Stage* s, std::ostringstream& out) {
@@ -1318,7 +1180,6 @@ static const StageEntry kStageRegistry[] = {
     { "Lorenzo",      StageType::LORENZO,      addLorenzoStage,      saveLorenzoStage,      "modules/predictors/lorenzo" },
     { "LorenzoQuant", StageType::LORENZO_QUANT, addLorenzoQuantStage, saveLorenzoQuantStage, "modules/fused/lorenzo_quant" },
     { "AdaptiveLorenzo", StageType::ADAPTIVE_LORENZO, addAdaptiveLorenzoStage, saveAdaptiveLorenzoStage, "modules/fused/adaptive_lorenzo" },
-    { "FusedQuantAdaptiveLorenzo", StageType::FUSED_QUANT_ADAPTIVE_LORENZO, addFusedQuantAdaptiveLorenzoStage, saveFusedQuantAdaptiveLorenzoStage, "modules/fused/quant_adaptive_lorenzo" },
     { "Quantizer",    StageType::QUANTIZER,    addQuantizerStage,    saveQuantizerStage,    "modules/quantizers/quantizer" },
     { "Bitshuffle",   StageType::BITSHUFFLE,   addBitshuffleStage,   saveBitshuffleStage,   "modules/shufflers/bitshuffle" },
     { "RZE",          StageType::RZE,          addRZEStage,          saveRZEStage,          "modules/coders/rze" },
@@ -1331,9 +1192,6 @@ static const StageEntry kStageRegistry[] = {
     { "HCLOG",        StageType::HCLOG,        addHCLOGStage,        saveHCLOGStage,        "modules/coders/hclog" },
     { "TUPL",         StageType::TUPL,         addTUPLStage,         saveTUPLStage,         "modules/structural/tupl" },
     { "LogTransform", StageType::LOG_TRANSFORM, addLogTransformStage, saveLogTransformStage, "modules/transforms/log_transform" },
-    { "CDF97",        StageType::CDF97,         addCdf97Stage,        saveCdf97Stage,        "modules/transforms/cdf97" },
-    { "SPECK2D",      StageType::SPECK2D,       addSpeck2DStage,      saveSpeck2DStage,      "modules/coders/speck2d" },
-    { "Cdf97OutlierCorrect", StageType::CDF97_OUTLIER_CORRECT, addCdf97OutlierCorrectStage, saveCdf97OutlierCorrectStage, "modules/coders/cdf97_outlier_correct" },
     { "Merge",        StageType::MERGE,        addMergeStage,        saveMergeStage,        "modules/structural/merge" },
     { "ROIBinSplit",  StageType::ROIBIN_SPLIT, addROIBinSplitStage,  saveROIBinSplitStage,  "modules/structural/roibin_split" },
     { "RLE",          StageType::RLE,          addRLEStage,          saveRLEStage,          "modules/coders/rle" },
@@ -1347,33 +1205,16 @@ static const StageEntry kStageRegistry[] = {
     { "BitplaneRZE",  StageType::BITPLANE_RZE, addBitplaneRZEStage,  saveBitplaneRZEStage,  "modules/fused/bitplane_rze" },
     { "AdaptiveBitpack", StageType::ADAPTIVE_BITPACK, addAdaptiveBitpackStage, saveAdaptiveBitpackStage, "modules/coders/adaptive_bitpack" },
     { "TiledLorenzo", StageType::TILED_LORENZO, addTiledLorenzoStage, saveTiledLorenzoStage, "modules/predictors/tiled_lorenzo" },
-    { "SZx",          StageType::SZX,          addSZxStage,          saveSZxStage,          "modules/fused/szx" },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Legacy / experimental stage constructors — deliberately NOT in kStageRegistry.
-//
-// These are quarantined whole-compressor reference implementations. They are not
-// part of the public module catalog (registeredStageTypes(), stageFingerprints(),
-// the docs, the integration checkers), and no automatic-fusion rule targets them.
-// They remain constructible from TOML (`type = "..."`) and re-serializable ONLY so
-// that pre-existing configs and FZM archives written before the quarantine keep
-// working. The supported modular equivalents:
-//   SZp  ->  examples/presets/szp_composed.toml
-// ─────────────────────────────────────────────────────────────────────────────
-static const StageEntry kLegacyStageRegistry[] = {
-    { "SZp",          StageType::SZP,          addSZpStage,          saveSZpStage,          "modules/experimental/reference_compressors/szp" },
-};
-
 static const StageEntry* findStageEntry(const std::string& type_name) {
     for (const auto& e : kStageRegistry)       if (type_name == e.type_name) return &e;
-    for (const auto& e : kLegacyStageRegistry) if (type_name == e.type_name) return &e;
     return nullptr;
 }
 
 static const StageEntry* findStageEntry(StageType stype) {
     for (const auto& e : kStageRegistry)       if (e.enum_val == stype) return &e;
-    for (const auto& e : kLegacyStageRegistry) if (e.enum_val == stype) return &e;
     return nullptr;
 }
 
@@ -1495,8 +1336,13 @@ void Pipeline::loadConfig(const std::string& path) {
         // use the deduced type so this resolves to the file-scope registry entry.
         if (const auto* entry = findStageEntry(type))
             s = entry->load_fn(*this, *t);
-        if (!s)
+        if (!s) {
+            if (type == "SZx" || type == "SZp" || type == "CDF97" || type == "SPECK2D" ||
+                type == "Cdf97OutlierCorrect" || type == "FusedQuantAdaptiveLorenzo")
+                throw std::runtime_error("loadConfig: unsupported development stage \""
+                    + type + "\"; use the development branch for this configuration");
             throw std::runtime_error("loadConfig: unknown stage type \"" + type + "\"");
+        }
 
         stage_map[name] = s;
         entries.push_back({name, s, t});
@@ -1613,8 +1459,7 @@ void Pipeline::saveConfig(const std::string& path) const {
         // DAGNode::input_buffer_ids in call order, so that vector's index is
         // the authoritative port position -- look each one up rather than
         // assuming real connections always precede external bindings or
-        // vice versa (Cdf97OutlierCorrectStage happens to bind external
-        // first today, but nothing enforces that in general).
+        // vice versa; mixed-input stages can use either order.
         DAGNode* s_node = stage_to_node_.at(s);
         std::vector<std::string> port_entries(s_node->input_buffer_ids.size());
         for (auto& conn : connections_) {

@@ -354,3 +354,8 @@ Parsed OK.
 Compatibility also depends on the serialized stage type and configuration. This
 table describes the current reader; it does not promise compatibility with
 archives from the historical 1.0 library release.
+
+Stable main reads archives only for its shipped stage catalog. Historical IDs
+36, 37, 39–41, and 43 are reserved but unavailable; archives containing those
+stages require a compatible `development` decoder. The reader rejects missing
+stage factories rather than reusing their IDs. See [branch policy](branch_policy.md).

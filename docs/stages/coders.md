@@ -14,5 +14,3 @@
 | \subpage stage_hclog | CLOG bit packing with per-subchunk TCMS selection (LC framework lossless component) |
 | \subpage stage_bitpack | Dense bit-packing of fixed-width integers |
 | \subpage stage_adaptive_bitpack | Per-block adaptive fixed-rate bit-plane coding (cuSZp plain mode) |
-| \subpage stage_speck2d | Experimental GPU-parallel "wavefront" SPECK-like coder (2-D), custom decode-parallel format |
-| \subpage stage_outlier_correct | Experimental sparse floating-point residual correction in the reconstructed domain |

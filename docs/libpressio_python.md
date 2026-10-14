@@ -6,11 +6,15 @@ The plugin translates libpressio's generic compressor interface into FZGPUModule
 calls, handles GPU memory management, and surfaces metrics after each compress.
 
 The v2 release-preparation check builds the adapter against the relocated
-installed SDK. The local compatibility patch removes unavailable ADM/legacy
-SZp registrations and passes the C++/Python and targeted memcheck checks; see
+installed SDK. The local compatibility patch probes optional stage APIs and
+omits registrations for unavailable ADM, legacy SZp, CDF97, SPECK2D,
+Cdf97OutlierCorrect, and SZx stages. See
 the [validation report](releases/v2.0.0-validation.md#libpressio-compatibility).
 The unpatched fork is not v2-compatible. Apply/publish that adapter patch before
 using the installation instructions below as a v2 integration recipe.
+
+The plugin's configuration metadata exposes `fzgpumodules:optional_stages` for
+the CDF97, SPECK2D, wavelet-correction, and SZx wrappers.
 
 The adapter currently requires a prior `compress()` on the same compressor
 instance before `decompress()`. Its raw compressed output does not independently
@@ -352,33 +356,17 @@ Full metrics reference:
 
 ## Specialization demo
 
-The [installed demo runbook](demos/python-specialization.md) records the verified
-environment, dependency pins, setup commands, live presentation sequence, and
-rehearsal checks.
+The adapter's `fzgpumodules:specialization` option enables the retained CUDA
+Pipeline Specialization capability. `off` runs staged execution; `auto` installs
+admitted implementations where supported. Inspect installation diagnostics to
+confirm that a particular graph specialized. The former `fzgpumodules:fusion`
+key is rejected with a migration message. CUDA Graph capture and specialization
+are mutually exclusive.
 
-The adapter's `fzgpumodules:specialization` option enables Pipeline
-Specialization. The former `fzgpumodules:fusion` key was removed and is rejected
-with a migration message. `off` selects staged execution and `auto` installs admitted
-implementations where supported. Auto can fall back; selecting the policy alone
-does not establish that a specialization was installed. CUDA Graph mode is
-mutually exclusive with specialization, and this demo leaves graph mode disabled.
-
-The Python demo builds a cuSZp-style linear Quantizer → integer Lorenzo →
-AdaptiveBitpack pipeline with matching 32-element blocks. The local adapter patch
-adds the previously missing integer Lorenzo `block_size` option and exposes
-installation diagnostics. With a patched adapter installed:
-
-```bash
-python3 scripts/libpressio_specialization_demo.py
-```
-
-For a build-tree adapter, pass `--python-path /path/to/libpressio-build/tools/swig`.
-The script checks exact logical shape, finite reconstruction, maximum absolute
-error against the requested bound, zero installed groups for Off, and positive
-forward/inverse counts for Auto. It warms both directions before repeated timing.
-Timing includes Python and host/device transfers; it is not kernel-only throughput
-or a claim that Auto always wins. An optional flat f32 field can be supplied with
-`--input field.f32 --error-bound 1e-3`.
+The validated Python workflow uses linear Quantizer → integer Lorenzo →
+AdaptiveBitpack with matching block sizes. This capability remains available in
+main; presentation scripts, dependency pins, environment preflight, and rehearsal
+material are preserved on `development`. They are not part of the stable package.
 
 After `encode()`, `get_metrics()` exposes these additional diagnostics:
 

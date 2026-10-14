@@ -121,8 +121,7 @@ docker run --rm --gpus all \
   bash -c "cd /workspace/src && \
            cmake --preset release \
              -DBUILD_EXAMPLES=ON \
-             -DBUILD_TESTING=ON \
-             -DBUILD_PROFILING=ON && \
+             -DBUILD_TESTING=ON && \
            cmake --build build/release -j$(nproc)"
 ```
 
@@ -158,7 +157,7 @@ docker run --rm -it --gpus all \
 
 ### Python Integration
 
-Python 3 and pip are available for profiling scripts or future bindings:
+Python 3 and pip are available for integration tooling and bindings:
 
 ```bash
 docker run --rm -it fzgpumodules:latest python3 --version

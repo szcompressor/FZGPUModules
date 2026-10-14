@@ -1,5 +1,12 @@
 # Codebase Notes {#codebase_notes}
 
+These maintained notes preserve implementation rationale and historical
+investigations referenced by source. Experimental paths and research assets
+mentioned in older notes are retained on `development`; their mention here does
+not make them available in stable main. The [branch policy](branch_policy.md)
+and current stage catalog define the supported build scope.
+
+
 Longform engineering notes that back up decisions in the source: measurement
 tables, before/after numbers, bug postmortems, and "why not the obvious thing"
 arguments.
@@ -366,7 +373,8 @@ uniform, so the fallback always terminates.
 `profiling/huffman_throughput.cpp`
 **Measured:** 2026-08-22, NVIDIA H100 80 GB HBM3 (sm_90), driver 595.84,
 CUDA 12.9.86/runtime 12.9, GCC 13.3.0, CMake 3.28.3, Release,
-`BUILD_PROFILING=ON`, `BUILD_TESTING=ON`
+`BUILD_PROFILING=ON`, `BUILD_TESTING=ON` (historical development configuration;
+research profiling targets are available on `development`, not stable main).
 
 ### Method
 
@@ -597,6 +605,10 @@ Acceptance gates for the next builder optimization:
 7. do not commit unless explicitly requested.
 
 ### Reproduction
+
+Run this historical research harness on `development`. Stable main preserves
+production timing APIs and offers `ENABLE_NVTX` for annotations, but does not
+ship `BUILD_PROFILING` programs.
 
 ```bash
 CUDACXX=/software/u24/nvhpc/25.7/Linux_x86_64/25.7/cuda/12.9/bin/nvcc \

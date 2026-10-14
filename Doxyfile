@@ -17,8 +17,8 @@ INPUT                  = include/ \
                          modules/ \
                          docs/mainpage.md \
                          docs/building.md \
+                         docs/branch_policy.md \
                          docs/stages/ \
-                         docs/experimental/ \
                          docs/config_file.md \
                          docs/cli.md \
                          docs/api_reference.md \
@@ -26,7 +26,6 @@ INPUT                  = include/ \
                          docs/performance_tuning.md \
                          docs/pipeline_specialization_internals.md \
                          docs/extending.md \
-                         docs/developing_stages_deep_dive.md \
                          docs/how_to_add_a_stage.md \
                          docs/out_of_tree_stage.md \
                          docs/fzm_format.md \

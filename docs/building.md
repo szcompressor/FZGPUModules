@@ -10,7 +10,6 @@ configuring with CMake, running tests, installing, and integrating into your own
 | Requirement | Requirement or scope |
 |---|---|
 | CUDA Toolkit | 11.2+ configure-time API floor (stream-ordered allocator) |
-| AMD backend (experimental) | HIP, hipCUB, and rocThrust packages required; backend coverage remains experimental |
 | C++ Standard | C++17 |
 | CMake | 3.24+ |
 | Python | Python 3 (build-time header embedding and source fingerprints) |
@@ -20,7 +19,7 @@ configuring with CMake, running tests, installing, and integrating into your own
 The compiler must provide C++17 language and library facilities, including
 `<charconv>` used by the vendored TOML parser. Select a host compiler supported by
 your CUDA toolkit; a compiler's C++17 support alone does not establish CUDA
-compatibility. For HIP, use ROCm's supported compiler toolchain. The repository
+compatibility. The repository
 does not establish a tested minimum GCC or Clang version, and the CUDA 11.2
 configure-time floor is not a guarantee that every older toolkit builds current
 sources. The build-check container specifies CUDA 12.6; the GPU CI workflow loads
@@ -91,7 +90,6 @@ cleaned up afterward.
 | `debug` | Debug | Unoptimized build with `-Wall` |
 | `asan` | Debug | AddressSanitizer + UndefinedBehaviorSanitizer |
 | `compute-san` | RelWithDebInfo | CUDA Compute Sanitizer (auto-wraps ctest with memcheck) |
-| `hip` | Release | Experimental AMD HIP/ROCm build |
 
 Configure and build any preset:
 
@@ -110,9 +108,9 @@ cmake --build --preset <preset> -j$(nproc)
 | `BUILD_SHARED_LIBS` | `ON` | Build as a shared library; set `OFF` for static |
 | `BUILD_TESTING` | `OFF` | Build the test suite |
 | `BUILD_EXAMPLES` | `OFF` | Build example executables |
-| `BUILD_PROFILING` | `OFF` | Build profiling targets (requires Nsight Systems / NVTX3) |
 | `BUILD_CLI` | `ON` | Build the `fzgmod-cli` command-line tool |
-| `FZGMOD_BACKEND` | `CUDA` | Backend: supported `CUDA`, experimental `HIP`, or unimplemented `SYCL` |
+| `ENABLE_NVTX` | `OFF` | Enable production NVTX annotations; requires NVTX3 headers |
+| `FZGMOD_BACKEND` | `CUDA` | Stable main supports `CUDA` only; backend work is on `development` |
 | `USE_SANITIZER` | — | Sanitizer mode: `ASanUbsan`, `TSan`, or `Compute` |
 | `COMPUTE_SANITIZER_DEVICE_DEBUG` | `OFF` | Add `-G` to CUDA builds for source-level Compute Sanitizer (much slower) |
 | `CMAKE_CUDA_ARCHITECTURES` | — | CUDA compute capability (e.g., `75`, `80`, `90`); comma-separated for multiple |
@@ -136,27 +134,9 @@ paths, factories and the public registration surfaces. See
 
 ## Common Build Examples
 
-### Experimental HIP/ROCm backend
-
-HIP support is experimental: it does not yet have the same CI and stage coverage as
-CUDA, and some CUDA-specific stages such as ANS are unavailable. Configure ROCm's
-package root and select the GPU architecture explicitly when the `gfx908` preset
-default is not appropriate:
-
-```bash
-export CMAKE_PREFIX_PATH=/opt/rocm:$CMAKE_PREFIX_PATH
-cmake --preset hip -DCMAKE_HIP_ARCHITECTURES=gfx90a
-cmake --build --preset hip -j$(nproc)
-ctest --preset hip
-```
-
-An installed HIP build records its backend in `FZGPUModulesConfig.cmake`; downstream
-`find_package(FZGPUModules)` calls resolve ROCm dependencies rather than requiring a
-CUDA Toolkit.
-
 ### CUDA examples
 
-**Development build** (with tests, profiling, examples, and sanitizer support):
+**Development build** (with tests, examples, and sanitizer support):
 
 ```bash
 cmake -S . -B build \
@@ -197,7 +177,6 @@ cmake --install build
 | CLI (`fzgmod-cli`) | `build/release/bin/` |
 | Examples | `build/release/bin/examples/` |
 | Tests | `build/release/tests/` |
-| Profiling | `build/release/bin/profiling/` |
 
 ---
 

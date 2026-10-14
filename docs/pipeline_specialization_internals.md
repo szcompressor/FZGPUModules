@@ -376,5 +376,3 @@ CESM-2D/CLDHGH 108.9 -> 59.4 MB (input, archive, outliers, ~1/CR concat copy).
 
 - User guide: \ref pipeline_specialization "Pipeline Specialization" (in Performance Tuning)
 - Adding a stage at all: [how_to_add_a_stage.md](how_to_add_a_stage.md)
-- Future deep-dive on stage design + optimization decisions (WIP outline):
-  [developing_stages_deep_dive.md](developing_stages_deep_dive.md)

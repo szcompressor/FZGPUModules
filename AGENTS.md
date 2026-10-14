@@ -48,15 +48,14 @@ How to add a brand-new stage: [docs/how_to_add_a_stage.md](docs/how_to_add_a_sta
 ## Build
 
 ```bash
-cmake --preset release                          # default (no examples/tests/profiling)
+cmake --preset release                          # default (no examples/tests)
 cmake --preset release -DBUILD_EXAMPLES=ON      # with examples
 cmake --preset release -DBUILD_TESTING=ON       # with tests
-cmake --preset release -DBUILD_PROFILING=ON     # with profiling
 cmake --build build/release -j$(nproc)
 ```
 
-Test binaries go to `build/release/tests/`, example binaries to `build/release/bin/examples/`,
-profiling binaries to `build/release/bin/profiling/`. Full option/preset list:
+Test binaries go to `build/release/tests/` and example binaries to
+`build/release/bin/examples/`. Full option/preset list:
 [docs/building.md](docs/building.md).
 
 ## Testing
@@ -97,7 +96,6 @@ include/            public headers (only these in user/example code)
 modules/             stage implementations, see table above
 src/pipeline/        Pipeline, DAG, MemoryPool internals
 examples/            example programs (-DBUILD_EXAMPLES=ON)
-profiling/           profiling programs (-DBUILD_PROFILING=ON)
 tests/               test suite (-DBUILD_TESTING=ON)
 docs/                doxygen-driven documentation site (mainpage, architecture, stages/, api_reference)
 scripts/             helper scripts
@@ -157,3 +155,11 @@ Do not add entries for documentation-only or comment-only edits.
 | FZM binary file format | [docs/fzm_format.md](docs/fzm_format.md) |
 | CLI and TOML config syntax | [docs/cli.md](docs/cli.md), [docs/config_file.md](docs/config_file.md) |
 | Building from source (all presets/options) | [docs/building.md](docs/building.md) |
+
+## Branch policy
+
+Stable main contains CUDA production modules and their validation/support tooling.
+Research artifacts, profiling programs, demos, experimental modules, and backend
+development are preserved on `development`. See [docs/branch_policy.md](docs/branch_policy.md).
+Cherry-pick stable fixes into development; do not merge the main cleanup wholesale,
+which would remove the research tree from development.

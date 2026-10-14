@@ -69,9 +69,9 @@ constexpr size_t FZM_MAX_SOURCES      = 4;    ///< Maximum source stages per pip
 /// Set on exactly the stage Pipeline::setPrimarySource() designated (or, if
 /// unset, the pipeline's sole/first-discovered source) -- see buildHeader()
 /// and Pipeline::buildSourceSizesFromHeader(). Needed because a stage bound
-/// via bindExternalInput() alongside other real connections (e.g.
-/// Cdf97OutlierCorrectStage) is invisible to the plain "no other stage
-/// produces any of my inputs" source test buildSourceSizesFromHeader() uses
+/// via bindExternalInput() alongside other real connections is invisible to
+/// the plain "no other stage produces any of my inputs" source test
+/// buildSourceSizesFromHeader() uses
 /// for everything else -- decompressFromFile() has no live Pipeline to ask.
 /// Absent (0) on any archive written before this flag existed; the
 /// old is-source heuristic remains the fallback for those.
@@ -119,17 +119,17 @@ enum class StageType : uint16_t {
     LOG_TRANSFORM = 33, ///< Log-space transform for point-wise relative bounds (Liang et al., CLUSTER'18)
     ADAPTIVE_LORENZO = 34, ///< Per-tile adaptive multi-order Lorenzo + centering (FSZ prediction stage)
     ROIBIN_SPLIT = 35, ///< Region-of-interest / binned-background split (ROIBIN-style dual-error-bound branching)
-    SZX        = 36,   ///< SZx ultrafast EB compressor: per-block constant/non-constant classification + fixed-length residuals (fused, no entropy coder)
-    SZP        = 37,   ///< SZp / fZ-light: quantize + 1-D Lorenzo delta + fixed-length bitpack. QUARANTINED experimental reference compressor (modules/experimental/reference_compressors/szp) — ID reserved forever, factory stays linked for archive back-compat; use szp_composed.toml for new pipelines.
+    SZX        = 36, ///< Reserved development-stage ID; implementation is not shipped on main.
+    SZP        = 37, ///< Reserved development-stage ID; implementation is not shipped on main.
     // 38 (TEE, SPERR-branch-only) never shipped on main -- bindExternalInput()
     // replaced the fan-out/duplicate-copy stage it would have been for before
     // this branch merged. Not reused -- a future stage type reading an old
     // archive that used it should fail loudly, not silently collide.
-    CDF97      = 39,   ///< CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half)
-    SPECK2D    = 40,   ///< GPU-parallel "wavefront" SPECK-like coder (2-D), decode-parallel format
-    CDF97_OUTLIER_CORRECT = 41, ///< Sparse outlier correction, guarantees the GPU SPERR pipeline's pointwise bound
+    CDF97      = 39, ///< Reserved development-stage ID; implementation is not shipped on main.
+    SPECK2D    = 40, ///< Reserved development-stage ID; implementation is not shipped on main.
+    CDF97_OUTLIER_CORRECT = 41, ///< Reserved development-stage ID; implementation is not shipped on main.
     GOLOMB_RICE = 42,  ///< Chunk-local Golomb-Rice entropy coder (exact per-chunk k, escape-bounded)
-    FUSED_QUANT_ADAPTIVE_LORENZO = 43, ///< AdaptiveLorenzo with the upstream linear Quantizer fused into its forward kernel (FSZ "M1" partial fusion, deletes one DRAM round-trip)
+    FUSED_QUANT_ADAPTIVE_LORENZO = 43, ///< Reserved development-stage ID; implementation is not shipped on main.
 };
 
 /**

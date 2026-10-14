@@ -103,6 +103,9 @@ void build(Pipeline& p) {
 | `Auto` | Install every auto-enabled registered specialization that matches a chain. Registration is the current evidence gate; there is not yet a per-input predictive profitability test. This is the production setting. |
 | `Force` | Also admit *experimental* specializations that have not yet cleared the gate. For correctness/perf diagnostics only — not a production default. |
 
+All specializations shipped on stable main are auto-enabled, so `Force` currently
+adds no implementations beyond `Auto`.
+
 `PREALLOCATE` is recommended (and required for the fused path's persistent scratch).
 
 **From the environment** (overrides the programmatic policy):
@@ -398,11 +401,14 @@ Compiles out `FZ_LOG()` call sites below the threshold entirely. Arguments are
 never evaluated, zero-overhead for suppressed levels. Default `2` (INFO); set to `255` (SILENT) to strip all
 logging for production/embedded builds where every cycle counts.
 
-### BUILD_PROFILING / FZ_PROFILING_ENABLED
+### ENABLE_NVTX / FZ_PROFILING_ENABLED
 
-Gates NVTX3 annotations (used in `decompressFromFile` and the `profiling/`
-harnesses) and `-fno-omit-frame-pointer` for complete `nsys` CPU stack walks. `OFF` compiles the instrumentation out entirely (zero cost). When `ON` but not
-captured under `nsys`, the per-call NVTX range-push/pop cost is *(unmeasured)*.
+`-DENABLE_NVTX=ON` enables production NVTX annotations for Nsight Systems and
+retains host frame pointers on GCC/Clang. It requires `nvtx3/nvtx3.hpp`; set
+`-DNVTX3_INCLUDE_DIR=/path/to/nvtx/include` if the toolkit does not provide it.
+The default is `OFF`. This option does not build research profiling programs,
+which are preserved on `development`. Pipeline/CLI timing APIs remain available
+without NVTX instrumentation.
 
 ### USE_SANITIZER
 

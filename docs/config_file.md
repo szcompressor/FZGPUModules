@@ -134,9 +134,8 @@ stages except Lorenzo, which uses named ports "codes", "outlier_errors",
 `{ from = "__external__" }` is a reserved entry, not a stage reference: it
 binds the pipeline's raw input directly to this port
 (`Pipeline::bindExternalInput()`), even when the same stage's `inputs` array
-also has a normal `{ from = "<name>" }` entry at another position — needed by
-[Cdf97OutlierCorrect](#cdf97outliercorrect) below, whose raw-field port and
-codes port come from two different places. Position in the array matters,
+also has a normal `{ from = "<name>" }` entry at another position.
+Position in the array matters,
 same as for a real connection. When this creates more than one source stage
 in the pipeline, set `[pipeline].primary_source = "<name>"` to say which
 stage's inverse output `decompress()` should return (see the
@@ -179,16 +178,8 @@ example `setBlockSize(32)` is `block_size = 32`).
 | `GPULZ` | `GPULZStage` | \ref stage_gpulz "GPULZStage" |
 | `GInterp` | `GInterpStage` | \ref stage_ginterp "GInterpStage" |
 | `BitplaneRZE` | `BitplaneRZEStage` | \ref stage_bitplane_rze "BitplaneRZEStage" |
-| `SZx` | `SZxStage` | \ref stage_szx "SZxStage" |
 | `Merge` | `MergeStage` | \ref stage_merge "MergeStage" |
 | `ROIBinSplit` | `ROIBinSplitStage` | \ref stage_roibin_split "ROIBinSplitStage" |
-
-> **Legacy / experimental types.** `type = "SZp"` still loads (and re-saves) for
-> backward compatibility with configs and archives written before SZp was
-> quarantined as an experimental reference compressor, but it is not a supported
-> module and is absent from the catalog above. New pipelines can use the
-> SZp-inspired modular composition in `examples/presets/szp_composed.toml`
-> (`Quantizer(linear) → Lorenzo(block_size=128) → AdaptiveBitpack(block_size=128)`).
 
 For a cuSZp-style `Quantizer` with a strict requested bound, set
 `linear_mode = true` and `linear_high_precision = true`. The optional
@@ -202,43 +193,6 @@ For a native-PFPL-compatible float32 front end, set
 and `verify_reconstruction = true`. The last option losslessly embeds any
 otherwise representable value whose actual reconstructed float would exceed
 the resolved absolute bound.
-
-### CDF97
-
-CDF 9/7 biorthogonal wavelet transform (SPERR's DWT front-half). Lossless,
-invertible, size-preserving `float -> float` basis change -- not itself
-lossy, feeds a `Quantizer`. No `inputs` key needed when it's the pipeline's
-only true source (the common case).
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| data_type | string | "float32" | "float32" or "float64". `float64` reproduces SPERR's coefficients bit-for-bit. |
-
-### SPECK2D
-
-GPU-parallel "wavefront" SPECK-like bit-plane coder (2-D only). Takes signed
-`int32` codes -- the same convention `Quantizer`'s `linear_mode = true`
-emits.
-
-No tunable keys -- dims, threshold, and the tree/magnitude split point are
-all pipeline/data-derived.
-
-### Cdf97OutlierCorrect
-
-Sparse exact outlier correction: turns `CDF97`+`Quantizer`'s reported error
-bound into an actually guaranteed one (quantizing DWT coefficients alone
-does not bound the reconstructed field's pointwise error -- see
-[stage_outlier_correct](stages/outlier_correct.md)). Needs the raw field
-bound to one input port via `{ from = "__external__" }` and the paired
-`Quantizer`'s codes on the other, in that order (see the `inputs` note
-above) -- see the [SPERR pipeline example](#sperr-pipeline-bound-guaranteed)
-below.
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| error_bound | float | 1e-4 | MUST equal the paired `Quantizer` stage's own `error_bound` exactly (ABS mode only -- `rel_range`/NOA bounds must be converted to absolute externally before setting this). |
-
----
 
 ## Complete Examples
 
@@ -338,62 +292,6 @@ Load it via the CLI:
 ```bash
 fzgmod-cli -b -c examples/presets/pfpl.toml -i data.f32
 ```
-
-### SPERR pipeline (bound-guaranteed)
-
-CDF 9/7 DWT -> Quantizer -> sparse outlier correction -> SPECK2D. Unlike the
-two examples above, this pipeline has **two** source stages (`dwt`, a pure
-source with no `inputs` key, and `correct`, bound to the raw input via
-`{ from = "__external__" }` alongside its normal `quant` connection) --
-`primary_source` says which one's reconstruction `decompress()` returns.
-This is `examples/presets/sperr_gpu.toml`; see
-[stage_outlier_correct](stages/outlier_correct.md) for why the pipeline
-needs this stage at all (a plain `CDF97 -> Quantizer -> SPECK2D` chain does
-not guarantee its reported error bound).
-
-```toml
-[pipeline]
-memory_strategy = "PREALLOCATE"
-pool_multiplier = 8.0
-primary_source  = "correct"    # decompress() returns correct's corrected
-                                # field, not dwt's own uncorrected inverse
-
-[[stage]]
-name = "dwt"
-type = "CDF97"
-data_type = "float32"
-
-[[stage]]
-name = "quant"
-type = "Quantizer"
-input_type       = "float32"
-code_type        = "uint32"
-error_bound      = 1e-4
-error_bound_mode = "ABS"       # NOA/rel_range is NOT valid for this pipeline -- see below
-linear_mode      = true
-inputs = [{ from = "dwt" }]
-
-[[stage]]
-name = "correct"
-type = "Cdf97OutlierCorrect"
-error_bound = 1e-4              # MUST match quant's error_bound exactly
-inputs = [
-  { from = "__external__" },    # correct.input[0] = raw field
-  { from = "quant", port = "codes" }   # correct.input[1] = codes
-]
-
-[[stage]]
-name = "speck"
-type = "SPECK2D"
-inputs = [{ from = "correct", port = "codes" }]
-```
-
-```bash
-fzgmod-cli -c examples/presets/sperr_gpu.toml \
-    -i data/CLDHGH.f32 -l 3600x1800x1 -b --report --compare data/CLDHGH.f32
-```
-
----
 
 ## Limitations
 

@@ -809,3 +809,21 @@ TEST(ConfigSave, DeviceResidentHuffmanModeRoundTrips) {
     EXPECT_NO_THROW(p2.loadConfig(path));
     std::remove(path.c_str());
 }
+
+TEST(Config, DevelopmentStageTypesRejectedWithGuidance) {
+    for (const std::string type : {"SZx", "SZp", "CDF97", "SPECK2D",
+                                   "Cdf97OutlierCorrect", "FusedQuantAdaptiveLorenzo"}) {
+        SCOPED_TRACE(type);
+        const auto path = write_toml("development_rejected", "[[stage]]\nname = \"dev\"\ntype = \"" + type + "\"\n");
+        Pipeline p(4096, MemoryStrategy::PREALLOCATE);
+        try {
+            p.loadConfig(path);
+            FAIL() << "development configuration was accepted";
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find(type), std::string::npos);
+            EXPECT_NE(message.find("development branch"), std::string::npos);
+        }
+        std::remove(path.c_str());
+    }
+}

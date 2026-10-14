@@ -392,9 +392,8 @@ void Pipeline::typeCheckConnections() {
         // connection's buffer id IS its real port position. Counting entries
         // in connections_ alone (an earlier version of this fix did that)
         // undercounts whenever bindExternalInput() also consumed a port on
-        // the same stage without adding to connections_ -- exactly
-        // Cdf97OutlierCorrectStage's shape (external field on port 0, this
-        // connection on port 1).
+        // the same stage without adding to connections_ (for example, an
+        // external buffer on port 0 and a stage connection on port 1).
         DAGNode* dep_node  = stage_to_node_.at(conn.dependent);
         DAGNode* prod_node = stage_to_node_.at(conn.producer);
         int buf_id = prod_node->output_index_to_buffer_id.at(conn.output_index);

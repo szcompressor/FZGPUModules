@@ -148,22 +148,6 @@ fz_add_test(
     LABELS  stages gpu
 )
 
-# ─── Cdf97Stage (CDF 9/7 wavelet transform, SPERR's DWT) ─────────────────────
-fz_add_test(
-    NAME    test_cdf97
-    SOURCES test_cdf97.cpp
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
-
-# ─── Speck2DStage (GPU-parallel wavefront SPECK-like coder) ─────────────────
-fz_add_test(
-    NAME    test_speck2d
-    SOURCES test_speck2d.cpp
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
-
 # ─── MergeStage (structural concat/split) ────────────────────────────────────
 fz_add_test(
     NAME    test_merge_stage
@@ -219,20 +203,6 @@ fz_add_test(
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )
-
-# ─── Module-card coverage (index / field consistency check) ──────────────────
-# Verifies docs/cards/index.json is in sync with card files on disk and each
-# card contains the required top-level fields.  Heavy JSON-schema validation
-# is done by validate-cards.py (Z-Hub repo); this C++ test is a fast CI guard.
-# Cards moved from modules/*/card.json to docs/cards/fzgm-*.json in v1.0.
-fz_add_test(
-    NAME    test_module_cards
-    SOURCES test_module_cards.cpp
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
-target_compile_definitions(test_module_cards PRIVATE
-    FZ_CARDS_DIR="${CMAKE_SOURCE_DIR}/docs/cards")
 
 # ─── cuSZp-family pipeline block/tile size sweeps ─────────────────────────────
 fz_add_test(
@@ -306,22 +276,6 @@ fz_add_test(
 fz_add_test(
     NAME    test_gpulz
     SOURCES test_gpulz.cpp
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
-
-# ─── SZx stage (ultrafast EB, constant-block classification) ──────────────────
-fz_add_test(
-    NAME    test_szx
-    SOURCES test_szx.cpp
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
-
-# ─── SZp / fZ-light stage (quantize + 1-D delta + fixed-length bitpack) ────────
-fz_add_test(
-    NAME    test_szp
-    SOURCES test_szp.cpp
     LIBS    fzgmod_modules fzgmod_mem fzgmod
     LABELS  stages gpu
 )

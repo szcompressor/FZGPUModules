@@ -38,6 +38,19 @@ Stage* createStage(StageType type, const uint8_t* config, size_t config_size) {
     auto& m = registry();
     auto it = m.find(static_cast<uint16_t>(type));
     if (it == m.end() || it->second == nullptr) {
+        switch (type) {
+            case StageType::SZX:
+            case StageType::SZP:
+            case StageType::CDF97:
+            case StageType::SPECK2D:
+            case StageType::CDF97_OUTLIER_CORRECT:
+            case StageType::FUSED_QUANT_ADAPTIVE_LORENZO:
+                throw std::runtime_error("createStage: unsupported development stage "
+                    + stageTypeToString(type) + " (ID "
+                    + std::to_string(static_cast<uint16_t>(type))
+                    + "); use the development branch to decode this archive");
+            default: break;
+        }
         throw std::runtime_error("createStage: no factory registered for stage type "
                                  + std::to_string(static_cast<uint16_t>(type)));
     }
