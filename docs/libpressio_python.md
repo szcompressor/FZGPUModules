@@ -5,13 +5,10 @@ that lets you build and run GPU compression pipelines from Python (or C++) throu
 The plugin translates libpressio's generic compressor interface into FZGPUModules pipeline
 calls, handles GPU memory management, and surfaces metrics after each compress.
 
-The v2 release-preparation check builds the adapter against the relocated
-installed SDK. The local compatibility patch probes optional stage APIs and
-omits registrations for unavailable ADM, legacy SZp, CDF97, SPECK2D,
-Cdf97OutlierCorrect, and SZx stages. See
-the [validation report](releases/v2.0.0-validation.md#libpressio-compatibility).
-The unpatched fork is not v2-compatible. Apply/publish that adapter patch before
-using the installation instructions below as a v2 integration recipe.
+Use a v2-compatible adapter and rebuild it against the installed SDK.
+Public-header probes omit registrations for unavailable ADM, legacy SZp,
+CDF97, SPECK2D, Cdf97OutlierCorrect, and SZx stages. The unpatched fork
+requires the v2 compatibility changes before following the setup below.
 
 The plugin's configuration metadata exposes `fzgpumodules:optional_stages` for
 the CDF97, SPECK2D, wavelet-correction, and SZx wrappers.
@@ -378,7 +375,7 @@ After `encode()`, `get_metrics()` exposes these additional diagnostics:
 | `specialization_inverse_implementations` | Inverse implementation names |
 | `specialization_fallback_reason` | Empty on a forward installation; otherwise the library fallback reason |
 
-These metrics require the local adapter patch described in the validation report.
+These metrics require a v2-compatible adapter.
 Use the same compressor instance for encode and decode. This demo does not provide
 standalone decoder restoration or independently portable archive files.
 
