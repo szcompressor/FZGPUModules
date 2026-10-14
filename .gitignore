@@ -1,4 +1,5 @@
 # Project-specific
+/docs/releases/
 .notes/
 temp/
 memory/

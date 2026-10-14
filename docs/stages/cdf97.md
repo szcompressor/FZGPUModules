@@ -3,7 +3,7 @@
 **Header:** `modules/transforms/cdf97/cdf97_stage.h`
 **Class:** `fz::Cdf97Stage<TInput>`
 **Category:** Transform (numerically reversible, size-preserving)
-**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
+**Release status:** Experimental in v2.0.
 
 ---
 

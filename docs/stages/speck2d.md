@@ -4,7 +4,7 @@
 **Kernels:** `modules/coders/speck2d/speck2d_kernels.cuh`
 **Class:** `fz::Speck2DStage`
 **Category:** Coder (lossless, variable-length output)
-**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
+**Release status:** Experimental in v2.0.
 
 ---
 

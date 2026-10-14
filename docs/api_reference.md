@@ -337,7 +337,7 @@ The public headers are organized into three tiers by how stable they are:
 Experimental stage headers (CDF97, SPECK2D, OutlierCorrect/Cdf97OutlierCorrect,
 and SZx), and the legacy SZp reference, are excluded from the stable source-API
 promise. Their availability does not establish an unrestricted numerical
-accuracy contract. See the [v2 experimental scope](releases/v2.0.0.md#experimental-modules).
+accuracy contract.
 Stage IDs and available archive readers are retained.
 
 The umbrella `fzgpumodules.h` no longer advertises the Advanced headers. `Pipeline`

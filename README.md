@@ -97,7 +97,7 @@ See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, 
 
 CDF97, SPECK2D, wavelet outlier correction, and SZx are **experimental** in v2.0.
 Their availability does not establish a strict numerical guarantee for every
-input. See the [release scope](docs/releases/v2.0.0.md#experimental-modules).
+input.
 
 | Stage | Description |
 |---|---|

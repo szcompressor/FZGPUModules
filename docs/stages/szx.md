@@ -3,7 +3,7 @@
 **Header:** `modules/fused/szx/szx_stage.h`
 **Class:** `fz::SZxStage<TData>` — `TData` is `float` or `double`
 **Category:** Fused (lossy, whole compressor)
-**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
+**Release status:** Experimental in v2.0.
 
 **Common instantiation:**
 ```cpp

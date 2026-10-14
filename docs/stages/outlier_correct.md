@@ -4,7 +4,7 @@
 **Class:** `fz::OutlierCorrectStage<Reconstructor>`
 **Shipped instantiation:** `fz::Cdf97OutlierCorrectStage` (`modules/coders/cdf97_outlier_correct/`)
 **Category:** Coder (sparse reconstructed-domain residual correction)
-**Release status:** Experimental in v2.0; see the [release scope](../releases/v2.0.0.md#experimental-modules).
+**Release status:** Experimental in v2.0.
 
 ---
 
