@@ -109,12 +109,13 @@ Set the paths for the machine and the **patched** adapter source:
 export FZGM_DEMO_ROOT=/path/to/persistent/fzgm-python-demo
 export FZGM_SOURCE=/path/to/FZGPUModules
 export LIBPRESSIO_SOURCE=/path/to/patched/libpressio-fork
+export FZGM_DEVELOPMENT_SOURCE=/path/to/FZGPUModules-development
 export STD_COMPAT_CONFIG=/path/to/libstdcompat/share/std_compat/cmake
 export CUDA_ROOT=/usr/local/cuda-12.9
 
 python3 -m venv "$FZGM_DEMO_ROOT/venv"
 "$FZGM_DEMO_ROOT/venv/bin/python" -m pip install \
-  -r "$FZGM_SOURCE/python/demo-requirements.txt"
+  -r "$FZGM_DEVELOPMENT_SOURCE/python/demo-requirements.txt"
 ```
 
 `std_compat` 0.0.22 is an installed C++ build dependency. This is a fresh Python
