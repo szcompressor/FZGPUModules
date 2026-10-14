@@ -48,7 +48,8 @@ def main() -> None:
         shutil.copytree(REPO / "tests" / "installed_specialization", fixture)
         run(["cmake", "-S", str(source), "-B", str(build),
              "-DCMAKE_BUILD_TYPE=Release", "-DFZGMOD_BACKEND=CUDA",
-             "-DBUILD_TESTING=OFF", "-DBUILD_EXAMPLES=OFF", "-DBUILD_PROFILING=OFF",
+             "-DBUILD_TESTING=OFF", "-DBUILD_EXAMPLES=OFF",
+             "-DBUILD_PROFILING=OFF", "-DENABLE_NVTX=OFF",
              "-DBUILD_CLI=OFF", "-DCMAKE_CUDA_ARCHITECTURES=" + args.cuda_architectures])
         run(["cmake", "--build", str(build), "--parallel", str(args.jobs)])
         run(["cmake", "--install", str(build), "--prefix", str(prefix)])

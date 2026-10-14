@@ -11,7 +11,7 @@ prototyped. When it is ready to upstream, follow
 workarounds below.
 
 The stage *class* is written exactly as the in-tree guide describes — same
-`Stage` base class, same required overrides, same HIP rules, same
+`Stage` base class, same required overrides, same backend facade conventions, same
 `execute()` contract. Everything on this page is only about the parts that
 normally touch shared files (`fzm_format.h`, the root `CMakeLists.txt`,
 `config.cpp`, `include/fzgpumodules.h`) and how to replace them from outside.

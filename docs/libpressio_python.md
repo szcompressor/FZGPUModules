@@ -10,6 +10,10 @@ Public-header probes omit registrations for unavailable ADM, legacy SZp,
 CDF97, SPECK2D, Cdf97OutlierCorrect, and SZx stages. The unpatched fork
 requires the v2 compatibility changes before following the setup below.
 
+The plugin metadata `fzgpumodules:optional_stages` reports availability of CDF97,
+SPECK2D, wavelet correction, and SZx wrappers in the installed SDK. The v2-compatible
+adapter supports both the stable catalog and this development catalog.
+
 The adapter currently requires a prior `compress()` on the same compressor
 instance before `decompress()`. Its raw compressed output does not independently
 restore a fresh decoder's pipeline and stage metadata. This is an existing

@@ -73,7 +73,7 @@ build_config() {
     log "Configuring $sanitizer at $build_dir"
     # Direct compute invocations supply their own wrapper; never wrap ASan tests.
     cmake -S "$ROOT" -B "$build_dir" \
-        -DFZGMOD_BACKEND=CUDA -DBUILD_TESTING=ON \
+        -DFZGMOD_BACKEND=CUDA -DCMAKE_CUDA_ARCHITECTURES=native -DBUILD_TESTING=ON \
         -DFZGMOD_COMPUTE_SANITIZER_WRAPPER=OFF \
         -DUSE_SANITIZER="$sanitizer" -DCMAKE_BUILD_TYPE="$build_type" \
         -DCOMPUTE_SANITIZER_DEVICE_DEBUG=OFF -DCUDA_MODULE_LOADING=EAGER || return $?

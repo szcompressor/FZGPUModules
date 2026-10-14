@@ -11,19 +11,7 @@
 # GPU composition whose staged/auto performance isolates FZGM specialization.
 #
 # It is NOT byte-compatible with the reference SZp container. The monolithic
-# `SZpStage` FZGM implementation is quarantined under
-# modules/experimental/reference_compressors/szp/ (and its legacy preset at
-# modules/experimental/reference_compressors/szp/szp.toml); it is a GPU point of
-# comparison only, not a supported module.
-#
-# SZp / fZ-light: Huang, Di, et al., SC'24. The homomorphic collective
-# operations are a separate communication-system capability, not expressed by
-# this compression preset.
-#
-# Usage:
-#   fzgmod-cli -c examples/presets/szp_composed.toml \
-#              -i data/CLDHGH.f32 -l 3600x1800 -b --report --compare data/CLDHGH.f32
-memory_strategy = "PREALLOCATE"
+# The monolithic reference implementation is available on the development branch.
 
 [[stage]]
 name = "quant"

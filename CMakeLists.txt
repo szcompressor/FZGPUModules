@@ -274,6 +274,22 @@ if(FZGMOD_HIP_HEADER_ONLY_INCLUDES)
     ${FZGMOD_HIP_HEADER_ONLY_INCLUDES})
 endif()
 
+# Production annotations can be enabled without building research programs.
+option(ENABLE_NVTX "Enable NVTX annotations in production library code" OFF)
+if(ENABLE_NVTX)
+  if(NOT FZGMOD_BACKEND STREQUAL "CUDA")
+    message(FATAL_ERROR "ENABLE_NVTX requires the CUDA backend.")
+  endif()
+  find_path(NVTX3_INCLUDE_DIR NAMES nvtx3/nvtx3.hpp
+    HINTS ${CUDAToolkit_INCLUDE_DIRS} REQUIRED)
+  target_compile_definitions(fzgmod_compile_settings INTERFACE
+    $<BUILD_INTERFACE:FZ_PROFILING_ENABLED>)
+  target_include_directories(fzgmod_compile_settings SYSTEM INTERFACE
+    $<BUILD_INTERFACE:${NVTX3_INCLUDE_DIR}>)
+  target_compile_options(fzgmod_compile_settings INTERFACE
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU,Clang>>:-fno-omit-frame-pointer>)
+endif()
+
 # Libraries
 
 # Memory management

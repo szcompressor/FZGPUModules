@@ -157,3 +157,9 @@ Do not add entries for documentation-only or comment-only edits.
 | FZM binary file format | [docs/fzm_format.md](docs/fzm_format.md) |
 | CLI and TOML config syntax | [docs/cli.md](docs/cli.md), [docs/config_file.md](docs/config_file.md) |
 | Building from source (all presets/options) | [docs/building.md](docs/building.md) |
+
+## Branch policy
+
+Development includes the v2.0.0 baseline plus experimental modules and backend
+work. Keep development-only implementations during merges from main, and promote
+validated changes through focused pull requests. See [docs/branch_policy.md](docs/branch_policy.md).

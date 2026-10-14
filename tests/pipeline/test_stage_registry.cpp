@@ -28,6 +28,7 @@ TEST(StageRegistry, EveryShippedStageTypeHasAFactory) {
         StageType::RAZE, StageType::CLOG, StageType::HCLOG, StageType::TUPL,
         StageType::GPULZ, StageType::LOG_TRANSFORM, StageType::ADAPTIVE_LORENZO,
         StageType::ROIBIN_SPLIT, StageType::SZX,
+        StageType::FUSED_QUANT_ADAPTIVE_LORENZO,
         StageType::CDF97, StageType::SPECK2D, StageType::CDF97_OUTLIER_CORRECT,
         // SZP is a quarantined experimental reference compressor
         // (modules/experimental/reference_compressors/szp) — no longer a public module,
@@ -47,4 +48,15 @@ TEST(StageRegistry, EveryShippedStageTypeHasAFactory) {
 TEST(StageRegistry, UnknownTypeThrows) {
     uint8_t cfg[1] = {0};
     EXPECT_THROW(createStage(StageType::UNKNOWN, cfg, 0), std::runtime_error);
+}
+
+TEST(StageRegistry, ExperimentalStageIdsRemainStable) {
+    const StageType types[] = {StageType::SZX, StageType::SZP, StageType::CDF97,
+        StageType::SPECK2D, StageType::CDF97_OUTLIER_CORRECT,
+        StageType::FUSED_QUANT_ADAPTIVE_LORENZO};
+    const uint16_t ids[] = {36, 37, 39, 40, 41, 43};
+    for (size_t i = 0; i < 6; ++i) {
+        EXPECT_EQ(static_cast<uint16_t>(types[i]), ids[i]);
+        EXPECT_TRUE(hasStageHeaderFactory(types[i]));
+    }
 }

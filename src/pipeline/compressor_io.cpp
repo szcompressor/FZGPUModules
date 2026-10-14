@@ -576,7 +576,7 @@ Pipeline::reconstructForwardTopology(const FZMFileHeader& fh)
 // force-included and returned ALONE, regardless of what the topology test
 // finds -- it is decompressFromFile()'s answer stage by construction, and a
 // mixed source+consumer stage (bindExternalInput() alongside a real
-// connection, e.g. Cdf97OutlierCorrectStage) fails the plain topology test
+// connection) fails the plain topology test
 // (it DOES have an input produced by another stage -- just not ALL of them)
 // so the flag is the only way to find it here, where there's no live
 // Pipeline to ask via getSourceStages()/setPrimarySource(). Matches

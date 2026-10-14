@@ -52,7 +52,7 @@ git clone https://github.com/szcompressor/FZGPUModules.git
 cd FZGPUModules
 git submodule update --init --recursive
 
-cmake --preset release 
+cmake --preset release -DCMAKE_CUDA_ARCHITECTURES=native
 cmake --build build/release -j$(nproc)
 cmake --install build/release --prefix /your/install/prefix
 ```
