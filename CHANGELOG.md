@@ -10,6 +10,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased] — 2.0.0
 
 ### Changed
+- The optional Python `Chain` builder is owned and installed by the libpressio adapter rather than the core library source tree.
 - Libpressio examples and Python demo use `fzgpumodules:specialization`; the local adapter replaces the former `fusion` option without an alias.
 - Modules own their CMake source lists and backend settings; an explicit module catalog, stage scaffolding, and integration checks replace root-level source-list edits.
 - Runtime specialization embeds its device-header dependencies in the library, allowing JIT compilation from relocated installations without the original source checkout.
