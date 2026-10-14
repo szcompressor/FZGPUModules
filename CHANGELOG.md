@@ -9,16 +9,10 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
-- Development now includes the v2.0.0 release baseline while retaining experimental modules, backend configuration, research tools, and demos.
-- Imported portable Docker architecture selection, native sanitizer targets, installed-specialization checks, and standalone CUDA NVTX support.
-- Preserved experimental archive factories and stage IDs; the combined quantizer/AdaptiveLorenzo factory is covered by registry tests.
+### Added
+- `Pipeline::fromHeader()` reconstructs a fresh decoder from in-memory FZM metadata without encoder configuration or a prior compression call.
 
-Earlier experimental engineering details are in `docs/history/pre-v2-engineering.md`.
-
----
-
-## [2.0.0] — 2026-10-13
+## [2.0.0] — 2026-10-14
 
 ### Added
 - Composable `fz::Pipeline` graphs with named ports, automatic inverse construction, multiple sources, TOML configuration, and a command-line interface.
@@ -57,6 +51,5 @@ Earlier experimental engineering details are in `docs/history/pre-v2-engineering
 
 Initial tagged release. cuSZ based compressor with modular design and experimental CUDASTF support.
 
-[Unreleased]: https://github.com/szcompressor/FZGPUModules/compare/v2.0.0...development
-[2.0.0]: https://github.com/szcompressor/FZGPUModules/releases/tag/v2.0.0
+[Unreleased]: https://github.com/szcompressor/FZGPUModules/compare/release...HEAD
 [1.0.0]: https://github.com/szcompressor/FZGPUModules/releases/tag/release

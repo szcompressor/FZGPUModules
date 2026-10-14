@@ -927,6 +927,16 @@ TEST(FileIO, LorenzoDimsSerializedThroughFile) {
     EXPECT_LE(max_err, EB * 1.01f)
         << "Lorenzo 2D dims file round-trip max_err=" << max_err;
 
+    auto serialized = pipeline.serializeHeaderToMemory();
+    auto fresh = Pipeline::fromHeader(serialized.data(), serialized.size());
+    fresh->setPoolManagedDecompOutput(false);
+    fresh->decompress(d_comp, comp_sz, &d_dec, &dec_sz, stream);
+    stream.sync();
+    ASSERT_EQ(dec_sz, in_bytes);
+    FZ_TEST_CUDA(cudaMemcpy(h_recon.data(), d_dec, in_bytes, cudaMemcpyDeviceToHost));
+    FZ_TEST_CUDA(cudaFree(d_dec));
+    EXPECT_LE(max_abs_error(h_input, h_recon), EB * 1.01f);
+
     std::remove(tmp.c_str());
 }
 
@@ -1456,4 +1466,97 @@ TEST(FileIO, GraphReplaySmallerAlignedInputKeepsLogicalLength) {
     std::remove(path.c_str());
     }
     FZ_TEST_CUDA(cudaDeviceSynchronize());
+}
+
+TEST(FileIO, FromHeaderReconstructsFreshPartialPipeline) {
+    CudaStream stream;
+    for (auto policy : {SpecializationPolicy::Off, SpecializationPolicy::Auto}) {
+        for (size_t count : {size_t(8192), size_t(8195)}) {
+            constexpr float bound = 1e-3f;
+            auto input = make_smooth_data<float>(count);
+            CudaBuffer<float> device_input(count);
+            device_input.upload(input, stream);
+            std::vector<uint8_t> header;
+            std::unique_ptr<CudaBuffer<uint8_t>> saved;
+            size_t compressed_bytes = 0;
+            {
+                Pipeline encoder(count * sizeof(float), MemoryStrategy::MINIMAL);
+                auto* q = encoder.addStage<QuantizerStage<float, uint32_t>>();
+                q->setLinearMode(true);
+                q->setErrorBound(bound);
+                q->setErrorBoundMode(ErrorBoundMode::ABS);
+                auto* l = encoder.addStage<LorenzoStage<int32_t>>();
+                l->setBlockSize(32);
+                auto* a = encoder.addStage<AdaptiveBitpackStage<int32_t>>();
+                a->setBlockSize(32);
+                encoder.connect(l, q, "codes");
+                encoder.connect(a, l);
+                encoder.finalize();
+                void* compressed = nullptr;
+                encoder.compress(device_input.void_ptr(), count * sizeof(float),
+                                 &compressed, &compressed_bytes, stream);
+                stream.sync();
+                header = encoder.serializeHeaderToMemory();
+                saved = std::make_unique<CudaBuffer<uint8_t>>(compressed_bytes);
+                FZ_TEST_CUDA(cudaMemcpy(saved->void_ptr(), compressed, compressed_bytes,
+                                       cudaMemcpyDeviceToDevice));
+            }
+            auto decoder = Pipeline::fromHeader(header.data(), header.size(),
+                                                MemoryStrategy::MINIMAL, policy);
+            decoder->setPoolManagedDecompOutput(false);
+            void* decoded = nullptr;
+            size_t decoded_bytes = 0;
+            decoder->decompress(saved->void_ptr(), compressed_bytes, &decoded, &decoded_bytes, stream);
+            stream.sync();
+            ASSERT_EQ(decoded_bytes, count * sizeof(float));
+            std::vector<float> output(count);
+            FZ_TEST_CUDA(cudaMemcpy(output.data(), decoded, decoded_bytes, cudaMemcpyDeviceToHost));
+            FZ_TEST_CUDA(cudaFree(decoded));
+            EXPECT_LE(max_abs_error(input, output), bound * 1.01f);
+        }
+    }
+}
+
+TEST(FileIO, FromHeaderRejectsInvalidTopologyBeforeFactories) {
+    Pipeline::FZMFileHeader fh;
+    fh.core.num_stages = 1;
+    fh.core.num_buffers = 1;
+    fh.core.num_sources = 1;
+    fh.core.uncompressed_size = 64;
+    fh.core.compressed_size = 16;
+    fh.core.header_size = sizeof(FZMHeaderCore) + sizeof(FZMStageInfo) + sizeof(FZMBufferEntry);
+    fh.stages.resize(1);
+    fh.stages[0].stage_type = StageType::UNKNOWN;
+    fh.stages[0].stage_version = 1;
+    fh.stages[0].num_inputs = 1;
+    fh.stages[0].num_outputs = 1;
+    fh.stages[0].input_buffer_ids[0] = 0;
+    fh.stages[0].output_buffer_ids[0] = 0;
+    fh.buffers.resize(1);
+    fh.buffers[0].dag_buffer_id = 0;
+    fh.buffers[0].stage_type = StageType::UNKNOWN;
+    fh.buffers[0].data_size = 16;
+    std::vector<uint8_t> bytes(fh.core.header_size);
+    auto serialize = [&]() {
+        std::memcpy(bytes.data(), &fh.core, sizeof(fh.core));
+        std::memcpy(bytes.data() + sizeof(fh.core), fh.stages.data(), sizeof(FZMStageInfo));
+        std::memcpy(bytes.data() + sizeof(fh.core) + sizeof(FZMStageInfo),
+                    fh.buffers.data(), sizeof(FZMBufferEntry));
+    };
+    serialize();
+    try {
+        auto decoder = Pipeline::fromHeader(bytes.data(), bytes.size());
+        FAIL() << "Self dependency was accepted";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("cycle"), std::string::npos);
+    }
+    fh.stages[0].input_buffer_ids[0] = 1;
+    fh.stages[0].config_size = FZM_STAGE_CONFIG_SIZE + 1;
+    serialize();
+    EXPECT_THROW(Pipeline::fromHeader(bytes.data(), bytes.size()), std::runtime_error);
+    fh.stages[0].config_size = 0;
+    fh.buffers[0].data_size = 17;
+    serialize();
+    EXPECT_THROW(Pipeline::fromHeader(bytes.data(), bytes.size()), std::runtime_error);
+    EXPECT_THROW(Pipeline::fromHeader(bytes.data(), bytes.size() - 1), std::runtime_error);
 }

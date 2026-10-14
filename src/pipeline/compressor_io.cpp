@@ -15,6 +15,7 @@
 #include <cstring>
 #include <vector>
 #include <unordered_set>
+#include <limits>
 
 namespace fz {
 
@@ -916,6 +917,124 @@ Pipeline::FZMFileHeader Pipeline::parseHeaderFromMemory(const void* data, size_t
         }
     }
     return fh;
+}
+
+std::unique_ptr<Pipeline> Pipeline::fromHeader(
+    const void* header_bytes, size_t header_size,
+    MemoryStrategy strategy, SpecializationPolicy policy)
+{
+    const auto fh = parseHeaderFromMemory(header_bytes, header_size);
+    auto invalid = [](const char* reason) {
+        throw std::runtime_error(std::string("fromHeader: ") + reason);
+    };
+    if (fh.stages.empty() || fh.buffers.empty() || !fh.core.uncompressed_size)
+        invalid("empty stage, output, or input description");
+    if (fh.core.header_size != header_size)
+        invalid("metadata length does not match header_size");
+    if (fh.core.uncompressed_size > std::numeric_limits<size_t>::max())
+        invalid("uncompressed size exceeds host address space");
+
+    // Validate the complete topology before passing untrusted configs to factories.
+    using Producer = std::pair<size_t, size_t>;
+    std::unordered_map<uint16_t, Producer> producers;
+    std::unordered_set<uint16_t> consumed;
+    size_t primary_count = 0;
+    for (size_t i = 0; i < fh.stages.size(); ++i) {
+        const auto& si = fh.stages[i];
+        if (!si.num_inputs || si.num_inputs > FZM_MAX_STAGE_INPUTS ||
+            !si.num_outputs || si.num_outputs > FZM_MAX_STAGE_OUTPUTS ||
+            si.config_size > FZM_STAGE_CONFIG_SIZE || si.stage_version != 1)
+            invalid("invalid stage port count or configuration size/version");
+        if (si.stage_flags & ~FZM_STAGE_FLAG_PRIMARY_SOURCE)
+            invalid("unsupported stage flags");
+        primary_count += !!(si.stage_flags & FZM_STAGE_FLAG_PRIMARY_SOURCE);
+        for (size_t j = 0; j < si.num_outputs; ++j) {
+            const auto id = si.output_buffer_ids[j];
+            if (id == 0xFFFF || !producers.emplace(id, Producer{i, j}).second)
+                invalid("invalid or duplicate output buffer ID");
+        }
+    }
+    if (primary_count > 1) invalid("multiple primary sources");
+    size_t external_count = 0;
+    for (size_t i = 0; i < fh.stages.size(); ++i) {
+        const auto& si = fh.stages[i];
+        for (size_t j = 0; j < si.num_inputs; ++j) {
+            const auto id = si.input_buffer_ids[j];
+            if (id == 0xFFFF) invalid("invalid input buffer ID");
+            const auto producer = producers.find(id);
+            if (producer == producers.end()) ++external_count;
+            else {
+                if (producer->second.first >= i)
+                    invalid("stage order contains a cycle or forward dependency");
+                consumed.insert(id);
+            }
+        }
+    }
+    if (!external_count || external_count > FZM_MAX_SOURCES)
+        invalid("invalid number of external inputs");
+    if (fh.core.num_sources && fh.core.num_sources != external_count)
+        invalid("external input count does not match num_sources");
+    std::unordered_set<uint16_t> leaves;
+    uint64_t end = 0;
+    for (const auto& b : fh.buffers) {
+        const auto producer = producers.find(b.dag_buffer_id);
+        if (producer == producers.end() || consumed.count(b.dag_buffer_id) ||
+            !leaves.insert(b.dag_buffer_id).second ||
+            b.producer_output_idx != producer->second.second ||
+            b.stage_type != fh.stages[producer->second.first].stage_type ||
+            b.config_size > FZM_STAGE_CONFIG_SIZE)
+            invalid("invalid output buffer producer");
+        if (b.byte_offset < end || b.byte_offset > fh.core.compressed_size ||
+            b.data_size > fh.core.compressed_size - b.byte_offset)
+            invalid("output buffer extends beyond compressed data");
+        end = b.byte_offset + b.data_size;
+    }
+    if (leaves.size() != producers.size() - consumed.size())
+        invalid("missing terminal output buffer");
+
+    auto result = std::make_unique<Pipeline>(
+        static_cast<size_t>(fh.core.uncompressed_size), strategy);
+    result->setSpecializationPolicy(policy);
+    result->preserve_serialized_dims_ = true;
+    std::vector<Stage*> stages;
+    for (const auto& si : fh.stages) {
+        std::unique_ptr<Stage> stage(createStage(si.stage_type, si.stage_config, si.config_size));
+        if (stage->getNumInputs() != si.num_inputs || stage->getNumOutputs() != si.num_outputs)
+            invalid("factory stage ports do not match archive");
+        stages.push_back(result->addRawStage(stage.release()));
+    }
+    for (size_t i = 0; i < fh.stages.size(); ++i) {
+        const auto& si = fh.stages[i];
+        bool external = false;
+        for (size_t j = 0; j < si.num_inputs; ++j) {
+            const auto producer = producers.find(si.input_buffer_ids[j]);
+            if (producer == producers.end()) {
+                result->bindExternalInput(stages[i]);
+                external = true;
+            } else {
+                const auto& names = stages[producer->second.first]->getOutputNames();
+                const auto output = producer->second.second;
+                const auto name = output < names.size() ? names[output] : std::to_string(output);
+                result->connect(stages[i], stages[producer->second.first], name);
+            }
+        }
+        if (si.stage_flags & FZM_STAGE_FLAG_PRIMARY_SOURCE) {
+            if (!external) invalid("primary source has no external input");
+            result->setPrimarySource(stages[i]);
+        }
+    }
+    result->finalize();
+    // Concat segments retain encoder output order, which can differ from level order.
+    result->output_buffer_ids_.clear();
+    result->output_nodes_.clear();
+    for (const auto& b : fh.buffers) {
+        const auto producer = producers.at(b.dag_buffer_id);
+        auto* node = result->stage_to_node_.at(stages[producer.first]);
+        result->output_buffer_ids_.push_back(node->output_index_to_buffer_id.at(producer.second));
+        result->output_nodes_.push_back(node);
+    }
+    result->primeInverseFromHeader(header_bytes, header_size);
+    return result;
 }
 
 void Pipeline::primeInverseFromHeader(const void* header_bytes, size_t header_size) {
