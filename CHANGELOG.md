@@ -7,7 +7,12 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased] — 2.0.0
+## [Unreleased]
+
+### Added
+- `Pipeline::fromHeader()` reconstructs a fresh decoder from in-memory FZM metadata without encoder configuration or a prior compression call.
+
+## [2.0.0] — 2026-10-14
 
 ### Added
 - Composable `fz::Pipeline` graphs with named ports, automatic inverse construction, multiple sources, TOML configuration, and a command-line interface.

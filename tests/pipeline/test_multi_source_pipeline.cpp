@@ -70,6 +70,15 @@ TEST(MultiSourcePipeline, PartialChunkArchiveAndPrimedSecondSource) {
     std::vector<float> memory_output(count);
     FZ_TEST_CUDA(cudaMemcpy(memory_output.data(), decoded, bytes, cudaMemcpyDeviceToHost));
     EXPECT_EQ(file_output, memory_output);
+    auto fresh = Pipeline::fromHeader(serialized.data(), serialized.size());
+    fresh->setPoolManagedDecompOutput(false);
+    fresh->decompress(compressed, compressed_bytes, &decoded, &decoded_bytes, stream);
+    stream.sync();
+    ASSERT_EQ(decoded_bytes, bytes);
+    std::vector<float> fresh_output(count);
+    FZ_TEST_CUDA(cudaMemcpy(fresh_output.data(), decoded, bytes, cudaMemcpyDeviceToHost));
+    FZ_TEST_CUDA(cudaFree(decoded));
+    EXPECT_EQ(file_output, fresh_output);
     }
     FZ_TEST_CUDA(cudaDeviceSynchronize());
 }
