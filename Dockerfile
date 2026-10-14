@@ -5,6 +5,9 @@
 # against it without building the library themselves.
 FROM nvcr.io/nvidia/cuda:12.6.0-devel-ubuntu24.04
 
+ARG CUDA_ARCHITECTURES="80;86;90"
+ARG BUILD_JOBS=4
+
 # Prevent interactive prompts during apt installations
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -30,8 +33,8 @@ COPY data/ /data/
 # and CMake package config at /usr/local/lib/cmake/FZGPUModules/ (find_package ready).
 COPY . /tmp/fzgpumodules-src
 RUN cd /tmp/fzgpumodules-src && \
-    cmake --preset release && \
-    cmake --build build/release -j$(nproc) && \
+    cmake --preset release -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" && \
+    cmake --build build/release --parallel "${BUILD_JOBS}" && \
     cmake --install build/release --prefix /usr/local && \
     rm -rf /tmp/fzgpumodules-src
 

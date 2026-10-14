@@ -32,10 +32,17 @@ docker build -t fzgpumodules:latest .
 Or with a specific version tag:
 
 ```bash
-docker build -t fzgpumodules:1.0.0 .
+docker build -t fzgpumodules:2.0.0 .
 ```
 
-The build takes a few minutes — it compiles FZGPUModules during the image build so subsequent runs are instant.
+The image compiles for SM 80, 86, and 90 by default, covering A100 and H100
+alongside other compatible GPUs. Limit the architecture list for a faster
+host-specific build, and adjust the default four build jobs as needed:
+
+```bash
+docker build --build-arg CUDA_ARCHITECTURES=80 --build-arg BUILD_JOBS=4 \
+  -t fzgpumodules:a100 .
+```
 
 ## Using the Pre-Installed Library
 
