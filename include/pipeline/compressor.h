@@ -684,6 +684,17 @@ public:
      */
     void primeInverseFromHeader(const void* header_bytes, size_t header_size);
 
+    /** Reconstruct and prime a fresh decode-only pipeline from serialized FZM
+     * metadata, including stages, named connections, and primary source.
+     * No encoder configuration or prior compress() is required. The compressed
+     * blob is supplied separately to decompressOwned()/decompress(). Factories
+     * for every archived stage type must be linked into the receiving library.
+     */
+    static std::unique_ptr<Pipeline> fromHeader(
+        const void* header_bytes, size_t header_size,
+        MemoryStrategy strategy = MemoryStrategy::MINIMAL,
+        SpecializationPolicy policy = SpecializationPolicy::Off);
+
     /**
      * One-shot decompress from an FZM file. Reconstructs the pipeline from the
      * file header, allocates a pool, and runs decompression.
@@ -1189,6 +1200,7 @@ private:
     };
     std::vector<BufferMetadata> buffer_metadata_;
 
+    bool preserve_serialized_dims_ = false;
     bool graph_mode_enabled_;
     bool graph_captured_;
     FusionPolicy fusion_policy_ = FusionPolicy::Off;

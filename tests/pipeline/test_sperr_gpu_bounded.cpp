@@ -178,3 +178,30 @@ TEST(SperrGpuBounded, Cdf97OutlierCorrectStageMetadata) {
     EXPECT_EQ(inv_names[0], "field");
     EXPECT_EQ(inv_names[1], "codes");
 }
+
+TEST(SperrGpuBounded, FreshHeaderRestoresMixedExternalInput) {
+    CudaStream stream;
+    constexpr int nx = 32, ny = 32;
+    constexpr float bound = 1e-3f;
+    auto input = make_clustered_field(nx, ny, 11);
+    const size_t bytes = input.size() * sizeof(float);
+    CudaBuffer<float> device_input(input.size());
+    device_input.upload(input, stream);
+    Pipeline encoder(bytes, MemoryStrategy::PREALLOCATE, 8.0f);
+    build_bounded_pipeline(encoder, nx, ny, bound);
+    void* compressed = nullptr;
+    size_t compressed_bytes = 0;
+    encoder.compress(device_input.void_ptr(), bytes, &compressed, &compressed_bytes, stream);
+    auto header = encoder.serializeHeaderToMemory();
+    auto decoder = Pipeline::fromHeader(header.data(), header.size());
+    decoder->setPoolManagedDecompOutput(false);
+    void* decoded = nullptr;
+    size_t decoded_bytes = 0;
+    decoder->decompress(compressed, compressed_bytes, &decoded, &decoded_bytes, stream);
+    stream.sync();
+    ASSERT_EQ(decoded_bytes, bytes);
+    std::vector<float> output(input.size());
+    FZ_TEST_CUDA(cudaMemcpy(output.data(), decoded, bytes, cudaMemcpyDeviceToHost));
+    FZ_TEST_CUDA(cudaFree(decoded));
+    EXPECT_LE(max_abs_error(input, output), bound * 1.01f);
+}

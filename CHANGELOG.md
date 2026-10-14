@@ -9,6 +9,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `Pipeline::fromHeader()` reconstructs a fresh decode-only graph from in-memory FZM metadata without encoder configuration or temporary files.
+
 ### Changed
 - Development now includes the v2.0.0 release baseline while retaining experimental modules, backend configuration, research tools, and demos.
 - Imported portable Docker architecture selection, native sanitizer targets, installed-specialization checks, and standalone CUDA NVTX support.
