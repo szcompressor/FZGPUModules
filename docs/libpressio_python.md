@@ -1,5 +1,11 @@
 # LibPressio Python Bindings {#libpressio_python}
 
+**Historical v2.0.0 adapter guide.** The setup below describes the older
+helper-based integration. The current v2.0.1 integration uses
+`libpressio.FZGPUModulesChain` and self-contained archives that a fresh decoder
+can read. Its builder and implementation notes are maintained in
+[CN-LIBPRESSIO-1](codebase_notes.md#cn-libpressio-1).
+
 FZGPUModules experimentally exposes a [libpressio](https://github.com/robertu94/libpressio) plugin (`fzgpumodules`)
 that lets you build and run GPU compression pipelines from Python (or C++) through libpressio. 
 The plugin translates libpressio's generic compressor interface into FZGPUModules pipeline
