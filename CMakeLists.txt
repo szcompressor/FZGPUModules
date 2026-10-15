@@ -20,7 +20,7 @@ else()
   message(FATAL_ERROR "Unknown FZGMOD_BACKEND '${FZGMOD_BACKEND}' — must be CUDA, HIP, or SYCL.")
 endif()
 
-project(FZGPUModules LANGUAGES ${FZGMOD_PROJECT_LANGUAGES} VERSION 2.0.0)
+project(FZGPUModules LANGUAGES ${FZGMOD_PROJECT_LANGUAGES} VERSION 2.0.1)
 
 # General settings
 

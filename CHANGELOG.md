@@ -9,6 +9,8 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-10-15
+
 ### Added
 - `Pipeline::fromHeader()` reconstructs a fresh decoder from in-memory FZM metadata without encoder configuration or a prior compression call.
 

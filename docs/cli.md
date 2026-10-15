@@ -115,7 +115,7 @@ Abbreviated `benchmark` output:
 ```json
 {
   "schema_version": "1.0",
-  "tool": { "name": "fzgmod-cli", "version": "2.0.0", "git_sha": "abcd123" },
+  "tool": { "name": "fzgmod-cli", "version": "2.0.1", "git_sha": "abcd123" },
   "status": "ok",
   "error_message": null,
   "config": { "operation": "benchmark", "dtype": "f32", "dims": [3600, 1800, 1],
