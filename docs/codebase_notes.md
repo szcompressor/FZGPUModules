@@ -1680,9 +1680,14 @@ destruction. This catches the ownership error that device sanitizers alone miss.
 `src/plugins/compressors/fzgpumodules/` and `tools/swig/libpressio.py`.
 These notes describe the integration using FZGPUModules v2.0.1 and the
 `FZGPUModulesChain` builder, rather than the archived v2.0.0 helper interface.
-They preserve the adapter implementation notes outside its usage README.
+They preserve the adapter implementation notes outside the libpressio source tree.
 
 ### Builder and constructor phases
+
+Encoder configuration starts with empty stage and connection lists. Encoding
+requires an explicit stage list or a TOML config file; creating a bare plugin
+and decoding an archive do not require either. The default absolute and relative
+error bounds remain `1e-3`.
 
 `add()` stores stage tokens, ordered connections, and per-stage parameters.
 `configure(**options)` stores pipeline-wide options with the `fzgpumodules:`
