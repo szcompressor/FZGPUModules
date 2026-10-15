@@ -9,7 +9,7 @@ endif()
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures to compile for")
 endif()
-project(FZGPUModules LANGUAGES CUDA CXX VERSION 2.0.0)
+project(FZGPUModules LANGUAGES CUDA CXX VERSION 2.0.1)
 
 # General settings
 

@@ -32,7 +32,7 @@ docker build -t fzgpumodules:latest .
 Or with a specific version tag:
 
 ```bash
-docker build -t fzgpumodules:2.0.0 .
+docker build -t fzgpumodules:2.0.1 .
 ```
 
 The image compiles for SM 80, 86, and 90 by default, covering A100 and H100
