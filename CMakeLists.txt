@@ -103,6 +103,9 @@ else() # HIP — SYCL and unknown values already rejected above
 
 endif()
 
+# Build-time header generators (stage fingerprints, embedded NVRTC headers).
+find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)
+
 # Retag .cu sources as HIP; define this before subdirectories use it.
 # Backend rationale: docs/codebase_notes.md CN-BUILD-1.
 function(fzgmod_set_gpu_source_language target)
@@ -330,7 +333,7 @@ add_library(FZGMOD::modules ALIAS fzgmod_modules)
 # Details: docs/codebase_notes.md CN-BUILD-3.
 set(FZGMOD_STAGE_FP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/fz_stage_fingerprints.h")
 add_custom_target(fzgmod_stage_fingerprints ALL
-  COMMAND ${CMAKE_COMMAND} -E env python3
+  COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_stage_fingerprints.py"
           --out "${FZGMOD_STAGE_FP_HEADER}"
   BYPRODUCTS "${FZGMOD_STAGE_FP_HEADER}"
