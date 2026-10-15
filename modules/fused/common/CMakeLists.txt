@@ -8,7 +8,7 @@ if(NOT FZGMOD_BACKEND STREQUAL "HIP")
   set(FZGMOD_NVRTC_HEADERS "${PROJECT_BINARY_DIR}/generated/fz_nvrtc_headers.h")
   # Unchanged output preserves its timestamp.
   add_custom_target(fzgmod_nvrtc_headers ALL
-    COMMAND ${CMAKE_COMMAND} -E env python3
+    COMMAND "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/scripts/gen_nvrtc_headers.py"
             --out "${FZGMOD_NVRTC_HEADERS}"
     BYPRODUCTS "${FZGMOD_NVRTC_HEADERS}"

@@ -46,6 +46,9 @@ if(CUDAToolkit_VERSION VERSION_LESS "11.2")
 endif()
 set(FZGMOD_GPU_RUNTIME CUDA::cudart)
 
+# Build-time header generators (stage fingerprints, embedded NVRTC headers).
+find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)
+
 # Retain the module-local source hook; CUDA needs no retagging.
 function(fzgmod_set_gpu_source_language target)
 endfunction()
@@ -237,7 +240,7 @@ add_library(FZGMOD::modules ALIAS fzgmod_modules)
 # Details: docs/codebase_notes.md CN-BUILD-3.
 set(FZGMOD_STAGE_FP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/fz_stage_fingerprints.h")
 add_custom_target(fzgmod_stage_fingerprints ALL
-  COMMAND ${CMAKE_COMMAND} -E env python3
+  COMMAND "${Python3_EXECUTABLE}"
           "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_stage_fingerprints.py"
           --out "${FZGMOD_STAGE_FP_HEADER}"
   BYPRODUCTS "${FZGMOD_STAGE_FP_HEADER}"

@@ -12,7 +12,7 @@ configuring with CMake, running tests, installing, and integrating into your own
 | CUDA Toolkit | 11.2+ configure-time API floor (stream-ordered allocator) |
 | C++ Standard | C++17 |
 | CMake | 3.24+ |
-| Python | Python 3 (build-time header embedding and source fingerprints) |
+| Python | 3.7+ (build-time header embedding and source fingerprints) |
 | Compiler | C++17 compiler and standard library supported by the selected GPU toolkit |
 | Host byte order | Little-endian |
 
