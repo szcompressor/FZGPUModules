@@ -244,7 +244,10 @@ __global__ void lorenzo_quantize_3d_kernel(
         // y-direction: exchange via shared memory (ghost row at index 0)
         s[threadIdx.y + 1][threadIdx.x] = delta[z];
         __syncthreads();
-        delta[z] -= (threadIdx.y > 0) * s[threadIdx.y][threadIdx.x];
+        // Row 0 is a ghost row that is never written. Skip it instead of
+        // multiplying it by zero: shared memory is not cleared between kernels,
+        // and 0 * NaN (or Inf) left there by an earlier kernel is NaN.
+        if (threadIdx.y > 0) delta[z] -= s[threadIdx.y][threadIdx.x];
 
         // Quantize and write
         bool is_valid = (gix < data_lenx && giy < data_leny && (uint32_t)giz(z - 1) < data_lenz);
