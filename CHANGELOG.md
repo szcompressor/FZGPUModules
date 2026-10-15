@@ -12,6 +12,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ### Added
 - `Pipeline::fromHeader()` reconstructs a fresh decoder from in-memory FZM metadata without encoder configuration or a prior compression call.
 
+### Fixed
+- The 3-D `LorenzoQuant` forward kernel read an uninitialized shared-memory ghost row and discarded it by multiplying with zero, which leaves NaN or Inf from an earlier kernel as NaN. A compress that followed other kernels in the same process (for example the second compress of `fzgmod-cli -b` after Huffman) could record spurious outliers with NaN values and decode to NaN. The first compress in a process, and 1-D/2-D fields, were unaffected.
+
 ## [2.0.0] — 2026-10-14
 
 ### Added
