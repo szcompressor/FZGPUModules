@@ -160,6 +160,7 @@ Do not add entries for documentation-only or comment-only edits.
 
 ## Branch policy
 
-Development includes the v2.0.0 baseline plus experimental modules and backend
-work. Keep development-only implementations during merges from main, and promote
-validated changes through focused pull requests. See [docs/branch_policy.md](docs/branch_policy.md).
+Development includes current main plus experimental modules and backend work.
+Merge main into development to preserve ancestry, resolving conflicts while
+keeping development-only implementations. Promote selected, validated changes
+through focused main-based pull requests, then merge main back into development. See [docs/branch_policy.md](docs/branch_policy.md).
