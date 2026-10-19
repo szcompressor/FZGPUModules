@@ -103,3 +103,6 @@ build setting, not part of the public recipe.
 
 CUDA Graph capture is absent from this Python interface. Evaluate its core C++
 implementation separately before deciding whether to retain it in the library.
+
+Core graph-capture deprecation and the other deferred engineering directions
+are tracked in [future work](../future_work.md).
