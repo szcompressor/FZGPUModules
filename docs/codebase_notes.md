@@ -1804,3 +1804,40 @@ it in `stage_registry.h`, and add FZGM integration tests. Use the existing SDK
 capability guards for optional families. Registration order retains the previous
 first-match behavior; individual handlers own their token aliases. The main
 plugin requires no stage-specific edits.
+
+
+## CN-GRAPH-1 — CUDA Graph replay evaluation after v2.0.1
+### Scope and protocol
+This is a bounded engineering probe on one NVIDIA H100 80GB HBM3 (driver 595.99.02, CUDA 12.9), not a publication-quality benchmark or an A100 result. Development includes the v2.0.1 decoder API and LorenzoQuant initialization fix. Source inputs are evenly sampled float32 CESM-ATM/2d CLDHGH values from the checksum-verified SDRBench Hugging Face field. Sizes are 4 KiB, 64 KiB, 1 MiB + 12 bytes, and the full 25,920,000-byte field.
+Three isolated-process batches per pipeline/mode/size use randomized order, three warmup compressions, then 30 measurements. Modes are MINIMAL staged, PREALLOCATE staged, PREALLOCATE graph, and PREALLOCATE Auto. Graph versus staged comparisons below use the same PREALLOCATE strategy and Off specialization. Auto is a separate reference, not combined with graphs. GPU data is resident; host latency includes stream synchronization and two CUDA event recordings. The GPU event interval includes queued work and host dispatch gaps. Setup includes construction/finalization and, for graphs, warmup/capture; it is excluded from steady-state latency.
+Every case validates a round trip, then rotates the input by seven elements and validates another round trip on the same pipeline. Outputs must be finite, preserve the exact logical length, and satisfy ABS = 2^-10. Timings from cases failing either check are excluded. The graph compression path has no graph-based decompression. The experiment does not make a general kernel-only throughput claim.
+### Valid latency comparisons
+Medians below are medians of three per-process medians, in microseconds. A value above 1 in the final column favors graphs.
+| Pipeline | Input bytes | Staged PREALLOCATE us | Graph us | Staged / graph |
+|---|---:|---:|---:|---:|
+| Quantizer → integer Lorenzo → AdaptiveBitpack | 4,096 | 61.41 | 48.52 | 1.27x |
+| Quantizer → integer Lorenzo → AdaptiveBitpack | 65,536 | 67.34 | 49.30 | 1.37x |
+| Quantizer → integer Lorenzo → AdaptiveBitpack | 1,048,588 | 63.66 | 57.60 | 1.11x |
+| Quantizer → integer Lorenzo → AdaptiveBitpack | 25,920,000 | 257.32 | 269.44 | 0.96x |
+| LorenzoQuant | 4,096 | 39.36 | 40.56 | 0.97x |
+| LorenzoQuant | 65,536 | 45.14 | 42.16 | 1.07x |
+| LorenzoQuant | 1,048,588 | 44.33 | 44.69 | 0.99x |
+| LorenzoQuant | 25,920,000 | 84.93 | 104.89 | 0.81x |
+
+Graph and staged reconstruction hashes match for every successful graph size/pipeline and batch. The demo chain has a small-input benefit but regresses on the full CLDHGH field. At 64 KiB one staged batch median was 115.91 us versus 61.71 and 67.34 us in the others; do not treat three batches as a calibrated statistical confidence interval. The large-input medians were much tighter.
+Graph pool peaks on the full field were 184,072,502 bytes versus 158,152,502 staged for the demo chain (one extra input-sized buffer), and 129,600,032 versus 77,760,032 for single LorenzoQuant (two extra input-sized buffers). These are pipeline-reported pool peaks, not total process/device memory. Setup values are retained in the JSON report; cold setup variance prevents a precise amortization estimate from this pilot.
+### Data-dependent correctness failure
+132/144 cases passed. All 12 failing cases were LorenzoQuant → RLE with graph mode (four sizes × three batches). The first input decoded successfully; rotating input after the first round trip produced an error-bound failure at 4 KiB, decoded-size mismatches at 64 KiB and 1 MiB + 12 bytes, and a CUDA invalid-argument error during inverse LorenzoQuant at full-field size. A separate 4 KiB control that repeats the same input instead of rotating it passed. Staged MINIMAL, staged PREALLOCATE, and Auto controls passed. This localizes the reproduced problem to changed-input graph reuse with this pipeline; it does not identify the underlying stale metadata/state cause.
+The 4 KiB failing case still failed functionally under CUDA memcheck with zero reported memory errors. Existing graph unit tests (18 tests), the imported LorenzoQuant shared-initialization regression, and the successful small/full demo graph probes passed memcheck with zero errors. Thus existing graph tests passing does not establish safe changed-input RLE replay. Failed graph arms have no accepted speedup result.
+### Decision and reproduction
+Keep graph capture out of the Python interface and demo. This pilot disproves a blanket claim that graph capture has no performance value: the three-stage small-input chain benefits. It does not justify additional demo integration: full-field compression regresses, memory grows, graph setup is extra work, and a variable-input correctness defect remains. Before retaining graph capture as a supported core feature, reproduce/fix that defect and define compatible stage/state contracts, or explicitly deprecate the feature if small-input reuse is not a target workload. No graph-core removal or fix was made by this evaluation.
+```bash
+cmake --build <development-build> --target graph_capture_comparison
+python scripts/evaluate_graph_capture.py \
+  --executable <development-build>/bin/examples/graph_capture_comparison \
+  --input CLDHGH.f32 --output-dir <private-results>/graph
+# Separate diagnostic: repeats the same input for both validation passes.
+<development-build>/bin/examples/graph_capture_comparison \
+  input-1024.f32 1024 lorenzo_rle graph 1 same-input
+```
+Raw per-process logs, medians, reconstruction hashes, pool peaks, setup times, and failures are retained in `/home/exouser/release_validation/fzgm-development-refresh/graph-measurements/`. Diagnostic and sanitizer logs are alongside it; the original input SHA-256 is in `summary.json`. These generated artifacts are outside the repository.

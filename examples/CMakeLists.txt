@@ -147,3 +147,9 @@ add_executable(sperr_gpu_dag_bounded sperr_gpu_dag_bounded.cu)
 target_link_libraries(sperr_gpu_dag_bounded PRIVATE fzgmod fzgmod_modules fzgmod_mem)
 set_target_properties(sperr_gpu_dag_bounded PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
+
+# Compression latency with staged allocation, graph replay, and specialization.
+add_executable(graph_capture_comparison graph_capture_comparison.cpp)
+target_link_libraries(graph_capture_comparison PRIVATE fzgmod)
+set_target_properties(graph_capture_comparison PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")

@@ -9,6 +9,15 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Add a CUDA Graph compression comparison covering setup cost, steady-state latency, memory, and changed-input reconstruction checks.
+
+### Changed
+- Development includes the v2.0.1 decoder API, LorenzoQuant fix, and Python build discovery while retaining experimental modules and backend support.
+- Refresh the Python demo for the libpressio-owned subclass, SDRBench loading, and saved-archive decoding in a fresh process.
+
+Earlier experimental engineering details are in `docs/history/pre-v2-engineering.md`.
+
 ### Changed
 - CMake now locates the build-time Python interpreter with `find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)` and runs the header generators through `${Python3_EXECUTABLE}`, so a missing or too-old Python fails at configure time instead of mid-build. Override with `-DPython3_EXECUTABLE=...`.
 

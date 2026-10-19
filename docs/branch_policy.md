@@ -1,6 +1,6 @@
 # Stable main and development {#branch_policy}
 
-`v2.0.0` is the immutable stable release baseline. `main` contains the supported
+`v2.0.0` is the shared release baseline; stable fixes through `v2.0.1` are integrated. `main` contains the supported
 CUDA catalog and production fixes. `development` includes that release in its
 ancestry and preserves experimental modules, backend work, research artifacts,
 profiling programs, cards, design notes, and demo materials.
@@ -22,6 +22,8 @@ cd /home/exouser/FZGPUModules-development
 git switch -c feature/<name> development
 ```
 
-Production fixes should land on main and then merge into development. Internal
+Production fixes should land on main and then be integrated into development.
+Cherry-pick bounded fixes when a merge would discard development-only files;
+review the resulting patches rather than requiring main to be an ancestor. Internal
 `docs/releases/` records remain ignored local files on both branches. The Python
 Chain helper belongs to the separately installed libpressio adapter.
