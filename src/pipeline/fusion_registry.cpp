@@ -21,6 +21,7 @@
 
 namespace fz {
 
+#if !defined(FZGMOD_BACKEND_HIP)   // the fused implementations are NVRTC/CUDA-only; see findFusedImpl()
 namespace {
 
 // ── Warp-register (cuSZp): Quantizer(linear,ABS) -> block-local predictor ->
@@ -536,13 +537,20 @@ const FusedImpl kBuiltins[] = {
 };
 
 } // namespace
+#endif // !FZGMOD_BACKEND_HIP
 
 const FusedImpl* findFusedImpl(
     const std::vector<Stage*>& group, bool include_experimental) {
+#if defined(FZGMOD_BACKEND_HIP)
+    // No fused implementation exists on HIP (they JIT with NVRTC), so specialization falls back to staged.
+    (void)group; (void)include_experimental;
+    return nullptr;
+#else
     for (const auto& impl : kBuiltins)
         if ((impl.auto_enabled || include_experimental) && impl.matches(group))
             return &impl;
     return nullptr;
+#endif
 }
 
 } // namespace fz

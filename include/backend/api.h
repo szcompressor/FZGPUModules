@@ -46,6 +46,7 @@
 #define cudaDevAttrMaxSharedMemoryPerBlock        hipDeviceAttributeMaxSharedMemoryPerBlock
 #define cudaDevAttrMaxSharedMemoryPerBlockOptin   hipDeviceAttributeSharedMemPerBlockOptin
 #define cudaDevAttrMultiProcessorCount            hipDeviceAttributeMultiprocessorCount
+#define cudaDevAttrCooperativeLaunch              hipDeviceAttributeCooperativeLaunch
 
 // ── Handle types
 #define cudaError_t                 hipError_t
@@ -75,6 +76,7 @@
 #define cudaDeviceGetAttribute                          hipDeviceGetAttribute
 #define cudaDeviceSynchronize                           hipDeviceSynchronize
 #define cudaFuncSetAttribute                            hipFuncSetAttribute
+#define cudaLaunchCooperativeKernel                     hipLaunchCooperativeKernel
 #define cudaFuncAttributeMaxDynamicSharedMemorySize     hipFuncAttributeMaxDynamicSharedMemorySize
 #define cudaOccupancyMaxActiveBlocksPerMultiprocessor   hipOccupancyMaxActiveBlocksPerMultiprocessor
 #define cudaProfilerStart                               hipProfilerStart

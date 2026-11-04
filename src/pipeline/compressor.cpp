@@ -206,6 +206,10 @@ void Pipeline::planAndInstallFusion() {
         fusion_info_.fallback_reason = "policy_off";
         return;
     }
+#if defined(FZGMOD_BACKEND_HIP)
+    fusion_info_.fallback_reason = "unsupported_backend";
+    return;
+#endif
 
     std::vector<CompressionDAG::FusedGroupExec> installed;
     const bool include_experimental = mode == FusionPolicy::Force;

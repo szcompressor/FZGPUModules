@@ -40,6 +40,8 @@
 #include "coders/lc_common/lc_chunk_components.cuh"
 #include "coders/lc_common/lc_clog_components.cuh"   // d_CLOG / d_HCLOG
 #include "transforms/negabinary/negabinary.h"
+#include "backend/fp.h"
+#include "backend/warp.h"
 #include "transforms/zigzag/zigzag.h"
 #include <cstdint>
 
@@ -51,17 +53,17 @@ using byte = uint8_t;
 
 // 5-stage register butterfly (copy of bitshuffle_stage.cu butterfly32).
 __device__ __forceinline__ unsigned butterfly32(unsigned a, int sublane) {
-    unsigned q = __shfl_xor_sync(0xffffffffu, a, 16, 32);
+    unsigned q = fz::backend::shflXor(a, 16, 32);
     a = ((sublane&16)==0) ? __byte_perm(a,q,(3u<<12)|(2u<<8)|(7u<<4)|6u)
                           : __byte_perm(a,q,(5u<<12)|(4u<<8)|(1u<<4)|0u);
-    q = __shfl_xor_sync(0xffffffffu, a, 8, 32);
+    q = fz::backend::shflXor(a, 8, 32);
     a = ((sublane&8)==0) ? __byte_perm(a,q,(3u<<12)|(7u<<8)|(1u<<4)|5u)
                          : __byte_perm(a,q,(6u<<12)|(2u<<8)|(4u<<4)|0u);
-    q = __shfl_xor_sync(0xffffffffu, a, 4, 32); unsigned m=0x0F0F0F0Fu;
+    q = fz::backend::shflXor(a, 4, 32); unsigned m=0x0F0F0F0Fu;
     a = ((sublane&4)==0) ? ((a&~m)|((q>>4)&m)) : (((q<<4)&~m)|(a&m));
-    q = __shfl_xor_sync(0xffffffffu, a, 2, 32); m=0x33333333u;
+    q = fz::backend::shflXor(a, 2, 32); m=0x33333333u;
     a = ((sublane&2)==0) ? ((a&~m)|((q>>2)&m)) : (((q<<2)&~m)|(a&m));
-    q = __shfl_xor_sync(0xffffffffu, a, 1, 32); m=0x55555555u;
+    q = fz::backend::shflXor(a, 1, 32); m=0x55555555u;
     a = ((sublane&1)==0) ? ((a&~m)|((q>>1)&m)) : (((q<<1)&~m)|(a&m));
     return a;
 }
@@ -98,7 +100,7 @@ struct QuantInplaceZigzag {
             bool representable = q > -(int)p.radius && q < (int)p.radius
                               && fabsf(x) < p.threshold;
             if (representable && p.verify_reconstruction)
-                representable = fabsf(x - __fmul_rn(static_cast<float>(q), p.ebx2)) <= p.abs_eb;
+                representable = fabsf(x - fz::backend::fmulRounded(static_cast<float>(q), p.ebx2)) <= p.abs_eb;
             if (representable)
                 c = (uint32_t)((q << 1) ^ (q >> 31));
             else
@@ -136,13 +138,17 @@ struct QuantSplitOutlier {
             // atomicAdd per outlier. Cuts global-counter contention up to 32x. Only
             // outlier lanes reach here, so __activemask() is exactly the outlier set
             // (tail-safe: partial final chunks just have fewer active lanes).
-            const unsigned outmask   = __activemask();
+            const unsigned outmask   = fz::backend::activeMask32();   // this 32-lane group's outlier lanes
             const int      leader    = __ffs(outmask) - 1;
             const unsigned rank      = __popc(outmask & ((1u << lane) - 1));
             uint32_t       warp_base = 0;
             if (lane == leader)
                 warp_base = atomicAdd(side.out_count, __popc(outmask));
+#if defined(FZGMOD_BACKEND_HIP)
+            warp_base = fz::backend::shfl(warp_base, leader, 32);   // broadcast base slot (mask inert on HIP)
+#else
             warp_base = __shfl_sync(outmask, warp_base, leader);   // broadcast base slot
+#endif
             const uint32_t slot = warp_base + rank;
             if (slot < side.max) {
                 side.out_idxs[slot] = (uint32_t)(base + i);   // global element index
@@ -385,7 +391,7 @@ struct GolombRiceCoder {
         for (uint32_t k = 0; k <= kMaxK; ++k) {
             uint32_t c = local_cost[k];
             #pragma unroll
-            for (int off = 16; off > 0; off >>= 1) c += __shfl_down_sync(0xffffffffu, c, off, 32);
+            for (int off = 16; off > 0; off >>= 1) c += fz::backend::shflDown(c, off, 32);
             if (lane == 0) s_warp_cost[warp * (kMaxK + 1) + k] = c;
         }
         __syncthreads();
@@ -394,7 +400,7 @@ struct GolombRiceCoder {
             for (uint32_t k = 0; k <= kMaxK; ++k) {
                 uint32_t c = (lane < nwarps) ? s_warp_cost[lane * (kMaxK + 1) + k] : 0u;
                 #pragma unroll
-                for (int off = 16; off > 0; off >>= 1) c += __shfl_down_sync(0xffffffffu, c, off, 32);
+                for (int off = 16; off > 0; off >>= 1) c += fz::backend::shflDown(c, off, 32);
                 if (lane == 0) s_total_cost[k] = c;
             }
             if (lane == 0) {
@@ -420,10 +426,10 @@ struct GolombRiceCoder {
         uint32_t warp_excl = thread_total;
         #pragma unroll
         for (int d = 1; d < 32; d <<= 1) {
-            const uint32_t up = __shfl_up_sync(0xffffffffu, warp_excl, d, 32);
+            const uint32_t up = fz::backend::shflUp(warp_excl, d, 32);
             if (lane >= d) warp_excl += up;
         }
-        const uint32_t warp_bit_total = __shfl_sync(0xffffffffu, warp_excl, 31, 32);
+        const uint32_t warp_bit_total = fz::backend::shfl(warp_excl, 31, 32);
         warp_excl -= thread_total;
         const uint32_t warp_byte_len = (warp_bit_total + 7u) >> 3;
         if (lane == 0) s_warp_bytelen[warp] = warp_byte_len;
@@ -433,10 +439,10 @@ struct GolombRiceCoder {
             uint32_t excl = v;
             #pragma unroll
             for (int d = 1; d < 32; d <<= 1) {
-                const uint32_t up = __shfl_up_sync(0xffffffffu, excl, d, 32);
+                const uint32_t up = fz::backend::shflUp(excl, d, 32);
                 if (lane >= d) excl += up;
             }
-            const uint32_t grand_total = __shfl_sync(0xffffffffu, excl, nwarps - 1, 32);
+            const uint32_t grand_total = fz::backend::shfl(excl, nwarps - 1, 32);
             excl -= v;
             if (lane < nwarps) s_warp_bytebase[lane] = excl;
             if (lane == 0) *s_total_bytes = grand_total;
@@ -604,7 +610,11 @@ constexpr unsigned long long kLookbackInclusive = 2ull << 62;
 constexpr unsigned long long kLookbackValueMask = (1ull << 62) - 1ull;
 
 __device__ __forceinline__ unsigned long long lookbackLoad(const unsigned long long* p) {
+#if defined(FZGMOD_BACKEND_HIP)
+    return __hip_atomic_load(p, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+#else
     return *reinterpret_cast<const volatile unsigned long long*>(p);
+#endif
 }
 
 // Block-wide shared->global copy to an arbitrarily aligned destination (after
@@ -654,12 +664,12 @@ chunk_emit_direct(uint32_t cid, const ChunkEncoded& e, byte* __restrict__ archiv
             if (j >= 0) {
                 while (((v = lookbackLoad(&state[j])) >> 62) == 0ull) {}
             }
-            const unsigned incl = __ballot_sync(0xffffffffu, (v >> 62) == 2ull);
+            const unsigned incl = fz::backend::ballotSync32((v >> 62) == 2ull);
             const unsigned upto = incl ? (__ffs(incl) - 1) : 31u;  // nearest inclusive lane
             unsigned long long part = (lane <= upto) ? (v & kLookbackValueMask) : 0ull;
             for (int off = 16; off > 0; off >>= 1)
-                part += __shfl_down_sync(0xffffffffu, part, off);
-            prefix += __shfl_sync(0xffffffffu, part, 0);
+                part += fz::backend::shflDown(part, off, 32);
+            prefix += fz::backend::shfl(part, 0, 32);
             if (incl) break;
         }
         if (lane == 0) {
@@ -703,41 +713,48 @@ chunk_fused_kernel(const float* __restrict__ in, size_t n,
 }
 
 // ── Inverse chunk harness (initial RZE evidence-gated path). ─────────────────
-// One CTA consumes one packed LC chunk, keeps every intermediate in the same
-// shared-memory ping-pong buffers as compression, and writes reconstructed
-// floats once. `offsets` are payload-relative exclusive offsets computed from
-// the archive's flagged size table by the launcher.
+// Block-wide global->shared copy of `len` bytes from an arbitrarily aligned
+// `src` into the 16-byte aligned shared `dst` (the mirror of storeChunkBytes):
+// aligned word loads realigned with __funnelshift_r. `src` must lie in a buffer
+// whose start is 4-byte aligned; nothing past the word holding src[len-1] is read.
+__device__ __forceinline__ void loadChunkBytes(byte* __restrict__ dst,
+                                               const byte* __restrict__ src, uint32_t len) {
+    const uint32_t mis   = (uint32_t)((size_t)src & 3u);
+    const uint32_t words = (len + 3u) / 4u;
+    const uint32_t* __restrict__ sw = reinterpret_cast<const uint32_t*>(src - mis);
+    uint32_t* __restrict__ dw = reinterpret_cast<uint32_t*>(dst);
+    if (mis == 0) {
+        for (uint32_t w = threadIdx.x; w < words; w += TPB) dw[w] = sw[w];
+    } else {
+        const uint32_t need  = mis + len;   // bytes from the aligned base
+        const uint32_t shift = mis * 8u;
+        for (uint32_t w = threadIdx.x; w < words; w += TPB) {
+            const uint32_t hi = (4u * (w + 1u) < need) ? sw[w + 1u] : 0u;
+            dw[w] = __funnelshift_r(sw[w], hi, shift);
+        }
+    }
+}
+
+// Decode one packed chunk into floats. `payload` is the chunk's bytes in the
+// archive, `entry` its size-table word (bit 31 = stored raw). `coded_full`: the
+// chunk was encoded whole (ChunkBytes, bitshuffled) -- a chunk padded with zeros
+// past the field's end still was; `cnt` floats are reconstructed and written to
+// out_chunk[0, cnt). Every intermediate stays in shared memory.
 template<int ChunkBytes, class Coder>
 __device__ __forceinline__ void
-chunk_inverse_pfpl_body(const byte* __restrict__ archive,
-                        const uint32_t* __restrict__ entries,
-                        const uint32_t* __restrict__ offsets,
-                        size_t output_bytes, float ebx2,
-                        bool inplace_outliers, uint32_t quant_radius,
-                        float* __restrict__ out) {
+chunk_inverse_pfpl_at(const byte* __restrict__ payload, uint32_t entry, bool coded_full, int cnt,
+                      float ebx2, bool inplace_outliers, uint32_t quant_radius,
+                      float* __restrict__ out_chunk) {
     constexpr int NELEM = Geom<ChunkBytes>::NELEM;
     constexpr int NPP   = Geom<ChunkBytes>::NPP;
     __shared__ __align__(16) uint32_t sA[NELEM];
     __shared__ __align__(16) uint32_t sB[NELEM];
     __shared__ __align__(16) byte     sTemp[TEMP_BYTES];
 
-    const uint32_t cid = blockIdx.x;
-    const size_t base_bytes = static_cast<size_t>(cid) * ChunkBytes;
-    if (base_bytes >= output_bytes) return;
-    const int out_bytes = static_cast<int>(min(static_cast<size_t>(ChunkBytes),
-                                               output_bytes - base_bytes));
-    const int cnt = out_bytes / static_cast<int>(sizeof(uint32_t));
-    const bool full = out_bytes == ChunkBytes;
-    const uint32_t entry = entries[cid];
     const uint32_t stored = entry & 0x7fffffffu;
     const bool raw = (entry & 0x80000000u) != 0;
-    const uint32_t nchunks = static_cast<uint32_t>(
-        (output_bytes + ChunkBytes - 1) / ChunkBytes);
-    const size_t header = 8u + static_cast<size_t>(nchunks) * sizeof(uint32_t);
-    const byte* payload = archive + header + offsets[cid];
 
-    for (uint32_t i = threadIdx.x; i < stored; i += blockDim.x)
-        reinterpret_cast<byte*>(sA)[i] = payload[i];
+    loadChunkBytes(reinterpret_cast<byte*>(sA), payload, stored);
     __syncthreads();
 
     uint32_t* cur = sA;
@@ -752,7 +769,7 @@ chunk_inverse_pfpl_body(const byte* __restrict__ archive,
     }
 
     // Bitshuffle is self-inverse but its read/write indexing is reversed.
-    if (full) {
+    if (coded_full) {
         const int lane = threadIdx.x & 31;
         for (int i = threadIdx.x; i < NELEM; i += blockDim.x) {
             const unsigned a = cur[i / 32 + lane * NPP];
@@ -776,7 +793,7 @@ chunk_inverse_pfpl_body(const byte* __restrict__ archive,
         const int lane = threadIdx.x & 31;
         const int warp = threadIdx.x >> 5;
         for (int delta = 1; delta < 32; delta <<= 1) {
-            const int32_t up = __shfl_up_sync(0xffffffffu, v, delta);
+            const int32_t up = fz::backend::shflUp(v, delta, 32);
             if (lane >= delta) v += up;
         }
         if (lane == 31) scan[warp] = v;
@@ -784,7 +801,7 @@ chunk_inverse_pfpl_body(const byte* __restrict__ archive,
         if (warp == 0) {
             int32_t w = lane < 16 ? scan[lane] : 0;
             for (int delta = 1; delta < 32; delta <<= 1) {
-                const int32_t up = __shfl_up_sync(0xffffffffu, w, delta);
+                const int32_t up = fz::backend::shflUp(w, delta, 32);
                 if (lane >= delta) w += up;
             }
             if (lane < 16) scan[lane] = w;
@@ -797,19 +814,44 @@ chunk_inverse_pfpl_body(const byte* __restrict__ archive,
         __syncthreads();
     }
 
-    const size_t base_elem = base_bytes / sizeof(uint32_t);
     for (int i = threadIdx.x; i < cnt; i += blockDim.x) {
         // Difference reconstructs the quantizer's *zigzag code* stream. Undo
         // that final map before scaling back to the reconstructed float.
         const uint32_t code = static_cast<uint32_t>(qout[i]);
         if (inplace_outliers && (code >> 1) >= quant_radius) {
-            out[base_elem + static_cast<size_t>(i)] = __uint_as_float(code);
+            out_chunk[i] = __uint_as_float(code);
         } else {
             const int32_t q = static_cast<int32_t>(
                 (code >> 1) ^ (0u - (code & 1u)));
-            out[base_elem + static_cast<size_t>(i)] = static_cast<float>(q) * ebx2;
+            out_chunk[i] = static_cast<float>(q) * ebx2;
         }
     }
+}
+
+// One CTA consumes one packed LC chunk, keeps every intermediate in the same
+// shared-memory ping-pong buffers as compression, and writes reconstructed
+// floats once. `offsets` are payload-relative exclusive offsets computed from
+// the archive's flagged size table by the launcher.
+template<int ChunkBytes, class Coder>
+__device__ __forceinline__ void
+chunk_inverse_pfpl_body(const byte* __restrict__ archive,
+                        const uint32_t* __restrict__ entries,
+                        const uint32_t* __restrict__ offsets,
+                        size_t output_bytes, float ebx2,
+                        bool inplace_outliers, uint32_t quant_radius,
+                        float* __restrict__ out) {
+    const uint32_t cid = blockIdx.x;
+    const size_t base_bytes = static_cast<size_t>(cid) * ChunkBytes;
+    if (base_bytes >= output_bytes) return;
+    const int out_bytes = static_cast<int>(min(static_cast<size_t>(ChunkBytes),
+                                               output_bytes - base_bytes));
+    const uint32_t nchunks = static_cast<uint32_t>(
+        (output_bytes + ChunkBytes - 1) / ChunkBytes);
+    const size_t header = 8u + static_cast<size_t>(nchunks) * sizeof(uint32_t);
+    chunk_inverse_pfpl_at<ChunkBytes, Coder>(
+        archive + header + offsets[cid], entries[cid], out_bytes == ChunkBytes,
+        out_bytes / static_cast<int>(sizeof(uint32_t)), ebx2, inplace_outliers, quant_radius,
+        out + base_bytes / sizeof(uint32_t));
 }
 
 template<int ChunkBytes, class Coder>
