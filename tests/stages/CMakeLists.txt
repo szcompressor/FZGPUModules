@@ -189,12 +189,15 @@ fz_add_test(
 )
 
 # 3-D LorenzoQuant forward kernel must not depend on stale shared memory
-fz_add_test(
-    NAME    test_lorenzo_quant_shared_init
-    SOURCES test_lorenzo_quant_shared_init.cu
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
+# Includes cuda_runtime.h directly.
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+    fz_add_test(
+        NAME    test_lorenzo_quant_shared_init
+        SOURCES test_lorenzo_quant_shared_init.cu
+        LIBS    fzgmod_modules fzgmod_mem fzgmod
+        LABELS  stages gpu
+    )
+endif()
 
 # ─── Per-tile adaptive multi-order Lorenzo (FSZ prediction stage) ────────────
 fz_add_test(

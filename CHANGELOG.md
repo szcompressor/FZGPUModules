@@ -9,6 +9,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `-DFZGMOD_BACKEND=HIP` configures again, with `hip` CMake presets. NVRTC specialization is not built on HIP, so every stage runs staged, and `test_fusion_f64`, `test_fusion_fixed`, `test_fusion_planner` and `test_lorenzo_quant_shared_init` are CUDA-only.
+
 ### Changed
 - CMake now locates the build-time Python interpreter with `find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)` and runs the header generators through `${Python3_EXECUTABLE}`, so a missing or too-old Python fails at configure time instead of mid-build. Override with `-DPython3_EXECUTABLE=...`.
 

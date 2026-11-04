@@ -58,28 +58,37 @@ fz_add_test(
 )
 
 # ─── Fusion planner (identifies fusable stage chains in the DAG) ───────────────
-fz_add_test(
-    NAME    test_fusion_planner
-    SOURCES test_fusion_planner.cpp
-    LIBS    fzgmod
-    LABELS  pipeline gpu
-)
+# Calls the NVRTC source generators, which only the CUDA backend builds.
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+    fz_add_test(
+        NAME    test_fusion_planner
+        SOURCES test_fusion_planner.cpp
+        LIBS    fzgmod
+        LABELS  pipeline gpu
+    )
+endif()
 
 # ─── f64 Auto specialization correctness and fallback coverage ────────────────
-fz_add_test(
-    NAME    test_fusion_f64
-    SOURCES test_fusion_f64.cpp
-    LIBS    fzgmod
-    LABELS  pipeline gpu
-)
+# Calls the NVRTC source generators, which only the CUDA backend builds.
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+    fz_add_test(
+        NAME    test_fusion_f64
+        SOURCES test_fusion_f64.cpp
+        LIBS    fzgmod
+        LABELS  pipeline gpu
+    )
+endif()
 
 # ─── Predictor-free fixed 1D warp specialization ──────────────────────────────
-fz_add_test(
-    NAME    test_fusion_fixed
-    SOURCES test_fusion_fixed.cpp
-    LIBS    fzgmod
-    LABELS  pipeline gpu
-)
+# Requires an installed specialization, which only the CUDA backend has.
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+    fz_add_test(
+        NAME    test_fusion_fixed
+        SOURCES test_fusion_fixed.cpp
+        LIBS    fzgmod
+        LABELS  pipeline gpu
+    )
+endif()
 
 # ─── Config file load/save (TOML) ─────────────────────────────────────────────
 fz_add_test(
