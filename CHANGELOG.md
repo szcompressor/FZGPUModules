@@ -10,9 +10,15 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- `fz::pfpl` (`fused/chunk_fusion/pfpl_stream.h`): a float field compresses from one device buffer into another and back in one stream-ordered kernel each, with no host synchronization and the same archive bytes as the PFPL preset in ABS mode.
+- Wave64 AMD kernels for `fz::pfpl`, used by default on HIP; `FZ_PFPL_HARNESS=1` selects the generic harness kernels. See CN-PFPLSTREAM-1.
 - `-DFZGMOD_BACKEND=HIP` configures again, with `hip` CMake presets. NVRTC specialization is not built on HIP, so every stage runs staged, and `test_fusion_f64`, `test_fusion_fixed`, `test_fusion_planner` and `test_lorenzo_quant_shared_init` are CUDA-only.
 
+### Fixed
+- On HIP, the ABS bound check could accept values that decode up to half an ulp past the bound, because clang fused its multiply and subtract into one FMA. `fz::backend::fmulRounded` keeps the product rounded in the staged quantizer and the chunk harness.
+
 ### Changed
+- The chunk harness decode copies payloads with `loadChunkBytes` instead of byte by byte, on CUDA as well.
 - CMake now locates the build-time Python interpreter with `find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)` and runs the header generators through `${Python3_EXECUTABLE}`, so a missing or too-old Python fails at configure time instead of mid-build. Override with `-DPython3_EXECUTABLE=...`.
 
 ## [2.0.1] — 2026-10-15

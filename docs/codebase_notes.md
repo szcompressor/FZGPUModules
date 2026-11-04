@@ -1816,3 +1816,46 @@ it in `stage_registry.h`, and add FZGM integration tests. Use the existing SDK
 capability guards for optional families. Registration order retains the previous
 first-match behavior; individual handlers own their token aliases. The main
 plugin requires no stage-specific edits.
+
+## CN-PFPLSTREAM-1 — Why `fz::pfpl` has AMD kernels, and what they gain
+
+**Source:** `modules/fused/chunk_fusion/pfpl_stream_amd.inl`.
+
+The generic harness kernels keep a chunk in shared memory with block-wide scans
+and about 20 barriers per chunk. Profiled on MI250X, they wait about 65% of the
+time at 8 waves per CU. Their 36 KiB of shared memory also limits a CU to one
+block. The AMD kernels produce the same stream, byte for byte, with 6-7 barriers
+and 19 KiB of shared memory, which fits 3 blocks per CU.
+
+Measured on one MI250X GCD with ROCm 7.1.1, on a polar tile with `abs_eb` 1e-4
+and a compression ratio of about 1.7. Throughput is in GB/s:
+
+| Field | Encode: two-array | Encode: staged | Decode: two-array | Decode: staged |
+|---|---:|---:|---:|---:|
+| 1 MiB | 57.3 | 6.7 | 46.1 | 6.8 |
+| 8 MiB | 151.6 | 25.7 | 129.2 | 29.2 |
+| 32 MiB | 191.7 | 37.1 | 156.9 | 45.4 |
+| 128 MiB | 203.3 | 41.8 | 165.6 | 50.3 |
+| 512 MiB | 202.5 | 43.0 | 167.7 | 52.0 |
+
+## CN-PFPLSTREAM-2 — A new `Plan` clears its memory on the calling stream
+
+**Source:** `Plan::reserve` and `Plan::nextEpoch` in
+`modules/fused/chunk_fusion/pfpl_stream.cu`.
+
+`Plan::reserve` used to clear its new ticket counter and look-back state with a
+stream-less `cudaMemset`. On MI250X with ROCm 7.1.1 that clear could land after
+the first encode kernel on a non-blocking stream had started. A read on the
+calling stream right after the call returned the page's previous contents, and
+the same read after a 50 ms wait, with no GPU synchronization, returned zero.
+
+A stale counter gives `atomicAdd(ticket, 1) - ticket_base` a wild chunk id, so the
+kernel reads from `in + cid * kElems`. Both the AMD and the harness encode kernels
+stopped with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. Stale look-back words
+tagged with the same epoch would give a wrong offset with no fault.
+
+The clears now run in `Plan::nextEpoch` with `cudaMemsetAsync` on the calling
+stream, ahead of that call's kernel, so they need no host synchronization.
+`PfplStream.FreshPlanIgnoresStaleMemory` keeps the default stream busy so that a
+clear queued there always loses the race. Without this fix it faults in its first
+round on both kernel sets.

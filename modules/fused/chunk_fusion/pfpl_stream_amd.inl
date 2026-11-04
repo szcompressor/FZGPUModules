@@ -1,9 +1,9 @@
 // Included by pfpl_stream.cu (inside fz::pfpl::<anonymous>): the AMD (wave64) encode/decode kernels.
 //
 // The generic harness kernels keep a chunk in two 16 KiB shared buffers plus 4 KiB of coder scratch (36 KiB: one
-// 512-thread block per CU on MI200's 64 KiB LDS) and run d_RZE's bitmap recursion with block-wide scans (~20
-// barriers per chunk); profiled on MI250X they wait ~65% of the time at 8 waves per CU. These produce the same
-// stream, byte for byte, from one padded 16.1 KiB buffer and 2 KiB of bitmap (3 blocks per CU), with 6-7 barriers:
+// 512-thread block per CU on MI200's 64 KiB LDS) and run d_RZE's bitmap recursion with block-wide scans, which
+// spend most of their time waiting at barriers (CN-PFPLSTREAM-1). These produce the same stream, byte for byte, from
+// one padded 16.1 KiB buffer and 2 KiB of bitmap (3 blocks per CU), with 6-7 barriers:
 //  - quantize, difference and bitshuffle in registers (the difference's cross-wavefront neighbours through a
 //    64-word exchange), scattering the bitshuffled planes into a buffer padded to 129 words per plane so the
 //    plane scatter hits 32 different banks (the unpadded layout puts all 32 lanes of a group in one bank);
@@ -354,9 +354,6 @@ decodeKernel(const byte* __restrict__ stream, float* __restrict__ out, uint32_t 
     const uint32_t chunks = gridDim.x;
     if (w[0] != kStreamMagic || w[3] != n || w[4] != chunks * kElems * 4u || w[5] != chunks ||
         w[1] < kLcHeader + 4u * chunks || !(__uint_as_float(w[2]) > 0.0f)) {
-        if (blockIdx.x == 0 && t == 0)
-            printf("[fzgmod] pfpl::decompress: not a PFPL stream of %u floats "
-                   "(magic %08x, n %u, chunks %u, archive %u B)\n", n, w[0], w[3], w[5], w[1]);
         streamTrap();
     }
     const uint32_t  cid    = blockIdx.x;

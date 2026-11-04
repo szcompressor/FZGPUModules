@@ -200,9 +200,6 @@ decodeKernel(const byte* __restrict__ stream, float* __restrict__ out, uint32_t 
     const uint32_t chunks = gridDim.x;
     if (w[0] != kStreamMagic || w[3] != n || w[4] != chunks * kElems * 4u || w[5] != chunks ||
         w[1] < kLcHeader + 4u * chunks || !(__uint_as_float(w[2]) > 0.0f)) {
-        if (blockIdx.x == 0 && threadIdx.x == 0)
-            printf("[fzgmod] pfpl::decompress: not a PFPL stream of %u floats "
-                   "(magic %08x, n %u, chunks %u, archive %u B)\n", n, w[0], w[3], w[5], w[1]);
         streamTrap();
     }
     const uint32_t cid   = blockIdx.x;
@@ -274,7 +271,7 @@ void Plan::reserve(size_t n) {
     const size_t chunks = std::max<size_t>(chunksOf(n), 1);
     if (ticket_ == nullptr) {
         FZ_CUDA_CHECK(cudaMalloc(&ticket_, sizeof(unsigned long long)));
-        FZ_CUDA_CHECK(cudaMemset(ticket_, 0, sizeof(unsigned long long)));
+        clear_ticket_ = true;
         tickets_ = 0;
     }
     if (chunks <= chunks_) return;
@@ -284,12 +281,23 @@ void Plan::reserve(size_t n) {
         state_ = nullptr;
     }
     FZ_CUDA_CHECK(cudaMalloc(&state_, chunks * sizeof(unsigned long long)));
-    FZ_CUDA_CHECK(cudaMemset(state_, 0, chunks * sizeof(unsigned long long)));
+    clear_state_ = true;
     chunks_ = chunks;
     epoch_  = 0;   // a cleared state: every epoch is new again
 }
 
 uint32_t Plan::nextEpoch(fz::stream_t stream) {
+    // New memory can hold earlier bytes: a stale ticket is a wild chunk id, and stale look-back words are a wrong
+    // offset. Clear it on the calling stream, because a stream-less cudaMemset is not ordered with a non-blocking
+    // stream's kernels. See CN-PFPLSTREAM-2.
+    if (clear_ticket_) {
+        FZ_CUDA_CHECK(cudaMemsetAsync(ticket_, 0, sizeof(unsigned long long), stream));
+        clear_ticket_ = false;
+    }
+    if (clear_state_) {
+        FZ_CUDA_CHECK(cudaMemsetAsync(state_, 0, chunks_ * sizeof(unsigned long long), stream));
+        clear_state_ = false;
+    }
     if (++epoch_ > kEpochMask) {   // after 2^30 calls, start over on a cleared state
         FZ_CUDA_CHECK(cudaMemsetAsync(state_, 0, chunks_ * sizeof(unsigned long long), stream));
         epoch_ = 1;

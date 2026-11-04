@@ -61,7 +61,8 @@ public:
     Plan(const Plan&)            = delete;
     Plan& operator=(const Plan&) = delete;
 
-    /** Make room for fields of up to n floats. Allocating synchronizes the device. */
+    /** Make room for fields of up to n floats. Replacing a smaller state synchronizes the device; new memory is
+     *  cleared on the stream of the next compress or decompress. */
     void reserve(size_t n);
 
 private:
@@ -74,6 +75,8 @@ private:
     size_t              chunks_  = 0;        ///< chunks state_ holds
     unsigned long long  tickets_ = 0;        ///< the ticket counter's value between calls
     uint32_t            epoch_   = 0;        ///< last epoch used (0 = never: fresh state reads as empty)
+    bool                clear_ticket_ = false;  ///< ticket_ is new: zero it ahead of the next call's kernel
+    bool                clear_state_  = false;  ///< state_ is new: zero it ahead of the next call's kernel
 };
 
 /**
