@@ -1887,3 +1887,25 @@ Measured on one MI250X GCD with ROCm 7.1.1, on a 128 MiB polar tile (throughput 
 | double, 1e-4 | 3.56 | 219.2 | 182.5 | 70.0 | 65.1 |
 | double, 1e-9 | 1.81 | 214.2 | 177.2 | | |
 | double, 1e-12 | 1.40 | 207.9 | 173.0 | 68.1 | 61.6 |
+
+## CN-PFPLSTREAM-4 — The host coder
+
+**Source:** `modules/fused/chunk_fusion/pfpl_stream_host.inl`.
+
+A caller that has to read or write a stream off the GPU path used to stage it through the device. QCLAB++ did, and it failed
+two ways. Reading a state back, 14 threads per rank each allocated a tile's worth of device memory beside what PaRSEC already
+held, and double tiles of 512 MiB stopped with out of memory. And a rank that could see no GPU could not code at all.
+
+`compressHost` and `decompressHost` write and read the same stream as the kernels, in plain C++, one thread per call, with stack
+buffers only. `PfplHostCase` holds them to the kernels byte for byte on both kernel sets, both types and every size class. Its
+`hostile` field exists for the one place they can differ, a float-to-int conversion out of range: the GPU saturates and the host
+conversion is undefined, so the host code tests the range first, and both then store the raw bits. `-ffp-contract` matters as
+it does in the kernels (see `fmulRounded`), so the rebuilt value goes through a `volatile`.
+
+Measured on one Frontier login core, with no GPU in the process, on a 128 MiB polar tile:
+
+| Type, bound | Ratio | Encode | Decode |
+|---|---:|---:|---:|
+| float, 1e-3 | 2.43 | 350 MB/s | 550 MB/s |
+| double, 1e-3 | 4.87 | 565 MB/s | 656 MB/s |
+| double, 1e-9 | 1.92 | 460 MB/s | 638 MB/s |

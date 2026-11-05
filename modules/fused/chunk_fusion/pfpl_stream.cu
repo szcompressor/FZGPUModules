@@ -577,8 +577,10 @@ struct PlanAccess {
     }
 };
 
-void compress(Plan& plan, const float* d_in, size_t n, float abs_eb,
-              void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
+namespace {
+
+// What compress() and compressHost() share: the checks, and the quantizer's parameters.
+QuantInplaceZigzagParams quantParams(float abs_eb, size_t n) {
     if (!(abs_eb > 0.0f) || !std::isfinite(abs_eb) || !std::isfinite(0.5f / abs_eb))
         throw std::invalid_argument("fz::pfpl::compress: the error bound must be positive and finite, "
                                     "with a finite quantizer scale 0.5/abs_eb");
@@ -594,27 +596,41 @@ void compress(Plan& plan, const float* d_in, size_t n, float abs_eb,
     qp.radius                = kQuantRadius;
     qp.threshold             = std::numeric_limits<float>::infinity();
     qp.verify_reconstruction = 1;
-    PlanAccess::encode<float>(plan, d_in, n, qp, abs_eb, d_out, capacity, d_stream_bytes, stream);
+    return qp;
 }
 
-void compress(Plan& plan, const double* d_in, size_t n, double abs_eb,
-              void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
+QuantParams64 quantParams(double abs_eb, size_t n, float* recorded) {
     if (!(abs_eb > 0.0) || !std::isfinite(abs_eb))
         throw std::invalid_argument("fz::pfpl::compress: the error bound must be positive and finite");
     // The bound the stream records: never above the one asked for.
-    float recorded = static_cast<float>(abs_eb);
-    if (static_cast<double>(recorded) > abs_eb) recorded = std::nextafter(recorded, 0.0f);
-    if (recorded < std::numeric_limits<float>::min())
+    *recorded = static_cast<float>(abs_eb);
+    if (static_cast<double>(*recorded) > abs_eb) *recorded = std::nextafter(*recorded, 0.0f);
+    if (*recorded < std::numeric_limits<float>::min())
         throw std::invalid_argument("fz::pfpl::compress: a double stream records its bound as a float, so the bound "
                                     "must be at least the smallest normal float");
     if (!fitsArchive<double>(n))
         throw std::invalid_argument("fz::pfpl::compress: a field of 4 GiB or more (in whole chunks) exceeds "
                                     "the LC archive's 32-bit sizes");
-    const double eb = static_cast<double>(recorded);
+    const double eb = static_cast<double>(*recorded);
     QuantParams64 qp{};
     qp.ebx2_r = 0.5 / eb;
     qp.ebx2   = 2.0 * eb;
     qp.abs_eb = eb;
+    return qp;
+}
+
+} // namespace
+
+void compress(Plan& plan, const float* d_in, size_t n, float abs_eb,
+              void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
+    const QuantInplaceZigzagParams qp = quantParams(abs_eb, n);
+    PlanAccess::encode<float>(plan, d_in, n, qp, abs_eb, d_out, capacity, d_stream_bytes, stream);
+}
+
+void compress(Plan& plan, const double* d_in, size_t n, double abs_eb,
+              void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
+    float recorded = 0.0f;
+    const QuantParams64 qp = quantParams(abs_eb, n, &recorded);
     PlanAccess::encode<double>(plan, d_in, n, qp, recorded, d_out, capacity, d_stream_bytes, stream);
 }
 
@@ -624,6 +640,26 @@ void decompress(Plan& plan, const void* d_stream, float* d_out, size_t n, fz::st
 
 void decompress(Plan& plan, const void* d_stream, double* d_out, size_t n, fz::stream_t stream) {
     PlanAccess::decode<double>(plan, d_stream, d_out, n, stream);
+}
+
+#include "fused/chunk_fusion/pfpl_stream_host.inl"
+
+size_t compressHost(const float* in, size_t n, float abs_eb, void* out, size_t capacity) {
+    return host::encode<float>(in, n, quantParams(abs_eb, n), abs_eb, out, capacity);
+}
+
+size_t compressHost(const double* in, size_t n, double abs_eb, void* out, size_t capacity) {
+    float recorded = 0.0f;
+    const QuantParams64 qp = quantParams(abs_eb, n, &recorded);
+    return host::encode<double>(in, n, qp, recorded, out, capacity);
+}
+
+bool decompressHost(const void* stream, float* out, size_t n, size_t outBytes) {
+    return host::decode<float>(stream, out, n, outBytes);
+}
+
+bool decompressHost(const void* stream, double* out, size_t n, size_t outBytes) {
+    return host::decode<double>(stream, out, n, outBytes);
 }
 
 } // namespace pfpl

@@ -124,5 +124,22 @@ void compress(Plan& plan, const double* d_in, size_t n, double abs_eb,
 void decompress(Plan& plan, const void* d_stream, float* d_out, size_t n, fz::stream_t stream);
 void decompress(Plan& plan, const void* d_stream, double* d_out, size_t n, fz::stream_t stream);
 
+/**
+ * compress() on the host: the same stream, byte for byte, in host memory, from any thread, with no device, Plan or
+ * GPU. One thread, so far slower than the kernels. Returns the stream's length, greater than `capacity` when it does
+ * not fit; nothing at or past out + capacity is written, and a stream that does not fit leaves its 16-byte header
+ * (when that fits), as compress() does. The bound is taken as compress() takes it.
+ */
+size_t compressHost(const float* in, size_t n, float abs_eb, void* out, size_t capacity);
+size_t compressHost(const double* in, size_t n, double abs_eb, void* out, size_t capacity);
+
+/**
+ * decompress() on the host, under the same terms: the stream at `stream` (host memory; compress() or compressHost()
+ * wrote it) must describe n elements of this type. Writes the first `outBytes` bytes of the field and stops; false, with
+ * nothing more written, if the stream is not such a stream or its sizes do not add up.
+ */
+bool decompressHost(const void* stream, float* out, size_t n, size_t outBytes = SIZE_MAX);
+bool decompressHost(const void* stream, double* out, size_t n, size_t outBytes = SIZE_MAX);
+
 } // namespace pfpl
 } // namespace fz

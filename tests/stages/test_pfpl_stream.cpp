@@ -38,6 +38,7 @@
 #include "shufflers/bitshuffle/bitshuffle_stage.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -45,6 +46,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -693,4 +695,198 @@ TEST(PfplStream64, BoundIsRecordedAsAFloat) {
     EXPECT_THROW(attempt(-1.0), std::invalid_argument);
     EXPECT_THROW(attempt(std::numeric_limits<double>::infinity()), std::invalid_argument);
     EXPECT_THROW(attempt(std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
+}
+
+// ─── PH: the host coder against the kernels ─────────────────────────────────────────────
+
+namespace {
+
+// Everything a tile can hold that sends the quantizer down a different branch: raw values on either side of the radius,
+// non-finite ones, subnormals, ties, and runs of zeros between them.
+template <typename Real>
+std::vector<Real> hostileField(size_t n, double eb, uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    std::normal_distribution<double> g(0.0, 1.0);
+    std::uniform_int_distribution<int> pick(0, 15);
+    const double step = 2.0 * eb;
+    const double radius = sizeof(Real) == 4 ? static_cast<double>(fz::pfpl::kQuantRadius)
+                                            : static_cast<double>(fz::pfpl::kQuantRadius64);
+    std::vector<Real> f(n);
+    for (size_t i = 0; i < n; ++i) {
+        double v = 0.0;
+        switch (pick(rng)) {
+            case 0: v = radius * step * (1.0 + 1e-3 * g(rng)); break;                  // on the radius
+            case 1: v = -radius * step * (1.0 + 1e-3 * g(rng)); break;
+            case 2: v = std::numeric_limits<Real>::quiet_NaN(); break;
+            case 3: v = std::numeric_limits<Real>::infinity(); break;
+            case 4: v = -std::numeric_limits<Real>::infinity(); break;
+            case 5: v = std::numeric_limits<Real>::denorm_min(); break;
+            case 6: v = -std::numeric_limits<Real>::min() * 0.5; break;                // subnormal
+            case 7: v = (std::floor(g(rng) * 1000.0) + 0.5) * step; break;             // a rounding tie
+            case 8: v = std::numeric_limits<Real>::max() * (g(rng) > 0 ? 1.0 : -1.0); break;
+            case 9: v = g(rng) * 1e30; break;                                          // far past int's range
+            case 10: case 11: break;                                                   // zero
+            default: v = g(rng); break;
+        }
+        f[i] = static_cast<Real>(v);
+    }
+    return f;
+}
+
+template <typename Real>
+std::vector<Real> fieldOf(const std::string& kind, size_t n, double eb, uint64_t seed);
+template <>
+std::vector<float> fieldOf<float>(const std::string& kind, size_t n, double eb, uint64_t seed) {
+    return kind == "hostile" ? hostileField<float>(n, eb, seed) : makeField(kind, n, seed);
+}
+template <>
+std::vector<double> fieldOf<double>(const std::string& kind, size_t n, double eb, uint64_t seed) {
+    return kind == "hostile" ? hostileField<double>(n, eb, seed) : makeField64(kind, n, seed);
+}
+
+template <typename Real>
+void expectHostMatchesDevice(const std::string& kind, size_t n, double eb, cudaStream_t s, fz::pfpl::Plan& plan) {
+    SCOPED_TRACE(kind + " n=" + std::to_string(n) + " eb=" + std::to_string(eb));
+    const std::vector<Real> h = fieldOf<Real>(kind, n, eb, n * 53 + static_cast<uint64_t>(-std::log10(eb)));
+    const size_t cap = fz::pfpl::maxStreamBytes<Real>(n);
+    const size_t raw = n * sizeof(Real);
+
+    CudaBuffer<Real> d_in(n), d_out(n);
+    CudaBuffer<uint8_t> d_stream(cap);
+    CudaBuffer<size_t> d_len(1);
+    d_in.upload(h, s);
+    fz::pfpl::compress(plan, d_in.get(), n, static_cast<Real>(eb), d_stream.get(), cap, d_len.get(), s);
+    const size_t len = readDeviceSize(d_len, s);
+    const std::vector<uint8_t> device = d_stream.download_bytes(len, s);
+
+    std::vector<uint8_t> hostStream(cap, 0xcd);
+    const size_t hostLen = fz::pfpl::compressHost(h.data(), n, static_cast<Real>(eb), hostStream.data(), cap);
+    ASSERT_EQ(hostLen, len) << "host stream length differs from the device's";
+    ASSERT_EQ(std::memcmp(hostStream.data(), device.data(), len), 0) << "host stream bytes differ from the device's";
+
+    // Decoded by the kernels and on the host, from the same stream: the same bits.
+    fz::pfpl::decompress(plan, d_stream.get(), d_out.get(), n, s);
+    cudaStreamSynchronize(s);
+    const std::vector<Real> a = d_out.download_bytes(raw, s);
+    std::vector<Real> b(n, static_cast<Real>(-7));
+    ASSERT_TRUE(fz::pfpl::decompressHost(hostStream.data(), b.data(), n));
+    ASSERT_EQ(std::memcmp(a.data(), b.data(), raw), 0) << "host decode differs from the device's";
+
+    // The first part of the field alone, ending inside an element, and nothing past it.
+    const size_t part = raw / 3 + 1;
+    std::vector<uint8_t> partial(raw + 16, 0xab);
+    ASSERT_TRUE(fz::pfpl::decompressHost(hostStream.data(), reinterpret_cast<Real*>(partial.data()), n, part));
+    EXPECT_EQ(std::memcmp(partial.data(), b.data(), part), 0);
+    for (size_t i = part; i < partial.size(); ++i) ASSERT_EQ(partial[i], 0xab) << "wrote past the bytes asked for";
+}
+
+} // namespace
+
+class PfplHostCase : public ::testing::TestWithParam<CaseParam> {};
+
+TEST_P(PfplHostCase, FloatStreamEqualsTheKernels) {
+    const auto& [kind, n, eb] = GetParam();
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
+    {
+        fz::pfpl::Plan plan;
+        expectHostMatchesDevice<float>(kind, n, eb, s, plan);
+    }
+    cudaStreamDestroy(s);
+}
+
+TEST_P(PfplHostCase, DoubleStreamEqualsTheKernels) {
+    const auto& [kind, n, eb] = GetParam();
+    cudaStream_t s = nullptr;
+    ASSERT_EQ(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), cudaSuccess);
+    {
+        fz::pfpl::Plan plan;
+        expectHostMatchesDevice<double>(kind, n, eb, s, plan);
+    }
+    cudaStreamDestroy(s);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Fields, PfplHostCase,
+    ::testing::Combine(::testing::Values("polar", "smooth", "noise", "zeros", "spiky", "hostile"),
+                       ::testing::Values<size_t>(1, 7, 256, 2048, 4096, 4097, 3 * 2048 + 2, 1u << 17, 1u << 20),
+                       ::testing::Values(1e-1, 1e-3, 1e-5)));
+
+template <typename Real>
+void hostOverflowStaysInCapacity() {
+    const size_t n = 1u << 17;
+    const std::vector<Real> h = fieldOf<Real>("noise", n, 1e-5, 91);
+    const size_t needed = fz::pfpl::compressHost(h.data(), n, static_cast<Real>(1e-5), nullptr, 0);
+    ASSERT_GT(needed, sizeof(fz::pfpl::StreamHeader));
+    for (const size_t cap : {size_t(0), size_t(8), sizeof(fz::pfpl::StreamHeader), size_t(32), needed / 2, needed - 1, needed}) {
+        std::vector<uint8_t> out(cap + 64, 0xee);
+        const size_t len = fz::pfpl::compressHost(h.data(), n, static_cast<Real>(1e-5), out.data(), cap);
+        EXPECT_EQ(len, needed) << "capacity " << cap;
+        for (size_t i = cap; i < out.size(); ++i) ASSERT_EQ(out[i], 0xee) << "wrote past capacity " << cap;
+        if (cap >= sizeof(fz::pfpl::StreamHeader)) {
+            fz::pfpl::StreamHeader hdr;
+            std::memcpy(&hdr, out.data(), sizeof(hdr));
+            EXPECT_EQ(sizeof(hdr) + static_cast<size_t>(hdr.archive_bytes), needed) << "the header must record the length";
+        }
+    }
+}
+
+TEST(PfplHost, OverflowStaysInCapacityFloat) { hostOverflowStaysInCapacity<float>(); }
+TEST(PfplHost, OverflowStaysInCapacityDouble) { hostOverflowStaysInCapacity<double>(); }
+
+TEST(PfplHost, RefusesAStreamNotOfThisField) {
+    const size_t n = 1u << 14;
+    const std::vector<float> f = fieldOf<float>("polar", n, 1e-3, 5);
+    std::vector<double> d = fieldOf<double>("polar", n, 1e-3, 5);
+    std::vector<uint8_t> sf(fz::pfpl::maxStreamBytes<float>(n)), sd(fz::pfpl::maxStreamBytes<double>(n));
+    const size_t lf = fz::pfpl::compressHost(f.data(), n, 1e-3f, sf.data(), sf.size());
+    const size_t ld = fz::pfpl::compressHost(d.data(), n, 1e-3, sd.data(), sd.size());
+    ASSERT_LE(lf, sf.size());
+    ASSERT_LE(ld, sd.size());
+    std::vector<float> of(n);
+    std::vector<double> od(n);
+    EXPECT_TRUE(fz::pfpl::decompressHost(sf.data(), of.data(), n));
+    EXPECT_TRUE(fz::pfpl::decompressHost(sd.data(), od.data(), n));
+    EXPECT_FALSE(fz::pfpl::decompressHost(sd.data(), of.data(), n)) << "a double stream read as floats";
+    EXPECT_FALSE(fz::pfpl::decompressHost(sf.data(), od.data(), n)) << "a float stream read as doubles";
+    EXPECT_FALSE(fz::pfpl::decompressHost(sf.data(), of.data(), n - 1)) << "another field's length";
+    EXPECT_FALSE(fz::pfpl::decompressHost(nullptr, of.data(), n));
+    std::vector<uint8_t> zero(64, 0);
+    EXPECT_FALSE(fz::pfpl::decompressHost(zero.data(), of.data(), n));
+
+    // A chunk whose packed form lies about its lengths, and a size table that runs past the archive.
+    std::vector<uint8_t> bad(sf.begin(), sf.begin() + static_cast<long>(lf));
+    const size_t table = sizeof(fz::pfpl::StreamHeader) + 8;
+    uint32_t entry;
+    std::memcpy(&entry, bad.data() + table, sizeof(entry));
+    if ((entry & 0x80000000u) == 0u) {
+        const uint32_t shorter = 5;
+        std::memcpy(bad.data() + table, &shorter, sizeof(shorter));
+        EXPECT_FALSE(fz::pfpl::decompressHost(bad.data(), of.data(), n));
+    }
+    const uint32_t tooLong = 0x7ffffff0u;
+    std::memcpy(bad.data() + table, &tooLong, sizeof(tooLong));
+    EXPECT_FALSE(fz::pfpl::decompressHost(bad.data(), of.data(), n));
+}
+
+TEST(PfplHost, ThreadsShareNothing) {
+    const size_t n = 1u << 16;
+    const std::vector<float> f = fieldOf<float>("polar", n, 1e-3, 17);
+    std::vector<uint8_t> serial(fz::pfpl::maxStreamBytes<float>(n));
+    const size_t len = fz::pfpl::compressHost(f.data(), n, 1e-3f, serial.data(), serial.size());
+    std::vector<std::thread> threads;
+    std::atomic<int> differ{0};
+    for (int t = 0; t < 8; ++t)
+        threads.emplace_back([&] {
+            std::vector<uint8_t> out(serial.size());
+            std::vector<float> back(n);
+            for (int r = 0; r < 4; ++r) {
+                if (fz::pfpl::compressHost(f.data(), n, 1e-3f, out.data(), out.size()) != len ||
+                    std::memcmp(out.data(), serial.data(), len) != 0 ||
+                    !fz::pfpl::decompressHost(out.data(), back.data(), n))
+                    differ.fetch_add(1);
+            }
+        });
+    for (auto& t : threads) t.join();
+    EXPECT_EQ(differ.load(), 0);
 }
