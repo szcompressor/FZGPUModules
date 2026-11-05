@@ -16,6 +16,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - On HIP, the ABS bound check could accept values that decode up to half an ulp past the bound, because clang fused its multiply and subtract into one FMA. `fz::backend::fmulRounded` keeps the product rounded in the staged quantizer and the chunk harness.
+- `fzgmod_modules` now links `fzgmod_mem`, which it calls into, so a consumer of the shared library links on toolchains that default to `--as-needed` (such as Ubuntu's GCC).
 
 ### Changed
 - The chunk harness decode copies payloads with `loadChunkBytes` instead of byte by byte, on CUDA as well.
