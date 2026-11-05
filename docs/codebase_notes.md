@@ -1859,3 +1859,31 @@ stream, ahead of that call's kernel, so they need no host synchronization.
 `PfplStream.FreshPlanIgnoresStaleMemory` keeps the default stream busy so that a
 clear queued there always loses the race. Without this fix it faults in its first
 round on both kernel sets.
+
+## CN-PFPLSTREAM-3 — Doubles in `fz::pfpl`
+
+**Source:** `quantCode64` and `encodeChunk64` in `modules/fused/chunk_fusion/pfpl_stream.cu`, `Layout<Real>` in `pfpl_stream_amd.inl`.
+
+A double takes the float chain's steps in 64 bits. The chunk stays 16 KiB, so it holds 2048 elements in 64 planes of 256 bytes,
+and everything after the bitshuffle is unchanged. A 64-plane bitshuffle is two 32-plane transposes: a group's high words give
+planes 0..31 and its low words planes 32..63, with the groups of a plane in swapped pairs. That is the staged 8-byte
+`BitshuffleStage`'s order.
+
+The staged quantizer has no double form with in-place outliers, so no staged pipeline matches the whole chain.
+`PfplStream64Case.MatchesStagedStages` computes the expected codes on the host and compares the archive with staged
+`DifferenceStage<int64_t, uint64_t>`, `BitshuffleStage` and `RZEStage`, byte for byte.
+
+- **Quantization radius:** 2^51, the analog of the float preset's 2^22. A raw value's bits have to read as raw on decode, and
+  the bits of a normal double lie at or above 2 * radius. A subnormal always quantizes to index 0 at an allowed bound.
+- **Bound:** the 16-byte header is unchanged, so the stream records the bound as a float, rounded down, and that rounded value
+  is the bound the field is coded to. It has to be at least the smallest normal float. A power-of-two bound is exact.
+- **Rounding:** `rint`, with a range check before the conversion, which is undefined out of range.
+
+Measured on one MI250X GCD with ROCm 7.1.1, on a 128 MiB polar tile (throughput in GB/s of raw data):
+
+| Type, bound | Ratio | AMD encode | AMD decode | Generic encode | Generic decode |
+|---|---:|---:|---:|---:|---:|
+| float, 1e-4 | 1.74 | 186.4 | 164.5 | 62.5 | 55.1 |
+| double, 1e-4 | 3.56 | 219.2 | 182.5 | 70.0 | 65.1 |
+| double, 1e-9 | 1.81 | 214.2 | 177.2 | | |
+| double, 1e-12 | 1.40 | 207.9 | 173.0 | 68.1 | 61.6 |

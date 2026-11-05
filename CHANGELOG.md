@@ -12,6 +12,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 ### Added
 - `fz::pfpl` (`fused/chunk_fusion/pfpl_stream.h`): a float field compresses from one device buffer into another and back in one stream-ordered kernel each, with no host synchronization and the same archive bytes as the PFPL preset in ABS mode.
 - Wave64 AMD kernels for `fz::pfpl`, used by default on HIP; `FZ_PFPL_HARNESS=1` selects the generic harness kernels. See CN-PFPLSTREAM-1.
+- `fz::pfpl` takes double fields as well: a 64-bit zigzag code, difference and negabinary, a 64-plane bitshuffle, and the same RZE over 16 KiB chunks. Double streams carry their own magic and read back only as doubles. See CN-PFPLSTREAM-3.
 - `-DFZGMOD_BACKEND=HIP` configures again, with `hip` CMake presets. NVRTC specialization is not built on HIP, so every stage runs staged, and `test_fusion_f64`, `test_fusion_fixed`, `test_fusion_planner` and `test_lorenzo_quant_shared_init` are CUDA-only.
 
 ### Fixed
