@@ -13,19 +13,56 @@
 // Decoding mirrors it: an element of a repetition-eliminated level is data[k - 1], k the set bitmap bits up to and
 // including it, so each level decodes in parallel from popcounts; the chunk-local prefix sum runs as eight
 // wave scans at once with one barrier, in the element order the inverse bitshuffle leaves in registers.
+// A double chunk runs the same kernels with 64-bit codes in registers (4 elements per thread, not 8) and twice the
+// planes at half the length, each 32-element group's high and low words going through butterfly32 separately (see
+// encodeChunk64); from zero elimination on, a chunk is bytes and nothing differs.
 // Tuned for, and only used on, 64-lane wavefronts.
 
 namespace amd {
 
 constexpr int      kTPB      = 512;                  // 8 wavefronts; must equal the harness's TPB (storeChunkBytes)
-constexpr int      kPerT     = kElems / kTPB;         // 8 elements per thread, and 8 bitshuffled words
-constexpr int      kNPP      = kElems / 32;           // words per bitshuffle plane
-constexpr int      kPS       = kNPP + 1;              // padded plane stride (words)
-constexpr int      kBufWords = 32 * kPS;
+constexpr int      kWordsT   = kChunkBytes / 4 / kTPB;   // 8 bitshuffled words per thread
 constexpr int      kL1       = kChunkBytes / 8;       // zero-elimination bitmap bytes
 constexpr uint32_t kAvail    = kChunkBytes - 2;       // d_RZE: room before its 2-byte trailer
-static_assert(kTPB == TPB && kTPB == 8 * 64 && kPerT == 8, "one 512-thread block per 16 KiB chunk");
-static_assert(kBufWords * 4 >= kChunkBytes + 4, "the packed chunk is compacted in place in the plane buffer");
+static_assert(kTPB == TPB && kTPB == 8 * 64 && kWordsT == 8, "one 512-thread block per 16 KiB chunk");
+
+// A chunk's geometry in registers and in the plane buffer.
+template <typename Real>
+struct Layout {
+    using Word  = typename Elem<Real>::Word;
+    using SWord = typename Elem<Real>::SWord;
+    static constexpr int kPerChunk = kChunkBytes / sizeof(Real);
+    static constexpr int kPerT     = kPerChunk / kTPB;                // elements per thread: 8 floats or 4 doubles
+    static constexpr int kPlanes   = 8 * sizeof(Real);
+    static constexpr int kNPP      = kPerChunk / 32;                  // 32-bit words per bitshuffle plane
+    static constexpr int kPS       = kNPP + 1;                        // padded plane stride (words)
+    static constexpr int kBufWords = kPlanes * kPS;
+    static constexpr int kRowLog2  = sizeof(Real) == 4 ? 4 : 3;       // log2 threads per plane
+    static_assert(kBufWords * 4 >= kChunkBytes + 4, "the packed chunk is compacted in place in the plane buffer");
+    static_assert(kPlanes * kNPP * 4 == kChunkBytes && (kNPP / kWordsT) == (1 << kRowLog2), "planes fill the chunk");
+};
+
+// Thread t's 8 words of the bitshuffled chunk: bytes 32t..32t+31.
+template <typename Real>
+__device__ __forceinline__ const uint32_t* planeRow(const uint32_t* buf, int t) {
+    using L = Layout<Real>;
+    return buf + (t >> L::kRowLog2) * L::kPS + (t & ((1 << L::kRowLog2) - 1)) * kWordsT;
+}
+
+// Quantized code of x (QuantInplaceZigzag, verify_reconstruction): zigzag code, raw bits for outliers.
+__device__ __forceinline__ uint32_t quantCode(float x, const QuantInplaceZigzagParams& qp) {
+    const int q = static_cast<int>(roundf(x * qp.ebx2_r));
+    bool repr = q > -static_cast<int>(qp.radius) && q < static_cast<int>(qp.radius) && fabsf(x) < qp.threshold;
+    if (repr) repr = fabsf(x - fz::backend::fmulRounded(static_cast<float>(q), qp.ebx2)) <= qp.abs_eb;
+    return repr ? static_cast<uint32_t>((q << 1) ^ (q >> 31)) : __float_as_uint(x);
+}
+__device__ __forceinline__ uint64_t quantCode(double x, const QuantParams64& qp) { return quantCode64(x, qp); }
+
+__device__ __forceinline__ float valueOfCode(uint32_t code, float ebx2) {
+    if ((code >> 1) >= kQuantRadius) return __uint_as_float(code);
+    return static_cast<float>(static_cast<int32_t>((code >> 1) ^ (0u - (code & 1u)))) * ebx2;
+}
+__device__ __forceinline__ double valueOfCode(uint64_t code, double ebx2) { return valueOfCode64(code, ebx2); }
 
 __device__ __forceinline__ uint32_t inclMask(int j) { return j == 31 ? 0xffffffffu : (2u << j) - 1u; }
 
@@ -90,16 +127,22 @@ __device__ __forceinline__ void store32(byte* __restrict__ dst, const uint32_t v
     }
 }
 
+template <typename Real>
 __global__ void __launch_bounds__(kTPB)
-encodeKernel(const float* __restrict__ in, uint32_t n, QuantInplaceZigzagParams qp,
+encodeKernel(const Real* __restrict__ in, uint32_t n, typename Elem<Real>::Params qp, float abs_eb,
              byte* __restrict__ out, unsigned long long capacity, uint32_t chunks,
              unsigned long long* __restrict__ state, unsigned long long* __restrict__ ticket,
              unsigned long long ticket_base, uint32_t epoch, size_t* __restrict__ d_stream_bytes) {
-    __shared__ __align__(16) uint32_t buf[kBufWords];   // bitshuffled planes (padded), then the packed chunk
+    using L     = Layout<Real>;
+    using Word  = typename L::Word;
+    using SWord = typename L::SWord;
+    constexpr int kPerT = L::kPerT;
+    constexpr int kPS   = L::kPS;
+    __shared__ __align__(16) uint32_t buf[L::kBufWords];   // bitshuffled planes (padded), then the packed chunk
     __shared__ __align__(16) uint32_t l1w[kL1 / 4];      // L1 bitmap, then its repetition-eliminated bytes
     __shared__ uint8_t  re2[kL1 / 8];                    // L2's repetition-eliminated bytes
     __shared__ uint8_t  re3[32];                         // L3's
-    __shared__ uint32_t scratch[64];
+    __shared__ __align__(8) uint32_t scratch[64];
     __shared__ uint32_t s_cid;
     __shared__ uint32_t s_info[8];                       // raw, csize, offset, n1, n2, n3, L4, wpos
 
@@ -107,46 +150,48 @@ encodeKernel(const float* __restrict__ in, uint32_t n, QuantInplaceZigzagParams 
     if (t == 0) s_cid = static_cast<uint32_t>(atomicAdd(ticket, 1ull) - ticket_base);
     __syncthreads();
     const uint32_t cid  = s_cid;
-    const size_t   base = static_cast<size_t>(cid) * kElems;
+    const size_t   base = static_cast<size_t>(cid) * L::kPerChunk;
 
-    // Quantize elements i = t + 512k (QuantInplaceZigzag, verify_reconstruction): zigzag codes, raw bits for outliers.
-    uint32_t c[kPerT];
+    // Quantize elements i = t + 512k.
+    Word c[kPerT];
     #pragma unroll
     for (int k = 0; k < kPerT; ++k) {
         const size_t i = base + t + kTPB * k;
-        const float  x = i < n ? in[i] : 0.0f;
-        const int    q = static_cast<int>(roundf(x * qp.ebx2_r));
-        bool repr = q > -static_cast<int>(qp.radius) && q < static_cast<int>(qp.radius) && fabsf(x) < qp.threshold;
-        if (repr) repr = fabsf(x - fz::backend::fmulRounded(static_cast<float>(q), qp.ebx2)) <= qp.abs_eb;
-        c[k] = repr ? static_cast<uint32_t>((q << 1) ^ (q >> 31)) : __float_as_uint(x);
+        c[k] = quantCode(i < n ? in[i] : static_cast<Real>(0), qp);
     }
 
     // Difference with element i-1 (DiffNegabinary): lane-1 of this wavefront, or for lane 0 the previous
     // wavefront's lane 63 (wavefront 0: wavefront 7's of slab k-1; element 0 keeps its code).
+    Word* lastLane = reinterpret_cast<Word*>(scratch);
     if (lane == 63) {
         #pragma unroll
-        for (int k = 0; k < kPerT; ++k) scratch[wave * kPerT + k] = c[k];
+        for (int k = 0; k < kPerT; ++k) lastLane[wave * kPerT + k] = c[k];
     }
     __syncthreads();
     #pragma unroll
     for (int k = 0; k < kPerT; ++k) {
-        uint32_t prev = fz::backend::shflUp(c[k], 1, 64);
-        if (lane == 0) prev = wave > 0 ? scratch[(wave - 1) * kPerT + k] : (k > 0 ? scratch[7 * kPerT + k - 1] : 0u);
-        const int32_t d = (t == 0 && k == 0) ? static_cast<int32_t>(c[k]) : static_cast<int32_t>(c[k] - prev);
-        // Bitshuffle32: the butterfly leaves plane (t & 31) of group (t >> 5) + 16k in this lane.
-        buf[(t & 31) * kPS + (t >> 5) + 16 * k] =
-            fused::chunk::butterfly32(Negabinary<int32_t>::encode(d), t & 31);
+        Word prev = fz::backend::shflUp(c[k], 1, 64);
+        if (lane == 0) prev = wave > 0 ? lastLane[(wave - 1) * kPerT + k] : (k > 0 ? lastLane[7 * kPerT + k - 1] : Word(0));
+        const Word d  = (t == 0 && k == 0) ? c[k] : c[k] - prev;
+        const Word nb = Negabinary<SWord>::encode(static_cast<SWord>(d));
+        // The butterfly leaves plane (t & 31) of group (t >> 5) + 16k in this lane.
+        const int group = (t >> 5) + 16 * k;
+        if constexpr (sizeof(Real) == 4) {
+            buf[(t & 31) * kPS + group] = fused::chunk::butterfly32(nb, t & 31);
+        } else {
+            buf[(t & 31) * kPS + (group ^ 1)] = fused::chunk::butterfly32(static_cast<uint32_t>(nb >> 32), t & 31);
+            buf[(32 + (t & 31)) * kPS + (group ^ 1)] = fused::chunk::butterfly32(static_cast<uint32_t>(nb), t & 31);
+        }
     }
     __syncthreads();
 
-    // Zero elimination (d_ZEencodebyteshort): thread t owns bytes 32t..32t+31 of the bitshuffled chunk, i.e. plane
-    // t >> 4, words 8(t & 15)..+7.
-    uint32_t v[kPerT];
+    // Zero elimination (d_ZEencodebyteshort): thread t owns bytes 32t..32t+31 of the bitshuffled chunk.
+    uint32_t v[kWordsT];
     uint32_t bmp = 0;
     {
-        const uint32_t* row = buf + (t >> 4) * kPS + (t & 15) * 8;
+        const uint32_t* row = planeRow<Real>(buf, t);
         #pragma unroll
-        for (int r = 0; r < kPerT; ++r) {
+        for (int r = 0; r < kWordsT; ++r) {
             v[r] = row[r];
             #pragma unroll
             for (int b = 0; b < 4; ++b) bmp |= static_cast<uint32_t>(((v[r] >> (8 * b)) & 0xffu) != 0u) << (4 * r + b);
@@ -163,14 +208,14 @@ encodeKernel(const float* __restrict__ in, uint32_t n, QuantInplaceZigzagParams 
             raw = 1;
         } else if (wpos != 0) {
             // L1 -> RE data + L2: lane owns L1 bytes 32*lane..+31; L2 bit e = (byte e != byte e-1), byte -1 = 0.
-            uint32_t b1[kPerT];
+            uint32_t b1[kWordsT];
             #pragma unroll
-            for (int r = 0; r < kPerT; ++r) b1[r] = l1w[kPerT * lane + r];
+            for (int r = 0; r < kWordsT; ++r) b1[r] = l1w[kWordsT * lane + r];
             uint32_t prevByte = fz::backend::shflUp(b1[7], 1, 64) >> 24;
             if (lane == 0) prevByte = 0;
             uint32_t m1 = 0;
             #pragma unroll
-            for (int r = 0; r < kPerT; ++r)
+            for (int r = 0; r < kWordsT; ++r)
                 #pragma unroll
                 for (int b = 0; b < 4; ++b) {
                     const uint32_t cur = (b1[r] >> (8 * b)) & 0xffu;
@@ -186,7 +231,7 @@ encodeKernel(const float* __restrict__ in, uint32_t n, QuantInplaceZigzagParams 
                 byte* l1b = reinterpret_cast<byte*>(l1w);   // compacted in place: positions only move down
                 uint32_t q = i1 - c1;
                 #pragma unroll
-                for (int r = 0; r < kPerT; ++r)
+                for (int r = 0; r < kWordsT; ++r)
                     #pragma unroll
                     for (int b = 0; b < 4; ++b)
                         if ((m1 >> (4 * r + b)) & 1u) l1b[q++] = static_cast<byte>(b1[r] >> (8 * b));
@@ -253,7 +298,7 @@ encodeKernel(const float* __restrict__ in, uint32_t n, QuantInplaceZigzagParams 
         byte* bb = reinterpret_cast<byte*>(buf);
         uint32_t q = pos;
         #pragma unroll
-        for (int r = 0; r < kPerT; ++r)
+        for (int r = 0; r < kWordsT; ++r)
             #pragma unroll
             for (int b = 0; b < 4; ++b)
                 if ((bmp >> (4 * r + b)) & 1u) bb[q++] = static_cast<byte>(v[r] >> (8 * b));
@@ -280,13 +325,13 @@ encodeKernel(const float* __restrict__ in, uint32_t n, QuantInplaceZigzagParams 
         uint32_t* w = reinterpret_cast<uint32_t*>(out);
         if (total <= capacity) {
             for (unsigned long long b = kStreamHeader + archive; b < total; ++b) out[b] = 0;
-            w[4] = static_cast<uint32_t>(chunks) * kElems * 4u;
+            w[4] = chunks * static_cast<uint32_t>(kChunkBytes);
             w[5] = chunks;
         }
         if (kStreamHeader <= capacity) {
-            w[0] = kStreamMagic;
+            w[0] = Elem<Real>::kMagic;
             w[1] = static_cast<uint32_t>(padded);
-            w[2] = __float_as_uint(qp.abs_eb);
+            w[2] = __float_as_uint(abs_eb);
             w[3] = n;
         }
         if (d_stream_bytes != nullptr) *d_stream_bytes = static_cast<size_t>(total);
@@ -329,33 +374,36 @@ __device__ __forceinline__ uint32_t decodeBitmaps(const byte* payload, uint32_t 
     const uint32_t c1 = __popc(l2);
     const uint32_t e1 = waveInclusiveScan(c1) - c1;
     #pragma unroll
-    for (int r = 0; r < kPerT; ++r) {
+    for (int r = 0; r < kWordsT; ++r) {
         uint32_t word = 0;
         #pragma unroll
         for (int b = 0; b < 4; ++b) {
             const uint32_t k = e1 + __popc(l2 & inclMask(4 * r + b));
             word |= (k ? static_cast<uint32_t>(payload[rpos + k - 1]) : 0u) << (8 * b);
         }
-        l1w[kPerT * lane + r] = word;
+        l1w[kWordsT * lane + r] = word;
     }
     return rpos;
 }
 
+template <typename Real>
 __global__ void __launch_bounds__(kTPB)
-decodeKernel(const byte* __restrict__ stream, float* __restrict__ out, uint32_t n,
+decodeKernel(const byte* __restrict__ stream, Real* __restrict__ out, uint32_t n,
              unsigned long long* __restrict__ state, uint32_t epoch) {
-    __shared__ __align__(16) uint32_t buf[kBufWords];   // the packed chunk, then the bitshuffled planes (padded)
+    using L     = Layout<Real>;
+    using Word  = typename L::Word;
+    using SWord = typename L::SWord;
+    constexpr int kPerT = L::kPerT;
+    constexpr int kPS   = L::kPS;
+    __shared__ __align__(16) uint32_t buf[L::kBufWords];   // the packed chunk, then the bitshuffled planes (padded)
     __shared__ __align__(16) uint32_t l1w[kL1 / 4];
-    __shared__ uint32_t scratch[64];
+    __shared__ __align__(8) uint32_t scratch[64];
     __shared__ uint32_t s_offset;
 
     const int t = threadIdx.x, lane = t & 63, wave = t >> 6;
     const uint32_t* w = reinterpret_cast<const uint32_t*>(stream);
     const uint32_t chunks = gridDim.x;
-    if (w[0] != kStreamMagic || w[3] != n || w[4] != chunks * kElems * 4u || w[5] != chunks ||
-        w[1] < kLcHeader + 4u * chunks || !(__uint_as_float(w[2]) > 0.0f)) {
-        streamTrap();
-    }
+    checkStream(w, Elem<Real>::kMagic, n, chunks);
     const uint32_t  cid    = blockIdx.x;
     const uint32_t* table  = w + (kStreamHeader + kLcHeader) / 4u;
     const uint32_t  entry  = table[cid];
@@ -368,7 +416,7 @@ decodeKernel(const byte* __restrict__ stream, float* __restrict__ out, uint32_t 
     __syncthreads();
     const byte* payload = stream + kStreamHeader + kLcHeader + 4ull * chunks + s_offset;
 
-    uint32_t v[kPerT];
+    uint32_t v[kWordsT];
     if (raw) {
         load32(payload + 32u * t, v);
     } else {
@@ -381,7 +429,7 @@ decodeKernel(const byte* __restrict__ stream, float* __restrict__ out, uint32_t 
         uint32_t q = blockExclusiveScan(__popc(bmp), scratch, total);
         const byte* bb = reinterpret_cast<const byte*>(buf);
         #pragma unroll
-        for (int r = 0; r < kPerT; ++r) {
+        for (int r = 0; r < kWordsT; ++r) {
             uint32_t word = 0;
             #pragma unroll
             for (int b = 0; b < 4; ++b)
@@ -391,56 +439,57 @@ decodeKernel(const byte* __restrict__ stream, float* __restrict__ out, uint32_t 
         __syncthreads();   // every gather done before the planes overwrite the packed bytes
     }
     {
-        uint32_t* row = buf + (t >> 4) * kPS + (t & 15) * 8;
+        uint32_t* row = const_cast<uint32_t*>(planeRow<Real>(buf, t));
         #pragma unroll
-        for (int r = 0; r < kPerT; ++r) row[r] = v[r];
+        for (int r = 0; r < kWordsT; ++r) row[r] = v[r];
     }
     __syncthreads();
 
     // Inverse bitshuffle and negabinary: element i = t + 512k; then its chunk-local inclusive prefix sum.
-    uint32_t d[kPerT];
+    Word d[kPerT];
     #pragma unroll
-    for (int k = 0; k < kPerT; ++k)
-        d[k] = static_cast<uint32_t>(Negabinary<int32_t>::decode(
-            fused::chunk::butterfly32(buf[(t & 31) * kPS + (t >> 5) + 16 * k], t & 31)));
+    for (int k = 0; k < kPerT; ++k) {
+        const int group = (t >> 5) + 16 * k;
+        Word nb;
+        if constexpr (sizeof(Real) == 4) {
+            nb = fused::chunk::butterfly32(buf[(t & 31) * kPS + group], t & 31);
+        } else {
+            const uint32_t hi = fused::chunk::butterfly32(buf[(t & 31) * kPS + (group ^ 1)], t & 31);
+            const uint32_t lo = fused::chunk::butterfly32(buf[(32 + (t & 31)) * kPS + (group ^ 1)], t & 31);
+            nb = (static_cast<uint64_t>(hi) << 32) | lo;
+        }
+        d[k] = static_cast<Word>(Negabinary<SWord>::decode(nb));
+    }
     #pragma unroll
     for (int dd = 1; dd < 64; dd <<= 1)
         #pragma unroll
         for (int k = 0; k < kPerT; ++k) {
-            const uint32_t up = fz::backend::shflUp(d[k], dd, 64);
+            const Word up = fz::backend::shflUp(d[k], dd, 64);
             if (lane >= dd) d[k] += up;
         }
+    Word* waveTotal = reinterpret_cast<Word*>(scratch);
     if (lane == 63) {
         #pragma unroll
-        for (int k = 0; k < kPerT; ++k) scratch[k * 8 + wave] = d[k];
+        for (int k = 0; k < kPerT; ++k) waveTotal[k * 8 + wave] = d[k];
     }
     __syncthreads();
-    const size_t   base  = static_cast<size_t>(cid) * kElems;
-    const uint32_t cnt   = min(static_cast<uint32_t>(kElems), n - cid * kElems);
-    const float    ebx2  = 2.0f * __uint_as_float(w[2]);
-    uint32_t carry = 0;
+    const size_t   base  = static_cast<size_t>(cid) * L::kPerChunk;
+    const uint32_t cnt   = min(static_cast<uint32_t>(L::kPerChunk), n - cid * static_cast<uint32_t>(L::kPerChunk));
+    const Real     ebx2  = static_cast<Real>(2) * static_cast<Real>(__uint_as_float(w[2]));
+    Word carry = 0;
     #pragma unroll
     for (int k = 0; k < kPerT; ++k) {
-        uint32_t before = 0, slab = 0;
+        Word before = 0, slab = 0;
         #pragma unroll
         for (int ww = 0; ww < 8; ++ww) {
-            const uint32_t x = scratch[k * 8 + ww];
-            before += ww < wave ? x : 0u;
+            const Word x = waveTotal[k * 8 + ww];
+            before += ww < wave ? x : Word(0);
             slab += x;
         }
-        const uint32_t code = d[k] + before + carry;
+        const Word code = d[k] + before + carry;
         carry += slab;
         const uint32_t e = t + kTPB * k;
-        if (e < cnt) {
-            float y;
-            if ((code >> 1) >= kQuantRadius) {
-                y = __uint_as_float(code);
-            } else {
-                const int32_t qq = static_cast<int32_t>((code >> 1) ^ (0u - (code & 1u)));
-                y = static_cast<float>(qq) * ebx2;
-            }
-            out[base + e] = y;
-        }
+        if (e < cnt) out[base + e] = valueOfCode(code, ebx2);
     }
 }
 

@@ -29,5 +29,15 @@ __device__ __forceinline__ float fmulRounded(float a, float b) {
 #endif
 }
 
+/** The same for a double: the product the decoder stores, never fused into the operation that consumes it. */
+__device__ __forceinline__ double fmulRounded(double a, double b) {
+#if defined(FZGMOD_BACKEND_HIP)
+    #pragma clang fp contract(off)
+    return a * b;
+#else
+    return __dmul_rn(a, b);
+#endif
+}
+
 } // namespace backend
 } // namespace fz
