@@ -465,7 +465,7 @@ void BitshuffleStage::execute(
                     const size_t smem = bitshuf32SmemBytes(N_chunk);
                     if (bitshufUseSmem() && smem <= (size_t)bitshufMaxSmem()) {
                         if (smem > 48u * 1024u)
-                            cudaFuncSetAttribute(bitshuffleEncodeKernel32Smem,
+                            cudaFuncSetAttribute(reinterpret_cast<const void*>(bitshuffleEncodeKernel32Smem),
                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
                         bitshuffleEncodeKernel32Smem
                             <<<grid, 1024, smem, stream>>>(
@@ -515,7 +515,7 @@ void BitshuffleStage::execute(
                     const size_t smem = bitshuf32SmemBytes(N_chunk);
                     if (bitshufUseSmem() && smem <= (size_t)bitshufMaxSmem()) {
                         if (smem > 48u * 1024u)
-                            cudaFuncSetAttribute(bitshuffleDecodeKernel32Smem,
+                            cudaFuncSetAttribute(reinterpret_cast<const void*>(bitshuffleDecodeKernel32Smem),
                                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
                         bitshuffleDecodeKernel32Smem
                             <<<grid, 1024, smem, stream>>>(

@@ -20,6 +20,7 @@
 #include "cuda_check.h"
 #include "log.h"
 #include <limits>
+#include "backend/fp.h"
 
 namespace fz {
 
@@ -168,11 +169,12 @@ __global__ void quantizer_abs_fwd_inplace_kernel(
                       && quantAbs(x) < static_cast<TInput>(threshold);
     if (representable && verify_reconstruction) {
         // Keep the multiply rounded as a standalone float operation, matching
-        // PFPL's `recon = bin * eb2` before its subsequent subtraction. Without
-        // the explicit intrinsic nvcc may contract the multiply into the error
-        // subtraction and classify a different set of boundary values.
+        // PFPL's `recon = bin * eb2` before its subsequent subtraction. Fused
+        // into the subtraction (nvcc may, and HIP's clang does by default), the
+        // check tests the exact product rather than the stored one and passes
+        // values whose reconstruction misses the bound (backend/fp.h).
         const TInput recon = std::is_same<TInput, float>::value
-            ? static_cast<TInput>(__fmul_rn(static_cast<float>(q), static_cast<float>(ebx2)))
+            ? static_cast<TInput>(fz::backend::fmulRounded(static_cast<float>(q), static_cast<float>(ebx2)))
             : static_cast<TInput>(q) * ebx2;
         representable = quantAbs(x - recon) <= abs_eb;
     }

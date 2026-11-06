@@ -1816,3 +1816,96 @@ it in `stage_registry.h`, and add FZGM integration tests. Use the existing SDK
 capability guards for optional families. Registration order retains the previous
 first-match behavior; individual handlers own their token aliases. The main
 plugin requires no stage-specific edits.
+
+## CN-PFPLSTREAM-1 — Why `fz::pfpl` has AMD kernels, and what they gain
+
+**Source:** `modules/fused/chunk_fusion/pfpl_stream_amd.inl`.
+
+The generic harness kernels keep a chunk in shared memory with block-wide scans
+and about 20 barriers per chunk. Profiled on MI250X, they wait about 65% of the
+time at 8 waves per CU. Their 36 KiB of shared memory also limits a CU to one
+block. The AMD kernels produce the same stream, byte for byte, with 6-7 barriers
+and 19 KiB of shared memory, which fits 3 blocks per CU.
+
+Measured on one MI250X GCD with ROCm 7.1.1, on a polar field with `abs_eb` 1e-4
+and a compression ratio of about 1.7. Throughput is in GB/s:
+
+| Field | Encode: two-array | Encode: staged | Decode: two-array | Decode: staged |
+|---|---:|---:|---:|---:|
+| 1 MiB | 57.3 | 6.7 | 46.1 | 6.8 |
+| 8 MiB | 151.6 | 25.7 | 129.2 | 29.2 |
+| 32 MiB | 191.7 | 37.1 | 156.9 | 45.4 |
+| 128 MiB | 203.3 | 41.8 | 165.6 | 50.3 |
+| 512 MiB | 202.5 | 43.0 | 167.7 | 52.0 |
+
+## CN-PFPLSTREAM-2 — A new `Plan` clears its memory on the calling stream
+
+**Source:** `Plan::reserve` and `Plan::nextEpoch` in
+`modules/fused/chunk_fusion/pfpl_stream.cu`.
+
+`Plan::reserve` used to clear its new ticket counter and look-back state with a
+stream-less `cudaMemset`. On MI250X with ROCm 7.1.1 that clear could land after
+the first encode kernel on a non-blocking stream had started. A read on the
+calling stream right after the call returned the page's previous contents, and
+the same read after a 50 ms wait, with no GPU synchronization, returned zero.
+
+A stale counter gives `atomicAdd(ticket, 1) - ticket_base` a wild chunk id, so the
+kernel reads from `in + cid * kElems`. Both the AMD and the harness encode kernels
+stopped with `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. Stale look-back words
+tagged with the same epoch would give a wrong offset with no fault.
+
+The clears now run in `Plan::nextEpoch` with `cudaMemsetAsync` on the calling
+stream, ahead of that call's kernel, so they need no host synchronization.
+`PfplStream.FreshPlanIgnoresStaleMemory` keeps the default stream busy so that a
+clear queued there always loses the race. Without this fix it faults in its first
+round on both kernel sets.
+
+## CN-PFPLSTREAM-3 — Doubles in `fz::pfpl`
+
+**Source:** `quantCode64` and `encodeChunk64` in `modules/fused/chunk_fusion/pfpl_stream.cu`, `Layout<Real>` in `pfpl_stream_amd.inl`.
+
+A double takes the float chain's steps in 64 bits. The chunk stays 16 KiB, so it holds 2048 elements in 64 planes of 256 bytes,
+and everything after the bitshuffle is unchanged. A 64-plane bitshuffle is two 32-plane transposes: a group's high words give
+planes 0..31 and its low words planes 32..63, with the groups of a plane in swapped pairs. That is the staged 8-byte
+`BitshuffleStage`'s order.
+
+The staged quantizer has no double form with in-place outliers, so no staged pipeline matches the whole chain.
+`PfplStream64Case.MatchesStagedStages` computes the expected codes on the host and compares the archive with staged
+`DifferenceStage<int64_t, uint64_t>`, `BitshuffleStage` and `RZEStage`, byte for byte.
+
+- **Quantization radius:** 2^51, the analog of the float preset's 2^22. A raw value's bits have to read as raw on decode, and
+  the bits of a normal double lie at or above 2 * radius. A subnormal always quantizes to index 0 at an allowed bound.
+- **Bound:** the 16-byte header is unchanged, so the stream records the bound as a float, rounded down, and that rounded value
+  is the bound the field is coded to. It has to be at least the smallest normal float. A power-of-two bound is exact.
+- **Rounding:** `rint`, with a range check before the conversion, which is undefined out of range.
+
+Measured on one MI250X GCD with ROCm 7.1.1, on a 128 MiB polar field (throughput in GB/s of raw data):
+
+| Type, bound | Ratio | AMD encode | AMD decode | Generic encode | Generic decode |
+|---|---:|---:|---:|---:|---:|
+| float, 1e-4 | 1.74 | 186.4 | 164.5 | 62.5 | 55.1 |
+| double, 1e-4 | 3.56 | 219.2 | 182.5 | 70.0 | 65.1 |
+| double, 1e-9 | 1.81 | 214.2 | 177.2 | | |
+| double, 1e-12 | 1.40 | 207.9 | 173.0 | 68.1 | 61.6 |
+
+## CN-PFPLSTREAM-4 — The host coder
+
+**Source:** `modules/fused/chunk_fusion/pfpl_stream_host.inl`.
+
+A caller that has to read or write a stream off the GPU path used to stage it through the device, and that fails two ways.
+Threads reading fields back each allocate a field's worth of device memory beside whatever the card already holds, and double
+fields of 512 MiB stopped with out of memory. And a process that sees no GPU cannot code at all.
+
+`compressHost` and `decompressHost` write and read the same stream as the kernels, in plain C++, one thread per call, with stack
+buffers only. `PfplHostCase` holds them to the kernels byte for byte on both kernel sets, both types and every size class. Its
+`hostile` field exists for the one place they can differ, a float-to-int conversion out of range: the GPU saturates and the host
+conversion is undefined, so the host code tests the range first, and both then store the raw bits. `-ffp-contract` matters as
+it does in the kernels (see `fmulRounded`), so the rebuilt value goes through a `volatile`.
+
+Measured on one Frontier login core, with no GPU in the process, on a 128 MiB polar field:
+
+| Type, bound | Ratio | Encode | Decode |
+|---|---:|---:|---:|
+| float, 1e-3 | 2.43 | 350 MB/s | 550 MB/s |
+| double, 1e-3 | 4.87 | 565 MB/s | 656 MB/s |
+| double, 1e-9 | 1.92 | 460 MB/s | 638 MB/s |

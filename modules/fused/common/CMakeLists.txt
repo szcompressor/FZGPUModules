@@ -18,3 +18,18 @@ if(NOT FZGMOD_BACKEND STREQUAL "HIP")
   add_dependencies(fzgmod_modules fzgmod_nvrtc_headers)
   target_include_directories(fzgmod_modules PRIVATE "${PROJECT_BINARY_DIR}/generated")
 endif()
+
+# Pipeline specialization JIT-compiles its fused kernels with NVRTC and launches them through the CUDA driver API, and its
+# harness assumes 32-lane warps: none of it is built on HIP, where the registry offers no fused implementation
+# (src/pipeline/fusion_registry.cpp) and every stage runs staged.
+if(FZGMOD_BACKEND STREQUAL "HIP")
+  set_source_files_properties(
+    ${CMAKE_CURRENT_LIST_DIR}/../fused_block/fused_block.cu
+    ${CMAKE_CURRENT_LIST_DIR}/../fused_block/nvrtc_warp_fusion.cu
+    ${CMAKE_CURRENT_LIST_DIR}/../chunk_fusion/chunk_fusion.cu
+    ${CMAKE_CURRENT_LIST_DIR}/../chunk_fusion/nvrtc_chunk_fusion.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/nvrtc_jit.cpp
+    TARGET_DIRECTORY fzgmod_modules
+    PROPERTIES HEADER_FILE_ONLY TRUE
+  )
+endif()

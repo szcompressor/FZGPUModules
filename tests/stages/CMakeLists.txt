@@ -84,6 +84,22 @@ fz_add_test(
     LABELS  stages gpu
 )
 
+# ─── Two-array PFPL against the staged PFPL pipeline ─────────────────────────
+fz_add_test(
+    NAME    test_pfpl_stream
+    SOURCES test_pfpl_stream.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
+# HIP defaults to AMD kernels: also run the generic harness kernels, which are the ones CUDA uses.
+if(FZGMOD_BACKEND STREQUAL "HIP")
+    add_test(NAME test_pfpl_stream_harness COMMAND test_pfpl_stream)
+    set_tests_properties(test_pfpl_stream_harness PROPERTIES
+        ENVIRONMENT "HIP_VISIBLE_DEVICES=0;FZ_PFPL_HARNESS=1"
+        LABELS      "stages;gpu"
+    )
+endif()
+
 # ─── GolombRiceStage GPU round-trip ──────────────────────────────────────────
 fz_add_test(
     NAME    test_golomb_rice
@@ -189,12 +205,15 @@ fz_add_test(
 )
 
 # 3-D LorenzoQuant forward kernel must not depend on stale shared memory
-fz_add_test(
-    NAME    test_lorenzo_quant_shared_init
-    SOURCES test_lorenzo_quant_shared_init.cu
-    LIBS    fzgmod_modules fzgmod_mem fzgmod
-    LABELS  stages gpu
-)
+# Includes cuda_runtime.h directly.
+if(FZGMOD_BACKEND STREQUAL "CUDA")
+    fz_add_test(
+        NAME    test_lorenzo_quant_shared_init
+        SOURCES test_lorenzo_quant_shared_init.cu
+        LIBS    fzgmod_modules fzgmod_mem fzgmod
+        LABELS  stages gpu
+    )
+endif()
 
 # ─── Per-tile adaptive multi-order Lorenzo (FSZ prediction stage) ────────────
 fz_add_test(
