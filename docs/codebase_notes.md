@@ -1827,7 +1827,7 @@ time at 8 waves per CU. Their 36 KiB of shared memory also limits a CU to one
 block. The AMD kernels produce the same stream, byte for byte, with 6-7 barriers
 and 19 KiB of shared memory, which fits 3 blocks per CU.
 
-Measured on one MI250X GCD with ROCm 7.1.1, on a polar tile with `abs_eb` 1e-4
+Measured on one MI250X GCD with ROCm 7.1.1, on a polar field with `abs_eb` 1e-4
 and a compression ratio of about 1.7. Throughput is in GB/s:
 
 | Field | Encode: two-array | Encode: staged | Decode: two-array | Decode: staged |
@@ -1879,7 +1879,7 @@ The staged quantizer has no double form with in-place outliers, so no staged pip
   is the bound the field is coded to. It has to be at least the smallest normal float. A power-of-two bound is exact.
 - **Rounding:** `rint`, with a range check before the conversion, which is undefined out of range.
 
-Measured on one MI250X GCD with ROCm 7.1.1, on a 128 MiB polar tile (throughput in GB/s of raw data):
+Measured on one MI250X GCD with ROCm 7.1.1, on a 128 MiB polar field (throughput in GB/s of raw data):
 
 | Type, bound | Ratio | AMD encode | AMD decode | Generic encode | Generic decode |
 |---|---:|---:|---:|---:|---:|
@@ -1892,9 +1892,9 @@ Measured on one MI250X GCD with ROCm 7.1.1, on a 128 MiB polar tile (throughput 
 
 **Source:** `modules/fused/chunk_fusion/pfpl_stream_host.inl`.
 
-A caller that has to read or write a stream off the GPU path used to stage it through the device. QCLAB++ did, and it failed
-two ways. Reading a state back, 14 threads per rank each allocated a tile's worth of device memory beside what PaRSEC already
-held, and double tiles of 512 MiB stopped with out of memory. And a rank that could see no GPU could not code at all.
+A caller that has to read or write a stream off the GPU path used to stage it through the device, and that fails two ways.
+Threads reading fields back each allocate a field's worth of device memory beside whatever the card already holds, and double
+fields of 512 MiB stopped with out of memory. And a process that sees no GPU cannot code at all.
 
 `compressHost` and `decompressHost` write and read the same stream as the kernels, in plain C++, one thread per call, with stack
 buffers only. `PfplHostCase` holds them to the kernels byte for byte on both kernel sets, both types and every size class. Its
@@ -1902,7 +1902,7 @@ buffers only. `PfplHostCase` holds them to the kernels byte for byte on both ker
 conversion is undefined, so the host code tests the range first, and both then store the raw bits. `-ffp-contract` matters as
 it does in the kernels (see `fmulRounded`), so the rebuilt value goes through a `volatile`.
 
-Measured on one Frontier login core, with no GPU in the process, on a 128 MiB polar tile:
+Measured on one Frontier login core, with no GPU in the process, on a 128 MiB polar field:
 
 | Type, bound | Ratio | Encode | Decode |
 |---|---:|---:|---:|
