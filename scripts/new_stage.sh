@@ -529,6 +529,7 @@ echo "  2. include/fzgpumodules.h — #include \"${CATEGORY}/${LOWER}/${LOWER}_s
 echo "  3. tests/pipeline/test_stage_registry.cpp — add StageType::${UPPER} to shipped[]"
 echo "  4. include/fzm_format.h — replace the TODO comment on ${UPPER} with a description"
 echo "  5. docs/stages/${LOWER}.md + a '\\subpage stage_${LOWER}' row in docs/stages/${CATEGORY}.md"
+echo "     + a row in the stage tables of docs/mainpage.md and docs/config_file.md"
 echo "  6. CHANGELOG.md — one line under [Unreleased] → Added"
 echo ""
 echo "See docs/how_to_add_a_stage.md for full details. Agents: follow"

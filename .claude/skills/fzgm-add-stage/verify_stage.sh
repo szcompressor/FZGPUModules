@@ -44,7 +44,11 @@ finish() {
         echo "$1"
         exit 0
     fi
-    echo "RESULT: FAIL (${#FAILS[@]} problem(s)); logs in $LOGS"
+    if [[ "$STATIC" == 1 ]]; then   # static failures are fully shown above
+        rm -rf "$LOGS"; echo "RESULT: FAIL (${#FAILS[@]} problem(s))"
+    else
+        echo "RESULT: FAIL (${#FAILS[@]} problem(s)); logs in $LOGS"
+    fi
     for f in "${FAILS[@]}"; do echo "  - $f"; done
     exit 1
 }
@@ -113,10 +117,23 @@ grep -qE 'pipeline_file_round_trip|decompressFromFile' "$TEST_SRC" 2>/dev/null \
 grep -qE 'saveConfig|loadConfig' "$TEST_SRC" 2>/dev/null \
     && pass "tests include a TOML save/load round trip" \
     || fail "add a TOML saveConfig/loadConfig round-trip test to $TEST_SRC"
-if grep -qiE 'prior work|adapted from|direct port|upstream' "$SOURCE" "$HEADER" 2>/dev/null; then
-    grep -q '## Acknowledgements' "docs/stages/${NAME}.md" 2>/dev/null \
-        && pass "attribution: Acknowledgements section present" \
-        || fail "source mentions prior work but docs/stages/${NAME}.md has no ## Acknowledgements"
+for table in docs/mainpage.md docs/config_file.md; do
+    if [[ -n "$STAGE_CLASS" ]] && grep -q "\b${STAGE_CLASS}\b" "$table"; then
+        pass "listed in $table"
+    else
+        fail "add a ${STAGE_CLASS:-stage} row to the stage table in $table"
+    fi
+done
+grep -q 'captureGraph' "$TEST_SRC" 2>/dev/null \
+    || warn "no captured-graph replay test in $TEST_SRC; required if isGraphCompatible() can return true (SKILL.md Phase 5)"
+ATTR_HITS=$(grep -niE 'prior work|adapted from|direct port|Upstream:|https?://' "$SOURCE" "$HEADER" 2>/dev/null)
+if [[ -n "$ATTR_HITS" ]]; then
+    if grep -q '## Acknowledgements' "docs/stages/${NAME}.md" 2>/dev/null; then
+        pass "attribution: Acknowledgements section present"
+    else
+        fail "source looks based on prior work, but docs/stages/${NAME}.md has no ## Acknowledgements (Step 8b). Matched:"
+        printf '%s\n' "$ATTR_HITS" | head -5 | sed 's/^/        /'
+    fi
 fi
 
 [[ "$STATIC" == 1 ]] && finish "RESULT: STATIC PASS (build, tests and sanitizer not run)"
@@ -159,8 +176,10 @@ if [[ -n "$BIN" ]] && (cd "$(dirname "$BIN")" && "${WRAP[@]}" "$BIN") > "$LOGS/s
 fi
 
 # ── Poisoned allocations (only if this build supports FZ_POISON_ALLOCATIONS) ──
-if grep -rqs 'FZ_POISON_ALLOCATIONS' src include; then
-    section "Poisoned allocations"
+section "Poisoned allocations"
+if ! grep -rqs 'FZ_POISON_ALLOCATIONS' src include; then
+    warn "unavailable in this build (no FZ_POISON_ALLOCATIONS support); buffer-contents rules unchecked"
+else
     for byte in 0xA5 0x00; do
         if [[ -n "$BIN" ]] && (cd "$(dirname "$BIN")" && "${WRAP[@]}" env FZ_POISON_ALLOCATIONS=$byte "$BIN") > "$LOGS/poison_$byte.log" 2>&1; then
             pass "FZ_POISON_ALLOCATIONS=$byte"

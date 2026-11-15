@@ -519,8 +519,10 @@ The last field is the stage's module directory, used for stage fingerprints.
 The `type` string (first field) is what appears in TOML files.
 Convention: class name without the `Stage` suffix (e.g. `"Bitshuffle"`, `"RZE"`, `"Quantizer"`).
 
-If your stage is templated, dispatch on `input_type` / `code_type` TOML keys in
-the helpers — see `addLorenzoQuantStage` / `saveLorenzoQuantStage` for the pattern.
+If your stage is templated, dispatch on a type key in the TOML helpers: `data_type`
+for single-type stages (RLE, GolombRice), `input_type` / `output_type` or
+`input_type` / `code_type` for type pairs (Zigzag, LorenzoQuant). See `addLorenzoQuantStage` /
+`saveLorenzoQuantStage` for the pattern.
 
 ---
 
@@ -600,7 +602,7 @@ Create `tests/stages/test_<name>.cpp` with at minimum:
 
 | Test | What it checks |
 |------|----------------|
-| `ForwardRoundTrip` | Forward + inverse produces exact or within-error output |
+| `RoundTrip` | Forward + inverse produces exact (lossless) or within-error output |
 | `ZeroInput` | `n=0` does not crash or corrupt |
 | `SerializeDeserialize` | `serializeHeader` → `deserializeHeader` restores identical config |
 | `PipelineIntegration` | Stage wired into a `Pipeline`, compress + decompress round-trip |
@@ -661,9 +663,11 @@ has a registered archive factory.
 - [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
 - [ ] `config.cpp` — `#include` header, `addXxxStage` / `saveXxxStage` helpers, one entry in `kStageRegistry[]`
 - [ ] `cli.cpp` — `--stages` name + help text *(if applicable)*
-- [ ] Tests: ForwardRoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState, GraphCompatible
+- [ ] Tests: RoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState, GraphCompatible
 - [ ] `StageType` added to `shipped[]` in `tests/pipeline/test_stage_registry.cpp`
 - [ ] `docs/stages/<name>.md` written and linked from `docs/stages/<category>.md`
+- [ ] Rows in the stage tables of `docs/mainpage.md` and `docs/config_file.md`
+- [ ] Variable-size output: exact size survives captured-graph replay (replays skip `execute()`; re-read the size in `postStreamSync()`), tested with two different inputs
 - [ ] `CHANGELOG.md` entry under `[Unreleased]`
 - [ ] `saveState`/`restoreState` implemented if `deserializeHeader` overwrites forward-pass config
 - [ ] `estimateScratchBytes()` overridden if stage holds persistent pool allocations

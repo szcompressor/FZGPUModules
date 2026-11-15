@@ -37,7 +37,7 @@ request, ask; don't guess a file format.
 | Ports: one output, or named outputs (`codes`, `outliers`, ...)? | `getOutputNames`, downstream wiring | Step 2 |
 | What config goes in the header (<= 128 bytes)? Does decode overwrite forward config? | `serializeHeader`, `saveState/restoreState` | Step 2 |
 | Scratch memory, input alignment, any host sync / D2H in `execute()`? | `estimateScratchBytes`, `getRequiredInputAlignment`, `isGraphCompatible` | Step 2 |
-| Inputs that don't divide evenly (trailing partial word/chunk): pass through or reject? | silent corruption at the tail | Step 3 |
+| Inputs that don't divide evenly (trailing partial word/chunk): handle, pass through, or reject? | silent corruption at the tail; a stage that handles a partial last chunk returns `getRequiredInputAlignment() = 1` (otherwise the pipeline pads every input) | Steps 2, 3 |
 | Based on prior work (code or a specific paper's algorithm)? | attribution in 4 places | Step 8b |
 | Fuse with neighbours later? | specialization contract, after it round-trips | `docs/pipeline_specialization_internals.md` |
 | Add to the CLI `--stages` builder? | optional | Step 8 |
@@ -59,7 +59,7 @@ with distinct input/output types use `input_type` / `output_type` (Zigzag, Bitpa
 |---|---|
 | Size-preserving, element-wise, templated | `modules/transforms/zigzag/` (factory on header byte 0, explicit + `extern template` instantiations) |
 | Size-preserving with inter-element dependency (scan / prefix op) | `modules/predictors/diff/`; for a device-wide scan use `backend::withTempStorage` + `cub::DeviceScan` as in `modules/coders/rle/` (transient scratch, not counted in `estimateScratchBytes`) |
-| Variable-size lossless coder | `modules/coders/rle/` (templated), `modules/coders/rze/` (chunked bytes), `modules/coders/bitpack/` |
+| Variable-size lossless coder | kernels: `modules/coders/rze/` (chunked bytes), `modules/coders/rle/` (templated), `modules/coders/bitpack/`. **Don't copy RZE's or RLE's size readback**: it is not safe under captured-graph replay. Use the pattern in Phase 3, "Variable-size output". |
 | Multi-output (codes + outliers) | `modules/quantizers/quantizer/` |
 | Dimension-aware predictor | `modules/predictors/lorenzo/` |
 
@@ -70,6 +70,9 @@ scripts/new_stage.sh <Name> <category>        # StageType = highest existing + 1
 cmake --preset release -DBUILD_TESTING=ON -DCMAKE_CUDA_ARCHITECTURES=native
 cmake --build build/release -j<N>             # first build: a few minutes
 ```
+
+Don't edit the stage's files while that first build runs; a half-built tree gives
+confusing link errors.
 
 The scaffold creates the module dir (`.h`, `.cu`, `CMakeLists.txt`), the test file,
 the `StageType` entry, and the catalog and test registration, then prints every
@@ -108,6 +111,42 @@ Fill every `TODO` the script left. Contracts that break silently if missed:
 - Floating point: keep error bounds, ranges and bases in the input precision. Never
   narrow `double` through `float` (setters, header, TOML, kernels).
 - Handle `n == 0` and sizes that aren't a multiple of the block/tile/word size.
+- Persistent memory has two mechanisms: `pool->allocate(..., /*persistent=*/true)`
+  (count it in `estimateScratchBytes`), or `pool->allocatePersistentDevice` /
+  `allocatePersistentPinned` in `onFinalize()` (count it in
+  `estimateDeviceFootprintBytes` / `estimatePinnedFootprintBytes`). Anything a graph
+  will use, such as pinned readback slots, must exist before capture: allocate it in
+  `onFinalize()`.
+
+### Variable-size output (coders, anything whose output size depends on the data)
+
+How the real size reaches the host:
+- Without a graph, the DAG asks `getActualOutputSize*()` right after `execute()`.
+- During graph capture it doesn't, and **a graph replay never calls `execute()`**.
+  `compress()` calls `postStreamSync()` after every run, replays included.
+- So any host-side state set only in `execute()` (a "readback pending" flag, a cached
+  size) goes stale on replay. This is exactly how RZE and RLE break.
+
+The pattern that works:
+1. In `execute()`, enqueue the size computation on the device and an async D2H copy
+   of the total into a pinned slot (allocated in `onFinalize`). Don't sync.
+2. The size getters sync and read the pinned slot (lazily, once per call).
+3. `postStreamSync()` re-reads the pinned slot **every time**, not gated on a flag
+   that only `execute()` sets.
+4. If a downstream stage consumes this output (`setTerminalOutput(false)`), publish
+   the exact size before `execute()` returns; see `setTerminalOutput` in
+   `include/stage/stage.h`.
+5. If the stage must sync or make host decisions mid-`execute()`, return
+   `isGraphCompatible() == false` for that direction instead.
+
+Size bounds:
+- Forward: the worst case including all headers and metadata. With a raw fallback,
+  that's metadata + n.
+- Inverse: cache the original size in the stage header (and in `saveState` /
+  `restoreState`). Never use the compressed size as the decoded-size bound.
+
+Raw fallback (coders): a per-chunk flag in the stream, store raw when encoded >= raw,
+and include it in the worst-case bound. Test it with incompressible input.
 
 ## Phase 4 — Integrate (Steps 5-8b)
 
@@ -120,6 +159,8 @@ The scaffold's summary lists these; do all of them.
 - `include/fzgpumodules.h`: header include (alphabetical within category).
 - `tests/pipeline/test_stage_registry.cpp`: add `StageType::<UPPER>` to `shipped[]`.
 - `include/fzm_format.h`: replace the scaffold's `TODO` comment on the enum value.
+- Catalog tables that list every stage: a row in `docs/mainpage.md` (stage table) and
+  in `docs/config_file.md` (TOML type → class table).
 - Docs: `docs/stages/<lower>.md` starting `# <Name>Stage {#stage_<lower>}`. Use
   `docs/stages/diff.md` as the layout (header, class, ports, types, constraints, TOML
   block, example), plus a `\subpage stage_<lower>` row in `docs/stages/<category>.md`.
@@ -148,12 +189,19 @@ Then add these, which past bugs showed are needed:
 - **Second call**: two different inputs through one pipeline; the second result must
   equal a fresh pipeline's (catches stale buffers and persistent scratch).
 - **Coders**: incompressible input (random bytes) must round-trip even if it expands.
+  The scaffold's tests use float data with a tolerance; for a byte coder, compare
+  bytes exactly.
+- **Captured-graph replay** (if `isGraphCompatible()` can return true): enable graph
+  mode, `warmup`, `captureGraph`, then compress → decompress input A, then compress
+  → decompress a *different* input B. Each reported compressed size and decoded
+  result must match a fresh non-graph pipeline. The generated `GraphCompatible` test
+  only checks a boolean; it doesn't catch this.
 - **Floating-point / lossy stages**: f64 as well as f32 with a relative error bound,
   through the file round trip.
-- **TOML**: `saveConfig` → `loadConfig` with non-default parameters, then round-trip
-  through the loaded pipeline. Pattern: `tests/pipeline/test_config.cpp`
-  (`ConfigSave.PreservesParams`); in a stage test, checking the saved text and the
-  loaded stage's getters avoids including toml++.
+- **TOML**: `saveConfig` → `loadConfig` with non-default parameters. Check the saved
+  text, then compare the loaded pipeline's compressed bytes with a pipeline built in
+  code (a `Pipeline` doesn't expose the stages it loaded). Pattern:
+  `tests/pipeline/test_config.cpp` (`ConfigSave.PreservesParams`).
 
 Lossless stages: compare bytes exactly (`EXPECT_EQ`), not with a tolerance.
 
@@ -170,8 +218,10 @@ the enum line), checks the registry test, umbrella header, docs, CHANGELOG and t
 file/TOML/second-call tests, builds the stage's tests plus the registry, config and
 file-I/O tests, runs them, and runs the stage's tests under Compute Sanitizer
 (memcheck, racecheck, initcheck). When the build supports `FZ_POISON_ALLOCATIONS`,
-it also runs the stage's tests with pool memory poisoned to `0xA5` and `0x00`. It
-warns on skipped tests and ends with `RESULT: PASS` or a list of what to fix.
+it also runs the stage's tests with pool memory poisoned to `0xA5` and `0x00`
+(otherwise it prints a WARN that this check is unavailable). It also warns on skipped
+tests and on a stage with no captured-graph replay test, and ends with
+`RESULT: PASS` or a list of what to fix.
 
 The full rebuild before `ctest --preset default` matters: shared headers changed, and
 `ctest` does not rebuild stale test binaries.
