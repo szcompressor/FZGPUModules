@@ -6,7 +6,7 @@
 #
 #   StageName   : PascalCase name, e.g. "MyEncoder"
 #   category    : "predictors", "transforms", "quantizers", "coders", "shufflers", or "fused"
-#   StageTypeId : integer for the StageType enum (optional — auto-detected if omitted)
+#   StageTypeId : integer for the StageType enum (optional — default: highest existing + 1)
 #
 # Categories:
 #   predictors  — model-based decorrelation producing residuals (Lorenzo, Diff, interpolation)
@@ -42,7 +42,7 @@ set -euo pipefail
 if [[ $# -lt 2 ]]; then
     echo "Usage: $0 <StageName> <category> [StageTypeId]"
     echo "  category: predictors | transforms | quantizers | coders | shufflers | fused"
-    echo "  StageTypeId: optional integer — lowest unused value is auto-selected if omitted"
+    echo "  StageTypeId: optional integer — highest existing + 1 if omitted (never reuse a gap)"
     exit 1
 fi
 
@@ -74,13 +74,12 @@ if [[ $# -ge 3 ]]; then
     fi
     echo "  Using explicit StageTypeId: ${TYPE_ID}"
 else
-    # Find the lowest positive integer not already assigned in the StageType enum.
-    # Scopes the grep to the StageType enum block only (avoids picking up DataType values).
+    # Use max+1, never a gap: retired IDs may still appear in old .fzm files, and
+    # not every retired value is marked reserved in the enum.
     TYPE_ID=$(awk '/enum class StageType/,/\};/' "$FZM_FORMAT_H" \
         | grep -oP '=\s*\K[0-9]+(?=\s*,)' \
-        | sort -n \
-        | awk 'BEGIN{e=1} {if($1==e)e++} END{print e}')
-    echo "  Auto-selected StageTypeId: ${TYPE_ID} (lowest unused value)"
+        | sort -n | tail -1 | awk '{print $1 + 1}')
+    echo "  Auto-selected StageTypeId: ${TYPE_ID} (highest existing + 1)"
 fi
 
 MODULE_DIR="${REPO_ROOT}/modules/${CATEGORY}/${LOWER}"
@@ -334,15 +333,17 @@ TEST(${NAME}Stage, RoundTrip) {
 
 // ── ZeroInput ─────────────────────────────────────────────────────────────────
 TEST(${NAME}Stage, ZeroInput) {
-    Pipeline p(0, MemoryStrategy::PREALLOCATE);
-    p.addStage<${NAME}Stage>();
-    p.finalize();
-
+    // Stage level: an empty input must not launch kernels or touch memory.
+    // (A Pipeline rejects an empty input buffer before any stage runs, so this
+    // is tested on the stage directly, in both directions.)
+    ${NAME}Stage s;
+    auto pool = make_test_pool(1024);
     CudaStream cs;
-    std::vector<float> empty;
-    EXPECT_NO_THROW({
-        auto res = pipeline_round_trip<float>(p, empty, cs.stream);
-    });
+    EXPECT_NO_THROW(s.execute(cs.stream, pool.get(), {nullptr}, {nullptr}, {0}));
+    EXPECT_EQ(s.getActualOutputSize(0), 0u);
+    s.setInverse(true);
+    EXPECT_NO_THROW(s.execute(cs.stream, pool.get(), {nullptr}, {nullptr}, {0}));
+    EXPECT_EQ(s.getActualOutputSize(0), 0u);
 }
 
 // ── SerializeDeserialize ──────────────────────────────────────────────────────
@@ -402,9 +403,6 @@ TESTS
 
 # ── fzm_format.h: StageType enum entry ───────────────────────────────────────
 # Insert before the closing brace of the enum (the line with just "};")
-# We target the last enum value line (ends with a comment) and insert after it.
-# Strategy: find the RZE line (currently last) and insert after it.
-LAST_ENUM_LINE="    RZE        = 18,"
 NEW_ENUM_LINE="    ${UPPER}    = ${TYPE_ID},"
 if grep -q "${UPPER}" "$FZM_FORMAT_H"; then
     echo "Warning: ${UPPER} already appears in fzm_format.h — skipping enum insertion."
@@ -483,7 +481,7 @@ if match is None:
 if module in match.group(2).split():
     print("  (stage module catalog entry already present — skipping)")
 else:
-    insertion = match.group(2) + f"    {module}\n"
+    insertion = match.group(2) + f"  {module}\n"
     path.write_text(text[:match.start(2)] + insertion + text[match.end(2):])
     print(f"  + {module} added to stage module catalog")
 PYEOF
@@ -517,17 +515,24 @@ echo "    ${MODULES_CMAKELISTS}  (stage module catalog entry)"
 echo "    ${TESTS_CMAKELISTS}  (fz_add_test entry)"
 echo "    ${MODULE_DIR}/${LOWER}_stage.cu  (self-registers its FZM-header factory)"
 echo ""
-echo "One step still requires a manual edit (TOML support is the only shared"
-echo "registration that cannot self-register — toml++ is confined to config.cpp):"
+echo "Still to do by hand (TOML support cannot self-register — toml++ is confined"
+echo "to config.cpp — and these shared files are not edited by the script):"
 echo ""
 echo "  1. src/pipeline/config.cpp — add TOML load/save support (3 edits in one place):"
 echo "       // At top: #include \"${CATEGORY}/${LOWER}/${LOWER}_stage.h\""
 echo "       static Stage* add${NAME}Stage(Pipeline& p, const toml::table& t) { ... }"
 echo "       static void   save${NAME}Stage(Stage* s, std::ostringstream& out) { ... }"
 echo "       // In kStageRegistry[]:"
-echo "       { \"${NAME}\", StageType::${UPPER}, add${NAME}Stage, save${NAME}Stage },"
+echo "       { \"${NAME}\", StageType::${UPPER}, add${NAME}Stage, save${NAME}Stage, \"modules/${CATEGORY}/${LOWER}\" },"
 echo ""
-echo "See docs/how_to_add_a_stage.md for full details."
+echo "  2. include/fzgpumodules.h — #include \"${CATEGORY}/${LOWER}/${LOWER}_stage.h\""
+echo "  3. tests/pipeline/test_stage_registry.cpp — add StageType::${UPPER} to shipped[]"
+echo "  4. include/fzm_format.h — replace the TODO comment on ${UPPER} with a description"
+echo "  5. docs/stages/${LOWER}.md + a '\\subpage stage_${LOWER}' row in docs/stages/${CATEGORY}.md"
+echo "  6. CHANGELOG.md — one line under [Unreleased] → Added"
+echo ""
+echo "See docs/how_to_add_a_stage.md for full details. Agents: follow"
+echo ".claude/skills/fzgm-add-stage/SKILL.md and finish with its verify_stage.sh."
 echo ""
 echo "If the stage is based on prior work (upstream code or algorithm),"
 echo "also add attribution (see docs/how_to_add_a_stage.md, Step 8b):"

@@ -62,6 +62,7 @@ Stages live under `modules/` in one of these categories:
 | Shufflers | `modules/shufflers/<name>/` | `bitshuffle/` |
 | Transforms | `modules/transforms/<name>/` | `zigzag/`, `negabinary/` |
 | Fused | `modules/fused/<name>/` | `lorenzo_quant/` |
+| Structural | `modules/structural/<name>/` | `merge/`, `tupl/` (DAG plumbing; `new_stage.sh` does not scaffold this category, so copy an existing one) |
 
 ### Category definitions
 
@@ -383,7 +384,7 @@ In `include/fzm_format.h`, add to the `StageType` enum:
 ```cpp
 enum class StageType : uint16_t {
     // ... existing entries (do NOT renumber or reuse) ...
-    MY_STAGE = 19,   // next available value after RZE = 18
+    MY_STAGE = 45,   // highest existing value + 1 (the new_stage.sh default)
 };
 ```
 
@@ -393,8 +394,9 @@ Also add to `stageTypeToString()` in the same file:
 case StageType::MY_STAGE: return "MyStage";
 ```
 
-**Never renumber or reuse existing values.** They are serialized in `.fzm` files;
-reusing a value corrupts files that contain the old stage type.
+**Never renumber or reuse existing values, and never fill a gap.** They are serialized
+in `.fzm` files; reusing a value corrupts files that contain the old stage type, and
+not every retired value is marked reserved in the enum. Use the highest value + 1.
 
 ---
 
@@ -510,10 +512,11 @@ static void saveMyStage(Stage* s, std::ostringstream& out) {
 **4. Add one entry to kStageRegistry[]**:
 
 ```cpp
-{ "MyStage", StageType::MY_STAGE, addMyStage, saveMyStage },
+{ "MyStage", StageType::MY_STAGE, addMyStage, saveMyStage, "modules/<category>/<name>" },
 ```
 
-That's it. The `type` string (first field) is what appears in TOML files.
+The last field is the stage's module directory, used for stage fingerprints.
+The `type` string (first field) is what appears in TOML files.
 Convention: class name without the `Stage` suffix (e.g. `"Bitshuffle"`, `"RZE"`, `"Quantizer"`).
 
 If your stage is templated, dispatch on `input_type` / `code_type` TOML keys in
@@ -534,7 +537,7 @@ instantiations or unusual wiring can be TOML-only.
 ## Step 8b — Attribution (required when based on prior work)
 
 If your stage ports, adapts, or closely follows an algorithm from another
-project, you must acknowledge it in three places:
+project, you must acknowledge it in four places:
 
 **1. Source file comment** — top of the `.cu` file:
 
@@ -632,8 +635,17 @@ pattern only works via `writeToFile`/`decompressFromFile`.
 
 Register in `tests/stages/CMakeLists.txt`:
 ```cmake
-fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
+fz_add_test(
+    NAME    test_my_stage
+    SOURCES test_my_stage.cpp
+    LIBS    fzgmod_modules fzgmod_mem fzgmod
+    LABELS  stages gpu
+)
 ```
+
+Also add `StageType::MY_STAGE` to `shipped[]` in
+`tests/pipeline/test_stage_registry.cpp`, which asserts that every shipped stage
+has a registered archive factory.
 
 ---
 
@@ -649,7 +661,10 @@ fz_add_test(test_my_stage test_my_stage.cpp LABELS stages gpu)
 - [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
 - [ ] `config.cpp` — `#include` header, `addXxxStage` / `saveXxxStage` helpers, one entry in `kStageRegistry[]`
 - [ ] `cli.cpp` — `--stages` name + help text *(if applicable)*
-- [ ] Tests: ForwardRoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState
+- [ ] Tests: ForwardRoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState, GraphCompatible
+- [ ] `StageType` added to `shipped[]` in `tests/pipeline/test_stage_registry.cpp`
+- [ ] `docs/stages/<name>.md` written and linked from `docs/stages/<category>.md`
+- [ ] `CHANGELOG.md` entry under `[Unreleased]`
 - [ ] `saveState`/`restoreState` implemented if `deserializeHeader` overwrites forward-pass config
 - [ ] `estimateScratchBytes()` overridden if stage holds persistent pool allocations
 - [ ] `getRequiredInputAlignment()` overridden if stage requires chunk-aligned input
