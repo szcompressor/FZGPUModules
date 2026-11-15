@@ -44,6 +44,9 @@ for the complete lifecycle/enum reference.
 
 Full per-stage constraints, ports, and TOML keys: [docs/stages/index.md](docs/stages/index.md).
 How to add a brand-new stage: [docs/how_to_add_a_stage.md](docs/how_to_add_a_stage.md).
+Agents: follow the step-by-step skill in
+[.claude/skills/fzgm-add-stage/SKILL.md](.claude/skills/fzgm-add-stage/SKILL.md)
+(Claude Code loads it automatically; other agents can read it directly).
 
 ## Build
 
@@ -88,6 +91,26 @@ out-of-bounds device writes that land in pool slack, which a normal test run can
 
 `tests/` layout: `stages/` (per-stage unit tests), `pipeline/` (integration tests),
 `golden/` (reference data), `helpers/`.
+
+### What counts as verified
+
+Before reporting a change as done or fixed, run the check that proves that kind of
+claim and quote its result:
+
+| Claim | Evidence |
+|---|---|
+| Tests pass | `ctest --preset default` output (count and failures), on a fresh build |
+| Device code is safe | `./scripts/run_sanitizers.sh --mode compute` on the changed stages |
+| A stage is integrated | `python3 scripts/check_stage_integration.py` exits 0 |
+| A new stage is done | `.claude/skills/fzgm-add-stage/verify_stage.sh <name>` ends in `RESULT: PASS` |
+| A stage round-trips | compress then decompress through `fzgmod-cli` or `stage_harness`: byte-identical for lossless stages, error bound met for lossy ones; include f64 with a relative bound through a file round trip, and an all-zero and a constant input |
+| Specialization preserves output | compressed bytes identical with `FZ_SPECIALIZE=off` and `FZ_SPECIALIZE=auto` |
+| A change is faster | timings from a quiet GPU, not one run; for "fusion is unprofitable", an ncu occupancy profile |
+
+When debugging device code: a CUDA illegal-address error is reported at the next
+synchronization point, not in the faulting kernel. Localize it with
+`CUDA_LAUNCH_BLOCKING=1` and Compute Sanitizer before reading code around the
+reported line.
 
 ## Directory layout
 

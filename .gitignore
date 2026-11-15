@@ -3,7 +3,9 @@
 .notes/
 temp/
 memory/
-.claude/
+# Local agent state stays untracked; shared agent skills are versioned.
+.claude/*
+!.claude/skills/
 Testing/
 .github/agents/
 settings.json
