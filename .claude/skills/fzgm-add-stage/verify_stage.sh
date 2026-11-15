@@ -9,9 +9,10 @@
 # Environment:
 #   FZ_SKIP_SANITIZER=1   skip the Compute Sanitizer pass (e.g. no compute-sanitizer)
 #   FZ_GPU_WRAPPER="..."  prefix for GPU commands (e.g. a GPU lock: "python -m benchkit lock --")
-#   JOBS=N                build parallelism (default: nproc)
+#   JOBS=N                build parallelism (default: nproc, capped at 16)
 #
-# Exit 0 and "RESULT: PASS" only if every check passes.
+# Exit 0 and "RESULT: PASS" only if every check passes. Logs of failed steps are
+# kept in a temporary directory that is printed; it is removed on a pass.
 
 set -uo pipefail
 
@@ -19,24 +20,40 @@ STATIC=0
 if [[ "${1:-}" == --static ]]; then STATIC=1; shift; fi
 NAME="${1:-}"
 if [[ -z "$NAME" || "$NAME" == -h || "$NAME" == --help ]]; then
-    sed -n '2,14p' "$0"; exit 2
+    sed -n '2,15p' "$0"; exit 2
 fi
 ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$ROOT" || exit 2
 BUILD="${2:-build/release}"
-JOBS="${JOBS:-$(nproc)}"
+NPROC=$(nproc)
+JOBS="${JOBS:-$(( NPROC > 16 ? 16 : NPROC ))}"
 read -r -a WRAP <<< "${FZ_GPU_WRAPPER:-}"
+LOGS=$(mktemp -d "${TMPDIR:-/tmp}/fz_verify_${NAME}.XXXXXX")
 
 FAILS=()
 pass() { printf '  PASS  %s\n' "$*"; }
 fail() { printf '  FAIL  %s\n' "$*"; FAILS+=("$*"); }
 warn() { printf '  WARN  %s\n' "$*"; }
 section() { printf '\n== %s\n' "$*"; }
+show() { grep -E "$2" "$1" | head -"${3:-10}" | sed 's/^/        /'; }
+
+finish() {
+    echo
+    if [[ ${#FAILS[@]} -eq 0 ]]; then
+        rm -rf "$LOGS"
+        echo "$1"
+        exit 0
+    fi
+    echo "RESULT: FAIL (${#FAILS[@]} problem(s)); logs in $LOGS"
+    for f in "${FAILS[@]}"; do echo "  - $f"; done
+    exit 1
+}
 
 # ── Locate the stage ──────────────────────────────────────────────────────────
 MODULE_DIR=$(find modules -mindepth 2 -maxdepth 2 -type d -name "$NAME" | head -1)
 if [[ -z "$MODULE_DIR" ]]; then
-    echo "No module directory modules/<category>/$NAME — run scripts/new_stage.sh first."; exit 2
+    echo "No module directory modules/<category>/$NAME — run scripts/new_stage.sh first."
+    rm -rf "$LOGS"; exit 2
 fi
 CATEGORY=$(basename "$(dirname "$MODULE_DIR")")
 HEADER="$MODULE_DIR/${NAME}_stage.h"
@@ -48,12 +65,11 @@ echo "Stage: $MODULE_DIR (category $CATEGORY, StageType::${UPPER:-?})"
 
 # ── Static checks (no build needed) ───────────────────────────────────────────
 section "Integration and docs checks"
-if python3 scripts/check_docs.py > /tmp/fz_verify_docs_$$.log 2>&1; then
+if python3 scripts/check_docs.py > "$LOGS/docs.log" 2>&1; then
     pass "scripts/check_docs.py (includes check_stage_integration.py)"
 else
-    fail "scripts/check_docs.py — see output below"; sed 's/^/        /' /tmp/fz_verify_docs_$$.log | grep -E 'FAIL|ERROR|error|problem' | head -20
+    fail "scripts/check_docs.py"; show "$LOGS/docs.log" 'FAIL|ERROR|error|problem' 20
 fi
-rm -f /tmp/fz_verify_docs_$$.log
 
 for f in "$HEADER" "$SOURCE" "$TEST_SRC" "$MODULE_DIR/CMakeLists.txt"; do
     [[ -f "$f" ]] || { fail "missing $f"; continue; }
@@ -61,8 +77,12 @@ for f in "$HEADER" "$SOURCE" "$TEST_SRC" "$MODULE_DIR/CMakeLists.txt"; do
     if [[ "$n" -gt 0 ]]; then fail "$f has $n TODO(s) left from the scaffold"; else pass "no TODOs in $f"; fi
 done
 
-[[ -n "$UPPER" ]] || fail "could not find the StageType used in $SOURCE"
-if [[ -n "$UPPER" ]]; then
+if [[ -z "$UPPER" ]]; then
+    fail "could not find the StageType used in $SOURCE"
+else
+    grep -qE "^\s*${UPPER}\s*=.*TODO" include/fzm_format.h \
+        && fail "include/fzm_format.h: replace the scaffold's TODO comment on ${UPPER}" \
+        || pass "StageType::$UPPER described in include/fzm_format.h"
     grep -q "StageType::${UPPER}\b" tests/pipeline/test_stage_registry.cpp \
         && pass "StageType::$UPPER listed in tests/pipeline/test_stage_registry.cpp" \
         || fail "add StageType::$UPPER to shipped[] in tests/pipeline/test_stage_registry.cpp"
@@ -79,7 +99,7 @@ if [[ -f "docs/stages/${NAME}.md" ]]; then
         && pass "listed in docs/stages/${CATEGORY}.md" \
         || fail "add '\\subpage stage_${NAME}' to docs/stages/${CATEGORY}.md"
 else
-    fail "write docs/stages/${NAME}.md (layout: docs/stages/zigzag.md)"
+    fail "write docs/stages/${NAME}.md (layout: docs/stages/diff.md)"
 fi
 STAGE_CLASS=$(grep -oP 'class\s+\K[A-Za-z0-9_]+Stage\b' "$HEADER" 2>/dev/null | head -1)
 if [[ -n "$STAGE_CLASS" ]] && sed -n '/## \[Unreleased\]/,/## \[[0-9]/p' CHANGELOG.md | grep -q "$STAGE_CLASS\|${STAGE_CLASS%Stage}"; then
@@ -99,45 +119,60 @@ if grep -qiE 'prior work|adapted from|direct port|upstream' "$SOURCE" "$HEADER" 
         || fail "source mentions prior work but docs/stages/${NAME}.md has no ## Acknowledgements"
 fi
 
-if [[ "$STATIC" == 1 ]]; then
-    echo
-    if [[ ${#FAILS[@]} -eq 0 ]]; then echo "RESULT: STATIC PASS (build, tests and sanitizer not run)"; exit 0; fi
-    echo "RESULT: FAIL (${#FAILS[@]} problem(s))"; for f in "${FAILS[@]}"; do echo "  - $f"; done; exit 1
-fi
+[[ "$STATIC" == 1 ]] && finish "RESULT: STATIC PASS (build, tests and sanitizer not run)"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
-section "Build"
+section "Build (-j$JOBS)"
 if [[ ! -f third_party/googletest/CMakeLists.txt ]]; then
     git submodule update --init --recursive >/dev/null 2>&1 || true
 fi
 if [[ ! -f "$BUILD/CMakeCache.txt" ]] || ! grep -q 'BUILD_TESTING:BOOL=ON' "$BUILD/CMakeCache.txt"; then
     echo "  configuring $BUILD (release, tests on, native CUDA arch)"
-    cmake --preset release -DBUILD_TESTING=ON -DCMAKE_CUDA_ARCHITECTURES=native > /tmp/fz_verify_cfg_$$.log 2>&1 \
-        || { fail "cmake configure (log: /tmp/fz_verify_cfg_$$.log)"; }
+    cmake --preset release -DBUILD_TESTING=ON -DCMAKE_CUDA_ARCHITECTURES=native > "$LOGS/configure.log" 2>&1 \
+        || fail "cmake configure (log: $LOGS/configure.log)"
 fi
 TARGETS=("$TEST_BIN_NAME" test_stage_registry test_config test_file_io)
-if cmake --build "$BUILD" -j"$JOBS" --target "${TARGETS[@]}" > /tmp/fz_verify_build_$$.log 2>&1; then
-    pass "built ${TARGETS[*]}"; rm -f /tmp/fz_verify_build_$$.log
+if cmake --build "$BUILD" -j"$JOBS" --target "${TARGETS[@]}" > "$LOGS/build.log" 2>&1; then
+    pass "built ${TARGETS[*]}"
 else
-    fail "build (log: /tmp/fz_verify_build_$$.log)"; grep -E 'error|Error' /tmp/fz_verify_build_$$.log | head -15 | sed 's/^/        /'
+    fail "build (log: $LOGS/build.log)"; show "$LOGS/build.log" ' error|Error ' 15
 fi
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 section "Tests"
+BIN=$(find "$BUILD" -type f -name "$TEST_BIN_NAME" -perm -u+x | head -1); [[ -z "$BIN" ]] || BIN=$(realpath "$BIN")
 if ctest --test-dir "$BUILD" -N -R "^${TEST_BIN_NAME}\$" 2>/dev/null | grep -q 'Total Tests: [1-9]'; then
     if "${WRAP[@]}" ctest --test-dir "$BUILD" --output-on-failure \
-            -R "^(${TEST_BIN_NAME}|test_stage_registry|test_config|test_file_io)\$" > /tmp/fz_verify_ctest_$$.log 2>&1; then
-        pass "$(grep -E 'tests passed' /tmp/fz_verify_ctest_$$.log | tail -1)"
+            -R "^(${TEST_BIN_NAME}|test_stage_registry|test_config|test_file_io)\$" > "$LOGS/ctest.log" 2>&1; then
+        pass "$(grep -E 'tests passed' "$LOGS/ctest.log" | tail -1)"
     else
-        fail "ctest (log: /tmp/fz_verify_ctest_$$.log)"; grep -E 'Failed|FAILED|\*\*\*' /tmp/fz_verify_ctest_$$.log | head -15 | sed 's/^/        /'
+        fail "ctest (log: $LOGS/ctest.log)"; show "$LOGS/ctest.log" 'Failed|FAILED|\*\*\*' 15
     fi
 else
     fail "ctest has no test named $TEST_BIN_NAME (check tests/stages/CMakeLists.txt and that BUILD_TESTING=ON)"
 fi
+if [[ -n "$BIN" ]] && (cd "$(dirname "$BIN")" && "${WRAP[@]}" "$BIN") > "$LOGS/stage_tests.log" 2>&1; then
+    n_pass=$(grep -oE '\[  PASSED  \] [0-9]+' "$LOGS/stage_tests.log" | grep -oE '[0-9]+$' | tail -1)
+    n_skip=$(grep -oE '\[  SKIPPED \] [0-9]+' "$LOGS/stage_tests.log" | grep -oE '[0-9]+$' | tail -1)
+    pass "$TEST_BIN_NAME: ${n_pass:-?} test cases"
+    [[ -z "$n_skip" || "$n_skip" == 0 ]] || warn "$TEST_BIN_NAME skipped $n_skip test case(s) — check they are meant to skip here"
+fi
+
+# ── Poisoned allocations (only if this build supports FZ_POISON_ALLOCATIONS) ──
+if grep -rqs 'FZ_POISON_ALLOCATIONS' src include; then
+    section "Poisoned allocations"
+    for byte in 0xA5 0x00; do
+        if [[ -n "$BIN" ]] && (cd "$(dirname "$BIN")" && "${WRAP[@]}" env FZ_POISON_ALLOCATIONS=$byte "$BIN") > "$LOGS/poison_$byte.log" 2>&1; then
+            pass "FZ_POISON_ALLOCATIONS=$byte"
+        else
+            fail "FZ_POISON_ALLOCATIONS=$byte — some byte is read before it is written (log: $LOGS/poison_$byte.log)"
+            show "$LOGS/poison_$byte.log" 'FAILED|Failure' 8
+        fi
+    done
+fi
 
 # ── Compute Sanitizer on the stage's own tests ────────────────────────────────
 section "Compute Sanitizer"
-BIN=$(find "$BUILD" -type f -name "$TEST_BIN_NAME" -perm -u+x | head -1); [[ -z "$BIN" ]] || BIN=$(realpath "$BIN")
 if [[ "${FZ_SKIP_SANITIZER:-0}" == 1 ]]; then
     warn "skipped (FZ_SKIP_SANITIZER=1)"
 elif ! command -v compute-sanitizer >/dev/null; then
@@ -146,23 +181,16 @@ elif [[ -z "$BIN" ]]; then
     fail "test binary $TEST_BIN_NAME not found under $BUILD"
 else
     for tool in memcheck racecheck initcheck; do
-        log="/tmp/fz_verify_${tool}_$$.log"
+        log="$LOGS/$tool.log"
         if (cd "$(dirname "$BIN")" && "${WRAP[@]}" env CUDA_MODULE_LOADING=EAGER timeout 600 \
                 compute-sanitizer --tool "$tool" --error-exitcode=1 --require-cuda-init=no \
                 "$BIN" --gtest_fail_if_no_test_linked) > "$log" 2>&1; then
-            pass "$tool: clean, $(grep -oE '\[  PASSED  \] [0-9]+ tests?' "$log" | tail -1 | sed 's/.*] //')"; rm -f "$log"
+            pass "$tool: clean, $(grep -oE '\[  PASSED  \] [0-9]+ tests?' "$log" | tail -1 | sed 's/.*] //')"
         else
-            fail "$tool (log: $log)"; grep -E 'ERROR SUMMARY|RACECHECK SUMMARY|Invalid|Uninitialized|hazard|FAILED' "$log" | head -8 | sed 's/^/        /'
+            fail "$tool (log: $log)"; show "$log" 'ERROR SUMMARY|RACECHECK SUMMARY|Invalid|Uninitialized|hazard|FAILED' 8
         fi
     done
 fi
 
-# ── Result ────────────────────────────────────────────────────────────────────
-echo
-if [[ ${#FAILS[@]} -eq 0 ]]; then
-    echo "RESULT: PASS — now run the full suite once: ctest --preset default"
-    exit 0
-fi
-echo "RESULT: FAIL (${#FAILS[@]} problem(s))"
-for f in "${FAILS[@]}"; do echo "  - $f"; done
-exit 1
+finish "RESULT: PASS — now rebuild everything and run the full suite once:
+  cmake --build $BUILD -j$JOBS && ctest --preset default"

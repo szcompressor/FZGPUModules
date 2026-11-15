@@ -15,49 +15,72 @@ instead; the stage class is the same, but no shared files are edited.
 
 ## Phase 0 — Workspace
 
-- Work on a new branch, ideally in its own worktree, not on a shared checkout:
+- Work on a new branch, ideally in its own worktree, not a shared checkout:
   `git worktree add -b stage/<name> ../FZGPUModules-<name> main`
 - A fresh clone or worktree needs submodules, or CMake fails on googletest:
   `git submodule update --init --recursive`
-- Configure with tests for the GPU you have (the default architecture is 86):
-  `cmake --preset release -DBUILD_TESTING=ON -DCMAKE_CUDA_ARCHITECTURES=native`
-  then `cmake --build build/release -j$(nproc)`. The first build takes a while;
-  start it now and design while it runs.
+- Don't build yet. The scaffold (Phase 2) edits `include/fzm_format.h`, which forces
+  a near-full rebuild, so build once after scaffolding.
+- Build parallelism: `-j$(nproc)` on your own machine; cap it (e.g. `-j16`) on a
+  shared host. `verify_stage.sh` reads `JOBS`.
 
 ## Phase 1 — Design card (before any code)
 
-Answer these in a short note to the user (or yourself). If a question can't be
-answered from the request, ask; don't guess a file format.
+Answer these in a short note to the user. If a question can't be answered from the
+request, ask; don't guess a file format.
 
 | Question | Why it matters | Where it lands |
 |---|---|---|
-| Name (PascalCase, no `Stage` suffix) and category | directory, StageType, TOML name | Step 1 category definitions |
-| Input/output element types; templated? | `getInput/OutputDataType`, factory dispatch, TOML type keys | Steps 2, 5, 7 |
+| Name (PascalCase, no `Stage` suffix) and category | directory, StageType, TOML name | Step 1 |
+| Input/output element types; templated? | `getInput/OutputDataType`, factory, TOML type keys | Steps 2, 5, 7 |
 | Size-preserving or variable-size? Forward *and* inverse size bounds | `estimateOutputSizes` must be safe in both directions | Step 2 |
 | Ports: one output, or named outputs (`codes`, `outliers`, ...)? | `getOutputNames`, downstream wiring | Step 2 |
 | What config goes in the header (<= 128 bytes)? Does decode overwrite forward config? | `serializeHeader`, `saveState/restoreState` | Step 2 |
 | Scratch memory, input alignment, any host sync / D2H in `execute()`? | `estimateScratchBytes`, `getRequiredInputAlignment`, `isGraphCompatible` | Step 2 |
+| Inputs that don't divide evenly (trailing partial word/chunk): pass through or reject? | silent corruption at the tail | Step 3 |
 | Based on prior work (code or a specific paper's algorithm)? | attribution in 4 places | Step 8b |
-| Does it need to fuse with neighbours later? | specialization contract, after it round-trips | `docs/pipeline_specialization_internals.md` |
+| Fuse with neighbours later? | specialization contract, after it round-trips | `docs/pipeline_specialization_internals.md` |
+| Add to the CLI `--stages` builder? | optional | Step 8 |
 
-Pick the nearest existing stage as a template and say which:
+**Category tie-break.** Decide by what the operation needs, not what it's called:
+- any element depends on others (delta, scan, prediction) → `predictors`, even for
+  integer code streams;
+- strictly element-wise and bijective → `transforms`;
+- changes size losslessly → `coders`;
+- reorders bytes/bits only → `shufflers`.
+If still unsure, use the category of the closest existing stage and say why.
+
+**TOML key convention.** Single-type stages use `data_type` (RLE, Lorenzo); stages
+with distinct input/output types use `input_type` / `output_type` (Zigzag, Bitpack).
+
+**Template to copy** — say which you picked:
 
 | Shape of the new stage | Copy from |
 |---|---|
-| Size-preserving, element-wise | `modules/transforms/zigzag/` |
+| Size-preserving, element-wise, templated | `modules/transforms/zigzag/` (factory on header byte 0, explicit + `extern template` instantiations) |
+| Size-preserving with inter-element dependency (scan / prefix op) | `modules/predictors/diff/`; for a device-wide scan use `backend::withTempStorage` + `cub::DeviceScan` as in `modules/coders/rle/` (transient scratch, not counted in `estimateScratchBytes`) |
 | Variable-size lossless coder | `modules/coders/rle/` (templated), `modules/coders/rze/` (chunked bytes), `modules/coders/bitpack/` |
 | Multi-output (codes + outliers) | `modules/quantizers/quantizer/` |
-| Dimension-aware predictor | `modules/predictors/lorenzo/`, `modules/predictors/diff/` |
+| Dimension-aware predictor | `modules/predictors/lorenzo/` |
 
-## Phase 2 — Scaffold
+## Phase 2 — Scaffold, then first build
 
 ```bash
-scripts/new_stage.sh <Name> <category>        # StageType ID auto-assigned
+scripts/new_stage.sh <Name> <category>        # StageType = highest existing + 1
+cmake --preset release -DBUILD_TESTING=ON -DCMAKE_CUDA_ARCHITECTURES=native
+cmake --build build/release -j<N>             # first build: a few minutes
 ```
 
-It creates the module dir (`.h`, `.cu`, `CMakeLists.txt`), `tests/stages/test_<lower>.cpp`,
-the `StageType` entry, the catalog and test registration, and prints what's left.
-Never renumber or reuse a `StageType` value: they're stored in `.fzm` files.
+The scaffold creates the module dir (`.h`, `.cu`, `CMakeLists.txt`), the test file,
+the `StageType` entry, and the catalog and test registration, then prints every
+remaining manual step. Never pass an ID that fills a gap in the enum: retired IDs
+live on in old `.fzm` files.
+
+The scaffold is a **plain (non-template) class** with `FZ_REGISTER_SIMPLE_STAGE`. For a
+templated stage, convert it like `zigzag_stage.h/.cu`: class template, a header
+factory that dispatches on the stored `DataType` registered with
+`FZ_REGISTER_STAGE_FACTORY`, explicit instantiations in the `.cu`, and matching
+`extern template` declarations in the header. This is real work; budget for it.
 
 ## Phase 3 — Implement (Steps 2-3b)
 
@@ -72,48 +95,65 @@ Fill every `TODO` the script left. Contracts that break silently if missed:
   scratch needs `estimateScratchBytes`.
 - Use the backend facades (`backend/types.h`, `backend/api.h`, `backend/cub.h`), not
   `<cuda_runtime.h>`, in stage code.
-- Shared output slots (packing, reductions) need exclusive ownership or atomics; `|=`
-  after a memset is still a race. `atomicOr` on a 32-bit word needs a 4-byte-aligned
-  address: don't atomically OR into a byte offset.
-- Integer promotion: small signed types (int8/int16) promote to `int` in arithmetic.
-  Mask or cast back before shifting or zigzag-encoding, or negative values corrupt.
-- Floating point: keep error bounds, ranges, and bases in the input precision. Don't
-  narrow `double` through `float` anywhere (setters, header, TOML, kernels).
+- **No buffer starts zeroed.** Pool memory is reused across calls and, with buffer
+  coloring, shared with other stages' earlier buffers. So:
+  - write every byte anything reads (padding, unused bits of the last word, tails);
+  - clear before any read-modify-write (`|=`, `atomicOr`, counters, histograms) or
+    sparse write, with `cudaMemsetAsync` on `stream`;
+  - never write to an input buffer; persistent scratch keeps last call's contents.
+- Shared output slots (packing, reductions) need exclusive ownership or atomics. An
+  `atomicOr` on a 32-bit word needs a 4-byte-aligned address.
+- Integer promotion: int8/int16 promote to `int`. Mask or cast back before shifting
+  or zigzag-encoding, or negative values corrupt.
+- Floating point: keep error bounds, ranges and bases in the input precision. Never
+  narrow `double` through `float` (setters, header, TOML, kernels).
 - Handle `n == 0` and sizes that aren't a multiple of the block/tile/word size.
 
 ## Phase 4 — Integrate (Steps 5-8b)
 
-- `src/pipeline/config.cpp`: include, `add<Name>Stage` + `save<Name>Stage`, one
-  `kStageRegistry[]` entry. Save every parameter the load helper reads.
-- `include/fzgpumodules.h`: add the header include (alphabetical within category).
-- `tests/pipeline/test_stage_registry.cpp`: add `StageType::<UPPER>` to `shipped[]`
-  (**not mentioned in the doc**; the integration script doesn't catch it either).
-- `src/utils/cli/cli.cpp` `--stages` builder: optional, only for general-purpose stages.
-- Docs: `docs/stages/<lower>.md` starting `# <Name>Stage {#stage_<lower>}` (copy the
-  layout of `docs/stages/zigzag.md`: header, class, category, ports, types,
-  constraints, TOML keys, example), plus a `\subpage stage_<lower>` row in the
-  category page `docs/stages/<category>.md`.
+The scaffold's summary lists these; do all of them.
+
+- `src/pipeline/config.cpp`: include, `add<Name>Stage` + `save<Name>Stage`, and one
+  `kStageRegistry[]` entry with **five** fields:
+  `{ "<Name>", StageType::<UPPER>, add<Name>Stage, save<Name>Stage, "modules/<category>/<lower>" },`
+  Save every parameter the load helper reads.
+- `include/fzgpumodules.h`: header include (alphabetical within category).
+- `tests/pipeline/test_stage_registry.cpp`: add `StageType::<UPPER>` to `shipped[]`.
+- `include/fzm_format.h`: replace the scaffold's `TODO` comment on the enum value.
+- Docs: `docs/stages/<lower>.md` starting `# <Name>Stage {#stage_<lower>}`. Use
+  `docs/stages/diff.md` as the layout (header, class, ports, types, constraints, TOML
+  block, example), plus a `\subpage stage_<lower>` row in `docs/stages/<category>.md`.
 - Attribution when based on prior work: `.cu` comment, `@note` in the class Doxygen,
   `## Acknowledgements` in the stage doc, `THIRD_PARTY.md` entry (Step 8b).
-- `CHANGELOG.md` under `[Unreleased]` → `Added`: one line.
+- `CHANGELOG.md` under `[Unreleased]` → `Added`: one line naming the class.
+- CLI `--stages` builder (`src/utils/cli/cli.cpp`): only if you decided yes in Phase 1.
 
 ## Phase 5 — Tests (Step 9)
 
 Fill the six generated tests (RoundTrip, ZeroInput, SerializeDeserialize,
-SaveRestoreState, PipelineIntegration, GraphCompatible), then add these, which past
-bugs showed are needed:
+SaveRestoreState, PipelineIntegration, GraphCompatible). ZeroInput checks `n == 0` on
+the stage directly, because a `Pipeline` rejects an empty input. Templated stages:
+make the tests typed (`TYPED_TEST`) over every type the factory and TOML accept.
+
+Then add these, which past bugs showed are needed:
 
 - **Fresh-decoder file round trip**: `fz_test::pipeline_file_round_trip` (writes the
-  archive, decodes in a new pipeline). This is what catches header/factory bugs.
-- **Awkward sizes**: n = 1, an odd n, and n not a multiple of the block/chunk size.
-- **Edge inputs**: all zeros, and a constant non-zero value. A constant input once
-  crashed the default Huffman pipeline on real data.
+  archive, decodes in a new pipeline). It catches header and factory bugs.
+- **A reference check**: compare the forward output with a simple host
+  implementation, not only round-trip equality (a wrong-but-invertible kernel
+  round-trips).
+- **Awkward sizes**: n = 1, an odd n, a size not a multiple of the block/chunk/word,
+  and one large size (a few million elements, crosses grid limits).
+- **Edge inputs**: all zeros, a constant non-zero value, all ones.
+- **Second call**: two different inputs through one pipeline; the second result must
+  equal a fresh pipeline's (catches stale buffers and persistent scratch).
 - **Coders**: incompressible input (random bytes) must round-trip even if it expands.
-- **Floating-point / lossy stages**: f64 as well as f32, and a relative error bound,
-  through the file round trip. f64 bound bugs only showed up that way.
-- **Templated stages**: every type the factory and TOML loader accept.
-- **TOML**: build a pipeline with the stage, `saveConfig` → `loadConfig`, and check
-  parameters survive and the loaded pipeline round-trips.
+- **Floating-point / lossy stages**: f64 as well as f32 with a relative error bound,
+  through the file round trip.
+- **TOML**: `saveConfig` → `loadConfig` with non-default parameters, then round-trip
+  through the loaded pipeline. Pattern: `tests/pipeline/test_config.cpp`
+  (`ConfigSave.PreservesParams`); in a stage test, checking the saved text and the
+  loaded stage's getters avoids including toml++.
 
 Lossless stages: compare bytes exactly (`EXPECT_EQ`), not with a tolerance.
 
@@ -122,16 +162,22 @@ Lossless stages: compare bytes exactly (`EXPECT_EQ`), not with a tolerance.
 ```bash
 .claude/skills/fzgm-add-stage/verify_stage.sh --static <lower_name>   # file checks only, seconds
 .claude/skills/fzgm-add-stage/verify_stage.sh <lower_name>            # everything, e.g. xor_delta
+cmake --build build/release -j<N> && ctest --preset default            # then the full suite
 ```
+
+`verify_stage.sh` runs the docs/integration checks, finds leftover TODOs (including
+the enum line), checks the registry test, umbrella header, docs, CHANGELOG and the
+file/TOML/second-call tests, builds the stage's tests plus the registry, config and
+file-I/O tests, runs them, and runs the stage's tests under Compute Sanitizer
+(memcheck, racecheck, initcheck). When the build supports `FZ_POISON_ALLOCATIONS`,
+it also runs the stage's tests with pool memory poisoned to `0xA5` and `0x00`. It
+warns on skipped tests and ends with `RESULT: PASS` or a list of what to fix.
+
+The full rebuild before `ctest --preset default` matters: shared headers changed, and
+`ctest` does not rebuild stale test binaries.
 
 On a shared GPU, prefix GPU commands with a lock: `FZ_GPU_WRAPPER="<lock command> --"`
 (for example compression_benchmarking's `python -m benchkit lock --`).
-
-It checks integration (`scripts/check_docs.py`), leftover TODOs, registry/umbrella/docs/
-CHANGELOG presence, builds, runs the stage's tests plus registry/config/file-I/O tests,
-and runs the stage's tests under Compute Sanitizer (memcheck, racecheck, initcheck).
-It ends with `RESULT: PASS` or a list of failures. Then run the full suite once:
-`ctest --preset default`.
 
 For a CUDA "illegal address" error: it is reported at the next sync, not in the
 faulting kernel. Use `CUDA_LAUNCH_BLOCKING=1` and Compute Sanitizer to localize it
@@ -139,6 +185,7 @@ before reading code (the `systematic-debugging` skill applies).
 
 ## Done means
 
-Report, with the actual output: `verify_stage.sh` ended in `RESULT: PASS`,
-`ctest --preset default` passed (counts), the design card, and anything skipped or
-deferred (CLI, specialization). Don't claim done from a build alone.
+Report, with the actual output: `verify_stage.sh` ended in `RESULT: PASS`, the full
+rebuild + `ctest --preset default` passed (counts), the design card (including the
+questions you'd ask the user), and anything skipped or deferred (CLI, specialization).
+Don't claim done from a build alone.
