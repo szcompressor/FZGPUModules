@@ -36,8 +36,7 @@ using warp::TiledLorenzo2DPredictor;
 // ── Core launcher ────────────────────────────────────────────────────────────
 // Runs the two warp kernels + the CUB exclusive-scan offsets, then reads back the
 // archive length. Outlier mode only (meta_bytes = 2); both cuSZp2 and cuSZp3 use
-// it. Not graph-capturable (the length read-back syncs); fusion disables graph
-// mode in planAndInstallFusion().
+// it. The length read-back synchronises the stream.
 template<int ElemsPerLane, class Pred>
 static size_t launchFusedBlockCore(
     Pred pred, size_t n_ab, uint32_t word_bytes, size_t num_blocks,

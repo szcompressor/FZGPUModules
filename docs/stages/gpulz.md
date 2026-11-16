@@ -80,9 +80,8 @@ directly rather than rebuilding the interleaved stream. See
   bounds expansion to the input size plus container metadata.
 - All-zero chunks use an empty-payload sentinel and are reconstructed by
   zero-filling their output span.
-- The forward path supports CUDA Graph capture because output-size readback is
-  deferred until `postStreamSync()`. The inverse path is not graph-compatible;
-  it reads the stream header before computing chunk offsets and launching decode.
+- The forward path defers its output-size readback until `postStreamSync()`.
+  The inverse path reads the stream header before computing chunk offsets and launching decode.
 
 ---
 

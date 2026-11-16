@@ -451,7 +451,7 @@ void RZEStage::execute(
             out_cursor += chunk_orig;
         }
 
-        // Transient decode tables (inverse path is not graph-captured).
+        // Transient decode tables.
         auto alloc_u32 = [&](const char* tag) -> uint32_t* {
             if (pool) return (uint32_t*)pool->allocate(num_chunks * sizeof(uint32_t), stream, tag);
             uint32_t* p = nullptr; FZ_CUDA_CHECK(cudaMalloc(&p, num_chunks * sizeof(uint32_t))); return p;

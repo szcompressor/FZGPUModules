@@ -65,7 +65,7 @@ bits/element for a naive dense layout.
 
 Because the compacted length is data-dependent, the stage resolves it with a
 device-to-host readback in `postStreamSync()` (the same pattern `QuantizerStage`
-uses for its outlier arrays) and therefore reports `isGraphCompatible() == false`.
+uses for its outlier arrays).
 
 ---
 

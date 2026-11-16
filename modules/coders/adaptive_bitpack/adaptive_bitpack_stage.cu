@@ -132,8 +132,7 @@ void AdaptiveBitpackStage<T>::execute(
     // Persistent per-block cost/offset scratch, grown only when a larger input is
     // seen. Keeping it across calls (a) lets postStreamSync() read the scanned
     // length after the stream is idle instead of a host-blocking D2H here, and
-    // (b) avoids any allocation inside a captured graph replay. This is what
-    // makes the forward path graph-compatible (mirrors RZEStage's forward).
+    // (b) avoids reallocating on every call (mirrors RZEStage's forward).
     if (cfg.num_blocks > scratch_blocks_) {
         if (scratch_pool_ && d_cost_)   scratch_pool_->free(d_cost_, stream);
         if (scratch_pool_ && d_offset_) scratch_pool_->free(d_offset_, stream);
@@ -165,10 +164,9 @@ void AdaptiveBitpackStage<T>::execute(
     fz::backend::freeTempStorage(pool, d_tmp, stream);
 
     // The real archive length (meta_region + total payload) needs the scanned
-    // tail, which we read in postStreamSync() once the stream is idle — doing a
-    // D2H here would forbid CUDA graph capture. Record what postStreamSync needs
-    // and set a worst-case provisional size (postStreamSync is not invoked during
-    // graph *recording*, so actual_output_size_ must be valid right now too).
+    // tail, which we read in postStreamSync() once the stream is idle instead of
+    // a host-blocking D2H here. Record what postStreamSync needs and set a
+    // worst-case provisional size until then.
     fwd_num_blocks_     = cfg.num_blocks;
     fwd_meta_region_    = meta_region;
     actual_output_size_ = ab::maxArchiveBytes(cfg, 8u * sizeof(T));

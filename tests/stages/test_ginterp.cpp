@@ -197,21 +197,13 @@ TEST(GInterpStage, GI5_SerializeDeserialize) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GI6: StageTypeId + GraphCompatible (MVP graph-compat is false).
+// GI6: StageTypeId.
 // ─────────────────────────────────────────────────────────────────────────────
 TEST(GInterpStage, GI6_StageTypeId) {
     using GIU16 = GInterpStage<float, uint16_t>;
     EXPECT_EQ(GIU16().getStageTypeId(),
               static_cast<uint16_t>(StageType::G_INTERP));
 }
-TEST(GInterpStage, GI6b_DefaultConfigIsNotGraphCompatible) {
-    // Default config has quant_radius=0 (sentinel triggers the radius-auto-tune
-    // scan in execute()), so isGraphCompatible() must return false. The
-    // config-aware contract is exhaustively tested in GI42.
-    using GIU16 = GInterpStage<float, uint16_t>;
-    EXPECT_FALSE(GIU16().isGraphCompatible());
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // GI7: SetDimsAcceptsValidShapes — 2-D and 3-D are accepted; 1-D and any
 // zero dim must still throw.
@@ -1371,116 +1363,6 @@ TEST(GInterpStage, GI39_AutoTuneMode4_11Combos) {
 
     EXPECT_LE(res.max_error, eb * 1.5)
         << "Mode 4 (11 combos) max_error=" << res.max_error;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GI40: GraphCapture_Mode0 — modes 0 and 5 launch no profile kernel and have
-// no per-execute D2H, so `isGraphCompatible()` returns true. This test verifies
-// a baseline-mode (mode 0) GInterp pipeline survives captureGraph + a replay
-// compress and the reconstruction stays in bound. Skipped on systems without
-// a real CUDA mempool (graph mode requires stream-ordered allocator).
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(GInterpStage, GI40_GraphCapture_Mode0) {
-    Pipeline probe(1024, MemoryStrategy::PREALLOCATE, 1.0f);
-    if (probe.isMemPoolFallbackMode()) {
-        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
-    }
-    const size_t NX = 32, NY = 32, NZ = 32;
-    const size_t in_bytes = NX * NY * NZ * sizeof(float);
-    const float  eb = 1e-2f;
-
-    auto h_input = make_smooth_3d(NX, NY, NZ);
-
-    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    p.setDims(NX, NY, NZ);
-    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
-    stage->setErrorBound(eb);
-    // setAutoTuning omitted → mode 0 (baseline). Manual radius required so the
-    // radius-auto-tune scan doesn't fire during capture.
-    stage->setQuantRadius(1024);
-    EXPECT_TRUE(stage->isGraphCompatible());
-    p.enableGraphMode(true);
-    p.setPoolManagedDecompOutput(false);
-    p.finalize();
-
-    CudaStream cs;
-    p.captureGraph(cs.stream);
-    ASSERT_TRUE(p.isGraphCaptured());
-
-    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
-    EXPECT_LE(res.max_error, eb * 1.5)
-        << "GI40 graph-captured mode 0 max_error=" << res.max_error;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GI41: GraphCapture_Mode5 — mode 5 (manual α/β override) is the other
-// graph-safe path. Confirms `isGraphCompatible()==true` with mode 5 and that
-// the resolved α/β resolve once at first execute() (before graph capture) and
-// remain consistent across the captured replay.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(GInterpStage, GI41_GraphCapture_Mode5) {
-    Pipeline probe(1024, MemoryStrategy::PREALLOCATE, 1.0f);
-    if (probe.isMemPoolFallbackMode()) {
-        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
-    }
-    const size_t NX = 32, NY = 32, NZ = 32;
-    const size_t in_bytes = NX * NY * NZ * sizeof(float);
-    const float  eb = 1e-2f;
-
-    auto h_input = make_smooth_3d(NX, NY, NZ);
-
-    Pipeline p(in_bytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    p.setDims(NX, NY, NZ);
-    auto* stage = p.addStage<GInterpStage<float, uint16_t>>();
-    stage->setErrorBound(eb);
-    stage->setAutoTuning(5);
-    stage->setManualAlphaBeta(1.5, 3.0);
-    stage->setQuantRadius(1024);
-    EXPECT_TRUE(stage->isGraphCompatible());
-    p.enableGraphMode(true);
-    p.setPoolManagedDecompOutput(false);
-    p.finalize();
-
-    CudaStream cs;
-    p.captureGraph(cs.stream);
-    ASSERT_TRUE(p.isGraphCaptured());
-
-    auto res = pipeline_round_trip<float>(p, h_input, cs.stream);
-    EXPECT_LE(res.max_error, eb * 1.5)
-        << "GI41 graph-captured mode 5 max_error=" << res.max_error;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GI42: isGraphCompatible_ConfigAware — covers the gating contract directly.
-// Graph-safe iff: auto-tune mode is 0 or 5, quant_radius > 0, and (ABS mode
-// OR precomputed_value_base > 0). No GPU work, runs on any system.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(GInterpStage, GI42_isGraphCompatible_ConfigAware) {
-    GInterpStage<float, uint16_t> stage;
-    // Default: mode 0, ABS, quant_radius==0 (sentinel) → radius-auto-tune scan
-    EXPECT_FALSE(stage.isGraphCompatible()) << "default sentinel radius fires scan";
-
-    stage.setQuantRadius(1024);
-    EXPECT_TRUE(stage.isGraphCompatible())  << "mode 0 + manual radius";
-
-    stage.setAutoTuning(5);
-    EXPECT_FALSE(stage.isGraphCompatible()) << "mode 5 without manual α fires rel_eb scan";
-    stage.setManualAlphaBeta(1.5, 3.0);
-    EXPECT_TRUE(stage.isGraphCompatible())  << "mode 5 + manual radius + manual α/β";
-
-    for (uint8_t mode : {1, 2, 3, 4}) {
-        stage.setAutoTuning(mode);
-        EXPECT_FALSE(stage.isGraphCompatible())
-            << "mode " << (int)mode << " must report not graph-safe";
-    }
-
-    // REL/NOA without precomputed_value_base → scan fires
-    stage.setAutoTuning(0);
-    stage.setErrorBoundMode(ErrorBoundMode::PREL);
-    EXPECT_FALSE(stage.isGraphCompatible()) << "REL without value_base fires scan";
-
-    stage.setValueBase(1.0f);
-    EXPECT_TRUE(stage.isGraphCompatible())  << "REL + precomputed value_base";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

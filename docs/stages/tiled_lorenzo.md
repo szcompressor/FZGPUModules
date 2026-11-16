@@ -82,12 +82,6 @@ tile-major delta stream; the inverse output is the natural-order reconstruction.
 
 ---
 
-## Graph compatibility
-
-`isGraphCompatible()` is **true** — pure kernels with deterministic output sizes
-(the padded size is known from dims at finalize; no host-blocking D2H).
-
----
 
 ## Typical pipeline (cuSZp3)
 

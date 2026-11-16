@@ -119,9 +119,9 @@ the launcher), unconditionally — this is **not** a double-only branch:
 | `setErrorBoundMode(mode)` | `ErrorBoundMode` | `ABS` | `ABS`, `NOA`, or `PREL`. `REL` warns and maps to `PREL` — like `LorenzoQuantStage`, this stage has no exact per-element relative bound |
 | `setQuantRadius(r)` | `int` | `0` (auto) | Quantization radius — see "Radius auto-tune" below |
 | `setOutlierCapacity(c)` | `float` | `0.10` | Fraction of `N` reserved for outliers (0.10 ⇒ 10%) |
-| `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (PREL); set before graph capture |
+| `setValueBase(v)` | `float` | `0` | Pre-computed `value_range` (NOA) or `max(abs(data))` (PREL); skips the range scan |
 | `setAutoTuning(mode)` | `uint8_t` | `0` | Enable `INTERPOLATION_PARAMS` auto-tuning — see "Auto-tuning" below |
-| `setManualAlphaBeta(α, β)` | `double, double` | `0, 0` | Mode 5 only. Either value `0` falls back to the cuSZ-Hi piecewise-linear α schedule / `β = 4.0` default. Both `> 0` is required for graph-safe mode 5. |
+| `setManualAlphaBeta(α, β)` | `double, double` | `0, 0` | Mode 5 only. Either value `0` falls back to the cuSZ-Hi piecewise-linear α schedule / `β = 4.0` default. Both `> 0` skips the `rel_eb` scan. |
 | `set2DGeometry(g)` / `geometry_2d` | `GInterp2DGeometry` / string | `fine16` | 2-D kernel geometry: `fine16` (default) or `native64` (native cuSZ-Hi compatibility); ignored for 3-D. |
 
 ### 2-D geometry
@@ -165,8 +165,8 @@ Set the radius explicitly to **any positive value** to skip the scan:
 g->setQuantRadius(512);   // climate-style — route outliers to the triplet
 ```
 
-The manual path is required for:
-- **CUDA Graph capture** (the auto scan does a `cudaStreamSynchronize` + D2H).
+The manual path is useful for:
+- Avoiding the auto scan's `cudaStreamSynchronize` + D2H.
 - Datasets where the user *wants* extremes pushed into the outlier triplet for
   separate downstream handling (e.g. climate fields with rare spikes).
 
@@ -188,14 +188,14 @@ Enable auto-tuning to pick those flags per-dataset:
 g->setAutoTuning(3);   // recommended: full structural profiling
 ```
 
-| Mode | Probe kernel | What it sets | Dim | Graph-safe |
+| Mode | Probe kernel | What it sets | Dim | Host sync |
 |---|---|---|---|---|
-| `0` | none | (off; baseline) | 2-D + 3-D | yes |
-| `1` | `c_spline_profiling_data` (2 errors, ~1 ms) | `reverse[0..3]` only (one global bool replicated) | 3-D only | no |
-| `2` | `c_spline_profiling_data_2` (6 errors, ~1 ms) | single `use_natural` × `reverse` replicated across all levels; clears `use_md` | 2-D + 3-D | no |
-| `3` | `pa_spline_infprecis_data` workflow=true (18 errors 3-D / 27 errors 2-D, ~5–15 ms) | `use_md` / `use_natural` / `reverse` per level (cuSZ-Hi paper mode) | 2-D + 3-D | no |
-| `4` | mode 3 + `pa_spline_infprecis_data` workflow=false (+11 errors, ~10–20 ms total) | mode-3 flags **plus** sweeps 11 (alpha, beta) combos and picks the lowest-error | 2-D + 3-D | no |
-| `5` | none (manual override) | resolved `alpha` / `beta` (user-supplied or piecewise-linear default); structural flags stay at baseline | 2-D + 3-D | yes |
+| `0` | none | (off; baseline) | 2-D + 3-D | no |
+| `1` | `c_spline_profiling_data` (2 errors, ~1 ms) | `reverse[0..3]` only (one global bool replicated) | 3-D only | yes |
+| `2` | `c_spline_profiling_data_2` (6 errors, ~1 ms) | single `use_natural` × `reverse` replicated across all levels; clears `use_md` | 2-D + 3-D | yes |
+| `3` | `pa_spline_infprecis_data` workflow=true (18 errors 3-D / 27 errors 2-D, ~5–15 ms) | `use_md` / `use_natural` / `reverse` per level (cuSZ-Hi paper mode) | 2-D + 3-D | yes |
+| `4` | mode 3 + `pa_spline_infprecis_data` workflow=false (+11 errors, ~10–20 ms total) | mode-3 flags **plus** sweeps 11 (alpha, beta) combos and picks the lowest-error | 2-D + 3-D | yes |
+| `5` | none (manual override) | resolved `alpha` / `beta` (user-supplied or piecewise-linear default); structural flags stay at baseline | 2-D + 3-D | no |
 
 **Mode 2 — alternate cheap probe.** Runs `c_spline_profiling_data_2`, which
 writes 6 errors covering forward/reverse × {cubic, natural} on a tiny
@@ -213,7 +213,7 @@ the resolved `α/β`. Use mode 4 for offline workflows where the extra ~10 ms is
 worth the CR improvement vs mode 3 (typically 2–5%).
 
 **Mode 5 — manual alpha/beta override.** No profiling kernel runs, so the path
-is graph-safe and works on both 2-D and 3-D inputs. Set via
+has no profiling sync and works on both 2-D and 3-D inputs. Set via
 `setManualAlphaBeta(alpha, beta)`. Passing 0 for either field falls back to the
 cuSZ-Hi piecewise-linear `alpha` schedule (keyed on `rel_eb`) or `beta = 4.0`.
 The structural flags (`use_md` / `use_natural` / `reverse`) stay at baseline.
@@ -236,15 +236,11 @@ g->setErrorBound(1e-3f);
 g->setAutoTuning(3);
 ```
 
-**Profiling modes (1/2/3/4) are incompatible with CUDA graph capture.** Modes
-0 and 5 are graph-safe when combined with a manual `setQuantRadius(...)` and
-either ABS mode or a `setValueBase(...)` (REL/NOA). For mode 5, also
-`setManualAlphaBeta(α>0, β>0)` to skip the `rel_eb`-based α picker. Each
-probe ends with a D2H of the error array and a `cudaStreamSynchronize`, which
-would error out inside a captured region. **Mode 5 is graph-safe** since it
-never launches a profile kernel. `isGraphCompatible()` returns `false` in
-either case in the MVP — it'll be relaxed for mode 5 + manual radius once
-end-to-end graph capture is tested.
+**Profiling modes (1/2/3/4) synchronize the host.** Each probe ends with a D2H
+of the error array and a `cudaStreamSynchronize`. Modes 0 and 5 avoid every
+in-`execute()` sync when combined with a manual `setQuantRadius(...)` and either
+ABS mode or a `setValueBase(...)` (REL/NOA); for mode 5, also
+`setManualAlphaBeta(α>0, β>0)` to skip the `rel_eb`-based α picker.
 
 The resolved `INTERPOLATION_PARAMS` are embedded in the FZM stage header at
 compress time, so the decompressor reuses them verbatim — there is no
@@ -272,11 +268,6 @@ Other limitations:
 - **Profiling auto-tune mode 1 is 3-D only.** On 2-D inputs it logs a warning
   and falls through to the deterministic baseline. Modes 2, 3, 4, 5 all work
   on both 2-D and 3-D inputs.
-- `isGraphCompatible()` is **mode-aware**: returns `true` for modes 0 and 5
-  when `quant_radius > 0`, the error-bound mode is ABS or a `value_base` is
-  pre-set, and (for mode 5) `manual_alpha > 0`. Modes 1/2/3/4 each end with a
-  D2H + `cudaStreamSynchronize` of the error array, so those remain
-  graph-incompatible.
 - **3-D is fixed at `LEVEL=4` with 16×16×16 tiles.** 2-D defaults to
   `fine16` (`LEVEL=4`, 16×16), while the `native64` opt-in uses the active
   native cuSZ-Hi `LEVEL=6`, 64×64 instantiation and its sparse, zeroed `N/16`

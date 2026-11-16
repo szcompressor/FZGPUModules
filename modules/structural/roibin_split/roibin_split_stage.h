@@ -181,10 +181,6 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    /// Plain kernel launches and a stream-ordered H2D upload of the peak table
-    /// that happens once at finalize, not per execute → capturable.
-    bool isGraphCompatible() const override { return true; }
-
     // ── Port model ──────────────────────────────────────────────────────────
     size_t getNumInputs()  const override { return is_inverse_ ? 3 : 1; }
     size_t getNumOutputs() const override { return is_inverse_ ? 1 : 3; }

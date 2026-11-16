@@ -1428,46 +1428,6 @@ TEST(FileIO, PartialChunkLogicalLengthRoundTrip) {
     FZ_TEST_CUDA(cudaDeviceSynchronize());
 }
 
-TEST(FileIO, GraphReplaySmallerAlignedInputKeepsLogicalLength) {
-    if (MemoryPool(MemoryPoolConfig(1024 * 1024, 1.0f)).isFallbackMode())
-        GTEST_SKIP() << "Graph mode requires stream-ordered allocation";
-    {
-    CudaStream stream;
-    constexpr size_t capacity = 1024;
-    constexpr size_t count = 512;
-    constexpr float bound = 1e-3f;
-    auto input = make_smooth_data<float>(count);
-    CudaBuffer<float> device_input(count);
-    device_input.upload(input, stream);
-    Pipeline p(capacity * sizeof(float), MemoryStrategy::PREALLOCATE);
-    p.setSpecializationPolicy(SpecializationPolicy::Off);
-    p.enableGraphMode(true);
-    auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
-    q->setLinearMode(true);
-    q->setErrorBound(bound);
-    q->setErrorBoundMode(ErrorBoundMode::ABS);
-    p.finalize();
-    p.captureGraph(stream);
-    void* compressed = nullptr;
-    size_t compressed_bytes = 0;
-    p.compress(device_input.void_ptr(), count * sizeof(float), &compressed, &compressed_bytes, stream);
-    EXPECT_EQ(p.getLastUncompressedSize(), count * sizeof(float));
-    EXPECT_EQ(p.buildHeader().core.uncompressed_size, count * sizeof(float));
-    const std::string path = "/tmp/fzgmod_graph_logical_length.fzm";
-    p.writeToFile(path, stream);
-    void* decoded = nullptr;
-    size_t decoded_bytes = 0;
-    Pipeline::decompressFromFile(path, &decoded, &decoded_bytes, stream);
-    EXPECT_EQ(decoded_bytes, count * sizeof(float));
-    std::vector<float> output(count);
-    FZ_TEST_CUDA(cudaMemcpy(output.data(), decoded, count * sizeof(float), cudaMemcpyDeviceToHost));
-    FZ_TEST_CUDA(cudaFree(decoded));
-    EXPECT_LE(max_abs_error(input, output), bound * 1.01f);
-    std::remove(path.c_str());
-    }
-    FZ_TEST_CUDA(cudaDeviceSynchronize());
-}
-
 TEST(FileIO, FromHeaderReconstructsFreshPartialPipeline) {
     CudaStream stream;
     for (auto policy : {SpecializationPolicy::Off, SpecializationPolicy::Auto}) {

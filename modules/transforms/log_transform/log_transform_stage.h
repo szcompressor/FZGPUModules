@@ -208,9 +208,6 @@ public:
         return sizeof(uint32_t);
     }
 
-    /// No mid-execute sync: the outlier-count D2H happens in `postStreamSync()`.
-    bool isGraphCompatible() const override { return true; }
-
     // ── Metadata ─────────────────────────────────────────────────────────────
     std::string getName() const override { return "LogTransform"; }
 

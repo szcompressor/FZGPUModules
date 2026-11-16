@@ -31,7 +31,7 @@ struct FusedImpl;
 /** Memory allocation strategy for pipeline execution. */
 enum class MemoryStrategy {
     MINIMAL,      ///< Allocate on-demand, free at last consumer. Lowest peak memory.
-    PREALLOCATE   ///< Allocate everything upfront at finalize(). Required for graph mode.
+    PREALLOCATE   ///< Allocate everything upfront at finalize().
 };
 
 /** Buffer metadata and lifetime tracking. */
@@ -255,15 +255,6 @@ public:
     bool isColoringEnabled() const       { return coloring_applied_; }
     size_t getColorRegionCount() const   { return color_region_sizes_.size(); }
 
-    /**
-     * Enable or disable CUDA Graph capture mode.
-     *
-     * When true, execute() suppresses host-synchronous operations so the call
-     * is safe inside a cudaStreamBeginCapture bracket. Throws if any stage
-     * returns false from isGraphCompatible().
-     */
-    void setCaptureMode(bool capture);
-    bool isCaptureMode() const { return capture_mode_; }
 
     // ── Profiling ─────────────────────────────────────────────────────────────
 
@@ -298,7 +289,6 @@ private:
 
     bool profiling_enabled_;
     bool bounds_check_enabled_;
-    bool capture_mode_;
 
     // Buffer coloring (PREALLOCATE only). Non-overlapping buffers share a color
     // and are aliased into one pool region. color_region_ptrs_ owns the allocations.

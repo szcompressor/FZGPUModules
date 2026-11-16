@@ -83,8 +83,7 @@ __global__ void scatter_boundary_positions_kernel(
  * Takes d_num_runs as a device pointer (boundary_scan[n-1]) so the host
  * never needs to read num_runs before launching — the kernel bounds-checks
  * against *d_num_runs itself.  This eliminates the D2H sync that blocked
- * the GPU pipeline in the previous implementation and makes this kernel
- * CUDA Graph-capturable.
+ * the GPU pipeline in the previous implementation.
  */
 template<typename T>
 __global__ void rle_extract_runs_kernel(
@@ -260,8 +259,7 @@ __global__ void rle_chunk_finalize_offsets_kernel(
  * output, and zero the alignment padding.
  *
  * `total_runs` is read from the on-device offset table, so the layout
- * arithmetic never round-trips through the host — the whole forward chunked
- * path stays CUDA Graph-capturable.
+ * arithmetic never round-trips through the host.
  */
 template<typename T>
 __global__ void rle_chunk_compact_kernel(
@@ -443,8 +441,7 @@ void RLEStage<T>::execute(
     } else if (is_inverse_) {
         // ── DECOMPRESSION ────────────────────────────────────────────────────
         // Read num_runs from the first 4 bytes of the compressed stream.
-        // This D2H sync is unavoidable with the current compact wire format;
-        // decompression is not intended to be CUDA Graph-capturable.
+        // This D2H sync is unavoidable with the current compact wire format.
         uint32_t num_runs;
         FZ_CUDA_CHECK(cudaMemcpyAsync(&num_runs, inputs[0], sizeof(uint32_t),
                        cudaMemcpyDeviceToHost, stream));
@@ -520,7 +517,7 @@ void RLEStage<T>::execute(
         dec_sync_pending_ = true;
 
     } else {
-        // ── COMPRESSION (forward, CUDA Graph-capturable) ─────────────────────
+        // ── COMPRESSION (forward) ───────────────────────────────────────────────
         const size_t byte_size    = sizes[0];
         const size_t n            = byte_size / sizeof(T);
         cached_num_elements_      = static_cast<uint32_t>(n);
@@ -598,7 +595,7 @@ void RLEStage<T>::execute(
         uint8_t*    out_base   = static_cast<uint8_t*>(outputs[0]);
 
         if (isChunked()) {
-            // ── COMPRESSION, chunked (CUDA Graph-capturable) ─────────────────
+            // ── COMPRESSION, chunked ──────────────────────────────────────────
             const uint32_t epc = elemsPerChunk();
             const uint32_t nc  = static_cast<uint32_t>(numChunks(byte_size));
             const uint32_t values_offset =

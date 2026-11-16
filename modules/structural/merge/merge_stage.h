@@ -63,7 +63,7 @@ namespace fz {
  * called before `connect()` so `getNumInputs()` reports the right count.
  *
  * Byte-transparent: opts out of type checking (segments are opaque bytes once
- * merged). Pure stream-ordered D2D copies → graph-capturable in both directions.
+ * merged). Pure stream-ordered D2D copies, no host sync in either direction.
  */
 class MergeStage : public Stage {
 public:
@@ -87,9 +87,6 @@ public:
     // ── Stage control ───────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-
-    /// Pure stream-ordered D2D memcpy in both directions — no host sync.
-    bool isGraphCompatible() const override { return true; }
 
     // ── Port model ──────────────────────────────────────────────────────────
     // Forward: N inputs → 1 output ("output").

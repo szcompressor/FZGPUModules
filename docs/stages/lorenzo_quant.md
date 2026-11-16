@@ -181,7 +181,7 @@ p.setDims(nx, ny);      // too late; addStage already ran
 
 ---
 
-## Value base and CUDA Graph capture
+## Value base
 
 NOA and REL modes need a data-dependent scale:
 
@@ -189,8 +189,8 @@ NOA and REL modes need a data-dependent scale:
 - REL: `value_base = max(|x|)`
 
 If `setValueBase()` is not called, the stage scans the data to compute the
-value base internally. For CUDA Graph capture, you must provide the value base
-up front to avoid a device sync and D2H read.
+value base internally, which costs a device sync and a D2H read. Provide the
+value base up front to skip the scan.
 
 ```cpp
 // NOA
@@ -199,9 +199,6 @@ float value_base = vmax - vmin;
 float value_base = std::max(std::abs(vmin), std::abs(vmax));
 
 lorenzo->setValueBase(value_base);
-// after enableGraphMode(true) + finalize()
-pipeline.warmup(stream);
-pipeline.captureGraph(stream);
 ```
 
 ABS mode needs no `setValueBase()` call.

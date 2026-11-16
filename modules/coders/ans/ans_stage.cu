@@ -279,7 +279,7 @@ void ANSStage::executeForward(
         FZ_CUDA_CHECK(cudaGetLastError());
 
         // Step 6: D2H readback of ANSCoalescedHeader to get actual compressed size.
-        // Stream sync is required; stage is not graph-compatible.
+        // Stream sync is required here.
         //
         // vGPU only: the driver raises SIGSEGV asynchronously for GPU page faults, then
         // the cuda-EvtHandlr background thread withdraws it once the fault is resolved.

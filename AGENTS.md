@@ -140,7 +140,6 @@ module-specific backend restrictions in the local declaration.
 - Call `pipeline.setDims()` before `addStage()` for dimension-aware stages (Lorenzo,
   GInterp, etc.) — dims are pushed into the stage at add-time (and again at finalize as
   a safety net).
-- `MemoryStrategy::PREALLOCATE` is required for CUDA Graph capture; `MINIMAL` throws.
 
 ## Longform notes vs. inline comments
 

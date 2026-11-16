@@ -434,14 +434,6 @@ TEST(GPULZStage, UnsupportedWordSizeThrows) {
     EXPECT_THROW(s.execute(cs.stream, pool.get(), in, out, sz), std::runtime_error);
 }
 
-TEST(GPULZStage, IsGraphCompatible) {
-    GPULZStage fwd;
-    EXPECT_TRUE(fwd.isGraphCompatible());
-    GPULZStage inv;
-    inv.setInverse(true);
-    EXPECT_FALSE(inv.isGraphCompatible());
-}
-
 TEST(GPULZStage, RepeatedRoundTripStable) {
     std::mt19937 rng(55);
     std::uniform_int_distribution<int> dist(0, 4);

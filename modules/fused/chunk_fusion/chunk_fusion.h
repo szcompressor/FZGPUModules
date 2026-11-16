@@ -8,8 +8,7 @@
  * (Quantizer(inplace,zigzag) -> Difference(negabinary) -> Bitshuffle -> Coder)
  * plus the cross-chunk scan+pack tail, producing a raw LC-coder archive that is
  * byte-identical to the staged pipeline. The coder is selected at call time — the
- * same harness composes RZE, RRE, etc. Not graph-capturable (reads back the
- * archive length). See docs/codebase_notes.md CN-CHUNK-FUSE.
+ * same harness composes RZE, RRE, etc. It reads back the archive length. See docs/codebase_notes.md CN-CHUNK-FUSE.
  */
 
 #include "fused/chunk_fusion/chunk_geometry.h"   // chunk geometry constants

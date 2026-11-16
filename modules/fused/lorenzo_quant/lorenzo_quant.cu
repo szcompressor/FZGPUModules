@@ -862,11 +862,7 @@ void LorenzoQuantStage<TInput, TCode>::execute(
         }
 
         // Use max-capacity sizes for now; postStreamSync() will trim them
-        // (and refresh actual_outlier_count_) once the stream is idle. We do
-        // NOT zero actual_outlier_count_ here: this method may be invoked
-        // during cudaStreamBeginCapture/EndCapture (graph recording), in
-        // which case postStreamSync is not called and we'd lose the count
-        // from the previous real compress.
+        // (and refresh actual_outlier_count_) once the stream is idle.
         actual_output_sizes_[0] = num_elements * sizeof(TCode);
         actual_output_sizes_[1] = max_outliers * sizeof(TInput);
         actual_output_sizes_[2] = max_outliers * sizeof(uint32_t);

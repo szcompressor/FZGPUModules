@@ -68,8 +68,8 @@ constexpr size_t rleChunkedValuesOffset(size_t num_chunks) {
  * `run_offsets[num_chunks] == total_runs`.
  *
  * Chunked decode needs no device-to-host readback at all (the element count and
- * chunk size both come from the serialized stage header), so both directions are
- * CUDA Graph-capturable — the global path's inverse is not.
+ * chunk size both come from the serialized stage header); the global path's
+ * inverse reads the run count back to the host.
  *
  * Worst-case output is 2× input + 4 bytes (no repeated values), so RLE should
  * follow a predictor/quantizer stage that creates repetition.

@@ -58,14 +58,6 @@ automatically when an upstream byte-oriented stage uses a matching block size.
 
 ---
 
-## Graph capture
-
-Forward (compress) is CUDA-graph capturable. The inverse (decompress) path is
-not — it reads the stream header (original size, per-chunk sizes) with
-blocking device-to-host copies before launching the decode kernel. This
-mirrors `RREStage`/`RZEStage`.
-
----
 
 ## Typical pipeline
 

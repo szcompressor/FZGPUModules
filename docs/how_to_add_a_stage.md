@@ -254,25 +254,17 @@ size_t estimateScratchBytes(const std::vector<size_t>& input_sizes) const overri
 void* scratch = pool->allocate(scratch_bytes, stream, "my_scratch", /*persistent=*/true);
 ```
 
-### CUDA Graph compatibility
+### Host synchronization
 
-Override `isGraphCompatible()` to return `false` if `execute()` contains any of:
-- `cudaStreamSynchronize()` on its own stream
-- Blocking D2H copies (`cudaMemcpy` with `DeviceToHost`)
-- CPU decisions based on device data
+Prefer to keep `execute()` free of host synchronization. If you need a D2H transfer
+only *after* the whole pipeline finishes, use `postStreamSync()` instead — the
+stream is idle there.
 
-```cpp
-bool isGraphCompatible() const override { return false; }
-```
-
-If you need a D2H transfer only *after* the whole pipeline finishes, use
-`postStreamSync()` instead — the stream is idle there and graph capture is
-unaffected.
-
-Stages that sync mid-execute are valid and supported. The pattern is used by
-`HuffmanStage` (histogram D2H for codebook build + partition metadata D2H)
-and any future ANS/arithmetic coder that needs CPU-side renormalization. Document
-the sync points and return `false` from `isGraphCompatible()`.
+Stages that sync mid-execute (`cudaStreamSynchronize()` on their own stream,
+blocking D2H copies, CPU decisions based on device data) are valid and supported.
+The pattern is used by `HuffmanStage` (histogram D2H for codebook build + partition
+metadata D2H) and any future ANS/arithmetic coder that needs CPU-side
+renormalization. Document the sync points.
 
 ### Input alignment
 
@@ -335,8 +327,6 @@ through CUDA events. Do not call `cudaDeviceSynchronize()` or synchronize a
 when the algorithm inherently requires it (e.g. reading a GPU histogram to the
 host to build a CPU-side codebook, as in Huffman or ANS). When you do this:
 
-- Override `isGraphCompatible()` to return `false` — CUDA Graph capture records
-  a snapshot of the command stream; a mid-execute sync prevents capture.
 - Document the sync points in your class header and in `docs/stages/<name>.md`.
 - Be aware that the DAG dispatches nodes within a level sequentially on the CPU.
   A sync inside your `execute()` blocks the CPU from dispatching sibling nodes
@@ -607,7 +597,6 @@ Create `tests/stages/test_<name>.cpp` with at minimum:
 | `SerializeDeserialize` | `serializeHeader` → `deserializeHeader` restores identical config |
 | `PipelineIntegration` | Stage wired into a `Pipeline`, compress + decompress round-trip |
 | `SaveRestoreState` | `saveState` + `deserializeHeader` + `restoreState` returns to original config |
-| `GraphCompatible` | `isGraphCompatible()` returns expected value |
 
 Use `tests/helpers/stage_harness.h`. Pipeline integration tests must use a
 **single** `Pipeline` instance for both compress and decompress:
@@ -654,7 +643,7 @@ has a registered archive factory.
 ## Checklist
 
 - [ ] `<name>_stage.h` — all required overrides implemented
-- [ ] `<name>_stage.cu` — `execute()` enqueues on `stream`; if it calls `cudaStreamSynchronize(stream)`, `isGraphCompatible()` returns `false` and sync points are documented
+- [ ] `<name>_stage.cu` — `execute()` enqueues on `stream`; if it calls `cudaStreamSynchronize(stream)`, the sync points are documented
 - [ ] Backend facade conventions (Step 3b): runtime types/API and CUB access use the existing facades; CUDA validation covers the declared logical warp widths.
 - [ ] `StageType` enum value added (unique integer, never reuse old values)
 - [ ] `stageTypeToString()` case added
@@ -663,14 +652,12 @@ has a registered archive factory.
 - [ ] Stage header include added to `include/fzgpumodules.h` (public API export)
 - [ ] `config.cpp` — `#include` header, `addXxxStage` / `saveXxxStage` helpers, one entry in `kStageRegistry[]`
 - [ ] `cli.cpp` — `--stages` name + help text *(if applicable)*
-- [ ] Tests: RoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState, GraphCompatible
+- [ ] Tests: RoundTrip, ZeroInput, SerializeDeserialize, PipelineIntegration, SaveRestoreState
 - [ ] `StageType` added to `shipped[]` in `tests/pipeline/test_stage_registry.cpp`
 - [ ] `docs/stages/<name>.md` written and linked from `docs/stages/<category>.md`
 - [ ] Rows in the stage tables of `docs/mainpage.md` and `docs/config_file.md`
-- [ ] Variable-size output: exact size survives captured-graph replay (replays skip `execute()`; re-read the size in `postStreamSync()`), tested with two different inputs
 - [ ] `CHANGELOG.md` entry under `[Unreleased]`
 - [ ] `saveState`/`restoreState` implemented if `deserializeHeader` overwrites forward-pass config
 - [ ] `estimateScratchBytes()` overridden if stage holds persistent pool allocations
 - [ ] `getRequiredInputAlignment()` overridden if stage requires chunk-aligned input
-- [ ] `isGraphCompatible()` returns `false` if `execute()` does any D2H transfer
 - [ ] If based on prior work: attribution comment in `.cu`, `@note` in `.h`, `## Acknowledgements` in `docs/stages/<name>.md`, entry in `THIRD_PARTY.md` (if upstream not already listed)

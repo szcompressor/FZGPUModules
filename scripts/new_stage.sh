@@ -227,9 +227,6 @@ public:
     // Uncomment if this stage holds persistent pool allocations:
     // size_t estimateScratchBytes(const std::vector<size_t>& input_sizes) const override;
 
-    // Uncomment if execute() does D2H copies or host-side branching on device data:
-    // bool isGraphCompatible() const override { return false; }
-
     // Uncomment if input must be aligned to a chunk boundary:
     // size_t getRequiredInputAlignment() const override { return chunk_bytes_; }
 
@@ -393,12 +390,6 @@ TEST(${NAME}Stage, PipelineIntegration) {
     // TODO: EXPECT_LT(res.compressed_bytes, in_bytes) if stage is compressive
 }
 
-// ── GraphCompatible ───────────────────────────────────────────────────────────
-TEST(${NAME}Stage, GraphCompatible) {
-    ${NAME}Stage stage;
-    // TODO: change expected value to false if execute() does D2H transfers
-    EXPECT_TRUE(stage.isGraphCompatible());
-}
 TESTS
 
 # ── fzm_format.h: StageType enum entry ───────────────────────────────────────

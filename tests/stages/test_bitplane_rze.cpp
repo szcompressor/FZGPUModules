@@ -2,15 +2,14 @@
  * tests/stages/test_bitplane_rze.cpp
  *
  * GPU unit tests for BitplaneRZEStage — the FZ-GPU fused bitplane-transpose +
- * zero-group RZE lossless encoder. Fixed uint16_t input. Not graph-compatible
- * (blocking D2H in both directions).
+ * zero-group RZE lossless encoder. Fixed uint16_t input. Blocking D2H in
+ * both directions.
  *
  *   BP1  RoundTrip_Patterned       — uint16 round-trip, exact match (compressible data)
  *   BP2  RoundTrip_NonAligned      — length not a 4096-byte multiple exercises padding
  *   BP3  RoundTrip_Dense           — high-entropy data still round-trips exactly
  *   BP4  CompressedSmaller         — zero-heavy data compresses below input size
  *   BP5  ZeroInput                 — n=0 does not crash
- *   BP6  GraphCompatible           — isGraphCompatible() == false
  *   BP7  FileRoundTrip             — writeToFile → decompressFromFile (header serialize path)
  *   BP8  QuantizerPipeline         — Quantizer→BitplaneRZE end-to-end float round-trip (FZ-GPU)
  *
@@ -108,12 +107,6 @@ TEST(BitplaneRZEStage, CompressedSmaller) {
 TEST(BitplaneRZEStage, RoundTrip_Tiny) {
     std::vector<uint16_t> h_in{0xBEEF};
     expect_exact_round_trip(h_in);
-}
-
-// ── BP6 ──────────────────────────────────────────────────────────────────────
-TEST(BitplaneRZEStage, GraphCompatible) {
-    BitplaneRZEStage stage;
-    EXPECT_FALSE(stage.isGraphCompatible());
 }
 
 // ── BP7 ──────────────────────────────────────────────────────────────────────

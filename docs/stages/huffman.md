@@ -231,7 +231,7 @@ Only the model form round-trips through TOML — a raw frequency table exceeds t
 128-byte per-stage config slot and has to be re-supplied through the C++ API.
 
 A fixed book with the default `HostCoordinated` execution still has the partition
-prefix barrier. Select `DeviceResident` to remove it and enable forward graph capture.
+prefix barrier. Select `DeviceResident` to remove it.
 
 ---
 
@@ -268,7 +268,7 @@ GPU  ←input T[]                                       output uint8_t[]→
 
 **Consequence:** the CPU-visible barriers per compress call make this stage
 latency-bound. `Adaptive`/`Fixed` removes barrier 1; barrier 2 remains in every
-host-coordinated configuration. `isGraphCompatible()` returns `false` because
+host-coordinated configuration, because
 `encode()` returns `total_nbit` / `total_ncell` to the host to assemble `phf_header`
 before the H2D merge.
 
@@ -287,10 +287,7 @@ When Huffman is terminal, exact-size readback stays in `postStreamSync()` after 
 pipeline completion barrier. When it has a downstream consumer, the stage performs
 that small readback before returning from `execute()` so the consumer receives the
 exact byte count. This makes nonterminal composition correct at the cost of a host
-synchronization. Forward execution is CUDA Graph compatible only for terminal
-`Fixed` mode today; PerBlock and Adaptive now contain no mid-execute host work, but
-their captured-state/refit contract has not yet been enabled for graph replay. A
-model-derived Fixed frequency table is prepared once on the CPU and copied H2D; its
+synchronization. A model-derived Fixed frequency table is prepared once on the CPU and copied H2D; its
 canonical tree and both encoded books are built on the GPU.
 
 ### Inverse pass
@@ -372,8 +369,7 @@ or another stage's scratch. When `phf::Buf<T>` is destroyed, `MemoryPool` untrac
 them and calls `cudaFree` / `cudaFreeHost`; they are not returned to the reusable
 `cudaMemPool_t` arena. Their bytes appear in `getPersistentDeviceBytes()` and
 `getPersistentPinnedBytes()`, but do not count against the stream-ordered arena's
-`pool_size_multiplier`. Allocation choice is independent of graph compatibility;
-`HostCoordinated` execution contains host synchronizations, while the fixed-book
+`pool_size_multiplier`. `HostCoordinated` execution contains host synchronizations, while the fixed-book
 `DeviceResident` path does not contain one inside `execute()`.
 
 **Reallocation on capacity growth.**  `phf::Buf<T>` is reallocated only when the

@@ -373,7 +373,6 @@ TEST(LogTransform, PortNamesAndArity) {
     EXPECT_EQ(names[3], "outlier_idxs");
     EXPECT_EQ(fwd.getStageTypeId(),
               static_cast<uint16_t>(StageType::LOG_TRANSFORM));
-    EXPECT_TRUE(fwd.isGraphCompatible());
 
     LogTransformStage<float> inv;
     inv.setInverse(true);

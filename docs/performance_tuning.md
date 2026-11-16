@@ -1,7 +1,7 @@
 # Performance Tuning {#performance_tuning}
 
 FZGPUModules exposes performance levers at three levels: pipeline-level API options
-(memory strategy, CUDA Graph capture, stream count), per-stage TOML/setter
+(memory strategy, stream count), per-stage TOML/setter
 configuration, and build-time flags. This page catalogs every lever found in the
 codebase, what it trades off, and the measured effect size where one exists.
 
@@ -27,22 +27,6 @@ entirely. Useful for easier `compute-sanitizer` debugging.
 memory pool as `input_size × multiplier`. Too low risks a mid-run pool growth
 reallocation; too high wastes memory.
 
-### CUDA Graph Mode {#pt_graph_mode}
-
-```cpp
-pipeline.enableGraphMode(true);   // before finalize()
-pipeline.finalize();
-pipeline.warmup(stream);          // JIT-compiles all kernels once
-pipeline.captureGraph(stream);
-```
-
-Eliminates CPU-side kernel launch/dispatch overhead on repeated `compress()` calls
-by replaying a recorded CUDA graph. Requires `MemoryStrategy::PREALLOCATE`, a
-non-default stream, and every stage in the pipeline to be graph-compatible,
-(`isGraphCompatible()`) — `HuffmanStage` and `ANSStage` are not graph-compatible.
-
-**Effect size:** testing has shown minimal improvement through the use of graph capture, but more experiments are needed to determine the effect of graph capture on different pipelines and workloads. The main benefit of graph capture is to reduce CPU overhead for repeated calls to `compress()`, which may be more significant in certain scenarios.
-
 ### Pipeline Specialization {#pipeline_specialization}
 
 FZGPUModules' runtime optimization layer. You build a pipeline (a modular DAG,
@@ -64,8 +48,6 @@ registry and resolves overlaps by launches removed; it does not yet evaluate a
 general predictive per-input performance cost model. The warp strategy does choose
 among its supported execution paths per call using bounded size/rate rules. Further
 runtime optimizations fit under the same umbrella.
-
-Specialization and CUDA Graph mode are mutually exclusive (see above) — pick one.
 
 #### Why it exists
 
@@ -227,9 +209,6 @@ cell rather than silently falling back.
   implementation. Admission is based on prior evidence, but the current planner
   does not predict a crossover for each input. `Force` additionally exposes
   experimental implementations for diagnostics.
-- **CUDA Graph mode.** Specialization and graph capture are mutually exclusive: the
-  fused runner synchronizes to read data-dependent archive lengths, so enabling
-  `Auto`/`Force` disables graph mode (with a log warning). Pick one.
 - **MINIMAL memory strategy** does not support the fused path's persistent scratch;
   use `PREALLOCATE`.
 
@@ -375,7 +354,7 @@ on first decode.
 On a vGPU, or with `FZ_FORCE_MEMPOOL_FALLBACK` set in the environment, CUDA's
 stream-ordered mempool allocator is unavailable and the pipeline falls back to
 `cudaMalloc`+sync — this works correctly but loses the stream-ordered allocator's
-performance and disables CUDA Graph capture entirely (`mainpage.md:30`).
+performance (`mainpage.md:30`).
 
 ---
 

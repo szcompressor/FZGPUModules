@@ -32,7 +32,7 @@ Defined in `include/advanced/dag.h`.
 | Value | Behavior |
 |-------|----------|
 | `MINIMAL` | Allocate buffers on demand; free each one as soon as its last consumer reads it. |
-| `PREALLOCATE` | Allocate all buffers during `finalize()`. Required for CUDA Graph capture. Enables buffer coloring for lower memory footprint. |
+| `PREALLOCATE` | Allocate all buffers during `finalize()`. Enables buffer coloring for lower memory footprint. |
 
 ### fz::ErrorBoundMode
 Defined in `modules/fused/lorenzo_quant/lorenzo_quant.h`. Used by `LorenzoQuantStage`, `QuantizerStage`, and `GInterpStage`.
@@ -77,7 +77,6 @@ fz::Pipeline p("pipeline.toml");
 | `setDims(x)`<br>`setDims(x, y, z)` | Spatial dimensions of the input data. Push dims before `addStage()` for Lorenzo-family stages. |
 | `setMemoryStrategy(strategy)` | Switch between `MINIMAL` and `PREALLOCATE`. |
 | `setNumStreams(n)` | Number of parallel CUDA streams for level-based execution (default: 4). |
-| `enableGraphMode(true)` | Enable CUDA Graph capture mode. Requires `PREALLOCATE`. |
 | `setWarmupOnFinalize(true)` | Auto-run `warmup()` at the end of `finalize()`. |
 | `setColoringEnabled(false)` | Disable buffer coloring (useful when inspecting buffers with a memory checker). |
 | `enableBoundsCheck(true)` | Enable runtime buffer-overwrite detection (always active in debug builds). |
@@ -277,27 +276,6 @@ slot.decompressFromMemory(header.data(), header.size(),
 
 ---
 
-## CUDA Graph Capture
-
-Records the compression pass as a replayable graph, eliminating CPU kernel-launch
-overhead on repeated calls. See [Performance Tuning](\ref performance_tuning) for when
-this is worth it.
-
-```cpp
-fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE);
-// ... addStage, connect ...
-pipeline.enableGraphMode(true);
-pipeline.finalize();
-pipeline.warmup(stream);         // JIT-compile kernels
-pipeline.captureGraph(stream);   // record once
-pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);  // replays
-```
-
-Requirements: `PREALLOCATE`, non-zero input size at construction, a single-source
-pipeline of graph-compatible stages, and the same stream for capture and replay.
-Incompatible with the caller-owned `compress()` overload.
-
----
 
 ## Diagnostics
 

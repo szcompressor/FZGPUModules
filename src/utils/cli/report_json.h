@@ -115,10 +115,6 @@ struct ReportData {
     std::vector<FusionGroupJson> fusion_installed_inverse_groups;
     std::string                  fusion_fallback_reason;
 
-    // ── graph mode (benchmark only; omitted entirely when graph_requested is false) ──
-    bool        graph_requested = false;
-    bool        graph_active    = false;
-    std::string graph_incompatible_reason;   // empty → field omitted
 };
 
 /**

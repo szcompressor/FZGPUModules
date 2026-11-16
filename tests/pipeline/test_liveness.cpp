@@ -10,7 +10,6 @@
  *   LV4  Liveness/DiamondDagCompressOutputSize          — diamond compress() output is 2× input size
  *   LV5  Liveness/MinimalTopoPoolLEPreallocateThreeStages — MINIMAL topo pool ≤ PREALLOCATE for 3-stage chain
  *   LV6  Liveness/PreallocatePeakGEMinimalPeak          — PREALLOCATE observed peak ≥ MINIMAL observed peak
- *   LV7  Liveness/LivenessApiConsistentUnderGraphMode   — liveness API stable before/after graph capture
  *   LV8  Liveness/PrintDAGNoCrash                       — printDAG() does not throw on linear pipelines
  */
 
@@ -226,84 +225,6 @@ TEST(Liveness, PreallocatePeakGEMinimalPeak) {
     EXPECT_GE(peak_prealloc, peak_minimal)
         << "PREALLOCATE pre-allocates all buffers upfront, so its peak ("
         << peak_prealloc << " B) must be >= MINIMAL peak (" << peak_minimal << " B)";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LV7: Liveness API remains consistent under graph mode
-//
-// CUDA graph capture records all kernel launches and buffer pointers at
-// captureGraph() time; buffer addresses are then stable for every replay.
-// The liveness analysis (printBufferLifetimes, getLevels, computeTopoPoolSize)
-// must still report the same topology after graph capture — the graph
-// recording must not corrupt or invalidate the DAG metadata.
-//
-// Pipeline: Lorenzo → Bitshuffle (both are graph-compatible forward stages).
-// warmup() is called before captureGraph() to pre-allocate any stage-internal
-// host memory outside the CUDA stream-capture window.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(Liveness, LivenessApiConsistentUnderGraphMode) {
-    constexpr size_t N = 1 << 12;
-    const size_t in_bytes = N * sizeof(float);
-
-    {
-        Pipeline probe(in_bytes, MemoryStrategy::PREALLOCATE, 1.0f);
-        if (probe.isMemPoolFallbackMode()) {
-            GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
-        }
-    }
-
-    // Build a 2-stage PREALLOCATE + graph-mode pipeline.
-    auto p = std::make_unique<Pipeline>(in_bytes, MemoryStrategy::PREALLOCATE, 5.0f);
-
-    auto* lrz = p->addStage<LorenzoQuantStage<float, uint16_t>>();
-    lrz->setErrorBound(1e-2f);
-    lrz->setQuantRadius(512);
-    lrz->setOutlierCapacity(0.2f);
-
-    auto* bs = p->addStage<BitshuffleStage>();
-    bs->setBlockSize(4096);
-    bs->setElementWidth(2);
-    p->connect(bs, lrz, "codes");
-
-    p->enableGraphMode(true);
-    p->setPoolManagedDecompOutput(false);
-    p->finalize();
-
-    // warmup() runs a dummy compress+decompress to JIT-compile kernels and
-    // pre-allocate any stage-internal host buffers before the capture window.
-    CudaStream stream;
-    p->warmup(stream);
-    stream.sync();
-
-    // Record the liveness metrics before graph capture.
-    const size_t topo_before   = p->getDAG()->computeTopoPoolSize();
-    const size_t levels_before = p->getDAG()->getLevels().size();
-
-    // Capture the graph (PREALLOCATE; all buffer pointers are already stable).
-    ASSERT_NO_THROW(p->captureGraph(stream))
-        << "LV7: captureGraph() must not throw on a valid PREALLOCATE pipeline";
-    ASSERT_TRUE(p->isGraphCaptured());
-
-    // printBufferLifetimes() must not crash after graph capture.
-    ASSERT_NO_THROW(p->getDAG()->printBufferLifetimes())
-        << "LV7: printBufferLifetimes() must not throw after graph capture";
-
-    // Level structure must be unchanged — graph capture must not mutate the DAG.
-    const auto& levels_after = p->getDAG()->getLevels();
-    ASSERT_EQ(levels_after.size(), levels_before)
-        << "LV7: getLevels() must return the same count before and after captureGraph()";
-
-    for (size_t lvl = 0; lvl < levels_after.size(); lvl++) {
-        EXPECT_EQ(levels_after[lvl].size(), 1u)
-            << "LV7: level " << lvl << " must still have exactly 1 node after capture";
-    }
-
-    // computeTopoPoolSize() must be stable — topology did not change.
-    const size_t topo_after = p->getDAG()->computeTopoPoolSize();
-    EXPECT_EQ(topo_after, topo_before)
-        << "LV7: computeTopoPoolSize() must be unchanged after captureGraph()";
-    EXPECT_GT(topo_after, 0u)
-        << "LV7: computeTopoPoolSize() must remain positive after captureGraph()";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

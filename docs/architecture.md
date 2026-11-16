@@ -69,8 +69,7 @@ named-output wiring model. The lifecycle is four steps — construct (input size
 the pool), `addStage<T>()` + `connect(downstream, upstream, "port")` to build the graph,
 `finalize()` to validate topology and allocate buffers, then `compress()` / `decompress()`.
 
-For the full lifecycle with code — including caller-allocated output, CUDA Graph capture,
-and file I/O — see the \ref mainpage "Quick Start", the \ref api_reference "API Reference",
+For the full lifecycle with code — including caller-allocated output and file I/O — see the \ref mainpage "Quick Start", the \ref api_reference "API Reference",
 and `examples/`.
 
 ### CompressionDAG
@@ -102,7 +101,7 @@ Two strategies control when allocations happen:
 | Strategy | Behavior | Best for |
 |----------|----------|----------|
 | `MINIMAL` | Allocate on demand; free each buffer immediately after its last consumer reads it | Lowest peak GPU memory |
-| `PREALLOCATE` | Allocate all buffers during `finalize()`; reuse them across calls | CUDA Graph capture; repeated compression of same-shape data |
+| `PREALLOCATE` | Allocate all buffers during `finalize()`; reuse them across calls | Repeated compression of same-shape data |
 
 `PREALLOCATE` also enables *buffer coloring*: the DAG scheduler detects which
 buffers have non-overlapping lifetimes and assigns them to the same backing memory,

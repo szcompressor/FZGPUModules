@@ -40,11 +40,11 @@ Using any other type will result in a linker error. Most common: `BitpackStage<u
 | Setting | Purpose | Notes |
 |---|---|---|
 | `setNBits(nbits)` | Bits per element | Power of two, 1..`8 * sizeof(T)`; ignored when auto-detect is on |
-| `setAutoDetect(bool)` | GPU scan to pick `nbits` automatically | Disables CUDA Graph compatibility while active |
+| `setAutoDetect(bool)` | GPU scan to pick `nbits` automatically | Adds a host sync while active |
 | `setBase(base)` | Frame-of-reference offset subtracted before packing | Removes dead **high** bits; always lossless |
 | `setShift(shift)` | Right shift applied after the base subtraction | Removes dead **low** bits; **lossy** unless those bits are zero |
-| `setAutoBase(bool)` | GPU min-reduce to pick `base` automatically | Disables CUDA Graph compatibility while active |
-| `setAutoShift(bool)` | GPU OR-reduce to pick the largest lossless `shift` | Disables CUDA Graph compatibility while active |
+| `setAutoBase(bool)` | GPU min-reduce to pick `base` automatically | Adds a host sync while active |
+| `setAutoShift(bool)` | GPU OR-reduce to pick the largest lossless `shift` | Adds a host sync while active |
 | `setAdaptive(bool)` | Convenience: auto base + auto shift + auto `nbits` | Fully adaptive lossless mode |
 
 ### Manual bit-width
@@ -81,11 +81,9 @@ Scratch buffers for the scan are allocated through the pipeline's memory pool
 (with a transparent `cudaMalloc` fallback in vGPU / pool-fallback mode), so all
 device memory remains tracked by the pipeline.
 
-**CUDA Graph incompatibility:** auto-detect requires a device-to-host transfer
-and stream synchronization to read the max value, making it incompatible with
-CUDA Graph capture. `isGraphCompatible()` returns `false` while auto-detect is
-on.  If you know the bit-width ahead of time, use `setNBits()` instead to keep
-graph capture available.
+**Host synchronization:** auto-detect requires a device-to-host transfer and a
+stream synchronization to read the max value. If you know the bit-width ahead of
+time, use `setNBits()` instead to avoid it.
 
 **Output size estimate:** `estimateOutputSizes()` returns the worst-case (full
 input size) when auto-detect is enabled, so `PREALLOCATE` mode reserves
@@ -136,10 +134,9 @@ results into the compressed header:
 After `compress()`, `getBase()`, `getShift()`, and `getNBits()` reflect the
 detected values.
 
-**CUDA Graph incompatibility:** each auto mode needs a device-to-host readback,
-so `isGraphCompatible()` returns `false` while *any* of `setAutoDetect`,
-`setAutoBase`, or `setAutoShift` is on. Hand-set `base`/`shift`/`nbits` stay
-graph-capturable.
+**Host synchronization:** each auto mode needs a device-to-host readback while
+*any* of `setAutoDetect`, `setAutoBase`, or `setAutoShift` is on. Hand-set
+`base`/`shift`/`nbits` avoid it.
 
 **File format:** the serialized header is 15 bytes — the previous 10 plus
 `shift` (1 byte) and `base` (4 bytes, zero-extended). Archives written before

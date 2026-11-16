@@ -56,9 +56,6 @@ namespace fz {
  *       `modules/coders/lc_common/lc_chunk_components.cuh`. See
  *       `THIRD_PARTY.md`.
  *
- * @note CUDA Graph capture is supported for compression only. The inverse
- *       path reads the stream header with blocking D2H copies before it can
- *       launch the decode kernel (same constraint as RREStage/RZEStage/RAREStage).
  */
 class RAZEStage : public Stage {
 public:
@@ -80,11 +77,6 @@ public:
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-
-    /// Forward (compress) is graph-capturable; inverse reads the stream header
-    /// with blocking D2H copies and therefore is not. See RREStage for the
-    /// rationale.
-    bool isGraphCompatible() const override { return !is_inverse_; }
 
     void setChunkSize(size_t bytes) { chunk_size_ = static_cast<uint32_t>(bytes); }
     void setWordSize(size_t bytes)  { word_size_  = static_cast<uint8_t>(bytes);  }

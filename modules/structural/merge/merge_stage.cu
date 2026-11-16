@@ -3,8 +3,7 @@
  *
  * MergeStage — concatenate N input buffers into one (forward), split one buffer
  * back into N segments (inverse).  Pure stream-ordered device-to-device copies;
- * no kernels, no host synchronisation, so it is graph-capturable in both
- * directions.  See merge_stage.h for the rationale (materialising the
+ * no kernels, no host synchronisation in either direction.  See merge_stage.h for the rationale (materialising the
  * concatenation so a downstream coder can compress several producer ports as a
  * single stream — e.g. cuSZ-Hi's LC merged-blob layout).
  */

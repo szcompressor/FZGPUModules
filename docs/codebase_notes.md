@@ -1816,3 +1816,54 @@ it in `stage_registry.h`, and add FZGM integration tests. Use the existing SDK
 capability guards for optional families. Registration order retains the previous
 first-match behavior; individual handlers own their token aliases. The main
 plugin requires no stage-specific edits.
+
+## CN-GRAPH-1 — CUDA Graph mode removed: measured effect and reasons {#cn-graph-1}
+
+**Removed 2026-11-16.** `Pipeline::enableGraphMode()` / `captureGraph()` /
+`isGraphCaptured()`, `CompressionDAG::setCaptureMode()`, `Stage::isGraphCompatible()`,
+the CLI's `--graph` and its JSON `graph` block are gone. Older notes on this page that
+mention graph capture describe the code as it was when they were written.
+
+### What graph mode bought
+
+Measured before removal on an NVIDIA H100 80GB HBM3 (driver 595.99.02, CUDA 12.9),
+release build, profiling off. Host wall time per `compress()` call: median of 200
+timed calls after 20 warm-up calls, median of three processes (spread ≤ 4%). 1-D
+float32 smooth synthetic input. "Auto" is `FZ_SPECIALIZE=auto`, which could not be
+combined with graph mode.
+
+| Preset | Input | Staged (µs) | Graph (µs) | Auto (µs) | Graph / staged |
+|---|---|---|---|---|---|
+| cuszp2 | 64 KB | 56.0 | 41.3 | 156.7 | 0.74 |
+| cuszp2 | 1 MB | 57.9 | 48.9 | 140.6 | 0.85 |
+| cuszp2 | 4 MB | 81.8 | 76.1 | 148.4 | 0.93 |
+| cuszp2 | 16 MB | 190.0 | 189.7 | 184.6 | 1.00 |
+| cuszp2 | 64 MB | 628.9 | 664.9 | 323.2 | 1.06 |
+| cuszp3 | 64 KB | 55.7 | 42.5 | 108.9 | 0.76 |
+| cuszp3 | 16 MB | 499.7 | 498.6 | — | 1.00 |
+| cuszp3 | 64 MB | 1823.8 | 1858.8 | — | 1.02 |
+
+- A fixed ~10-15 µs of host dispatch saved per call: up to ~25% below 1 MB, nothing
+  from ~16 MB up, and slower at 64 MB because every call copied the input into the
+  graph's fixed input slot.
+- Only the cuSZp family could be captured: of 19 shipped presets, the six ending in
+  `AdaptiveBitpack` captured and replayed byte-identically; the rest were refused or
+  failed mid-capture. Pipeline Specialization covers that family for large inputs.
+
+### Why it was removed rather than fixed
+
+- **Replay sizing.** A replay runs the captured kernels without calling any stage's
+  `execute()`. RZE, RLE, RRE, RARE, RAZE, CLOG, HCLOG, GPULZ and GolombRice armed their
+  exact-size readback in `execute()`, so a replayed compress reported a stale size:
+  Lorenzo → RLE reported 131104 bytes for an input that compresses to 385344, and
+  Lorenzo → RZE hit an illegal address on decompress. No test replayed a second input.
+- **Undeclared syncs.** Quantizer and LorenzoQuant claimed compatibility while their
+  range-relative modes ran a host-synchronous scan inside `execute()`, so PFPL-family
+  pipelines aborted mid-capture with a raw CUDA error.
+- **Cost.** Every stage carried a compatibility contract, PREALLOCATE/non-default
+  stream/single-source restrictions applied, it was unavailable on vGPUs, and it
+  could not be combined with Specialization.
+
+The side findings of the same measurement (Auto specialization's per-call host
+overhead below ~4 MB, and an out-of-bounds read in the warp-fusion probe on 1-D
+cuSZp3 input) are tracked separately.

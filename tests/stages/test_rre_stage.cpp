@@ -19,7 +19,6 @@
  *   RR11  RREStage/HeaderSerialization           — serializeHeader/deserializeHeader preserves config
  *   RR12  RREStage/UnsupportedChunkSizeThrows    — chunk_size not in {4096,8192,16384} throws at execute()
  *   RR13  RREStage/UnsupportedWordSizeThrows     — word_size∉{1,2,4,8} throws at execute()
- *   RR14  RREStage/IsGraphCompatible             — forward=true, inverse=false
  *   RR15  RREStage/RepeatedRoundTripStable       — repeated round-trips on same objects stable
  *   RR16  RREStage/ChunkSize4096RandomBytesRoundTrip   — chunk_size=4096, multi-chunk random bytes
  *   RR17  RREStage/ChunkSize4096AllZerosRoundTrip      — chunk_size=4096, all-zeros fast path
@@ -210,14 +209,6 @@ TEST(RREStage, UnsupportedWordSizeThrows) {
     std::vector<void*> in = {d_in.void_ptr()}, out = {d_out.void_ptr()};
     std::vector<size_t> sz = {data.size()};
     EXPECT_THROW(s.execute(cs.stream, pool.get(), in, out, sz), std::runtime_error);
-}
-
-TEST(RREStage, IsGraphCompatible) {
-    RREStage fwd;
-    EXPECT_TRUE(fwd.isGraphCompatible());
-    RREStage inv;
-    inv.setInverse(true);
-    EXPECT_FALSE(inv.isGraphCompatible());
 }
 
 TEST(RREStage, RepeatedRoundTripStable) {

@@ -56,8 +56,8 @@ public:
      *
      * Stages may call cudaStreamSynchronize(stream) or issue blocking D2H copies
      * when the algorithm requires it (e.g. Huffman histogram readback for codebook
-     * construction, ANS renormalization tables).  Such stages must return false from
-     * isGraphCompatible() and must document the sync points.
+     * construction, ANS renormalization tables).  Such stages must document the
+     * sync points.
      *
      * Note: the DAG dispatches sibling nodes (same topological level) via a
      * sequential CPU loop, each enqueuing to its own stream.  A sync inside
@@ -252,20 +252,6 @@ public:
         (void)output_index;
         return 0;
     }
-
-    /**
-     * Whether this stage is safe inside a CUDA Graph capture.
-     *
-     * A stage is graph-compatible if execute() enqueues only device-side work
-     * (kernel launches, cudaMemcpyAsync D2D/H2D) and makes no host-synchronous
-     * calls.  Override and return false if execute() contains D2H copies or
-     * dynamic decisions based on device data — the DAG will throw at
-     * setCaptureMode(true) time rather than producing a broken graph.
-     *
-     * Default: true. Inverse-mode stages that do D2H reads (e.g. RZE inverse)
-     * must return false.
-     */
-    virtual bool isGraphCompatible() const { return true; }
 
     /**
      * Inform the stage whether all of its forward outputs are pipeline outputs.

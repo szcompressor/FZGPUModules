@@ -9,6 +9,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+- **Breaking:** CUDA Graph mode. Removed `Pipeline::enableGraphMode()`, `isGraphModeEnabled()`, `captureGraph()` and `isGraphCaptured()`; `CompressionDAG::setCaptureMode()` / `isCaptureMode()`; `Stage::isGraphCompatible()` (out-of-tree stages that override it must drop the override); the `fz::graph_t` / `fz::graph_exec_t` aliases; the CLI's `--graph` option (now rejected with a message) and the `graph` block of its JSON report; and the `pfpl_graph_capture` example. Measured on an H100, graph mode saved ~10-15 µs per call below ~16 MB on the one pipeline family it could capture, and replays reported stale compressed sizes for nine variable-size coders. The libpressio adapter already rejects its former `fzgpumodules:graph_mode` option. See `docs/codebase_notes.md` CN-GRAPH-1.
+
 ### Fixed
 - Pipeline Specialization's adaptive probe for TiledLorenzo chains (cuSZp3 family) read past the end of the input whenever a dimension was not a tile multiple, worst on 1-D data with 8x8 tiles, where the padded layout is 8x the input. It bounded its reads by the tile-padded element count; it now uses the real input size and samples only blocks inside the input. A 1-D field of 1 MB or more could fail with an illegal memory access; output is unchanged where it previously succeeded.
 

@@ -31,7 +31,7 @@ pipelines. Each pipeline is a directed acyclic graph (DAG) of stages, connected 
 | CMake | 3.24+ | |
 | Host byte order | Little-endian | |
 
-**Note:** using a vGPU will result in the CUDA mempool creation to fail, resulting in an automatic fallback allocation using `cudaMalloc`. This will work correctly but without the performance benefits of the stream-ordered allocator. For perfomance critical workloads avoid vGPU setups. The lack of stream-ordered allocator support also prevents CUDA Graph capture on vGPUs so this feature is unavailable in those environments.
+**Note:** using a vGPU will result in the CUDA mempool creation to fail, resulting in an automatic fallback allocation using `cudaMalloc`. This will work correctly but without the performance benefits of the stream-ordered allocator. For perfomance critical workloads avoid vGPU setups.
 
 ---
 
@@ -75,8 +75,8 @@ cudaStreamSynchronize(stream);
 // out.data() / out.bytes() hold the reconstructed field.
 ```
 
-See `examples/` for more usage patterns including multi-branch pipelines, CUDA Graph
-capture, and the low-level DAG API.
+See `examples/` for more usage patterns including multi-branch pipelines and the
+low-level DAG API.
 
 ---
 
@@ -187,33 +187,9 @@ is the highest-precedence runtime override. Use `--report-json` from the CLI to 
 what was installed. Full guide, guarantees, and how to make your own stages
 specialization-compatible: see \ref pipeline_specialization "Pipeline Specialization" in the Performance Tuning page.
 
-### CUDA Graph Support
-
-Enable CUDA Graph capture to eliminate
-CPU-side kernel launch overhead on repeated compress calls (note: Graph capture
-and Pipeline Specialization are mutually exclusive — the specializer synchronizes
-to read data-dependent archive lengths, so enabling `Auto`/`Force` disables graph
-mode):
-
-```cpp
-fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE, 2.0f);
-// ... addStage, connect ...
-pipeline.enableGraphMode(true);
-pipeline.finalize();
-pipeline.warmup(stream);      // JIT-compiles all kernels once
-pipeline.captureGraph(stream);
-
-// subsequent compress() calls replay the captured graph
-fz::BorrowedDeviceBuffer comp = pipeline.compress({d_input, input_bytes}, stream);
-```
-
-Call `compress()` only after `captureGraph()`; use the same stream for capture and replay.
-
-See the \ref performance_tuning "Performance Tuning" page for this and every other
+See the \ref performance_tuning "Performance Tuning" page for every other
 performance lever (memory strategy, stage-level config, build flags) with measured
 effect sizes where available.
-
----
 
 ### Compressor Config File 
 

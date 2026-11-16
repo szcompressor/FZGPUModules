@@ -188,10 +188,6 @@ public:
     /// stalls the pipeline mid-flight.
     void postStreamSync(fz::stream_t stream) override;
 
-    /// The `means` length is data-dependent and resolved by a D2H in
-    /// postStreamSync(), so the forward pass cannot be captured in a graph.
-    bool isGraphCompatible() const override { return false; }
-
     /// Defined in the .cu — sizing the CUB scan temp needs a CUDA translation unit.
     size_t estimateScratchBytes(
         const std::vector<size_t>& input_sizes

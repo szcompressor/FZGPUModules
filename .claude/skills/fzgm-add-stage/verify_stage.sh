@@ -124,8 +124,6 @@ for table in docs/mainpage.md docs/config_file.md; do
         fail "add a ${STAGE_CLASS:-stage} row to the stage table in $table"
     fi
 done
-grep -q 'captureGraph' "$TEST_SRC" 2>/dev/null \
-    || warn "no captured-graph replay test in $TEST_SRC; required if isGraphCompatible() can return true (SKILL.md Phase 5)"
 ATTR_HITS=$(grep -niE 'prior work|adapted from|direct port|Upstream:|https?://' "$SOURCE" "$HEADER" 2>/dev/null)
 if [[ -n "$ATTR_HITS" ]]; then
     if grep -q '## Acknowledgements' "docs/stages/${NAME}.md" 2>/dev/null; then

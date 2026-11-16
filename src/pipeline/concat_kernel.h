@@ -19,10 +19,8 @@ struct CopyDesc {
 
 /// Block-rows assigned to each segment by launch_gather_kernel().
 ///
-/// Constant, not derived from segment sizes: a CUDA Graph bakes the launch
-/// configuration in at capture time, so making the grid depend on the data would
-/// silently invalidate a captured graph the first time a differently-sized input
-/// was replayed through it.
+/// Constant, not derived from segment sizes, so the launch configuration does
+/// not depend on the data.
 constexpr unsigned kGatherBlocksPerSegment = 256;
 
 /**

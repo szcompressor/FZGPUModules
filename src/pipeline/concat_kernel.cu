@@ -9,9 +9,8 @@
 // segment: that starves unevenly-sized segments (112x slower on split-mode
 // GPU-Zstd, and invisible to dag_elapsed_ms).
 //
-// kBlocksPerSegment must stay a compile-time constant, not a function of the
-// segment size: the launch configuration must not depend on the data, or a
-// captured CUDA Graph stops being valid across replays with different inputs.
+// kBlocksPerSegment is a compile-time constant, not a function of the segment
+// size, so the launch configuration does not depend on the data.
 //
 // Measurements and the full story: docs/codebase_notes.md CN-CONCAT-1
 //
@@ -25,10 +24,6 @@
 // With src and dst guaranteed to be 16-byte aligned, the bulk path always
 // fires for the leading floor(bytes/16)*16 bytes.  Only the tail (<16 bytes)
 // falls to scalar.  This makes the fast path the common path for all segments.
-//
-// This is the prerequisite for CUDA Graph capture (§7): with a single kernel
-// node at the concat boundary, the entire compress path becomes capturable as
-// one graph with a fixed, O(1) update pattern.
 
 #include "pipeline/concat_kernel.h"
 #include "backend/api.h"

@@ -143,8 +143,7 @@ public:
      *
      * After compress(), getNBits() reflects the detected value.
      *
-     * Incompatible with CUDA Graph capture: isGraphCompatible() returns false
-     * while any auto-detect mode is enabled.
+     * Auto-detect adds a host sync inside execute() to read the scanned value.
      */
     void setAutoDetect(bool enable) { auto_detect_ = enable; }
     bool isAutoDetect() const { return auto_detect_; }
@@ -283,12 +282,6 @@ public:
         actual_output_size_  = saved_output_size_;
         shift_               = saved_shift_;
         base_                = saved_base_;
-    }
-
-    // Auto-detect requires a D2H sync to read the scanned min/max/OR, so it
-    // cannot be recorded inside a CUDA Graph.
-    bool isGraphCompatible() const override {
-        return !(auto_detect_ || auto_base_ || auto_shift_);
     }
 
 private:

@@ -22,7 +22,6 @@
  *   RZ11  RAZEStage/HeaderSerialization           — serializeHeader/deserializeHeader preserves config
  *   RZ12  RAZEStage/UnsupportedChunkSizeThrows    — chunk_size not in {4096,8192,16384} throws at execute()
  *   RZ13  RAZEStage/UnsupportedWordSizeThrows     — word_size∉{1,2,4,8} throws at execute()
- *   RZ14  RAZEStage/IsGraphCompatible             — forward=true, inverse=false
  *   RZ15  RAZEStage/RepeatedRoundTripStable       — repeated round-trips on same objects stable
  *   RZ16  RAZEStage/ChunkSize4096RandomBytesRoundTrip   — chunk_size=4096, multi-chunk random bytes
  *   RZ17  RAZEStage/ChunkSize8192PartialChunkRoundTrip  — chunk_size=8192, input not a multiple of chunk_size
@@ -226,14 +225,6 @@ TEST(RAZEStage, UnsupportedWordSizeThrows) {
     std::vector<void*> in = {d_in.void_ptr()}, out = {d_out.void_ptr()};
     std::vector<size_t> sz = {data.size()};
     EXPECT_THROW(s.execute(cs.stream, pool.get(), in, out, sz), std::runtime_error);
-}
-
-TEST(RAZEStage, IsGraphCompatible) {
-    RAZEStage fwd;
-    EXPECT_TRUE(fwd.isGraphCompatible());
-    RAZEStage inv;
-    inv.setInverse(true);
-    EXPECT_FALSE(inv.isGraphCompatible());
 }
 
 TEST(RAZEStage, RepeatedRoundTripStable) {

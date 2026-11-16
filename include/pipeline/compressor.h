@@ -90,7 +90,7 @@ class Pipeline {
 public:
     /**
      * @param input_data_size  Expected input size in bytes for pool sizing (0 = default).
-     * @param strategy         MINIMAL (on-demand alloc) or PREALLOCATE (upfront, required for graph mode).
+     * @param strategy         MINIMAL (on-demand alloc) or PREALLOCATE (upfront).
      * @param pool_multiplier  Pool size = input_size × multiplier.
      */
     explicit Pipeline(
@@ -243,9 +243,6 @@ public:
      * deterministic insertion order), which is almost never what you want
      * for N>1 — set this explicitly whenever there is more than one source
      * stage.
-     *
-     * Incompatible with CUDA Graph mode, which still requires exactly one
-     * source stage (enableGraphMode(true) throws otherwise).
      */
     void setPrimarySource(Stage* stage) { primary_source_stage_ = stage; }
 
@@ -314,9 +311,6 @@ public:
      * Alternatively, if you know empirically that your data compresses to at most
      * X bytes for your workload, you can pass X directly and accept the small
      * risk of a runtime error on unusually incompressible inputs.
-     *
-     * Incompatible with CUDA Graph mode (the output address cannot be baked into
-     * a captured graph). Throws if enableGraphMode(true) was set.
      *
      * @param d_input              Device pointer to raw input data.
      * @param input_size           Size of d_input in bytes.
@@ -448,8 +442,7 @@ public:
 
     /**
      * Compress into a caller-provided buffer. Returns the exact bytes written.
-     * Throws if `output` is too small (see the pointer overload for sizing);
-     * incompatible with CUDA Graph mode.
+     * Throws if `output` is too small (see the pointer overload for sizing).
      */
     size_t compressInto(ConstDeviceSpan input, DeviceSpan output, fz::stream_t stream = 0);
 
@@ -597,31 +590,6 @@ public:
         }
         return notes;
     }
-
-    // ── CUDA Graph Capture (compression-only) ─────────────────────────────────
-
-    /**
-     * Enable CUDA Graph mode. captureGraph() will record the forward compression
-     * pass as a replayable CUDA Graph, eliminating per-call CPU dispatch overhead.
-     *
-     * Requirements: PREALLOCATE strategy, non-zero input_size_hint, all stages
-     * graph-compatible, single-source pipeline. Must be set before finalize().
-     */
-    void enableGraphMode(bool enable);
-    bool isGraphModeEnabled() const { return graph_mode_enabled_; }
-
-    /**
-     * Record the forward compression pass as a CUDA Graph.
-     *
-     * After this call compress() uses cudaGraphLaunch() instead of dag_->execute().
-     * The input pointer is baked into the graph via a stable internal buffer
-     * (d_graph_input_); compress() copies user input there before each launch.
-     *
-     * Can be called again to re-capture. Must be called after finalize() and
-     * before the first compress().
-     */
-    void captureGraph(fz::stream_t stream = 0);
-    bool isGraphCaptured() const { return graph_captured_; }
 
     size_t getPeakMemoryUsage() const;
     size_t getCurrentMemoryUsage() const;
@@ -906,15 +874,14 @@ private:
     void bindSemanticContracts();
     /// Run the fusion planner and install matched fused groups on the DAG.
     /// Auto admits profitability-approved implementations; Force also admits
-    /// experimental ones. Off is a no-op. May disable graph mode.
+    /// experimental ones. Off is a no-op.
     void planAndInstallFusion();
     void notifyStagesFinalizeHooks();
     void refinePoolSize();
-    void setupGraphModeInput();
     void preallocatePadBuffer();
     void preallocateConcatBuffers();
 
-    // compress() helper: handles graph-mode copy or alignment padding.
+    // compress() helper: handles alignment padding.
     // Returns the effective source pointer and padded source size.
     std::pair<const void*, size_t> prepareInputSource(
         const void* d_input, size_t input_size, fz::stream_t stream);
@@ -1101,7 +1068,7 @@ private:
     bool pool_managed_decomp_;
 
     // is_compressed_: true after the first successful compress() (gates writeToFile).
-    // was_compressed_: true between compress() and the next reset() (gates captureGraph).
+    // was_compressed_: true between compress() and the next reset().
     bool is_compressed_;
     bool was_compressed_;
 
@@ -1200,19 +1167,9 @@ private:
     };
     std::vector<BufferMetadata> buffer_metadata_;
 
-    bool graph_mode_enabled_;
-    bool graph_captured_;
     bool preserve_serialized_dims_ = false;
     FusionPolicy fusion_policy_ = FusionPolicy::Off;
     FusionInfo fusion_info_;
-
-    // Fixed device input buffer whose address is baked into the captured graph.
-    // compress() copies user input here before cudaGraphLaunch().
-    PoolBuffer d_graph_input_;
-    size_t     d_graph_input_size_;
-
-    fz::graph_t      captured_graph_;
-    fz::graph_exec_t graph_exec_;
 };
 
 // ── Template implementation ───────────────────────────────────────────────────

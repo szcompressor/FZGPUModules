@@ -59,10 +59,10 @@ MemoryPool::~MemoryPool() {
         }
         allocations_.clear();
 
-        for (auto& [ptr, info] : graph_allocations_) {
+        for (auto& [ptr, info] : persistent_allocations_) {
             cudaFreeAsync(ptr, /*stream=*/0);
         }
-        graph_allocations_.clear();
+        persistent_allocations_.clear();
 
         cudaDeviceSynchronize();  // drain stream 0 before pool destruction
 
@@ -79,10 +79,10 @@ MemoryPool::~MemoryPool() {
         }
         allocations_.clear();
 
-        for (auto& [ptr, info] : graph_allocations_) {
+        for (auto& [ptr, info] : persistent_allocations_) {
             cudaFree(ptr);
         }
-        graph_allocations_.clear();
+        persistent_allocations_.clear();
     }
 
     // Free any persistent allocations not already returned by their owners.
@@ -190,7 +190,7 @@ void* MemoryPool::allocate(size_t size, cudaStream_t stream, const std::string& 
     
     // Track allocation in appropriate map
     if (persistent) {
-        graph_allocations_[ptr] = AllocationInfo(ptr, size, tag);
+        persistent_allocations_[ptr] = AllocationInfo(ptr, size, tag);
     } else {
         allocations_[ptr] = AllocationInfo(ptr, size, tag);
     }
@@ -229,8 +229,8 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
     }
 
     // Check graph allocations
-    auto git = graph_allocations_.find(ptr);
-    if (git != graph_allocations_.end()) {
+    auto git = persistent_allocations_.find(ptr);
+    if (git != persistent_allocations_.end()) {
         current_allocated_bytes_ -= git->second.size;
         if (mem_pool_) {
             FZ_CUDA_CHECK_WARN(cudaFreeAsync(ptr, stream));
@@ -239,7 +239,7 @@ void MemoryPool::free(void* ptr, cudaStream_t stream) {
             FZ_CUDA_CHECK_WARN(cudaStreamSynchronize(stream));
             FZ_CUDA_CHECK_WARN(cudaFree(ptr));
         }
-        graph_allocations_.erase(git);
+        persistent_allocations_.erase(git);
         total_frees_++;
         return;
     }
@@ -325,7 +325,7 @@ void MemoryPool::reset(cudaStream_t stream) {
     allocations_.clear();
 
     // Reset per-run tracking so the next compress/decompress call gets a clean slate.
-    current_allocated_bytes_ = 0;  // graph_allocations_ are intentionally excluded
+    current_allocated_bytes_ = 0;  // persistent_allocations_ are intentionally excluded
     overflow_warned_ = false;
 
     if (mem_pool_) {
@@ -394,16 +394,16 @@ void MemoryPool::printStats() const {
 
 #ifndef NDEBUG
     FZ_PRINT("  Active allocs: %zu  Graph allocs: %zu  Total: %zu allocs / %zu frees",
-             allocations_.size(), graph_allocations_.size(),
+             allocations_.size(), persistent_allocations_.size(),
              total_allocations_, total_frees_);
     for (const auto& pair : allocations_) {
         const auto& info = pair.second;
         FZ_PRINT("  [%s] %s at %p", info.tag.c_str(),
                  formatBytes(info.size).c_str(), info.ptr);
     }
-    if (!graph_allocations_.empty()) {
+    if (!persistent_allocations_.empty()) {
         FZ_PRINT("  Graph-persistent:");
-        for (const auto& pair : graph_allocations_) {
+        for (const auto& pair : persistent_allocations_) {
             const auto& info = pair.second;
             FZ_PRINT("  [%s] %s at %p", info.tag.c_str(),
                      formatBytes(info.size).c_str(), info.ptr);

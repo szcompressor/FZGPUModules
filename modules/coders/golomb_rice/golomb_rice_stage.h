@@ -124,11 +124,6 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    /// Decode is inherently sequential per chunk (a Rice codeword's length
-    /// isn't known until decoded) and reads the stream header with blocking
-    /// D2H copies before it can launch, like RZE/RRE's inverse.
-    bool isGraphCompatible() const override { return !is_inverse_; }
-
     void setChunkSize(size_t bytes) { chunk_size_ = static_cast<uint32_t>(bytes); }
     size_t getChunkSize() const { return chunk_size_; }
     size_t getRequiredInputAlignment() const override { return chunk_size_; }

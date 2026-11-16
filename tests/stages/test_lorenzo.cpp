@@ -9,7 +9,6 @@
  *   LZ3  LorenzoStage/RoundTrip3D                — 3-D int32 grid, exact reconstruction
  *   LZ4  LorenzoStage/SerializeDeserialize       — config round-trip via header bytes
  *   LZ5  LorenzoStage/StageTypeId               — getStageTypeId() == StageType::LORENZO
- *   LZ6  LorenzoStage/GraphCompatible            — forward stage returns isGraphCompatible()=true
  *   LZ7  LorenzoStage/Int16RoundTrip             — int16_t type instantiation, exact reconstruction
  *   LZ8  LorenzoQuantStage/DeterministicRecon    — two independent pipelines produce identical output
  *   LZ9  LorenzoStage/QuantizerLorenzoPipeline   — Quantizer→Lorenzo chained round-trip
@@ -209,13 +208,6 @@ TEST(LorenzoStage, SerializeDeserialize) {
 TEST(LorenzoStage, StageTypeId) {
     EXPECT_EQ(LorenzoStage<int32_t>().getStageTypeId(),
               static_cast<uint16_t>(StageType::LORENZO));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// LZ6: GraphCompatible — forward stage returns isGraphCompatible() = true
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(LorenzoStage, GraphCompatible) {
-    EXPECT_TRUE(LorenzoStage<int32_t>().isGraphCompatible());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

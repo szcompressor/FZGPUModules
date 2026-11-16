@@ -4,7 +4,7 @@
  * GPU unit tests for TiledLorenzoStage<T> — dimension-aware (tiled separable)
  * Lorenzo predictor (cuSZp3 delta). Signed int16/int32. Forward emits tile-major
  * deltas (edge tiles zero-padded); inverse un-tiles to natural row-major order.
- * Graph-compatible (pure kernels, deterministic sizes).
+ * Pure kernels, deterministic sizes.
  *
  *   TL1  RoundTrip2D_Int32        — 8x8 default tiles, dims multiple of 8, exact
  *   TL2  RoundTrip2D_Int16        — int16 2-D round-trip, exact
@@ -214,7 +214,6 @@ TEST(TiledLorenzoStage, PortAndTypeContract) {
     EXPECT_EQ(s.getNumOutputs(), 1u);
     EXPECT_EQ(s.getInputDataType(0), static_cast<uint8_t>(DataType::INT32));
     EXPECT_EQ(s.getOutputDataType(0), static_cast<uint8_t>(DataType::INT32));
-    EXPECT_TRUE(s.isGraphCompatible());
 
     TiledLorenzoStage<int16_t> s16;
     EXPECT_EQ(s16.getInputDataType(0), static_cast<uint8_t>(DataType::INT16));

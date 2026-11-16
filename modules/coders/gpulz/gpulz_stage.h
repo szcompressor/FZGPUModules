@@ -59,10 +59,6 @@ namespace fz {
  *       are entirely zero) is adapted from the "sparse" GPULZ variant in
  *       `boyuanzhang62/AIZ_VLDB26` (`test/gpulz.cuh`'s `notEmptyFlagArr`).
  *
- * @note CUDA Graph capture is supported for compression only (the final
- *       output-size readback is deferred to `postStreamSync()`). The inverse
- *       path reads the stream header with blocking D2H copies before it can
- *       launch the decode kernel, so it is not graph-capturable.
  */
 class GPULZStage : public Stage {
 public:
@@ -79,8 +75,6 @@ public:
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-
-    bool isGraphCompatible() const override { return !is_inverse_; }
 
     void setChunkSize(size_t bytes) { chunk_size_ = static_cast<uint32_t>(bytes); }
     void setWordSize(size_t bytes)  { word_size_  = static_cast<uint8_t>(bytes);  }

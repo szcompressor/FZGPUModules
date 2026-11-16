@@ -114,8 +114,7 @@ outlier mechanism at all**.
 `q = round(x / (2 · eb))` and stored as two's-complement in `TCode`, with **no
 radius clamp, no outlier ports, no zigzag**. The forward kernel is a pure
 memory-bound map: the outlier atomic and divergent branch of the regular forward
-kernel are removed. A four-byte overflow flag is read after execution, so linear
-mode is not CUDA-Graph compatible.
+kernel are removed. A four-byte overflow flag is read after execution.
 
 Because there is no outlier fallback, a bin outside signed `TCode` range is a
 hard error; **size TCode wide enough for the data** (use `uint32_t`). The codes are
@@ -344,17 +343,14 @@ block, not just its own bin).
 
 ---
 
-## Value base and CUDA Graph capture
+## Value base
 
 Only NOA needs a data-dependent value base (`max - min`). If `setValueBase()` is
-not called, the stage scans the data once to compute it. For CUDA Graph capture,
-provide the precomputed value base to avoid a device sync:
+not called, the stage scans the data once to compute it, which synchronizes the
+stream. Provide the precomputed value base to skip the scan:
 
 ```cpp
 quant->setValueBase(vmax - vmin);  // NOA only
-// after enableGraphMode(true) + finalize()
-pipeline.warmup(stream);
-pipeline.captureGraph(stream);
 ```
 
 ABS and REL modes do not require `setValueBase()`.

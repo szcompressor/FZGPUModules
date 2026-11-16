@@ -84,7 +84,7 @@ cudaStreamSynchronize(stream);
 // Call pipeline.setPoolManagedDecompOutput(false) for caller-owned output.
 ```
 
-See `examples/` for more patterns: caller-allocated output, CUDA Graph capture, file I/O, multi-branch pipelines.
+See `examples/` for more patterns: caller-allocated output, file I/O, multi-branch pipelines.
 
 ---
 
@@ -130,7 +130,7 @@ The table lists the stable main catalog. Experimental modules remain on
 | Strategy | Description |
 |---|---|
 | `MINIMAL` | Allocate on demand, free at last consumer. Lowest peak GPU memory. Default. |
-| `PREALLOCATE` | Allocate everything at `finalize()`. Required for CUDA Graph capture. Enables buffer coloring. |
+| `PREALLOCATE` | Allocate everything at `finalize()`. Enables buffer coloring. |
 
 ```cpp
 fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE);
@@ -138,27 +138,6 @@ fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE);
 
 ---
 
-## CUDA Graph Capture
-
-For throughput-critical workloads, capture the forward compression pass into a
-CUDA Graph. The correct sequence is: enable graph mode, finalize, warm up, then
-capture. Only after capture can you call `compress()` to replay the graph.
-
-```cpp
-fz::Pipeline pipeline(input_bytes, fz::MemoryStrategy::PREALLOCATE, 2.0f);
-// ... addStage, connect ...
-pipeline.enableGraphMode(true);
-pipeline.finalize();
-pipeline.warmup(stream);      // JIT-compile kernels
-pipeline.captureGraph(stream);
-
-// Graph replay
-pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
-```
-
-Use the same stream for capture and replay.
-
----
 
 ## CLI
 

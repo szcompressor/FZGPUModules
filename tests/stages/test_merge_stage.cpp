@@ -8,7 +8,6 @@
  *   MG2  MergeStage/EmptySegmentRoundTrip       — a zero-size middle segment round-trips
  *   MG3  MergeStage/HeaderSerialization         — names + sizes survive serialize/deserialize
  *   MG4  MergeStage/PortCounts                  — N→1 forward, 1→N inverse
- *   MG5  MergeStage/IsGraphCompatible           — true in both directions
  *   MG6  MergeStage/PipelineReversal            — LorenzoQuant(1→3) → Merge(3→1) float round-trip
  *   MG7  MergeStage/QuantizerMaterializedTails   — unused outlier capacities stay defined across reuse
  */
@@ -133,13 +132,6 @@ TEST(MergeStage, PortCounts) {
     s.setInverse(true);
     EXPECT_EQ(s.getNumInputs(), 1u);
     EXPECT_EQ(s.getNumOutputs(), 4u);
-}
-
-TEST(MergeStage, IsGraphCompatible) {
-    MergeStage s;
-    EXPECT_TRUE(s.isGraphCompatible());
-    s.setInverse(true);
-    EXPECT_TRUE(s.isGraphCompatible());
 }
 
 // Integration: validate the inverse-DAG reversal of an N-input-forward stage.

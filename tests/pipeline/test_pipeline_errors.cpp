@@ -398,23 +398,6 @@ TEST(PipelineErrors, InputSizeExceedsHintThrows) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// E11a: enableGraphMode() + MINIMAL strategy throws at finalize()
-//
-// Graph mode requires PREALLOCATE so all buffer pointers are stable before the
-// graph is recorded. Using MINIMAL must throw a clear error at finalize() time,
-// before any GPU work is attempted.
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(PipelineErrors, GraphModeWithMinimalStrategyThrows) {
-    Pipeline p(1024 * sizeof(float), MemoryStrategy::MINIMAL);
-    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
-    lrz->setErrorBound(1e-2f);
-    p.enableGraphMode(true);
-
-    EXPECT_THROW(p.finalize(), std::runtime_error)
-        << "Graph mode with MINIMAL strategy must throw at finalize()";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // ER1: Pipeline is still usable after compress() throws
 //
 // We force a throw by calling compress() with a null input pointer.

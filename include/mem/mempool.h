@@ -74,7 +74,7 @@ struct MemoryPoolConfig {
  * Stream-ordered CUDA memory pool.
  *
  * Uses `cudaMallocAsync`/`cudaFreeAsync` over a `cudaMemPool_t` for
- * efficient reuse and CUDA Graph compatibility. All allocations are tracked
+ * efficient stream-ordered reuse. All allocations are tracked
  * for overflow warnings and debug printing.
  *
  * @note Non-copyable. Not thread-safe.
@@ -95,7 +95,7 @@ public:
      * @param size        Bytes to allocate.
      * @param stream      CUDA stream ordering the allocation.
      * @param tag         Debug label stored in `AllocationInfo`.
-     * @param persistent  If true, allocation survives `reset()` (graph replay);
+     * @param persistent  If true, allocation survives `reset()`;
      *                    if false, `reset()` will free it.
      * @return Device pointer, or nullptr on failure.
      */
@@ -112,8 +112,7 @@ public:
      *
      * Use for stage-internal buffers that live for the stage's lifetime:
      * codebooks, histograms, partition metadata.  Not stream-ordered;
-     * not subject to MINIMAL/PREALLOCATE policy; safe across CUDA Graph
-     * captures (stable device address).
+     * not subject to MINIMAL/PREALLOCATE policy; stable device address.
      *
      * Freed explicitly via `freePersistentDevice()` or in bulk by the
      * pool destructor.  Tracked for `getPersistentDeviceBytes()` reporting.
@@ -180,7 +179,7 @@ public:
     }
 
     /** Total number of currently live allocations (stream + graph). */
-    size_t getAllocationCount() const { return allocations_.size() + graph_allocations_.size(); }
+    size_t getAllocationCount() const { return allocations_.size() + persistent_allocations_.size(); }
 
     void printStats() const;
 
@@ -225,7 +224,7 @@ private:
     fz::mempool_t    mem_pool_;
 
     std::unordered_map<void*, AllocationInfo> allocations_;
-    std::unordered_map<void*, AllocationInfo> graph_allocations_; ///< Persistent for graph replay.
+    std::unordered_map<void*, AllocationInfo> persistent_allocations_; ///< Persistent: survive reset().
 
     // Persistent allocations (device + pinned host) — freed individually or in destructor.
     std::vector<PersistentAllocInfo> persistent_allocs_;

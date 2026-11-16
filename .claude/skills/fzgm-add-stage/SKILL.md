@@ -36,7 +36,7 @@ request, ask; don't guess a file format.
 | Size-preserving or variable-size? Forward *and* inverse size bounds | `estimateOutputSizes` must be safe in both directions | Step 2 |
 | Ports: one output, or named outputs (`codes`, `outliers`, ...)? | `getOutputNames`, downstream wiring | Step 2 |
 | What config goes in the header (<= 128 bytes)? Does decode overwrite forward config? | `serializeHeader`, `saveState/restoreState` | Step 2 |
-| Scratch memory, input alignment, any host sync / D2H in `execute()`? | `estimateScratchBytes`, `getRequiredInputAlignment`, `isGraphCompatible` | Step 2 |
+| Scratch memory, input alignment, any host sync / D2H in `execute()`? | `estimateScratchBytes`, `getRequiredInputAlignment`, documented sync points | Step 2 |
 | Inputs that don't divide evenly (trailing partial word/chunk): handle, pass through, or reject? | silent corruption at the tail; a stage that handles a partial last chunk returns `getRequiredInputAlignment() = 1` (otherwise the pipeline pads every input) | Steps 2, 3 |
 | Based on prior work (code or a specific paper's algorithm)? | attribution in 4 places | Step 8b |
 | Fuse with neighbours later? | specialization contract, after it round-trips | `docs/pipeline_specialization_internals.md` |
@@ -59,7 +59,7 @@ with distinct input/output types use `input_type` / `output_type` (Zigzag, Bitpa
 |---|---|
 | Size-preserving, element-wise, templated | `modules/transforms/zigzag/` (factory on header byte 0, explicit + `extern template` instantiations) |
 | Size-preserving with inter-element dependency (scan / prefix op) | `modules/predictors/diff/`; for a device-wide scan use `backend::withTempStorage` + `cub::DeviceScan` as in `modules/coders/rle/` (transient scratch, not counted in `estimateScratchBytes`) |
-| Variable-size lossless coder | kernels: `modules/coders/rze/` (chunked bytes), `modules/coders/rle/` (templated), `modules/coders/bitpack/`. **Don't copy RZE's or RLE's size readback**: it is not safe under captured-graph replay. Use the pattern in Phase 3, "Variable-size output". |
+| Variable-size lossless coder | `modules/coders/rze/` (chunked bytes), `modules/coders/rle/` (templated), `modules/coders/bitpack/`; see Phase 3, "Variable-size output" |
 | Multi-output (codes + outliers) | `modules/quantizers/quantizer/` |
 | Dimension-aware predictor | `modules/predictors/lorenzo/` |
 
@@ -93,7 +93,7 @@ Fill every `TODO` the script left. Contracts that break silently if missed:
   inverse buffer. Over-estimating is fine; under-estimating corrupts memory.
 - Set `actual_output_size_` (or each named output's size) to the bytes really written.
 - Enqueue everything on `stream`. No `cudaDeviceSynchronize`, no other streams. A sync
-  on your own stream is allowed only with `isGraphCompatible() == false`, documented.
+  on your own stream is allowed; document it.
 - Allocate device memory through the `MemoryPool`, never `cudaMalloc`; persistent
   scratch needs `estimateScratchBytes`.
 - Use the backend facades (`backend/types.h`, `backend/api.h`, `backend/cub.h`), not
@@ -114,30 +114,18 @@ Fill every `TODO` the script left. Contracts that break silently if missed:
 - Persistent memory has two mechanisms: `pool->allocate(..., /*persistent=*/true)`
   (count it in `estimateScratchBytes`), or `pool->allocatePersistentDevice` /
   `allocatePersistentPinned` in `onFinalize()` (count it in
-  `estimateDeviceFootprintBytes` / `estimatePinnedFootprintBytes`). Anything a graph
-  will use, such as pinned readback slots, must exist before capture: allocate it in
-  `onFinalize()`.
+  `estimateDeviceFootprintBytes` / `estimatePinnedFootprintBytes`). Pinned readback
+  slots belong in `onFinalize()`.
 
 ### Variable-size output (coders, anything whose output size depends on the data)
 
-How the real size reaches the host:
-- Without a graph, the DAG asks `getActualOutputSize*()` right after `execute()`.
-- During graph capture it doesn't, and **a graph replay never calls `execute()`**.
-  `compress()` calls `postStreamSync()` after every run, replays included.
-- So any host-side state set only in `execute()` (a "readback pending" flag, a cached
-  size) goes stale on replay. This is exactly how RZE and RLE break.
-
-The pattern that works:
-1. In `execute()`, enqueue the size computation on the device and an async D2H copy
-   of the total into a pinned slot (allocated in `onFinalize`). Don't sync.
-2. The size getters sync and read the pinned slot (lazily, once per call).
-3. `postStreamSync()` re-reads the pinned slot **every time**, not gated on a flag
-   that only `execute()` sets.
-4. If a downstream stage consumes this output (`setTerminalOutput(false)`), publish
-   the exact size before `execute()` returns; see `setTerminalOutput` in
-   `include/stage/stage.h`.
-5. If the stage must sync or make host decisions mid-`execute()`, return
-   `isGraphCompatible() == false` for that direction instead.
+- How the size reaches the host: the DAG asks `getActualOutputSize*()` right after
+  `execute()`, and `compress()` calls `postStreamSync()` at the end. The usual pattern
+  (RZE, RLE): enqueue an async D2H copy of the total into a pinned slot, then sync and
+  read it lazily in the size getters and in `postStreamSync()`.
+- If a downstream stage consumes this output (`setTerminalOutput(false)`), publish
+  the exact size before `execute()` returns; see `setTerminalOutput` in
+  `include/stage/stage.h`.
 
 Size bounds:
 - Forward: the worst case including all headers and metadata. With a raw fallback,
@@ -171,8 +159,8 @@ The scaffold's summary lists these; do all of them.
 
 ## Phase 5 — Tests (Step 9)
 
-Fill the six generated tests (RoundTrip, ZeroInput, SerializeDeserialize,
-SaveRestoreState, PipelineIntegration, GraphCompatible). ZeroInput checks `n == 0` on
+Fill the five generated tests (RoundTrip, ZeroInput, SerializeDeserialize,
+SaveRestoreState, PipelineIntegration). ZeroInput checks `n == 0` on
 the stage directly, because a `Pipeline` rejects an empty input. Templated stages:
 make the tests typed (`TYPED_TEST`) over every type the factory and TOML accept.
 
@@ -191,11 +179,6 @@ Then add these, which past bugs showed are needed:
 - **Coders**: incompressible input (random bytes) must round-trip even if it expands.
   The scaffold's tests use float data with a tolerance; for a byte coder, compare
   bytes exactly.
-- **Captured-graph replay** (if `isGraphCompatible()` can return true): enable graph
-  mode, `warmup`, `captureGraph`, then compress → decompress input A, then compress
-  → decompress a *different* input B. Each reported compressed size and decoded
-  result must match a fresh non-graph pipeline. The generated `GraphCompatible` test
-  only checks a boolean; it doesn't catch this.
 - **Floating-point / lossy stages**: f64 as well as f32 with a relative error bound,
   through the file round trip.
 - **TOML**: `saveConfig` → `loadConfig` with non-default parameters. Check the saved
@@ -220,7 +203,7 @@ file-I/O tests, runs them, and runs the stage's tests under Compute Sanitizer
 (memcheck, racecheck, initcheck). When the build supports `FZ_POISON_ALLOCATIONS`,
 it also runs the stage's tests with pool memory poisoned to `0xA5` and `0x00`
 (otherwise it prints a WARN that this check is unavailable). It also warns on skipped
-tests and on a stage with no captured-graph replay test, and ends with
+tests, and ends with
 `RESULT: PASS` or a list of what to fix.
 
 The full rebuild before `ctest --preset default` matters: shared headers changed, and

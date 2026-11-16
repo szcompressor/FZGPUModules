@@ -374,11 +374,6 @@ public:
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
 
-    bool isGraphCompatible() const override {
-        return !is_inverse_ && execution_mode_ == HuffmanExecutionMode::DeviceResident
-               && book_source_ == HuffmanBookSource::Fixed && is_terminal_output_;
-    }
-
     void setTerminalOutput(bool terminal) override { is_terminal_output_ = terminal; }
 
     void postStreamSync(fz::stream_t stream) override;

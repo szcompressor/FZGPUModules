@@ -2,9 +2,8 @@
  * tests/stages/test_huffman.cpp
  *
  * GPU unit tests for HuffmanStage<T>.
- * The default host-coordinated path is not graph-compatible.  The fixed-book
- * DeviceResident forward path performs its scan and header assembly on-device
- * and is graph-compatible when Huffman is the terminal stage.
+ * The default path is host-coordinated.  The fixed-book DeviceResident forward
+ * path performs its scan and header assembly on-device.
  *
  *   HF1   HuffmanStage/RoundTrip_U16                  — uint16_t forward+inverse exact match
  *   HF2   HuffmanStage/RoundTrip_U8                   — uint8_t forward+inverse exact match
@@ -12,7 +11,6 @@
  *   HF4   HuffmanStage/CompressedSmallerThanInput      — compressed size < input for skewed data
  *   HF5   HuffmanStage/SerializeDeserialize            — serializeHeader→deserializeHeader roundtrip
  *   HF6   HuffmanStage/SaveRestoreState                — saveState+deserializeHeader+restoreState
- *   HF7   HuffmanStage/GraphCompatible                 — isGraphCompatible()==false
  *   HF8   HuffmanStage/PipelineIntegration_U16         — Pipeline round-trip with uint16_t codes
  *   HF9   HuffmanStage/LorenzoQuantPipeline            — LorenzoQuant→Huffman end-to-end float round-trip
  *   HF10  HuffmanStage/RoundTrip_U32                  — uint32_t forward+inverse exact match
@@ -246,24 +244,6 @@ TEST(HuffmanStage, SaveRestoreState) {
 
     s.restoreState();
     EXPECT_EQ(s.getBklen(), 512u);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HF7 — GraphCompatible
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(HuffmanStage, GraphCompatible) {
-    HuffmanStage<uint16_t> stage;
-    EXPECT_FALSE(stage.isGraphCompatible());
-
-    stage.setExecutionMode(HuffmanExecutionMode::DeviceResident);
-    EXPECT_FALSE(stage.isGraphCompatible()) << "device mode still needs a fixed book";
-
-    stage.setFixedBookFromModel(
-        {HuffmanBookModel::Uniform, -1.0, 1.0, 2.0});
-    EXPECT_TRUE(stage.isGraphCompatible());
-
-    stage.setInverse(true);
-    EXPECT_FALSE(stage.isGraphCompatible());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1131,7 +1111,6 @@ TEST(HuffmanStage, DeviceResidentNonTerminalPipeline) {
     auto* rle = p.addStage<RLEStage<uint8_t>>();
     p.connect(rle, huf);
     ASSERT_NO_THROW(p.finalize());
-    EXPECT_FALSE(huf->isGraphCompatible());
 
     CudaStream cs;
     const auto result = pipeline_round_trip<uint16_t>(p, input, cs.stream);

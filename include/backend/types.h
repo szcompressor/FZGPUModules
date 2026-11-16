@@ -30,8 +30,6 @@ using stream_t     = hipStream_t;
 using event_t      = hipEvent_t;
 using mempool_t    = hipMemPool_t;
 using error_t      = hipError_t;
-using graph_t      = hipGraph_t;
-using graph_exec_t = hipGraphExec_t;
 
 inline constexpr error_t kBackendSuccess = hipSuccess;
 
@@ -76,8 +74,6 @@ using stream_t     = cudaStream_t;
 using event_t      = cudaEvent_t;
 using mempool_t    = cudaMemPool_t;
 using error_t      = cudaError_t;
-using graph_t      = cudaGraph_t;
-using graph_exec_t = cudaGraphExec_t;
 
 inline constexpr error_t kBackendSuccess = cudaSuccess;
 

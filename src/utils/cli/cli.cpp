@@ -71,7 +71,6 @@ struct CliSettings {
     int  verbose_level = 0;    // 0=off, 1=INFO, 2=DEBUG, 3=TRACE
     bool print_pipeline = false;
     bool bounds_check = false;
-    bool use_graph = false;
     /// --no-coloring: disable liveness-driven buffer aliasing under PREALLOCATE.
     /// Exists for the peak-memory ablation — with coloring off, the pool peak is
     /// the sum of worst-case stage outputs, i.e. what a framework that cannot know
@@ -237,6 +236,12 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
             continue;
         }
 
+        if (key == "graph") {
+            throw std::runtime_error(
+                "--graph was removed together with CUDA Graph mode; drop the option "
+                "(see CHANGELOG.md, \"Removed\")");
+        }
+
         // --list-stages / --list-stages=json : optional-value option
         if (key == "list-stages") {
             opts[key] = has_value ? value : "text";
@@ -252,8 +257,7 @@ static OptionMap parse_option_tokens(int argc, char** argv, int start_index) {
             (key == "profile") ||
             (key == "print-pipeline") ||
             (key == "bounds-check") ||
-            (key == "no-coloring") ||
-            (key == "graph");
+            (key == "no-coloring");
 
         if (is_flag) {
             opts[key] = "true";
@@ -353,7 +357,6 @@ static void apply_common_options(const OptionMap& opts, CliSettings* s) {
     s->report = contains(opts, "report") && parse_bool(opts.at("report"), "report");
     s->print_pipeline = contains(opts, "print-pipeline") && parse_bool(opts.at("print-pipeline"), "print-pipeline");
     s->bounds_check   = contains(opts, "bounds-check")   && parse_bool(opts.at("bounds-check"),   "bounds-check");
-    s->use_graph      = contains(opts, "graph")          && parse_bool(opts.at("graph"),           "graph");
     s->no_coloring    = contains(opts, "no-coloring")    && parse_bool(opts.at("no-coloring"),     "no-coloring");
 
     if (contains(opts, "verbose")) {
@@ -816,7 +819,6 @@ static void print_root_usage(const char* argv0) {
         << "  --report-json <file>              Write a machine-readable JSON report to <file>\n"
         << "  --compare <original>              Compare decompressed output with original\n"
         << "  --profile                         Print per-stage GPU timing table\n"
-        << "  --graph                           Use CUDA Graph mode for benchmark (silently falls back if pipeline is incompatible)\n"
         << "  --print-pipeline                  Print pipeline stage graph after finalize\n"
         << "  --list-stages[=json]              List every stage type a TOML config accepts, then exit\n\n"
         << "Diagnostic Options:\n"
@@ -1221,10 +1223,7 @@ static int run_benchmark(CliSettings s) {
     const bool want_json = !s.report_json_path.empty();
     void* d_input = nullptr;
 
-    // Graph mode state — bench_stream stays 0 (default stream) unless graph capture succeeds.
-    bool graph_active = false;
-    std::string graph_reason;
-    cudaStream_t bench_stream = 0;
+    const cudaStream_t bench_stream = 0;
 
     try {
         FZ_CUDA_CHECK(cudaMalloc(&d_input, payload_bytes));
@@ -1233,77 +1232,8 @@ static int run_benchmark(CliSettings s) {
         s.profile = true;
         std::unique_ptr<Pipeline> pipeline;
 
-        // ── Try CUDA Graph capture ─────────────────────────────────────────────
-        // Graph mode requires PREALLOCATE (enforced here regardless of -strategy).
-        // enableGraphMode() must be called before finalize() (which loadConfig() does
-        // internally, or build_dynamic_linear_pipeline() does at the end).
-        // enableProfiling() must be on before warmup()/captureGraph() so the
-        // whole-pipeline DagEventTimer (events recorded on `stream`, outside the
-        // graph) yields dag_elapsed_ms.  Per-stage event timing is *not* available
-        // during a graph replay — cudaEventElapsedTime() across graph-recorded
-        // events is unsupported — so the compress `stages[]` breakdown is empty
-        // under --graph (decompress, which runs the normal DAG, still reports it).
-        // A real (non-default) stream is required because cudaStreamBeginCapture
-        // returns cudaErrorStreamCaptureUnsupported on stream 0.
-        if (s.use_graph) {
-            try {
-                CliSettings gs = s;
-                gs.strategy    = MemoryStrategy::PREALLOCATE;
-                gs.warmup      = false;   // manual warmup(stream) below; skip auto on stream 0
-                gs.print_pipeline = false; // suppress during trial; print after confirmed success
-
-                auto gp = std::make_unique<Pipeline>(payload_bytes, MemoryStrategy::PREALLOCATE,
-                                                     s.pool_multiplier);
-                if (!s.config_path.empty()) {
-                    gp->setDims(s.nx, s.ny, s.nz);
-                    gp->setWarmupOnFinalize(false);
-                    if (s.bounds_check) gp->enableBoundsCheck(true);
-                    if (s.no_coloring)  gp->setColoringEnabled(false);
-                    gp->enableProfiling(true);
-                    gp->enableGraphMode(true);
-                    gp->loadConfig(s.config_path);   // calls finalize() internally
-                } else {
-                    gp->enableGraphMode(true);        // must precede finalize() inside build_*
-                    if (gs.type == "f32") {
-                        build_dynamic_linear_pipeline<float>(gp.get(), gs);
-                    } else if (gs.type == "f64") {
-                        build_dynamic_linear_pipeline<double>(gp.get(), gs);
-                    } else {
-                        throw std::runtime_error("Dynamic builder only supports f32/f64 currently.");
-                    }
-                }
-
-                // Ensure profiling is on before warmup/captureGraph (calling again is harmless
-                // if build_dynamic_linear_pipeline already set it).
-                gp->enableProfiling(true);
-
-                // CUDA graph capture requires a non-default stream.
-                FZ_CUDA_CHECK(cudaStreamCreate(&bench_stream));
-
-                gp->warmup(bench_stream);
-                gp->captureGraph(bench_stream);
-                FZ_CUDA_CHECK(cudaStreamSynchronize(bench_stream));
-
-                if (s.print_pipeline) gp->printPipeline();
-
-                pipeline = std::move(gp);
-                graph_active = true;
-                s.strategy = MemoryStrategy::PREALLOCATE;  // reflect actual strategy in JSON
-                std::cout << "[benchmark] CUDA graph captured successfully\n";
-            } catch (const std::exception& ex) {
-                graph_reason = ex.what();
-                if (bench_stream != 0) {
-                    cudaStreamDestroy(bench_stream);
-                    bench_stream = 0;
-                }
-                pipeline.reset();
-                std::cerr << "[benchmark] Graph capture failed (falling back to normal pipeline): "
-                          << ex.what() << "\n";
-            }
-        }
-
-        // ── Normal pipeline (no --graph, or silent graph fallback) ─────────────
-        if (!pipeline) {
+        // ── Build the pipeline ─────────────────────────────────────────────────
+        {
             if (!s.config_path.empty()) {
                 pipeline = std::make_unique<Pipeline>(payload_bytes, s.strategy, s.pool_multiplier);
                 pipeline->setDims(s.nx, s.ny, s.nz);
@@ -1427,19 +1357,14 @@ static int run_benchmark(CliSettings s) {
             append_stages(d.stages, last_compress_perf, "compress");
             append_stages(d.stages, last_decompress_perf, "decompress");
             if (has_m) set_quality(d, m);
-            d.graph_requested = s.use_graph;
-            d.graph_active    = graph_active;
-            d.graph_incompatible_reason = graph_reason;
             set_stage_versions(d);
             try_write_report(s.report_json_path, d);
         }
 
     } catch (...) {
-        if (bench_stream != 0) { cudaStreamDestroy(bench_stream); bench_stream = 0; }
         if (d_input) FZ_CUDA_CHECK_WARN(cudaFree(d_input));
         throw;
     }
-    if (bench_stream != 0) cudaStreamDestroy(bench_stream);
     if (d_input) FZ_CUDA_CHECK(cudaFree(d_input));
     return 0;
 }

@@ -84,12 +84,6 @@ The 5-byte stage header holds `chunk_size` (uint32) and the element `DataType`
 
 ---
 
-## Graph capture
-
-Forward (compress) is CUDA-graph capturable. The inverse is not: decoding reads the
-stream header with blocking device-to-host copies before it launches.
-
----
 
 ## Pipeline Specialization
 

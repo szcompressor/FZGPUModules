@@ -873,8 +873,8 @@ void GInterpStage<TInput, TCode>::execute(
                     ? (1.0 / static_cast<double>(computed_abs_eb_)) : 0.0;
 
     // ── Auto-tune radius if user left it at the sentinel (0) ──
-    // Manual override (any radius > 0) skips the scan — required for CUDA
-    // graph capture, since the scan does a D2H sync inside computeValueBase.
+    // Manual override (any radius > 0) skips the scan and its D2H sync inside
+    // computeValueBase.
     if (config_.quant_radius == 0 && ebx2 > 0.0f) {
         float data_range = 0.0f;
         if (config_.eb_mode == ErrorBoundMode::NOA && computed_value_base_ > 0.0f) {
@@ -943,8 +943,7 @@ void GInterpStage<TInput, TCode>::execute(
         resolved_use_md_[0] = resolved_use_md_[1] = 1;
 
         // Defer compute_rel_eb() until we know it's needed — the rel_eb scan
-        // would break CUDA Graph capture, but with user-supplied alpha+beta
-        // we never look at it.
+        // syncs the host, and with user-supplied alpha+beta we never look at it.
         const bool need_rel_eb_for_alpha = (config_.manual_alpha <= 0.0);
         const double rel_eb = need_rel_eb_for_alpha ? compute_rel_eb() : 0.0;
         resolved_alpha_ = (config_.manual_alpha > 0.0)
@@ -1157,46 +1156,36 @@ void GInterpStage<TInput, TCode>::execute(
     // run) and corrupts memory (E19). Sorting (idx, val) by idx gives a
     // reproducible, stable-size blob. Outlier counts are tiny (~0.001-0.004% of
     // N here), so the radix sort is negligible next to the spline kernel.
-    // Skipped during CUDA graph capture: we can't read the host count there, and
-    // capture only runs under PREALLOCATE — which sizes buffers to worst case
-    // once, so the size-variation crash cannot occur on that path anyway.
     {
-        cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
-        cudaStreamIsCapturing(stream, &cap);
-        if (cap == cudaStreamCaptureStatusNone) {
-            uint32_t h_count = 0;
-            FZ_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_outlier_count_scratch_,
-                                          sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
-            FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
-            if (h_count > 1 && h_count <= max_outliers) {
-                uint32_t* d_idx = static_cast<uint32_t*>(outputs[3]);
-                TInput*   d_val = static_cast<TInput*>(outputs[2]);
-                const int n = static_cast<int>(h_count);
-                uint32_t* d_idx_out = static_cast<uint32_t*>(
-                    pool->allocate(h_count * sizeof(uint32_t), stream, "ginterp_sort_idx"));
-                TInput*   d_val_out = static_cast<TInput*>(
-                    pool->allocate(h_count * sizeof(TInput),   stream, "ginterp_sort_val"));
-                auto d_tmp = fz::backend::withTempStorage(pool, stream, "ginterp_sort_tmp",
-                    [&](void* tmp, size_t& bytes) {
-                        cub::DeviceRadixSort::SortPairs(tmp, bytes, d_idx, d_idx_out,
-                                                        d_val, d_val_out, n, 0, 32, stream);
-                    });
-                FZ_CUDA_CHECK(cudaMemcpyAsync(d_idx, d_idx_out, h_count * sizeof(uint32_t),
-                                              cudaMemcpyDeviceToDevice, stream));
-                FZ_CUDA_CHECK(cudaMemcpyAsync(d_val, d_val_out, h_count * sizeof(TInput),
-                                              cudaMemcpyDeviceToDevice, stream));
-                fz::backend::freeTempStorage(pool, d_tmp, stream);
-                pool->free(d_idx_out, stream);
-                pool->free(d_val_out, stream);
-            }
+        uint32_t h_count = 0;
+        FZ_CUDA_CHECK(cudaMemcpyAsync(&h_count, d_outlier_count_scratch_,
+                                      sizeof(uint32_t), cudaMemcpyDeviceToHost, stream));
+        FZ_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (h_count > 1 && h_count <= max_outliers) {
+            uint32_t* d_idx = static_cast<uint32_t*>(outputs[3]);
+            TInput*   d_val = static_cast<TInput*>(outputs[2]);
+            const int n = static_cast<int>(h_count);
+            uint32_t* d_idx_out = static_cast<uint32_t*>(
+                pool->allocate(h_count * sizeof(uint32_t), stream, "ginterp_sort_idx"));
+            TInput*   d_val_out = static_cast<TInput*>(
+                pool->allocate(h_count * sizeof(TInput),   stream, "ginterp_sort_val"));
+            auto d_tmp = fz::backend::withTempStorage(pool, stream, "ginterp_sort_tmp",
+                [&](void* tmp, size_t& bytes) {
+                    cub::DeviceRadixSort::SortPairs(tmp, bytes, d_idx, d_idx_out,
+                                                    d_val, d_val_out, n, 0, 32, stream);
+                });
+            FZ_CUDA_CHECK(cudaMemcpyAsync(d_idx, d_idx_out, h_count * sizeof(uint32_t),
+                                          cudaMemcpyDeviceToDevice, stream));
+            FZ_CUDA_CHECK(cudaMemcpyAsync(d_val, d_val_out, h_count * sizeof(TInput),
+                                          cudaMemcpyDeviceToDevice, stream));
+            fz::backend::freeTempStorage(pool, d_tmp, stream);
+            pool->free(d_idx_out, stream);
+            pool->free(d_val_out, stream);
         }
     }
 
-    // Max-capacity placeholders; postStreamSync() trims (and refreshes
-    // actual_outlier_count_). We do NOT zero actual_outlier_count_ here:
-    // this method may run inside cudaStreamBeginCapture/EndCapture (graph
-    // recording), where postStreamSync isn't called — clobbering the count
-    // would break the subsequent inverse path.
+    // Max-capacity placeholders; postStreamSync() trims them and refreshes
+    // actual_outlier_count_.
     size_t anchor_N             = anchor_dims_[0] * anchor_dims_[1] * anchor_dims_[2];
     actual_output_sizes_[0]     = N           * sizeof(TCode);
     actual_output_sizes_[1]     = anchor_N    * sizeof(TInput);

@@ -20,7 +20,7 @@
  *     error bound for THIS element, escalating to a lossless outlier if not)
  *     and decode (which must reproduce the identical offset with no access to
  *     the original value) always agree.
- *   - it is safe under arbitrary launch configurations and CUDA Graph capture.
+ *   - it is safe under arbitrary launch configurations.
  *
  * Usage:
  *   float offset = fz::ditherUnit(i, seed) * abs_eb;  // offset in [-abs_eb, abs_eb)

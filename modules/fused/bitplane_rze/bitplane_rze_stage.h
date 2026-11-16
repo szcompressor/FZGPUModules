@@ -46,7 +46,7 @@ namespace fz {
  * followed by the bitflag bitmap, per-block start positions, and the compacted
  * bitstream.
  *
- * @note **Not graph-compatible.** Both directions do a host-blocking
+ * @note Both directions do a host-blocking
  *       `cudaStreamSynchronize` + D2H copy (the forward to read the compacted
  *       length, the inverse to read the archive header).
  *
@@ -65,9 +65,6 @@ public:
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-
-    // Both directions do a blocking D2H sync; never graph-capturable.
-    bool isGraphCompatible() const override { return false; }
 
     // ── Execution ──────────────────────────────────────────────────────────
     void execute(

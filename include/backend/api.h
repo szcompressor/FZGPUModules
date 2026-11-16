@@ -7,7 +7,7 @@
  * Phase 0 abstracted the GPU *handle types* (`fz::stream_t` and friends, see
  * backend/types.h) but left the ~380 host-side runtime *calls* spelled with
  * their CUDA names (`cudaMalloc`, `cudaMemcpyAsync`, `cudaMemPoolCreate`,
- * `cudaGraphLaunch`, ...). HIP is deliberately source-compatible with the CUDA
+ * `cudaStreamSynchronize`, ...). HIP is deliberately source-compatible with the CUDA
  * runtime — its whole design premise is that `hipify` is a textual `cuda`→`hip`
  * rename — so rather than churn every call site, this header re-points the CUDA
  * spellings at their HIP equivalents when the HIP backend is selected.
@@ -51,8 +51,6 @@
 #define cudaError_t                 hipError_t
 #define cudaStream_t                hipStream_t
 #define cudaEvent_t                 hipEvent_t
-#define cudaGraph_t                 hipGraph_t
-#define cudaGraphExec_t             hipGraphExec_t
 #define cudaMemPool_t               hipMemPool_t
 #define cudaMemPoolProps            hipMemPoolProps
 #define cudaFuncAttribute           hipFuncAttribute
@@ -138,17 +136,6 @@
 #define cudaEventElapsedTime        hipEventElapsedTime
 #define cudaEventDefault            hipEventDefault
 #define cudaEventDisableTiming      hipEventDisableTiming
-
-// ── Graph capture
-#define cudaStreamBeginCapture      hipStreamBeginCapture
-#define cudaStreamEndCapture        hipStreamEndCapture
-#define cudaStreamIsCapturing       hipStreamIsCapturing
-#define cudaStreamCaptureModeGlobal hipStreamCaptureModeGlobal
-#define cudaStreamCaptureStatusNone hipStreamCaptureStatusNone
-#define cudaGraphInstantiate        hipGraphInstantiate
-#define cudaGraphLaunch             hipGraphLaunch
-#define cudaGraphDestroy            hipGraphDestroy
-#define cudaGraphExecDestroy        hipGraphExecDestroy
 
 // Device-side unconditional abort. CUDA exposes this as the named intrinsic
 // __trap(); HIP's clang only provides the compiler builtin __builtin_trap().

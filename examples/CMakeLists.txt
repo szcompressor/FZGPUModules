@@ -36,12 +36,6 @@ target_link_libraries(pfpl_memory_strategies PRIVATE fzgmod)
 set_target_properties(pfpl_memory_strategies PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
-# ── MINIMAL / PREALLOCATE / CUDA Graph capture three-way comparison ───────────
-add_executable(pfpl_graph_capture pfpl_graph_capture.cpp)
-target_link_libraries(pfpl_graph_capture PRIVATE fzgmod)
-set_target_properties(pfpl_graph_capture PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
-
 # ── Getting-started: LorenzoQuant → Bitshuffle → RZE ─────────────────────────
 add_executable(lorenzo_intro lorenzo_intro.cpp)
 target_link_libraries(lorenzo_intro PRIVATE fzgmod)
@@ -108,7 +102,7 @@ target_link_libraries(cusz_huffman_vs_bitplane_rze PRIVATE fzgmod)
 set_target_properties(cusz_huffman_vs_bitplane_rze PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
 
-# ── cuSZp 1/2/3 variants: performance + CUDA graph-mode check ─────────────────
+# ── cuSZp 1/2/3 variants: compression ratio and throughput ───────────────────
 add_executable(cuszp_variants cuszp_variants.cpp)
 target_link_libraries(cuszp_variants PRIVATE fzgmod)
 set_target_properties(cuszp_variants PROPERTIES

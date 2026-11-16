@@ -54,14 +54,12 @@ static_assert(sizeof(AdaptiveBitpackConfig) <= FZM_STAGE_CONFIG_SIZE,
  * Pair with `QuantizerStage(linear) → LorenzoStage(setBlockSize)` for the cuSZp
  * pipeline; `block_size` typically matches the Lorenzo block (32) but need not.
  *
- * @note **Forward is graph-compatible; inverse is not.** The forward path's
- *       data-dependent compressed-size readback (cuSZp's `cmpSize` D2H) is
- *       deferred to `postStreamSync()` — run after the launch, outside any
- *       capture window — so `execute()` enqueues only stream-ordered device
- *       work. Per-block cost/offset scratch is kept persistent so the readback
- *       can happen post-sync and no allocation occurs during graph replay
- *       (mirrors `RZEStage`'s forward). The inverse keeps a per-execute layout
- *       and stays out of capture.
+ * @note The forward path's data-dependent compressed-size readback (cuSZp's
+ *       `cmpSize` D2H) is deferred to `postStreamSync()`, after the launch, so
+ *       `execute()` enqueues only stream-ordered device work. Per-block
+ *       cost/offset scratch is kept persistent so the readback can happen
+ *       post-sync (mirrors `RZEStage`'s forward). The inverse keeps a
+ *       per-execute layout.
  *
  * @note **Prior work:** the per-block fixed-rate bit-plane encoding is the cuSZp
  *       lossless scheme (Yafan Huang et al., SC'23/SC'24, BSD-3-Clause). This
@@ -83,12 +81,6 @@ public:
     // ── Stage control ──────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-    // Forward (compress) is graph-capturable: execute() enqueues only
-    // device-side work and the data-dependent compressed-size readback is
-    // deferred to postStreamSync() (run after the launch, outside any capture
-    // window).  The inverse path keeps a per-execute layout and is left out of
-    // graph capture, mirroring RZEStage.
-    bool isGraphCompatible() const override { return !is_inverse_; }
 
     /// Elements per logical block (the fixed-rate granularity). Must be in
     /// [1, 1024]. cuSZp uses 32.
@@ -226,8 +218,8 @@ public:
 
     /// Forward only: read the scanned payload length (D2H of two tail words from
     /// the persistent cost/offset scratch) once the stream is idle, and finalize
-    /// actual_output_size_.  Kept out of execute() so the forward path stays
-    /// graph-capturable (no host sync inside the capture window).
+    /// actual_output_size_.  Kept out of execute() so the forward path has no
+    /// host sync.
     void postStreamSync(fz::stream_t stream) override;
 
     // ── Metadata ───────────────────────────────────────────────────────────
@@ -322,8 +314,7 @@ private:
     std::string fused_coder_ = "AdaptiveBitpackCoder";
 
     // Forward-path persistent scratch (kept alive across execute() so the
-    // compressed-size readback can be deferred to postStreamSync(), and so no
-    // allocation happens inside a captured graph replay). Grown lazily when a
+    // compressed-size readback can be deferred to postStreamSync()). Grown lazily when a
     // larger input is seen; freed in the destructor. Pool-managed (persistent).
     uint32_t*   d_cost_          = nullptr;  ///< per-block payload byte cost
     uint32_t*   d_offset_        = nullptr;  ///< exclusive scan of d_cost_

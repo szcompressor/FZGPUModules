@@ -189,7 +189,7 @@ static_assert(sizeof(GInterpConfig) <= FZM_STAGE_CONFIG_SIZE,
  * data range, capped at the TCode bit-width's maximum. This minimises outlier
  * count for unknown data ranges and is the recommended setting.
  *
- * For **CUDA graph capture** or strict determinism, set the radius explicitly
+ * For strict determinism (or to avoid the scan's host sync), set the radius explicitly
  * to any positive value to skip the scan (e.g. `setQuantRadius(512)` for
  * climate-style data where the user wants extremes routed to the outlier
  * triplet for downstream handling).
@@ -210,8 +210,8 @@ public:
         ///       input min/max and picks the largest radius that fits the data
         ///       range, capped at the TCode bit-width's maximum. Minimises
         ///       outlier count and works on any data range out of the box.
-        ///   > 0 = manual: use this radius directly, skip the scan. Required
-        ///       for CUDA graph capture (the scan does a D2H sync). Manual
+        ///   > 0 = manual: use this radius directly, skip the scan (and its
+        ///       D2H sync). Manual
         ///       values like 512 are useful when the user wants residuals
         ///       beyond `radius * eb / 2` routed to the separate outlier
         ///       triplet (e.g. climate data where extremes are handled
@@ -224,7 +224,7 @@ public:
         std::array<size_t, 3> dims = {0, 0, 0};
         ErrorBoundMode eb_mode   = ErrorBoundMode::ABS;
         /// Pre-computed value_range (NOA) or max(|data|) (REL). Set to skip
-        /// the on-device scan during execute() (required for graph capture).
+        /// the on-device scan (and its host sync) during execute().
         float precomputed_value_base = 0.0f;
         /// `INTERPOLATION_PARAMS` auto-tuning mode (cuSZ-Hi).
         ///   0 = off (default, deterministic baseline)
@@ -240,8 +240,7 @@ public:
         ///       used with `beta=4.0`. The structural flags stay at baseline.
         /// Mode 1 is 3-D-only; modes 2--5 support both 2-D and 3-D.
         /// Any non-zero mode that does profiling (1--4) forces a host-blocking
-        /// D2H sync inside execute() and is **incompatible with CUDA graph
-        /// capture**. Mode 5 (manual) is graph-safe.
+        /// D2H sync inside execute(). Mode 5 (manual) does not.
         uint8_t auto_tuning_mode = 0;
 
         /// Manual alpha override for `auto_tuning_mode == 5`. Set to a value
@@ -329,8 +328,8 @@ public:
     void setValueBase(float v)                { config_.precomputed_value_base = v; }
     /// Enable cuSZ-Hi's `INTERPOLATION_PARAMS` auto-tuning. See
     /// `Config::auto_tuning_mode` for mode semantics. Default is 0 (off).
-    /// Profiling modes (1/3/4) disable CUDA graph capture for this stage;
-    /// mode 5 (manual override) is graph-safe.
+    /// Profiling modes (1/3/4) add a host sync inside execute(); mode 5
+    /// (manual override) does not.
     void setAutoTuning(uint8_t mode)          { config_.auto_tuning_mode = mode; }
     void set2DGeometry(GInterp2DGeometry geometry) {
         if (geometry != GInterp2DGeometry::Fine16 &&
@@ -394,33 +393,6 @@ public:
     void deserializeHeader(const uint8_t* buf, size_t size) override;
     size_t getMaxHeaderSize(size_t /*output_index*/) const override {
         return sizeof(GInterpConfig);
-    }
-
-    /// Graph-compatible iff `execute()` does no host-blocking work. Four
-    /// scans inside `execute()` can break capture, each conditional:
-    ///   1. `computeValueBase()` (D2H min/max scan) — runs for REL/NOA when
-    ///      `precomputed_value_base <= 0`. Caller must `setValueBase(...)` to
-    ///      skip this.
-    ///   2. Radius auto-tune — runs when `quant_radius == 0`. Caller must
-    ///      `setQuantRadius(...)` to a positive value to skip.
-    ///   3. Auto-tune profile kernels (modes 1/2/3/4) each end with a D2H +
-    ///      `cudaStreamSynchronize` of the error array. Only modes 0
-    ///      (baseline) and 5 (manual α/β override) skip the profile entirely.
-    ///   4. Mode 5 with `manual_alpha <= 0` still computes `rel_eb` to pick α
-    ///      from the piecewise-linear schedule, which (for ABS) goes through
-    ///      the same min/max scan. Caller must `setManualAlphaBeta(α>0, β)` to
-    ///      skip that. (Mode 0 never touches `rel_eb`.)
-    /// `postStreamSync()` runs outside the captured region (same pattern as
-    /// LorenzoQuantStage) so the outlier-count D2H doesn't gate this.
-    bool isGraphCompatible() const override {
-        const bool tune_ok = (config_.auto_tuning_mode == 0 ||
-                              config_.auto_tuning_mode == 5);
-        const bool radius_ok = config_.quant_radius > 0;
-        const bool eb_ok = (config_.eb_mode == ErrorBoundMode::ABS) ||
-                           (config_.precomputed_value_base > 0.0f);
-        const bool mode5_alpha_ok = (config_.auto_tuning_mode != 5) ||
-                                    (config_.manual_alpha > 0.0);
-        return tune_ok && radius_ok && eb_ok && mode5_alpha_ok;
     }
 
 private:

@@ -24,7 +24,6 @@
  *   CL11  CLOGStage/HeaderSerialization           — serializeHeader/deserializeHeader preserves config
  *   CL12  CLOGStage/UnsupportedChunkSizeThrows    — chunk_size not in {4096,8192,16384} throws at execute()
  *   CL13  CLOGStage/UnsupportedWordSizeThrows     — word_size∉{1,2,4,8} throws at execute()
- *   CL14  CLOGStage/IsGraphCompatible             — forward=true, inverse=false
  *   CL15  CLOGStage/RepeatedRoundTripStable       — repeated round-trips on same objects stable
  *   CL16  CLOGStage/ChunkSize4096RandomBytesRoundTrip — chunk_size=4096, multi-chunk random bytes
  *   CL17  CLOGStage/ChunkSize8192PartialChunkRoundTrip — chunk_size=8192, input not a multiple of chunk_size
@@ -217,14 +216,6 @@ TEST(CLOGStage, UnsupportedWordSizeThrows) {
     std::vector<void*> in = {d_in.void_ptr()}, out = {d_out.void_ptr()};
     std::vector<size_t> sz = {data.size()};
     EXPECT_THROW(s.execute(cs.stream, pool.get(), in, out, sz), std::runtime_error);
-}
-
-TEST(CLOGStage, IsGraphCompatible) {
-    CLOGStage fwd;
-    EXPECT_TRUE(fwd.isGraphCompatible());
-    CLOGStage inv;
-    inv.setInverse(true);
-    EXPECT_FALSE(inv.isGraphCompatible());
 }
 
 TEST(CLOGStage, RepeatedRoundTripStable) {

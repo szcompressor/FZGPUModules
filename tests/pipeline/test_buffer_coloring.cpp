@@ -15,7 +15,6 @@
  *   BC6   Peak memory with coloring is <= peak memory without coloring
  *   BC7   getColorRegionCount() returns 0 when coloring is disabled
  *   BC8   Repeated compress() calls on a colored pipeline stay correct
- *   BC10  Colored (aliased) buffers remain stable across CUDA graph replays
  *   BC9   A multi-stage linear pipeline (Lorenzo→Diff→Bitshuffle) roundtrip
  *         is correct with coloring enabled
  */
@@ -277,68 +276,6 @@ TEST(BufferColoring, RepeatedCompressStaysCorrect) {
         EXPECT_LE(max_err, kEB * 1.01f)
             << "Run " << run << ": max_err=" << max_err
             << " exceeds error bound " << kEB;
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BC10: Colored (aliased) buffers remain stable across CUDA graph replays
-//       (PREALLOCATE + coloring enabled + graph mode; 5 compress replays)
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(BufferColoring, ColoredBuffersStableAcrossGraphReplays) {
-    {
-        Pipeline probe(kNBytes, MemoryStrategy::PREALLOCATE, 1.0f);
-        if (probe.isMemPoolFallbackMode()) {
-            GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode";
-        }
-    }
-    auto h_input = make_smooth_data<float>(kN);
-
-    CudaStream stream;
-    CudaBuffer<float> d_in(kN);
-    d_in.upload(h_input, stream);
-    stream.sync();
-
-    // PREALLOCATE + coloring enabled (default) + graph mode
-    Pipeline p(kNBytes, MemoryStrategy::PREALLOCATE, 4.0f);
-    auto* lrz = p.addStage<LorenzoQuantStage<float, uint16_t>>();
-    lrz->setErrorBound(kEB);
-    lrz->setQuantRadius(512);
-    lrz->setOutlierCapacity(0.2f);
-    p.enableGraphMode(true);
-    p.setPoolManagedDecompOutput(false);
-    p.finalize();
-
-    ASSERT_TRUE(p.isColoringEnabled())
-        << "BC10: coloring must be applied in PREALLOCATE mode";
-
-    p.captureGraph(stream);
-    ASSERT_TRUE(p.isGraphCaptured())
-        << "BC10: graph capture must succeed with coloring enabled";
-
-    // Five replays — aliased regions must not corrupt each other across calls.
-    for (int run = 0; run < 5; run++) {
-        void*  d_comp  = nullptr;
-        size_t comp_sz = 0;
-        ASSERT_NO_THROW(p.compress(d_in.void_ptr(), kNBytes, &d_comp, &comp_sz, stream))
-            << "run " << run;
-        stream.sync();
-        ASSERT_GT(comp_sz, 0u) << "run " << run;
-
-        void*  d_dec  = nullptr;
-        size_t dec_sz = 0;
-        p.decompress(nullptr, 0, &d_dec, &dec_sz, stream);
-        stream.sync();
-        ASSERT_NE(d_dec, nullptr) << "run " << run;
-        ASSERT_EQ(dec_sz, kNBytes) << "run " << run;
-
-        std::vector<float> h_recon(kN);
-        cudaMemcpy(h_recon.data(), d_dec, kNBytes, cudaMemcpyDeviceToHost);
-        cudaFree(d_dec);
-
-        const float max_err = max_abs_error(h_input, h_recon);
-        EXPECT_LE(max_err, kEB * 1.01f)
-            << "run " << run << ": max_err=" << max_err
-            << " exceeds bound " << kEB;
     }
 }
 

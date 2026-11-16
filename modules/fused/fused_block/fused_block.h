@@ -18,8 +18,7 @@
  * Registry entries in the "predict+quant+fixedcoder" driver:
  *   - cuSZp2: Lorenzo(1-D, block=32)         → launchFusedCuszp2Compress
  *   - cuSZp3: TiledLorenzo(2-D 8x8, block=64) → launchFusedCuszp3Compress
- * Neither is graph-capturable — each synchronises to read back the archive
- * length — so fusion disables graph mode.
+ * Each synchronises the stream to read back the archive length.
  */
 
 #include "backend/types.h"

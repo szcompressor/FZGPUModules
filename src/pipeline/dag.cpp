@@ -23,7 +23,6 @@ CompressionDAG::CompressionDAG(MemoryPool* mem_pool, MemoryStrategy strategy)
       peak_memory_usage_(0),
       profiling_enabled_(false),
       bounds_check_enabled_(false),
-      capture_mode_(false),
       coloring_disabled_(false),
       coloring_applied_(false) {
     
@@ -417,7 +416,7 @@ void CompressionDAG::setFusedGroups(std::vector<FusedGroupExec> groups) {
 // node and its member stages' individual execute()s are bypassed. Forward groups
 // normally dispatch at the head; inverse groups with staged boundary inputs may
 // dispatch at the tail, after those inputs have been produced. Only reached with
-// fusion enabled (which also disables graph capture). Returns false if
+// fusion enabled. Returns false if
 // `node` is not part of any fused group, so the caller falls through to
 // normal per-stage dispatch.
 bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
@@ -452,7 +451,7 @@ bool CompressionDAG::executeFusedNode(DAGNode* node, cudaStream_t stream) {
                 allocateBuffer(buffer_id, stream);
     }
 
-    if (profiling_enabled_ && node->start_event && !capture_mode_)
+    if (profiling_enabled_ && node->start_event)
         FZ_CUDA_CHECK(cudaEventRecord(node->start_event, stream));
 
     const BufferInfo& in_buf  = buffers_.at(fg.head->input_buffer_ids[0]);
@@ -567,10 +566,7 @@ void CompressionDAG::execute(cudaStream_t stream) {
             if (executeFusedNode(node, stream)) continue;
 
             // Use node's assigned stream, or fallback to provided stream.
-            // During graph capture, force all work onto the single capture stream
-            // so the entire execute() body is recorded in one graph regardless of
-            // internal multi-stream assignments.
-            cudaStream_t exec_stream = (capture_mode_ || !node->stream) ? stream : node->stream;
+            cudaStream_t exec_stream = !node->stream ? stream : node->stream;
             
             for (auto* dep : node->dependencies) {
                 FZ_CUDA_CHECK(cudaStreamWaitEvent(exec_stream, dep->completion_event));
@@ -595,12 +591,9 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 outputs[j] = buffers_[node->output_buffer_ids[j]].d_ptr;
             }
             
-            // start_event is timing-only (read by collectTimings()).  Skip it
-            // during graph capture: per-stage elapsed-time queries across
-            // graph-recorded events are unsupported, so recording it would only
-            // add a dead node to the graph.  completion_event is still recorded
-            // below because it carries the inter-node dependency ordering.
-            if (profiling_enabled_ && node->start_event && !capture_mode_) {
+            // start_event is timing-only (read by collectTimings()); completion_event
+            // is recorded below because it carries the inter-node dependency ordering.
+            if (profiling_enabled_ && node->start_event) {
                 FZ_CUDA_CHECK(cudaEventRecord(node->start_event, exec_stream));
             }
 
@@ -608,44 +601,37 @@ void CompressionDAG::execute(cudaStream_t stream) {
                 node->stage->execute(exec_stream, mem_pool_, inputs, outputs, sizes);
 
                 // Propagate actual output sizes and run bounds checks.
-                // Skipped during graph capture: getActualOutputSize() calls
-                // completePendingSync() which would cudaStreamSynchronize(),
-                // breaking the open capture bracket.  Sizes were already set
-                // at finalize() time from estimateOutputSizes() worst-case
-                // values, which is sufficient for PREALLOCATE graph mode.
-                if (!capture_mode_) {
-                    // §6: use index-based accessor — no unordered_map allocation.
-                    for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
-                        size_t sz = node->stage->getActualOutputSize(static_cast<int>(k));
-                        if (sz > 0) buffers_[node->output_buffer_ids[k]].size = sz;
-                    }
+                // §6: use index-based accessor — no unordered_map allocation.
+                for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
+                    size_t sz = node->stage->getActualOutputSize(static_cast<int>(k));
+                    if (sz > 0) buffers_[node->output_buffer_ids[k]].size = sz;
+                }
 
-                    // Buffer overwrite bounds check.
-                    auto do_bounds_check = [&]() {
-                        auto out_names = node->stage->getOutputNames();
-                        for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
-                            int    bid  = node->output_buffer_ids[k];
-                            size_t cap  = buffers_[bid].allocated_size;
-                            if (cap == 0) continue;  // not yet allocated (MINIMAL, first run)
-                            size_t sz   = node->stage->getActualOutputSize(static_cast<int>(k));
-                            std::string name = (k < out_names.size())
-                                ? out_names[k] : std::to_string(k);
-                            if (sz > cap) {
-                                throw std::runtime_error(
-                                    "Buffer overwrite detected: stage '" + node->name +
-                                    "' output '" + name + "' wrote " +
-                                    std::to_string(sz) + " bytes into a " +
-                                    std::to_string(cap) + "-byte buffer");
-                            }
+                // Buffer overwrite bounds check.
+                auto do_bounds_check = [&]() {
+                    auto out_names = node->stage->getOutputNames();
+                    for (size_t k = 0; k < node->output_buffer_ids.size(); k++) {
+                        int    bid  = node->output_buffer_ids[k];
+                        size_t cap  = buffers_[bid].allocated_size;
+                        if (cap == 0) continue;  // not yet allocated (MINIMAL, first run)
+                        size_t sz   = node->stage->getActualOutputSize(static_cast<int>(k));
+                        std::string name = (k < out_names.size())
+                            ? out_names[k] : std::to_string(k);
+                        if (sz > cap) {
+                            throw std::runtime_error(
+                                "Buffer overwrite detected: stage '" + node->name +
+                                "' output '" + name + "' wrote " +
+                                std::to_string(sz) + " bytes into a " +
+                                std::to_string(cap) + "-byte buffer");
                         }
-                    };
+                    }
+                };
 
 #ifndef NDEBUG
-                    do_bounds_check();  // Always check in debug builds
+                do_bounds_check();  // Always check in debug builds
 #else
-                    if (bounds_check_enabled_) do_bounds_check();  // Opt-in in release
+                if (bounds_check_enabled_) do_bounds_check();  // Opt-in in release
 #endif
-                }
             }
             
             FZ_CUDA_CHECK(cudaEventRecord(node->completion_event, exec_stream));
@@ -680,40 +666,16 @@ void CompressionDAG::execute(cudaStream_t stream) {
     // stage execute(), so the waitEvent inserts a happens-before edge from
     // "node finishes" to "any subsequent work on stream".  This is a no-op for
     // single-source pipelines (all nodes already use `stream`).
-    if (!capture_mode_) {
-        for (int level = 0; level <= max_level_; level++) {
-            for (auto* node : levels_[level]) {
-                if (!node->is_executed) continue;
-                cudaStream_t exec_stream =
-                    (capture_mode_ || !node->stream) ? stream : node->stream;
-                if (exec_stream != stream) {
-                    FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, node->completion_event));
-                }
+    for (int level = 0; level <= max_level_; level++) {
+        for (auto* node : levels_[level]) {
+            if (!node->is_executed) continue;
+            cudaStream_t exec_stream =
+                !node->stream ? stream : node->stream;
+            if (exec_stream != stream) {
+                FZ_CUDA_CHECK(cudaStreamWaitEvent(stream, node->completion_event));
             }
         }
     }
-}
-
-void CompressionDAG::setCaptureMode(bool capture) {
-    if (capture) {
-        // Validate all stages before entering capture mode so the developer
-        // gets a clear error at setup time rather than a silent broken graph.
-        std::string incompatible;
-        for (const auto* node : nodes_) {
-            if (node->stage && !node->stage->isGraphCompatible()) {
-                if (!incompatible.empty()) incompatible += ", ";
-                incompatible += "'" + node->name + "' (" + node->stage->getName() + ")";
-            }
-        }
-        if (!incompatible.empty()) {
-            throw std::runtime_error(
-                "Cannot enable CUDA Graph capture mode: the following stages are "
-                "not graph-compatible: " + incompatible +
-                ". Override Stage::isGraphCompatible() to return false to suppress "
-                "this error and opt the stage out of graph capture.");
-        }
-    }
-    capture_mode_ = capture;
 }
 
 void CompressionDAG::reset(cudaStream_t stream) {

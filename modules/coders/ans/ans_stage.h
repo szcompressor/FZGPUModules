@@ -7,7 +7,7 @@
  * Forward: uint8_t[] → ANS compressed bitstream (ANSCoalescedHeader + rANS data).
  * Inverse: ANS bitstream → uint8_t[].
  *
- * D2H copies occur in both directions, so isGraphCompatible() returns false.
+ * D2H copies occur in both directions.
  *
  * Only prob_bits=10 is supported in this build (baked into GpuANS.cu template
  * instantiations).  setProbBits() is reserved for future use; calling execute()
@@ -67,9 +67,6 @@ public:
     // ── Stage control ─────────────────────────────────────────────────────────
     void setInverse(bool inv) override { is_inverse_ = inv; }
     bool isInverse() const override    { return is_inverse_; }
-
-    // D2H copies occur in both encode (header readback) and decode (header peek).
-    bool isGraphCompatible() const override { return false; }
 
     // dietGPU requires input aligned to 4 bytes (kANSRequiredAlignment).
     size_t getRequiredInputAlignment() const override { return 4; }

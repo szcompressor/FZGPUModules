@@ -1,5 +1,5 @@
 /**
- * cuSZp variants (1 / 2 / 3) — performance with and without CUDA Graph mode.
+ * cuSZp variants (1 / 2 / 3) — compression ratio and throughput.
  *
  * Builds the three modular cuSZp emulation pipelines and benchmarks each one,
  * reporting compression ratio plus compress/decompress throughput:
@@ -8,17 +8,8 @@
  *   cuSZp2 (SC'24, outlier) : Quantizer(linear) → Lorenzo(block=32)   → AdaptiveBitpack(32, outlier)
  *   cuSZp3 (SC'25, plain 2D): Quantizer(linear) → TiledLorenzo(8x8)   → AdaptiveBitpack(64)
  *
- * For each variant we measure two strategies:
- *   PREALLOCATE  — all buffers fixed at finalize() (standard fast path)
- *   GRAPH        — PREALLOCATE + CUDA Graph capture of the compress pipeline
- *
- * Graph mode IS supported on the compress (forward) path of all three variants.
- * AdaptiveBitpackStage still does cuSZp's data-dependent compressed-size readback
- * (one D2H per compress), but that readback is deferred to postStreamSync() — run
- * after the launch, outside the capture window — so the captured region contains
- * only stream-ordered device work.  The example captures each variant's compress
- * graph, replays it, and validates the round-trip through the graph-produced
- * buffer.  (Decompress is left out of capture, like RZEStage's inverse.)
+ * Each variant runs with PREALLOCATE (all buffers fixed at finalize()) and its
+ * round trip is validated against the error bound.
  *
  * Usage:
  *   ./build/release/bin/examples/cuszp_variants <file> [dim_x [dim_y [eb [runs]]]]
@@ -63,9 +54,8 @@ static const char* variant_name(Variant v) {
     return "?";
 }
 
-// Build the stage graph for `v` onto `p`.  Does NOT finalize so the caller can
-// toggle graph mode first.  All variants are ABS error-bound, so no value_base
-// injection is needed (the only graph blocker is AdaptiveBitpack's D2H).
+// Build the stage graph for `v` onto `p`.  Does NOT finalize.  All variants are
+// ABS error-bound, so no value_base injection is needed.
 static void build_variant(Pipeline& p, Variant v, float eb,
                           size_t dim_x, size_t dim_y) {
     p.setDims(dim_x, dim_y, 1);
@@ -121,14 +111,10 @@ struct VariantResult {
     double      max_abs_error   = 0;   // PREALLOCATE round-trip
     Stats       comp_ms;               // PREALLOCATE compress
     Stats       decomp_ms;             // PREALLOCATE decompress
-    bool        graph_ok = false;      // did graph capture + replay succeed?
-    Stats       graph_comp_ms;         // GRAPH compress (replay)
-    double      graph_max_abs_error = 0;// GRAPH round-trip (validates graph output)
-    std::string graph_msg;             // failure reason if capture threw
 };
 
-// Run the PREALLOCATE compress+decompress benchmark for one variant, validate
-// the round-trip, then attempt CUDA graph capture and record the outcome.
+// Run the PREALLOCATE compress+decompress benchmark for one variant and
+// validate the round-trip.
 static VariantResult run_variant(Variant v,
                                  const std::vector<float>& h_input,
                                  float* d_input,
@@ -145,7 +131,7 @@ static VariantResult run_variant(Variant v,
               << " " << variant_name(v) << "\n"
               << "══════════════════════════════════════════════════════════════\n";
 
-    // ── PREALLOCATE: the fastest non-graph path ──────────────────────────────
+    // ── PREALLOCATE: the standard fast path ─────────────────────────────────
     Pipeline comp(data_bytes, MemoryStrategy::PREALLOCATE, POOL_MULT);
     build_variant(comp, v, eb, dim_x, dim_y);
     comp.finalize();
@@ -206,73 +192,6 @@ static VariantResult run_variant(Variant v,
               << R.decomp_ms.min << " ms  → " << std::setprecision(2)
               << tput_gbs(data_bytes, R.decomp_ms.min) << " GB/s (peak)\n";
 
-    // ── GRAPH: capture the compress pipeline and replay it ────────────────────
-    std::cout << "\n  ── CUDA Graph capture ──\n";
-    try {
-        Pipeline gcomp(data_bytes, MemoryStrategy::PREALLOCATE, POOL_MULT);
-        build_variant(gcomp, v, eb, dim_x, dim_y);
-        gcomp.enableGraphMode(true);   // must precede finalize()
-        gcomp.finalize();
-        gcomp.enableProfiling(true);
-
-        // Graph capture needs a non-default stream (stream 0 is not capturable),
-        // and every graph-mode compress() must use that same stream.
-        cudaStream_t s = nullptr;
-        cudaStreamCreate(&s);
-        gcomp.warmup(s);        // JIT + size the persistent scratch before capture
-        gcomp.captureGraph(s);  // records the compress execute() as a CUDA graph
-        cudaStreamSynchronize(s);
-        std::cout << "  Graph captured.\n";
-
-        fz::BorrowedDeviceBuffer gcomp_buf;
-        fz::BorrowedDeviceBuffer gdecomp_buf;
-
-        // One untimed replay to populate outputs, then validate the round-trip
-        // through the graph-produced buffer (decompress runs normally).
-        gcomp_buf = gcomp.compress({d_input, data_bytes}, s);
-        cudaStreamSynchronize(s);
-        gdecomp_buf = gcomp.decompressBorrowed(gcomp_buf.cspan(), s);
-        cudaStreamSynchronize(s);
-
-        std::vector<float> g_host(n);
-        cudaMemcpy(g_host.data(), gdecomp_buf.data(), n * sizeof(float), cudaMemcpyDeviceToHost);
-        double g_err = 0.0;
-        for (size_t i = 0; i < n; ++i)
-            g_err = std::max(g_err, std::abs(static_cast<double>(h_input[i]) - g_host[i]));
-        R.graph_max_abs_error = g_err;
-
-        std::vector<double> g_v;
-        g_v.reserve(runs);
-        for (int i = 0; i < runs; ++i) {
-            auto t0 = std::chrono::high_resolution_clock::now();
-            gcomp_buf = gcomp.compress({d_input, data_bytes}, s);
-            cudaStreamSynchronize(s);
-            auto t1 = std::chrono::high_resolution_clock::now();
-            g_v.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
-        }
-        R.graph_comp_ms = summarize(g_v);
-        R.graph_ok = (gcomp_buf.bytes() == R.compressed_size && g_err <= eb * 1.0001);
-
-        cudaStreamDestroy(s);
-
-        std::cout << std::fixed
-                  << "  Graph compress         : mean " << std::setprecision(3)
-                  << R.graph_comp_ms.mean << " ms  min " << R.graph_comp_ms.min
-                  << " ms  → " << std::setprecision(2)
-                  << tput_gbs(data_bytes, R.graph_comp_ms.min) << " GB/s (peak)\n"
-                  << "  Round-trip via graph   : max abs error " << std::scientific
-                  << std::setprecision(3) << g_err
-                  << (g_err <= eb * 1.0001 ? "  [within bound]" : "  [OVER BOUND]")
-                  << ", size " << (gcomp_buf.bytes() == R.compressed_size ? "matches" : "DIFFERS")
-                  << "\n" << std::fixed << std::setprecision(2)
-                  << "  Speedup vs PREALLOCATE  : "
-                  << (R.comp_ms.min / R.graph_comp_ms.min) << "x (peak compress)\n";
-    } catch (const std::exception& e) {
-        R.graph_ok = false;
-        R.graph_msg = e.what();
-        std::cout << "  Graph capture failed: " << e.what() << "\n";
-    }
-
     return R;
 }
 
@@ -318,7 +237,7 @@ int main(int argc, char* argv[]) {
     cudaMalloc(&d_input, data_bytes);
     cudaMemcpy(d_input, h_input.data(), data_bytes, cudaMemcpyHostToDevice);
 
-    std::cout << "=== cuSZp 1/2/3 — performance: PREALLOCATE vs CUDA Graph ===\n"
+    std::cout << "=== cuSZp 1/2/3 — performance (PREALLOCATE) ===\n"
               << "  Dataset    : " << input_file << " (" << dim_x << "x" << dim_y << ")\n"
               << "  Elements   : " << n << "\n"
               << "  Raw size   : " << std::fixed << std::setprecision(2)
@@ -333,37 +252,22 @@ int main(int argc, char* argv[]) {
             run_variant(v, h_input, d_input, data_bytes, dim_x, dim_y, eb, runs));
 
     // ── Summary table ─────────────────────────────────────────────────────────
-    std::cout << "\n══ Summary: peak compress throughput, PREALLOCATE vs GRAPH ═══════════════════\n"
+    std::cout << "\n══ Summary: peak throughput (PREALLOCATE) ══════════════════════════════\n"
               << std::left << std::setw(26) << "Variant"
               << std::right << std::setw(7)  << "CR"
-              << std::setw(13) << "Prealloc"
-              << std::setw(13) << "Graph"
-              << std::setw(11) << "Speedup"
-              << std::setw(13) << "Decomp" << "\n"
-              << std::left << std::setw(26) << ""
-              << std::right << std::setw(7) << ""
-              << std::setw(13) << "comp GB/s"
-              << std::setw(13) << "comp GB/s"
-              << std::setw(11) << "(comp)"
-              << std::setw(13) << "GB/s" << "\n"
-              << std::string(83, '-') << "\n";
+              << std::setw(13) << "Comp GB/s"
+              << std::setw(13) << "Decomp GB/s" << "\n"
+              << std::string(59, '-') << "\n";
     for (const auto& R : results) {
         const double cr = static_cast<double>(data_bytes) / R.compressed_size;
         std::cout << std::left << std::setw(26) << variant_name(R.variant)
                   << std::right << std::fixed << std::setprecision(2)
                   << std::setw(6) << cr << "x"
-                  << std::setw(13) << tput_gbs(data_bytes, R.comp_ms.min);
-        if (R.graph_ok)
-            std::cout << std::setw(13) << tput_gbs(data_bytes, R.graph_comp_ms.min)
-                      << std::setw(10) << (R.comp_ms.min / R.graph_comp_ms.min) << "x";
-        else
-            std::cout << std::setw(13) << "FAILED" << std::setw(11) << "-";
-        std::cout << std::setw(13) << tput_gbs(data_bytes, R.decomp_ms.min) << "\n";
+                  << std::setw(13) << tput_gbs(data_bytes, R.comp_ms.min)
+                  << std::setw(13) << tput_gbs(data_bytes, R.decomp_ms.min) << "\n";
     }
-    std::cout << std::string(83, '-') << "\n"
-              << "  Throughput = peak (min-latency run).  GRAPH captures the compress\n"
-              << "  pipeline (forward); decompress runs un-captured. Graph speedup reflects\n"
-              << "  removed CPU launch overhead — GPU compute is identical.\n";
+    std::cout << std::string(59, '-') << "\n"
+              << "  Throughput = peak (min-latency run).\n";
 
     cudaFree(d_input);
     std::cout << "\nDone.\n";

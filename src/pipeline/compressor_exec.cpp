@@ -21,18 +21,6 @@ std::pair<const void*, size_t> Pipeline::prepareInputSource(
 {
     original_input_size_ = 0;
 
-    if (graph_captured_) {
-        original_input_size_ = input_size < d_graph_input_size_ ? input_size : 0;
-        FZ_CUDA_CHECK(cudaMemcpyAsync(d_graph_input_.ptr, d_input, input_size,
-                                      cudaMemcpyDeviceToDevice, stream));
-        if (input_size < d_graph_input_size_) {
-            FZ_CUDA_CHECK(cudaMemsetAsync(
-                static_cast<uint8_t*>(d_graph_input_.ptr) + input_size,
-                0, d_graph_input_size_ - input_size, stream));
-        }
-        return {d_graph_input_.ptr, d_graph_input_size_};
-    }
-
     if (input_alignment_bytes_ > 1 && input_size % input_alignment_bytes_ != 0) {
         const size_t padded = ((input_size + input_alignment_bytes_ - 1)
                                / input_alignment_bytes_) * input_alignment_bytes_;
@@ -111,8 +99,7 @@ void Pipeline::compress(
     input_size_ = source_sz;
 
     // Re-estimate buffer sizes from runtime inputs when no static hint was given.
-    // Skipped in graph mode (hint is required).
-    if (!graph_captured_ && input_size_hint_ == 0) {
+    if (input_size_hint_ == 0) {
         propagateBufferSizes(true);
     }
 
@@ -128,11 +115,7 @@ void Pipeline::compress(
     auto t_dag_end   = t_dag_start;
     try {
         dag_timer.recordStart(stream);
-        if (graph_captured_) {
-            FZ_CUDA_CHECK(cudaGraphLaunch(graph_exec_, stream));
-        } else {
-            dag_->execute(stream);
-        }
+        dag_->execute(stream);
         dag_timer.recordStop(stream);
         t_dag_end = std::chrono::steady_clock::now();
 
@@ -152,16 +135,8 @@ void Pipeline::compress(
             stage_ptr->postStreamSync(stream);
         }
 
-        // Per-stage CUDA-event timing is unavailable during a graph replay: the
-        // start/completion events are recorded by nodes baked into the captured
-        // graph, and cudaEventElapsedTime() across graph-recorded events is not
-        // supported (returns cudaErrorInvalidValue on every node).  The whole-
-        // pipeline dag_elapsed_ms from the outer DagEventTimer (events recorded
-        // on `stream` outside the graph) is still valid.  Skip the per-stage pass
-        // here so we never issue the failing query.
-        stage_timings = (profiling_enabled_ && !graph_captured_)
-                            ? dag_->collectTimings()
-                            : std::vector<StageTimingResult>{};
+        stage_timings = profiling_enabled_ ? dag_->collectTimings()
+                                           : std::vector<StageTimingResult>{};
 
         for (size_t i = 0; i < output_buffer_ids_.size(); i++) {
             int buffer_id = output_buffer_ids_[i];
@@ -783,11 +758,6 @@ void Pipeline::compress(
     size_t*     actual_output_size,
     cudaStream_t stream
 ) {
-    if (graph_mode_enabled_) {
-        throw std::runtime_error(
-            "compress() with user-owned output is incompatible with CUDA Graph mode. "
-            "Use the pool-owned overload (void** d_output) when graph mode is enabled.");
-    }
     if (d_output_buf == nullptr) {
         throw std::runtime_error(
             "compress(): d_output_buf must not be null for user-owned output");

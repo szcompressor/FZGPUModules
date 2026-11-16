@@ -55,7 +55,7 @@ pipeline.compress(d_input, input_bytes, &d_compressed, &compressed_sz, stream);
 ```
 
 > [!IMPORTANT]
-> When using `memory_strategy = "PREALLOCATE"` (required for CUDA Graph capture),
+> When using `memory_strategy = "PREALLOCATE"`,
 > always use the constructor + `loadConfig()` pattern so the pipeline receives
 > the real `input_bytes` before `finalize()` runs preallocations.
 

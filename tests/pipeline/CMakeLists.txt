@@ -2,7 +2,7 @@
 # tests/pipeline/CMakeLists.txt
 #
 # Integration tests for the pipeline layer: DAG execution, memory strategies,
-# file I/O, graph capture, buffer liveness, ownership semantics, and
+# file I/O, buffer liveness, ownership semantics, and
 # pipeline-level error handling.
 #
 # These tests exercise multiple stages wired together through the Pipeline and
@@ -101,14 +101,6 @@ fz_add_test(
 fz_add_test(
     NAME    test_file_io
     SOURCES test_file_io.cpp
-    LIBS    fzgmod
-    LABELS  pipeline gpu
-)
-
-# ─── CUDA Graph capture correctness and replay ────────────────────────────────
-fz_add_test(
-    NAME    test_graph_capture
-    SOURCES test_graph_capture.cpp
     LIBS    fzgmod
     LABELS  pipeline gpu
 )

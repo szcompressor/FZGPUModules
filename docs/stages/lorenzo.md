@@ -54,7 +54,7 @@ selected by `dims_` (and the 1-D path already resets per launch block of 256).
 `setBlockSize(n)` with `n > 0` forces the **1-D** path over the flattened array and
 restarts the prediction chain (`prev = 0`) every `n` elements, independent of the
 launch configuration and of `dims_`. This is the cuSZp predictor (it uses `n = 32`).
-`n` must be in `[1, 1024]`. Block mode is graph-compatible.
+`n` must be in `[1, 1024]`.
 
 The inverse assigns one CTA per reset segment with several elements per thread,
 so the CTA width no longer tracks `n` — a 1024-element segment uses 256 threads

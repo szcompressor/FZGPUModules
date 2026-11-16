@@ -322,87 +322,19 @@ TEST(CLI, BenchmarkCompressSingleRunWorks) {
     EXPECT_EQ(rc, 0);
 }
 
-// CUDA Graph capture requires a real device memory pool; on vGPU / cudaMalloc
-// fallback mode it is unsupported and the CLI silently falls back.  Mirrors the
-// GraphCapture unit tests' is_graph_supported() guard.
-static bool cli_graph_supported() {
-    fz::Pipeline probe(1024, fz::MemoryStrategy::PREALLOCATE, 1.0f);
-    return !probe.isMemPoolFallbackMode();
-}
-
-// --graph should succeed for a graph-compatible pipeline (lorenzo->rle) and emit
-// "active": true in the JSON report.  Graph mode accelerates the (repeated)
-// compress path only; the benchmark's decompress round-trip runs the normal
-// inverse DAG, so the terminal coder here must round-trip cleanly (mirrors the
-// Lorenzo->RLE pipeline exercised by the GraphCapture unit tests).
-TEST(CLI, BenchmarkGraphModeActivates) {
-    if (!cli_graph_supported()) {
-        GTEST_SKIP() << "Graph mode unsupported in cudaMalloc fallback mode (vGPU)";
-    }
+// --graph was removed with CUDA Graph mode; it must fail with a clear message
+// rather than be silently ignored.
+TEST(CLI, GraphOptionRemoved) {
     TempWorkspace tmp;
-
-    constexpr size_t kN = 1 << 11;
-    std::vector<float> input = fz_test::make_sine_floats(kN, 0.015f, 2.0f);
-    const auto input_path = tmp.file("graph_input.f32");
-    const auto report_path = tmp.file("graph_report.json");
+    std::vector<float> input = fz_test::make_sine_floats(1 << 11, 0.015f, 2.0f);
+    const auto input_path = tmp.file("graph_removed.f32");
     write_float_file(input_path, input);
 
-    const int rc = run_cli({
-        "fzgmod-cli",
-        "-b",
-        "-i", input_path.string(),
-        "--stages", "lorenzo->rle",
-        "-m", "abs",
-        "-e", "1e-3",
-        "--strategy", "preallocate",
-        "--runs", "1",
-        "--graph",
-        "--report-json", report_path.string()
-    });
-
-    EXPECT_EQ(rc, 0);
-    ASSERT_TRUE(std::filesystem::exists(report_path));
-
-    const std::string json = read_text_file(report_path);
-    EXPECT_NE(json.find("\"schema_version\": \"1.1\""), std::string::npos);
-    EXPECT_NE(json.find("\"graph\""), std::string::npos);
-    EXPECT_NE(json.find("\"requested\": true"), std::string::npos);
-    EXPECT_NE(json.find("\"active\": true"), std::string::npos);
-    // No incompatible_reason field when graph succeeded.
-    EXPECT_EQ(json.find("\"incompatible_reason\""), std::string::npos);
-}
-
-// --graph with a graph-incompatible stage (huffman) should fall back silently,
-// exit 0, and report "active": false with an incompatible_reason.
-TEST(CLI, BenchmarkGraphModeFallsBackOnIncompatibleStage) {
-    TempWorkspace tmp;
-
-    constexpr size_t kN = 1 << 11;
-    std::vector<float> input = fz_test::make_sine_floats(kN, 0.015f, 2.0f);
-    const auto input_path = tmp.file("graph_fb_input.f32");
-    const auto report_path = tmp.file("graph_fb_report.json");
-    write_float_file(input_path, input);
-
-    const int rc = run_cli({
-        "fzgmod-cli",
-        "-b",
-        "-i", input_path.string(),
-        "--stages", "lorenzo->bitshuffle->huffman",
-        "-m", "abs",
-        "-e", "1e-3",
-        "--strategy", "preallocate",
-        "--runs", "1",
-        "--graph",
-        "--report-json", report_path.string()
-    });
-
-    EXPECT_EQ(rc, 0);
-    ASSERT_TRUE(std::filesystem::exists(report_path));
-
-    const std::string json = read_text_file(report_path);
-    EXPECT_NE(json.find("\"requested\": true"), std::string::npos);
-    EXPECT_NE(json.find("\"active\": false"), std::string::npos);
-    EXPECT_NE(json.find("\"incompatible_reason\""), std::string::npos);
+    testing::internal::CaptureStderr();
+    const int rc = run_cli({"fzgmod-cli", "-b", "-i", input_path.string(), "--graph"});
+    const std::string err = testing::internal::GetCapturedStderr();
+    EXPECT_NE(rc, 0);
+    EXPECT_NE(err.find("--graph was removed"), std::string::npos) << err;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

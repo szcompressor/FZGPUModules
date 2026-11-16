@@ -124,8 +124,7 @@ GPU  ←input ANS bitstream                              output uint8_t[]→
   3. ansDecodeKernel<128, 10, 4096> — occupancy-tuned warp-parallel decode
 ```
 
-**Consequence:** one host barrier per compress call, one per decompress call —
-the stage is not CUDA Graph compatible.  `isGraphCompatible()` returns `false`.
+**Consequence:** one host barrier per compress call, one per decompress call.
 
 ---
 
@@ -176,7 +175,7 @@ header peek inside `estimateOutputSizes()`.
 
 **Only prob_bits=10 is supported.** See \ref ans_stage_settings "Stage settings".
 
-**Not CUDA Graph compatible.** One device-to-host synchronization point exists in
+**Host synchronization.** One device-to-host synchronization point exists in
 every forward call (to read the `ANSCoalescedHeader` for the compressed size) and
 one in every inverse call (to read the header before decoding).
 

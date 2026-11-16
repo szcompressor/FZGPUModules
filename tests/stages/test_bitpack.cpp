@@ -16,10 +16,8 @@
  *   BP9   BitpackStage/SerializeDeserialize           — serializeHeader→deserializeHeader restores nbits
  *   BP10  BitpackStage/SaveRestoreState               — saveState+deserializeHeader+restoreState cycle
  *   BP11  BitpackStage/PipelineIntegration            — Quantizer<float,uint16_t>→Bitpack round-trip
- *   BP12  BitpackStage/GraphCompatible                — isGraphCompatible()==true when auto-detect off
  *   BP13  BitpackStage/InvalidNBits_NonPowerOfTwo     — non-power-of-two nbits throws
  *   BP14  BitpackStage/InvalidNBits_ExceedsWidth      — nbits > 8*sizeof(T) or 0 throws
- *   BP15  BitpackStage/AutoDetect_GraphIncompatible   — isGraphCompatible()==false when auto-detect on
  *   BP16  BitpackStage/AutoDetect_EstimateWorstCase   — estimateOutputSizes returns full input when auto on
  *   BP17  BitpackStage/AutoDetect_ChoosesNBits_U16_4bit — auto selects nbits=4 for uint16 max=15
  *   BP18  BitpackStage/AutoDetect_ChoosesNBits_U32_8bit — auto selects nbits=8 for uint32 max=200
@@ -35,7 +33,6 @@
  *   BP28  BitpackStage/AutoShift_DetectsTrailingZeros — auto shift picks ctz of the OR-reduce
  *   BP29  BitpackStage/AutoShift_AllEqual_ZeroShift   — OR == 0 → shift stays 0, not ctz(0)
  *   BP30  BitpackStage/Adaptive_ShrinksNBits_RoundTrip — base+shift+nbits together, 16→4 bits
- *   BP31  BitpackStage/Adaptive_GraphIncompatible     — any auto-* mode disables graph capture
  *   BP32  BitpackStage/SerializeDeserialize_ShiftAndBase — shift/base survive the 15-byte header
  *   BP33  BitpackStage/DeserializeLegacyHeader_DefaultsShiftAndBase — 10-byte headers still decode
  *   BP34  BitpackStage/InvalidShift_Throws            — shift >= 8*sizeof(T) throws
@@ -305,19 +302,6 @@ TEST(BitpackStage, PipelineIntegration) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BP12: BitpackStage/GraphCompatible — isGraphCompatible()==true when auto-detect off
-// ─────────────────────────────────────────────────────────────────────────────
-
-TEST(BitpackStage, GraphCompatible) {
-    BitpackStage<uint16_t> fwd;
-    EXPECT_TRUE(fwd.isGraphCompatible());
-
-    BitpackStage<uint16_t> inv;
-    inv.setInverse(true);
-    EXPECT_TRUE(inv.isGraphCompatible());
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // BP13-BP14: BitpackStage/InvalidNBits — invalid nbits values throw std::invalid_argument
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -332,19 +316,6 @@ TEST(BitpackStage, InvalidNBits_ExceedsWidth) {
     BitpackStage<uint16_t> s;
     EXPECT_THROW(s.setNBits(32), std::invalid_argument);  // max is 16 for uint16_t
     EXPECT_THROW(s.setNBits(0),  std::invalid_argument);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// BP15: BitpackStage/AutoDetect_GraphIncompatible — isGraphCompatible()==false when auto-detect on
-// ─────────────────────────────────────────────────────────────────────────────
-
-TEST(BitpackStage, AutoDetect_GraphIncompatible) {
-    BitpackStage<uint16_t> s;
-    EXPECT_TRUE(s.isGraphCompatible());
-    s.setAutoDetect(true);
-    EXPECT_FALSE(s.isGraphCompatible());
-    s.setAutoDetect(false);
-    EXPECT_TRUE(s.isGraphCompatible());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -682,18 +653,6 @@ TEST(BitpackStage, Adaptive_ShrinksNBits_RoundTrip) {
     EXPECT_EQ(enc.getNBits(), 4u);
     for (size_t i = 0; i < original.size(); ++i)
         EXPECT_EQ(restored[i], original[i]) << "at " << i;
-}
-
-TEST(BitpackStage, Adaptive_GraphIncompatible) {
-    BitpackStage<uint16_t> s;
-    EXPECT_TRUE(s.isGraphCompatible());
-    s.setAutoBase(true);
-    EXPECT_FALSE(s.isGraphCompatible());
-    s.setAutoBase(false);
-    s.setAutoShift(true);
-    EXPECT_FALSE(s.isGraphCompatible());
-    s.setAdaptive(false);
-    EXPECT_TRUE(s.isGraphCompatible());
 }
 
 TEST(BitpackStage, SerializeDeserialize_ShiftAndBase) {

@@ -53,13 +53,6 @@ None. The chunk layout (`pad_len`, `chunk_size`, `grid_x`) is fully derived from
 the input length. Inputs shorter than a 4096-byte multiple are zero-padded
 inside the stage; the original length is recorded so decode trims back to it.
 
-## Graph compatibility
-
-**Not graph-compatible** in either direction. The forward pass does a blocking
-`cudaStreamSynchronize` + 4-byte D2H to read the compacted bitstream length
-before writing the archive header; the inverse pass does a 128-byte D2H to read
-the archive header before launching the decode kernel.
-
 ## Ports
 
 - **Forward:** 1 input (`uint16_t` codes) → 1 output (`uint8_t` archive).

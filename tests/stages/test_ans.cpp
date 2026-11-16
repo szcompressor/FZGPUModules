@@ -4,14 +4,13 @@
  * GPU unit tests for ANSStage (rANS byte-level entropy coder, dietGPU backend).
  * Forward input: uint8_t[] → ANS compressed bitstream (ANSCoalescedHeader + data).
  * Inverse input: ANS bitstream → uint8_t[].
- * Not graph-compatible (D2H sync in both directions).
+ * D2H sync in both directions.
  *
  *   AN1   ANSStage/RoundTrip                  — uint8_t forward+inverse exact match (4 blocks)
  *   AN2   ANSStage/ZeroInput                  — n=0 does not crash; output size is 0
  *   AN3   ANSStage/CompressedSmallerThanInput  — compressed size < input for skewed distribution
  *   AN4   ANSStage/SerializeDeserialize        — prob_bits round-trips through 12-byte header
  *   AN5   ANSStage/SaveRestoreState            — saveState+deserializeHeader+restoreState
- *   AN6   ANSStage/GraphCompatible             — isGraphCompatible()==false
  *   AN7   ANSStage/PipelineIntegration         — Pipeline round-trip with uint8_t
  *   AN8   ANSStage/ReuseAfterSizeChange        — shrink reuses cap_bytes_; both round-trips correct
  *   AN9   ANSStage/FileRoundTrip               — writeToFile → decompressFromFile via Pipeline
@@ -210,14 +209,6 @@ TEST(ANSStage, SaveRestoreState) {
 
     s.restoreState();
     EXPECT_EQ(s.getProbBits(), 10u);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AN6 — GraphCompatible
-// ─────────────────────────────────────────────────────────────────────────────
-TEST(ANSStage, GraphCompatible) {
-    ANSStage stage;
-    EXPECT_FALSE(stage.isGraphCompatible());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

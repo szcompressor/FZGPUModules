@@ -250,12 +250,11 @@ comp = lp.PressioCompressor.from_config({
     "compressor_id": "fzgpumodules",
 
     # early_config: applied BEFORE the options template is built.
-    # Put stages, connections, and graph_mode here so per-stage option keys
+    # Put stages and connections here so per-stage option keys
     # (fzgpumodules:s0:...) are registered when compressor_config runs.
     "early_config": {
         "fzgpumodules:stages":      [...],
         "fzgpumodules:connections": [...],
-        "fzgpumodules:graph_mode":  False,       # optional, default False
         "fzgpumodules:metric":      "composite", # optional
         "composite:plugins":        ["size", "error_stat"],
     },
@@ -305,7 +304,6 @@ decompressed = comp.decode(compressed, out)
 | `fzgpumodules:memory_strategy` | str | `"minimal"` | `"minimal"` or `"preallocate"` |
 | `fzgpumodules:memory_multiplier` | float | 3.0 | GPU pool size multiplier |
 | `fzgpumodules:num_streams` | int | 1 | Parallel CUDA streams |
-| `fzgpumodules:graph_mode` | bool | False | CUDA graph capture (see below) |
 | `fzgpumodules:specialization` | str | `"off"` | `"off"` or `"auto"` — Pipeline Specialization (see below) |
 | `fzgpumodules:config_file` | str | `""` | Path to TOML pipeline config file (see below) |
 | `fzgpumodules:expose_stage_outputs` | bool | False | Expose terminal stage outputs as metrics after `encode` |
@@ -397,8 +395,8 @@ The adapter's `fzgpumodules:specialization` option enables the retained CUDA
 Pipeline Specialization capability. `off` runs staged execution; `auto` installs
 admitted implementations where supported. Inspect installation diagnostics to
 confirm that a particular graph specialized. The former `fzgpumodules:fusion`
-key is rejected with a migration message. CUDA Graph capture and specialization
-are mutually exclusive.
+key is rejected with a migration message, as is the former
+`fzgpumodules:graph_mode` key (CUDA Graph mode was removed from the library).
 
 The validated Python workflow uses linear Quantizer → integer Lorenzo →
 AdaptiveBitpack with matching block sizes. This capability remains available in
@@ -544,7 +542,7 @@ comp = lp.PressioCompressor.from_config({
     "compressor_id": "fzgpumodules",
     "compressor_config": {
         "fzgpumodules:config_file": "/path/to/my_pipeline.toml",
-        "fzgpumodules:graph_mode": False,   # graph_mode and num_streams still apply on top
+        "fzgpumodules:num_streams": 1,   # num_streams still applies on top
     },
 })
 ```

@@ -7,8 +7,8 @@ namespace fz {
 /**
  * RAII CUDA-event timer for bracketing DAG device execution.
  *
- * Records a start/stop event pair on a stream around dag->execute() (or a
- * cudaGraphLaunch) so that elapsedMs() returns the *device wall time* of the
+ * Records a start/stop event pair on a stream around dag->execute() so that
+ * elapsedMs() returns the *device wall time* of the
  * pipeline — i.e. from when the stream reaches the start marker until every
  * kernel (including those joined back from internal streams at the end of
  * execute()) has finished.  This is the honest device-side latency; it

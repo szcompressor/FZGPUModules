@@ -1050,8 +1050,7 @@ void QuantizerStage<TInput, TCode>::execute(
         } else {
             for (size_t j = 0; j < 3; j++) actual_output_sizes_[j] = 0;
         }
-        // Don't zero actual_outlier_count_: see the matching note below — if
-        // this is a graph-capture warmup, postStreamSync() won't run.
+        // actual_outlier_count_ is refreshed by postStreamSync().
         return;
     }
 
@@ -1240,10 +1239,8 @@ void QuantizerStage<TInput, TCode>::execute(
 
     FZ_CUDA_CHECK(cudaGetLastError());
 
-    // Don't zero actual_outlier_count_ here: this method may be invoked
-    // during cudaStreamBeginCapture/EndCapture (graph recording), in which
-    // case postStreamSync isn't called and we'd lose the count from the
-    // previous real compress.
+    // Max-capacity sizes; postStreamSync() trims them and refreshes
+    // actual_outlier_count_.
     actual_output_sizes_[0]  = num_elements   * sizeof(TCode);
     actual_output_sizes_[1]  = max_outliers   * sizeof(TInput);
     actual_output_sizes_[2]  = max_outliers   * sizeof(uint32_t);
