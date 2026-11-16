@@ -1679,6 +1679,47 @@ TEST(FusionPlanner, Cuszp3_3D_FusesMatchesStaged) {
     cudaFree(d_in);
 }
 
+// Regression: the adaptive TI/warp probe bounded its reads by the tile-padded
+// element count instead of the real input. 8x8 tiles on 1-D input pad the layout
+// 8x, so with an exact-size input allocation the probe read past it (illegal
+// address on a 1 MB field). Whether a stray read faults depends on allocation
+// layout, so the reliable detector is Compute Sanitizer (ctest --preset compute-san:
+// 5327 errors before the fix, 0 after). Fused output must match staged byte for byte.
+TEST(FusionPlanner, Cuszp3_1D_PaddedTilesProbeStaysInBounds) {
+    const size_t n = size_t(1) << 18;            // 1 MB of float32, 1-D
+    const float  eb = 1e-3f;
+    std::vector<float> h(n);
+    for (size_t i = 0; i < n; ++i) h[i] = 0.5f * std::sin(i * 0.001f) + 0.2f * std::sin(i * 0.013f);
+    const size_t bytes = n * sizeof(float);
+    float* d_in = nullptr; ASSERT_EQ(cudaMalloc(&d_in, bytes), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(d_in, h.data(), bytes, cudaMemcpyHostToDevice), cudaSuccess);
+
+    auto build = [&](Pipeline& p) {
+        p.setDims(n);
+        auto* q = p.addStage<QuantizerStage<float, uint32_t>>();
+        q->setErrorBound(eb); q->setErrorBoundMode(ErrorBoundMode::ABS); q->setLinearMode(true);
+        auto* tl = p.addStage<TiledLorenzoStage<int32_t>>(); tl->setTileShape(8, 8);
+        p.connect(tl, q, "codes");
+        auto* a = p.addStage<AdaptiveBitpackStage<int32_t>>();
+        a->setBlockSize(64);
+        p.connect(a, tl);
+    };
+    auto compressCopy = [&](FusionPolicy pol, std::vector<uint8_t>& out) {
+        Pipeline p(bytes, MemoryStrategy::PREALLOCATE, 2.0f); p.setFusionPolicy(pol);
+        build(p); p.finalize();
+        EXPECT_EQ(p.getFusedGroupCount(), pol == FusionPolicy::Auto ? 1u : 0u);
+        void* d_comp = nullptr; size_t sz = 0;
+        p.compress(d_in, bytes, &d_comp, &sz, 0);
+        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+        out.resize(sz); cudaMemcpy(out.data(), d_comp, sz, cudaMemcpyDeviceToHost);
+    };
+    std::vector<uint8_t> staged, fused;
+    compressCopy(FusionPolicy::Off, staged);
+    compressCopy(FusionPolicy::Auto, fused);
+    EXPECT_EQ(staged, fused) << "fused 1-D padded-tile archive not byte-identical to staged";
+    cudaFree(d_in);
+}
+
 // The swappable-coder payoff: fuse the SAME warp chain with a different SegmentCodec
 // sink (PlainBitpackCoder) composed in by a data change — no new launcher/dispatch,
 // mirroring how RARE/RAZE proved chunk generality. PlainBitpack emits an

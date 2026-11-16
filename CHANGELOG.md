@@ -9,6 +9,9 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Pipeline Specialization's adaptive probe for TiledLorenzo chains (cuSZp3 family) read past the end of the input whenever a dimension was not a tile multiple, worst on 1-D data with 8x8 tiles, where the padded layout is 8x the input. It bounded its reads by the tile-padded element count; it now uses the real input size and samples only blocks inside the input. A 1-D field of 1 MB or more could fail with an illegal memory access; output is unchanged where it previously succeeded.
+
 ### Changed
 - CMake now locates the build-time Python interpreter with `find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)` and runs the header generators through `${Python3_EXECUTABLE}`, so a missing or too-old Python fails at configure time instead of mid-build. Override with `-DPython3_EXECUTABLE=...`.
 

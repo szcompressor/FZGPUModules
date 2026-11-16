@@ -17,6 +17,7 @@
 
 #include <cuda.h>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -401,7 +402,14 @@ static size_t launchNvrtcWarpFusedImpl(
                 const bool  tiled_plain = (spec.elems_per_lane > 1) && plain_meta;
                 const float thresh      = tiled_plain ? env_cfg.adaptive_thresh_tiled : env_cfg.adaptive_thresh;
                 const float inv2eb  = (params_bytes >= sizeof(float)) ? *reinterpret_cast<const float*>(pred_params) : 0.0f;
-                const float avg_r   = probeAvgRate(d_in, n_ab, inv2eb, num_blocks, pool, stream);
+                // The probe reads d_in linearly, so bound it by the real input count,
+                // not n_ab: for a tiled predictor n_ab counts the tile-padded layout,
+                // which exceeds the input whenever a dimension is not a tile multiple
+                // (8x8 tiles on 1-D input: 8x). Sample only 32-element probe blocks
+                // that start inside the input; unpadded fields are unchanged.
+                const size_t n_in        = warpInputCount(spec, pred_params, params_bytes, n_ab);
+                const size_t probe_blocks = std::min(num_blocks, (n_in + 31u) / 32u);
+                const float avg_r   = probeAvgRate(d_in, n_in, inv2eb, probe_blocks, pool, stream);
                 use_ti = (avg_r <= thresh);
                 if (env_cfg.debug_probe) {
                     std::fprintf(stderr, "[fz_probe] predictor=%s coder=%s epl=%d tiled_plain=%d "
