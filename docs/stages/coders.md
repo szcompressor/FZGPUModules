@@ -14,3 +14,4 @@
 | \subpage stage_hclog | CLOG bit packing with per-subchunk TCMS selection (LC framework lossless component) |
 | \subpage stage_bitpack | Dense bit-packing of fixed-width integers |
 | \subpage stage_adaptive_bitpack | Per-block adaptive fixed-rate bit-plane coding (cuSZp plain mode) |
+| \subpage stage_golomb_rice | Chunk-local Golomb-Rice entropy coder with exact per-chunk parameter selection |

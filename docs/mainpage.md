@@ -110,6 +110,7 @@ usage notes — see the \ref stages_overview "Stage Reference".
 | \ref stage_log_transform "LogTransformStage<T>"    | `modules/transforms/log_transform/log_transform_stage.h` | Log-space transform for point-wise relative bounds |
 | \ref stage_bitpack "BitpackStage<T>"                  | `modules/coders/bitpack/bitpack_stage.h`           | Pack/unpack power-of-two value streams         |
 | \ref stage_adaptive_bitpack "AdaptiveBitpackStage<T>" | `modules/coders/adaptive_bitpack/adaptive_bitpack_stage.h` | Per-block adaptive fixed-rate bit-plane coding (cuSZp/cuSZp2 port) |
+| \ref stage_golomb_rice "GolombRiceStage<T>" | `modules/coders/golomb_rice/golomb_rice_stage.h` | Chunk-local Golomb-Rice entropy coder with exact per-chunk parameter selection |
 | \ref stage_huffman "HuffmanStage<T>"                  | `modules/coders/huffman/huffman_stage.h`           | GPU Huffman entropy coding (cuSZ port)         |
 | \ref stage_ans "ANSStage"                         | `modules/coders/ans/ans_stage.h`                   | GPU rANS entropy coding (dietGPU port)         |
 | \ref stage_bitplane_rze "BitplaneRZEStage"        | `modules/fused/bitplane_rze/bitplane_rze_stage.h`  | Fused bitplane transpose + zero-group RZE lossless encoder (FZ-GPU port) |

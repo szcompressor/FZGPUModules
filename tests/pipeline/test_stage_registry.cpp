@@ -26,7 +26,7 @@ TEST(StageRegistry, EveryShippedStageTypeHasAFactory) {
         StageType::TILED_LORENZO, StageType::RRE, StageType::RARE,
         StageType::RAZE, StageType::CLOG, StageType::HCLOG, StageType::TUPL,
         StageType::GPULZ, StageType::LOG_TRANSFORM, StageType::ADAPTIVE_LORENZO,
-        StageType::ROIBIN_SPLIT,
+        StageType::ROIBIN_SPLIT, StageType::GOLOMB_RICE,
     };
     for (StageType t : shipped) {
         EXPECT_TRUE(hasStageHeaderFactory(t))

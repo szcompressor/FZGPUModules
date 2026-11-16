@@ -173,6 +173,7 @@ example `setBlockSize(32)` is `block_size = 32`).
 | `HCLOG` | `HCLOGStage` | \ref stage_hclog "HCLOGStage" |
 | `Bitpack` | `BitpackStage` | \ref stage_bitpack "BitpackStage" |
 | `AdaptiveBitpack` | `AdaptiveBitpackStage` | \ref stage_adaptive_bitpack "AdaptiveBitpackStage" |
+| `GolombRice` | `GolombRiceStage` | \ref stage_golomb_rice "GolombRiceStage" |
 | `Huffman` | `HuffmanStage` | \ref stage_huffman "HuffmanStage" |
 | `ANS` | `ANSStage` | \ref stage_ans "ANSStage" |
 | `GPULZ` | `GPULZStage` | \ref stage_gpulz "GPULZStage" |
