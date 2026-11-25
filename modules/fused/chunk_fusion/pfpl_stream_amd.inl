@@ -330,11 +330,11 @@ encodeKernel(const Real* __restrict__ in, uint32_t n, typename Elem<Real>::Param
         }
         if (kStreamHeader <= capacity) {
             w[0] = Elem<Real>::kMagic;
-            w[1] = static_cast<uint32_t>(padded);
+            w[1] = recordedArchive(padded);
             w[2] = __float_as_uint(abs_eb);
             w[3] = n;
         }
-        if (d_stream_bytes != nullptr) *d_stream_bytes = static_cast<size_t>(total);
+        if (d_stream_bytes != nullptr) *d_stream_bytes = streamLength(padded, total);
     }
 }
 

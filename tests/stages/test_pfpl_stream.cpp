@@ -23,6 +23,12 @@
  *   PD4  PfplStream64/SharesAPlanWithFloats    — float and double fields alternate through one Plan
  *   PD5  PfplStream64/StreamBytesReadsTheHeader — as PS5
  *   PD6  PfplStream64/BoundIsRecordedAsAFloat  — never rounded up; too small or not finite is refused
+ *   PD7  PfplStream64/FieldOf8GiBRoundTrips    — a field of 2^30 doubles with a short stream: compressed and decoded
+ *                                                within the bound, its LC field-size word modulo 2^32; the host coder
+ *                                                refuses it (skipped without ~20 GiB of device memory)
+ *   PD8  PfplStream64/StreamOf4GiBOrMoreNeverFits — a stream that would reach 4 GiB fits no capacity (SIZE_MAX from
+ *                                                the kernel and the header) and writes nothing past the length a
+ *                                                header can record (skipped without ~10 GiB)
  *
  * On HIP, CTest runs this twice: with the AMD kernels (the default) and with the generic harness
  * kernels (FZ_PFPL_HARNESS=1), which are the kernels CUDA uses.
@@ -663,6 +669,94 @@ TEST(PfplStream64, StreamBytesReadsTheHeader) {
     EXPECT_NE(fz::pfpl::streamBytes(&floats), 0u);
 
     EXPECT_EQ(fz::pfpl::maxStreamBytes<double>(2048), fz::pfpl::maxStreamBytes<float>(4096));
+}
+
+// A device with room for `bytes` more (and 1 GiB to spare): the 4 GiB tests need tens of GiB.
+bool deviceHas(size_t bytes) {
+    size_t freeB = 0, totalB = 0;
+    return cudaMemGetInfo(&freeB, &totalB) == cudaSuccess && freeB > bytes + (size_t{1} << 30);
+}
+
+// d[0, n) = copies of h, doubled device to device: d[i] = h[i % h.size()].
+void fillRepeated(double* d, size_t n, const std::vector<double>& h, cudaStream_t s) {
+    const size_t b = std::min(n, h.size());
+    ASSERT_EQ(cudaMemcpyAsync(d, h.data(), b * sizeof(double), cudaMemcpyHostToDevice, s), cudaSuccess);
+    for (size_t have = b; have < n; have *= 2)
+        ASSERT_EQ(cudaMemcpyAsync(d + have, d, std::min(have, n - have) * sizeof(double), cudaMemcpyDeviceToDevice, s),
+                  cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+}
+
+// PD7: 8 GiB of doubles, 2^19 chunks: the LC field-size word is 2^33 modulo 2^32.
+TEST(PfplStream64, FieldOf8GiBRoundTrips) {
+    const size_t n = size_t{1} << 30, block = size_t{1} << 22, cap = size_t{2} << 30;
+    const double eb = 1e-3;
+    if (!deviceHas(2 * n * sizeof(double) + cap)) GTEST_SKIP() << "needs about 20 GiB of free device memory";
+    Stream s;
+    fz::pfpl::Plan plan;
+    const std::vector<double> h = makeField64("smooth", block, 7);
+    CudaBuffer<double> d_in(n), d_out(n);
+    CudaBuffer<uint8_t> d_stream(cap);
+    CudaBuffer<size_t> d_len(1);
+    fillRepeated(d_in.get(), n, h, s);
+    fz::pfpl::compress(plan, d_in.get(), n, eb, d_stream.get(), cap, d_len.get(), s);
+    const size_t len = readDeviceSize(d_len, s);
+    ASSERT_LE(len, cap);
+    const std::vector<uint8_t> head = d_stream.download_bytes(24, s);
+    uint32_t w[6];
+    std::memcpy(w, head.data(), sizeof(w));
+    EXPECT_EQ(w[0], fz::pfpl::kStreamMagic64);
+    EXPECT_EQ(w[3], static_cast<uint32_t>(n));
+    EXPECT_EQ(w[4], 0u) << "2^19 chunks of 16 KiB, modulo 2^32";
+    EXPECT_EQ(w[5], 1u << 19);
+    EXPECT_EQ(fz::pfpl::streamBytes(head.data()), len);
+    fz::pfpl::decompress(plan, d_stream.get(), d_out.get(), n, s);
+    ASSERT_EQ(cudaStreamSynchronize(s), cudaSuccess);
+    std::vector<double> piece(block);
+    size_t overBound = 0;
+    for (size_t at = 0; at < n; at += block) {
+        ASSERT_EQ(cudaMemcpy(piece.data(), d_out.get() + at, block * sizeof(double), cudaMemcpyDeviceToHost), cudaSuccess);
+        for (size_t j = 0; j < block; ++j) overBound += !(std::fabs(piece[j] - h[j]) <= eb);
+    }
+    EXPECT_EQ(overBound, 0u);
+    double one = 0.0;
+    EXPECT_FALSE(fz::pfpl::decompressHost(head.data(), &one, n, 0)) << "the host coder takes fields under 4 GiB";
+    EXPECT_THROW(fz::pfpl::compressHost(h.data(), n, eb, nullptr, 0), std::invalid_argument);
+}
+
+// PD8: 5 GiB of random 64-bit patterns (NaNs, infinities, raw and quantized values alike; uniform noise at 1e-12 still
+// codes to 3.3 GiB) stores its chunks raw, so its stream would pass 4 GiB. A capacity of 4.5 GiB would hold it, but
+// no header can record its length.
+TEST(PfplStream64, StreamOf4GiBOrMoreNeverFits) {
+    const size_t n = (size_t{5} << 30) / sizeof(double), block = size_t{1} << 22;
+    const size_t cap = size_t{9} << 29, guard = size_t{1} << 20;
+    if (!deviceHas(n * sizeof(double) + cap + guard)) GTEST_SKIP() << "needs about 10 GiB of free device memory";
+    Stream s;
+    fz::pfpl::Plan plan;
+    std::vector<double> h(block);
+    std::mt19937_64 rng(11);
+    for (double& x : h) {
+        const uint64_t bits = rng();
+        std::memcpy(&x, &bits, sizeof(x));
+    }
+    CudaBuffer<double> d_in(n);
+    CudaBuffer<uint8_t> d_stream(cap + guard);
+    CudaBuffer<size_t> d_len(1);
+    fillRepeated(d_in.get(), n, h, s);
+    ASSERT_EQ(cudaMemset(d_stream.get(), 0xA5, cap + guard), cudaSuccess);
+    fz::pfpl::compress(plan, d_in.get(), n, 1e-12, d_stream.get(), cap, d_len.get(), s);
+    EXPECT_EQ(readDeviceSize(d_len, s), SIZE_MAX);
+    const std::vector<uint8_t> head = d_stream.download_bytes(16, s);
+    fz::pfpl::StreamHeader hd;
+    std::memcpy(&hd, head.data(), sizeof(hd));
+    EXPECT_EQ(hd.archive_bytes, 0xfffffffcu);
+    EXPECT_EQ(fz::pfpl::streamBytes(head.data()), SIZE_MAX);
+    EXPECT_EQ(fz::pfpl::streamBytes(head.data(), cap), 0u);
+    const size_t from = 16 + size_t{0xfffffff8u};   // past the longest stream a header records
+    std::vector<uint8_t> tail(cap + guard - from);
+    ASSERT_EQ(cudaMemcpy(tail.data(), d_stream.get() + from, tail.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(std::count_if(tail.begin(), tail.end(), [](uint8_t b) { return b != 0xA5; }), 0)
+        << "bytes written past the length a header can record";
 }
 
 // PD6

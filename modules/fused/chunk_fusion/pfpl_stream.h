@@ -57,7 +57,8 @@ template <typename T = float>
 size_t maxStreamBytes(size_t n);
 
 /** Length of the stream whose first bytes are at `h_stream` (host memory), or 0
- *  if they are not a PFPL stream header or claim more than `capacity` bytes. */
+ *  if they are not a PFPL stream header or claim more than `capacity` bytes. The
+ *  header of a stream too long to record (4 GiB or more) claims SIZE_MAX. */
 size_t streamBytes(const void* h_stream, size_t capacity = SIZE_MAX);
 
 /**
@@ -98,11 +99,15 @@ private:
  * Compress n floats at d_in to within abs_eb into d_out, which holds `capacity`
  * bytes. Stream-ordered, no host synchronization. *d_stream_bytes (device
  * memory; may be null) receives the stream's length -- greater than `capacity`
- * when it does not fit. Nothing at or past d_out + capacity is ever written; a
+ * when it does not fit, SIZE_MAX when it would be 4 GiB or longer. Nothing at or past d_out + capacity is ever written; a
  * stream that does not fit leaves its 16-byte header (when that fits), which
  * records the length it needed, so streamBytes() reports the overflow too.
- * abs_eb must be positive and finite; the field must code to under 4 GiB (the
- * LC archive's size fields are 32-bit).
+ * abs_eb must be positive and finite. The field may be 4 GiB or more (under
+ * 2^32 elements in whole chunks), but its stream must stay under 4 GiB: the
+ * archive's lengths are 32-bit. A longer one does not fit, whatever
+ * `capacity` (its header records a length past any buffer, 0xfffffffc archive
+ * bytes). The LC header of a field of 4 GiB or more holds its whole-chunk size
+ * modulo 2^32; such a stream decodes with decompress() only, not on the host.
  */
 void compress(Plan& plan, const float* d_in, size_t n, float abs_eb,
               void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream);
@@ -128,7 +133,8 @@ void decompress(Plan& plan, const void* d_stream, double* d_out, size_t n, fz::s
  * compress() on the host: the same stream, byte for byte, in host memory, from any thread, with no device, Plan or
  * GPU. One thread, so far slower than the kernels. Returns the stream's length, greater than `capacity` when it does
  * not fit; nothing at or past out + capacity is written, and a stream that does not fit leaves its 16-byte header
- * (when that fits), as compress() does. The bound is taken as compress() takes it.
+ * (when that fits), as compress() does. The bound is taken as compress() takes it. Fields only under 4 GiB (in
+ * whole chunks), so that even an all-raw stream fits the LC archive's 32-bit sizes.
  */
 size_t compressHost(const float* in, size_t n, float abs_eb, void* out, size_t capacity);
 size_t compressHost(const double* in, size_t n, double abs_eb, void* out, size_t capacity);
@@ -136,7 +142,7 @@ size_t compressHost(const double* in, size_t n, double abs_eb, void* out, size_t
 /**
  * decompress() on the host, under the same terms: the stream at `stream` (host memory; compress() or compressHost()
  * wrote it) must describe n elements of this type. Writes the first `outBytes` bytes of the field and stops; false, with
- * nothing more written, if the stream is not such a stream or its sizes do not add up.
+ * nothing more written, if the stream is not such a stream or its sizes do not add up, or its field is 4 GiB or more.
  */
 bool decompressHost(const void* stream, float* out, size_t n, size_t outBytes = SIZE_MAX);
 bool decompressHost(const void* stream, double* out, size_t n, size_t outBytes = SIZE_MAX);

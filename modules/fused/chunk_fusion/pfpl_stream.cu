@@ -38,6 +38,14 @@ constexpr uint32_t kElems        = Geom<kChunkBytes>::NELEM;   // floats per chu
 constexpr uint32_t kElems64      = kChunkBytes / 8;            // doubles per chunk
 constexpr uint32_t kNPP64        = kElems64 / 32;              // 32-bit words per bit-plane of a double chunk
 constexpr uint32_t kLcHeader     = 8;                          // LC archive: [u32 coded bytes][u32 chunks]
+// The archive's lengths are 32-bit. The stream header records an archive of at most kArchiveMax bytes; a stream that
+// needed more records kArchiveTooLong, which streamBytes() reads as SIZE_MAX, and the kernel reports SIZE_MAX too, so
+// it fits no buffer (PlanAccess::encode clamps the capacity to kStreamHeader + kArchiveMax, so nothing is stored past
+// that). A payload offset that would reach 4 GiB saturates at kOffsetSaturated in the look-back, so it can never wrap
+// onto earlier bytes.
+constexpr unsigned long long kArchiveMax      = 0xfffffff8ull;
+constexpr uint32_t           kArchiveTooLong  = 0xfffffffcu;
+constexpr uint32_t           kOffsetSaturated = 0xffffffffu;
 constexpr uint32_t kStreamHeader = sizeof(StreamHeader);
 constexpr int      kWave         = fz::backend::kWaveSize;
 
@@ -117,6 +125,20 @@ __device__ __forceinline__ void lbPause() {
 #endif
 }
 
+__device__ __forceinline__ uint32_t saturate32(unsigned long long v) {
+    return v >= kOffsetSaturated ? kOffsetSaturated : static_cast<uint32_t>(v);
+}
+
+// The stream header's archive length: exact when it can be recorded, else kArchiveTooLong.
+__device__ __forceinline__ uint32_t recordedArchive(unsigned long long padded) {
+    return padded <= kArchiveMax ? static_cast<uint32_t>(padded) : kArchiveTooLong;
+}
+
+// *d_stream_bytes: the stream's length, or SIZE_MAX for one too long to record (past any capacity a caller passes).
+__device__ __forceinline__ size_t streamLength(unsigned long long padded, unsigned long long total) {
+    return padded <= kArchiveMax ? static_cast<size_t>(total) : ~static_cast<size_t>(0);
+}
+
 __device__ __forceinline__ void streamTrap() {
 #if defined(FZGMOD_BACKEND_HIP)
     __builtin_trap();
@@ -131,6 +153,9 @@ __device__ __forceinline__ void streamTrap() {
 // predecessor that has not published -- chunks are ticketed in start order, so
 // it is running. Decode reads an unpublished predecessor's size from the
 // archive's size table instead, so it never waits and needs no ticket.
+// Offsets saturate at kOffsetSaturated (a field of 4 GiB or more whose stream would
+// reach 4 GiB): the 32-bit look-back words cannot wrap, so a chunk past that point is
+// never stored over an earlier one and the stream's length reads as too long.
 __device__ uint32_t lookbackWave(uint32_t cid, uint32_t own, unsigned long long* __restrict__ state,
                                  uint32_t epoch, const uint32_t* __restrict__ table) {
     const int lane = static_cast<int>(threadIdx.x) % kWave;
@@ -160,8 +185,8 @@ __device__ uint32_t lookbackWave(uint32_t cid, uint32_t own, unsigned long long*
         if (inclMask) break;
     }
     if (lane == 0 && (cid != 0 || table != nullptr))
-        atomicExch(&state[cid], lbWord(kInclusive, epoch, static_cast<uint32_t>(prefix) + own));
-    return static_cast<uint32_t>(prefix);
+        atomicExch(&state[cid], lbWord(kInclusive, epoch, saturate32(prefix + own)));
+    return saturate32(prefix);
 }
 
 // lookbackWave() run by the block's first wavefront, its result shared with the block.
@@ -203,11 +228,11 @@ __device__ __forceinline__ void storeEncoded(const ChunkEncoded& e, uint32_t cid
         // buffer still records the length it needed.
         if (kStreamHeader <= capacity) {
             w[0] = magic;
-            w[1] = static_cast<uint32_t>(padded);
+            w[1] = recordedArchive(padded);
             w[2] = __float_as_uint(abs_eb);
             w[3] = n;
         }
-        if (d_stream_bytes != nullptr) *d_stream_bytes = static_cast<size_t>(total);
+        if (d_stream_bytes != nullptr) *d_stream_bytes = streamLength(padded, total);
     }
 }
 
@@ -437,12 +462,22 @@ uint32_t chunksOfBytes(size_t bytes) { return static_cast<uint32_t>((bytes + kCh
 template <typename Real>
 uint32_t chunksOf(size_t n) { return chunksOfBytes(n * sizeof(Real)); }
 
-// The archive's size fields are 32-bit: even an all-raw stream must stay below 4 GiB.
+// The host coder's limit: the archive's size fields are 32-bit, and it takes only fields whose all-raw stream stays
+// below 4 GiB (pfpl_stream_host.inl writes and checks the exact LC sizes).
 template <typename Real>
 bool fitsArchive(size_t n) {
     return n < (static_cast<size_t>(1) << 32) / sizeof(Real) &&
            kStreamHeader + kLcHeader + static_cast<size_t>(chunksOf<Real>(n)) * (4u + kChunkBytes)
          < (static_cast<size_t>(1) << 32);
+}
+
+// The GPU coder's limit: 32-bit element counts and chunk bases (the stream header's n; the kernels index elements in
+// 32 bits, floats also their coded count chunks * kElems). A field of 4 GiB or more is fine: the stream's own
+// lengths are checked as it is written (kArchiveMax), and its LC field-size word holds chunks * kChunkBytes modulo
+// 2^32, which the decoder compares the same way. Such a stream decodes on the GPU only (decompressHost refuses it).
+template <typename Real>
+bool fitsKernels(size_t n) {
+    return static_cast<unsigned long long>(chunksOf<Real>(n)) * (kChunkBytes / sizeof(Real)) < (1ull << 32);
 }
 
 void requireAligned(const void* p, size_t alignment, const char* what) {
@@ -469,7 +504,8 @@ size_t streamBytes(const void* h_stream, size_t capacity) {
     const uint32_t chunks = h.magic == kStreamMagic ? chunksOf<float>(h.n) : chunksOf<double>(h.n);
     if (h.archive_bytes < kLcHeader + 4ull * chunks)
         return 0;
-    const size_t total = kStreamHeader + static_cast<size_t>(h.archive_bytes);
+    // A stream too long to record (kArchiveTooLong) needs more than any buffer: SIZE_MAX, as compress() reports it.
+    const size_t total = h.archive_bytes == kArchiveTooLong ? SIZE_MAX : kStreamHeader + static_cast<size_t>(h.archive_bytes);
     return total <= capacity ? total : 0;
 }
 
@@ -525,6 +561,8 @@ struct PlanAccess {
                        void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
         requireAligned(d_in, sizeof(Real), "the input");
         requireAligned(d_out, 4, "the stream buffer");
+        // No stream longer than its header can record fits, whatever the buffer (kArchiveMax).
+        capacity = std::min<size_t>(capacity, kStreamHeader + kArchiveMax);
         plan.reserveBytes(n * sizeof(Real));
         const uint32_t epoch = plan.nextEpoch(stream);
         const uint32_t chunks = chunksOf<Real>(n);
@@ -555,8 +593,8 @@ struct PlanAccess {
     template <typename Real>
     static void decode(Plan& plan, const void* d_stream, Real* d_out, size_t n, fz::stream_t stream) {
         if (n == 0) return;
-        if (!fitsArchive<Real>(n))
-            throw std::invalid_argument("fz::pfpl::decompress: no stream holds a field of 4 GiB or more");
+        if (!fitsKernels<Real>(n))
+            throw std::invalid_argument("fz::pfpl::decompress: no stream holds a field of 2^32 elements or more");
         requireAligned(d_stream, 4, "the stream");
         requireAligned(d_out, sizeof(Real), "the output");
         plan.reserveBytes(n * sizeof(Real));
@@ -579,14 +617,23 @@ struct PlanAccess {
 
 namespace {
 
+// The field-size check of compress() (the GPU coder, fitsKernels) or of compressHost() (fitsArchive).
+template <typename Real>
+void requireField(size_t n, bool host) {
+    if (host && !fitsArchive<Real>(n))
+        throw std::invalid_argument("fz::pfpl::compressHost: a field of 4 GiB or more (in whole chunks) exceeds "
+                                    "the host coder's 32-bit LC sizes (the GPU coder takes it)");
+    if (!host && !fitsKernels<Real>(n))
+        throw std::invalid_argument("fz::pfpl::compress: a field of 2^32 elements or more (in whole chunks) exceeds "
+                                    "the stream's 32-bit element count");
+}
+
 // What compress() and compressHost() share: the checks, and the quantizer's parameters.
-QuantInplaceZigzagParams quantParams(float abs_eb, size_t n) {
+QuantInplaceZigzagParams quantParams(float abs_eb, size_t n, bool host) {
     if (!(abs_eb > 0.0f) || !std::isfinite(abs_eb) || !std::isfinite(0.5f / abs_eb))
         throw std::invalid_argument("fz::pfpl::compress: the error bound must be positive and finite, "
                                     "with a finite quantizer scale 0.5/abs_eb");
-    if (!fitsArchive<float>(n))
-        throw std::invalid_argument("fz::pfpl::compress: a field of 4 GiB or more (in whole chunks) exceeds "
-                                    "the LC archive's 32-bit sizes");
+    requireField<float>(n, host);
 
     // examples/presets/pfpl_specialization.toml in ABS mode, as QuantizerStage::getFusedOp() packs it.
     QuantInplaceZigzagParams qp{};
@@ -599,7 +646,7 @@ QuantInplaceZigzagParams quantParams(float abs_eb, size_t n) {
     return qp;
 }
 
-QuantParams64 quantParams(double abs_eb, size_t n, float* recorded) {
+QuantParams64 quantParams(double abs_eb, size_t n, float* recorded, bool host) {
     if (!(abs_eb > 0.0) || !std::isfinite(abs_eb))
         throw std::invalid_argument("fz::pfpl::compress: the error bound must be positive and finite");
     // The bound the stream records: never above the one asked for.
@@ -608,9 +655,7 @@ QuantParams64 quantParams(double abs_eb, size_t n, float* recorded) {
     if (*recorded < std::numeric_limits<float>::min())
         throw std::invalid_argument("fz::pfpl::compress: a double stream records its bound as a float, so the bound "
                                     "must be at least the smallest normal float");
-    if (!fitsArchive<double>(n))
-        throw std::invalid_argument("fz::pfpl::compress: a field of 4 GiB or more (in whole chunks) exceeds "
-                                    "the LC archive's 32-bit sizes");
+    requireField<double>(n, host);
     const double eb = static_cast<double>(*recorded);
     QuantParams64 qp{};
     qp.ebx2_r = 0.5 / eb;
@@ -623,14 +668,14 @@ QuantParams64 quantParams(double abs_eb, size_t n, float* recorded) {
 
 void compress(Plan& plan, const float* d_in, size_t n, float abs_eb,
               void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
-    const QuantInplaceZigzagParams qp = quantParams(abs_eb, n);
+    const QuantInplaceZigzagParams qp = quantParams(abs_eb, n, /*host=*/false);
     PlanAccess::encode<float>(plan, d_in, n, qp, abs_eb, d_out, capacity, d_stream_bytes, stream);
 }
 
 void compress(Plan& plan, const double* d_in, size_t n, double abs_eb,
               void* d_out, size_t capacity, size_t* d_stream_bytes, fz::stream_t stream) {
     float recorded = 0.0f;
-    const QuantParams64 qp = quantParams(abs_eb, n, &recorded);
+    const QuantParams64 qp = quantParams(abs_eb, n, &recorded, /*host=*/false);
     PlanAccess::encode<double>(plan, d_in, n, qp, recorded, d_out, capacity, d_stream_bytes, stream);
 }
 
@@ -645,12 +690,12 @@ void decompress(Plan& plan, const void* d_stream, double* d_out, size_t n, fz::s
 #include "fused/chunk_fusion/pfpl_stream_host.inl"
 
 size_t compressHost(const float* in, size_t n, float abs_eb, void* out, size_t capacity) {
-    return host::encode<float>(in, n, quantParams(abs_eb, n), abs_eb, out, capacity);
+    return host::encode<float>(in, n, quantParams(abs_eb, n, /*host=*/true), abs_eb, out, capacity);
 }
 
 size_t compressHost(const double* in, size_t n, double abs_eb, void* out, size_t capacity) {
     float recorded = 0.0f;
-    const QuantParams64 qp = quantParams(abs_eb, n, &recorded);
+    const QuantParams64 qp = quantParams(abs_eb, n, &recorded, /*host=*/true);
     return host::encode<double>(in, n, qp, recorded, out, capacity);
 }
 

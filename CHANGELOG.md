@@ -21,6 +21,7 @@ Version numbers follow [Semantic Versioning](https://semver.org/).
 - `fzgmod_modules` now links `fzgmod_mem`, which it calls into, so a consumer of the shared library links on toolchains that default to `--as-needed` (such as Ubuntu's GCC).
 
 ### Changed
+- `fz::pfpl::compress`/`decompress` (GPU) take fields of 4 GiB and more (under 2^32 elements); only the stream must stay under 4 GiB. Look-back offsets saturate instead of wrapping, a longer stream never fits (its header records 0xfffffffc archive bytes), and the LC field-size word of such a field holds its size modulo 2^32. `compressHost`/`decompressHost` keep the 4 GiB field limit.
 - The chunk harness decode copies payloads with `loadChunkBytes` instead of byte by byte, on CUDA as well.
 - CMake now locates the build-time Python interpreter with `find_package(Python3 3.7 REQUIRED COMPONENTS Interpreter)` and runs the header generators through `${Python3_EXECUTABLE}`, so a missing or too-old Python fails at configure time instead of mid-build. Override with `-DPython3_EXECUTABLE=...`.
 
